@@ -1,0 +1,60 @@
+# Takes INPUT_FILE, OUTPUT_FILE, VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH,
+# GIT_EXECUTABLE and GIT_WORKING_DIR (the repo whose HEAD describes this build —
+# pass the submodule source dir so git doesn't discover an enclosing superproject).
+
+if(GIT_EXECUTABLE)
+	execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+		WORKING_DIRECTORY ${GIT_WORKING_DIR}
+		OUTPUT_VARIABLE GIT_COMMIT)
+	execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short=8 HEAD
+		WORKING_DIRECTORY ${GIT_WORKING_DIR}
+		OUTPUT_VARIABLE GIT_COMMIT8)
+	execute_process(COMMAND ${GIT_EXECUTABLE} symbolic-ref --short HEAD
+		WORKING_DIRECTORY ${GIT_WORKING_DIR}
+		OUTPUT_VARIABLE GIT_BRANCH)
+	execute_process(COMMAND ${GIT_EXECUTABLE} diff HEAD
+		WORKING_DIRECTORY ${GIT_WORKING_DIR}
+		OUTPUT_VARIABLE GIT_DIFF)
+
+	execute_process(COMMAND ${GIT_EXECUTABLE} rev-list --tags --no-walk --max-count=1
+		WORKING_DIRECTORY ${GIT_WORKING_DIR}
+		OUTPUT_VARIABLE GIT_LAST_TAG_COMMIT)
+	if(NOT GIT_LAST_TAG_COMMIT)
+		# Maybe never tagged, get the initial commit instead
+		execute_process(COMMAND ${GIT_EXECUTABLE} rev-list --max-parents=0 HEAD
+			WORKING_DIRECTORY ${GIT_WORKING_DIR}
+			OUTPUT_VARIABLE GIT_LAST_TAG_COMMIT)
+	endif()
+
+	string(STRIP ${GIT_LAST_TAG_COMMIT} GIT_LAST_TAG_COMMIT)
+	execute_process(COMMAND ${GIT_EXECUTABLE} rev-list ${GIT_LAST_TAG_COMMIT}..HEAD --count
+		WORKING_DIRECTORY ${GIT_WORKING_DIR}
+		OUTPUT_VARIABLE GIT_NUM_SINCE_TAGGED)
+
+	string(STRIP ${GIT_BRANCH} GIT_BRANCH)
+	if(GIT_BRANCH STREQUAL "main")
+		set(VERSION_TAG_UNSTR "")
+	else()
+		set(VERSION_TAG_UNSTR ${GIT_BRANCH})
+	endif()
+	string(STRIP ${GIT_COMMIT} GIT_COMMIT)
+	string(STRIP ${GIT_COMMIT8} GIT_COMMIT8)
+	string(STRIP ${GIT_NUM_SINCE_TAGGED} GIT_NUM_SINCE_TAGGED)
+	if(NOT GIT_NUM_SINCE_TAGGED STREQUAL "0")
+		if(NOT GIT_BRANCH STREQUAL "main")
+			string(APPEND VERSION_TAG_UNSTR "-")
+		endif()
+		string(APPEND VERSION_TAG_UNSTR ${GIT_NUM_SINCE_TAGGED})
+	endif()
+	string(APPEND VERSION_TAG_UNSTR "-g" ${GIT_COMMIT})
+	if(GIT_DIFF)
+		string(APPEND VERSION_TAG_UNSTR "+") # Dirty flag
+		set(VERSION_DIRTY 1)
+	else()
+		set(VERSION_DIRTY 0)
+	endif()
+else()
+	set(VERSION_TAG_UNSTR "unknown")
+endif()
+
+configure_file(${INPUT_FILE} ${OUTPUT_FILE})
