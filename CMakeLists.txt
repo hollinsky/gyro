@@ -45,6 +45,11 @@ CPMAddPackage(
 add_executable(gyro
 	Source/Main.cpp
 )
+add_dependencies(gyro AppVersion)
+target_include_directories(gyro
+	PRIVATE
+		${CMAKE_CURRENT_BINARY_DIR}/Generated
+)
 target_link_libraries(gyro
 	PUBLIC
 		spdlog::spdlog

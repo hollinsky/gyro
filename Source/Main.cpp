@@ -1,7 +1,6 @@
 #include <cstring>
 #include <iostream>
 
-#include "DesktopApp.h"
 #include "Version.h"
 
 static void PrintVersion()
