@@ -35,6 +35,13 @@ add_custom_target(AppVersion
 		${CMAKE_CURRENT_BINARY_DIR}/Generated/Version.h
 )
 
+# The timebase has exactly one reader; checked on every build.
+add_custom_target(ClockDiscipline
+	COMMAND ${CMAKE_COMMAND}
+		-D SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/Source
+		-P ${CMAKE_CURRENT_SOURCE_DIR}/CMake/CheckClockDiscipline.cmake
+)
+
 # spdlog
 CPMAddPackage(
 	NAME spdlog
@@ -43,9 +50,10 @@ CPMAddPackage(
 )
 
 add_executable(gyro
+	Source/Core/Clock.cpp
 	Source/Main.cpp
 )
-add_dependencies(gyro AppVersion)
+add_dependencies(gyro AppVersion ClockDiscipline)
 target_include_directories(gyro
 	PRIVATE
 		${CMAKE_CURRENT_BINARY_DIR}/Generated
