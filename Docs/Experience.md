@@ -365,7 +365,8 @@ touched.**
 *Mechanism: [Admission control](Architecture.md#admission-control),
 [The floor tier](Architecture.md#the-floor-tier), [When there is no
 room](Animation.md#when-there-is-no-room),
-[decision 27](Decisions.md#27-resource-accounting-is-attribution-not-per-user-fairness).*
+[decision 27](Decisions.md#27-resource-accounting-is-attribution-not-per-user-fairness),
+[decision 66](Decisions.md#66-arrival-control-is-an-input-to-admission-control).*
 
 ## What is deliberately not promised
 

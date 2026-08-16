@@ -36,7 +36,7 @@ Codebase Structure:
 		Animation.md    - Tier 2. Animation system: springs, motion catalog, commits, transforms,
 		                  interactive transitions, identity, lifetime, exit pixels
 		Decisions.md    - Cross-cutting. Decision log with rejected alternatives and rationale
-		                  (65 decisions), plus the open-question list
+		                  (66 decisions), plus the open-question list
 
 	Docs are tiered: Experience (what the user perceives) → Architecture and Animation (mechanism
 	and invariants) → a structural tier that does not exist yet. Citations point up; dependencies

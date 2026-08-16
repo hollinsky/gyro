@@ -119,8 +119,8 @@ decorative — see [the timebase](#the-timebase). `Instant - Instant → Duratio
 `Command()` is the whole of the [VRR servo](#vrr-as-a-scheduling-degree-of-freedom)'s reach into the
 rest of the system, and it is why `Period()` and the commanded value are not the same accessor:
 `Command()` states the period gyro is asking the panel for, `Period()` reports what the panel last
-did, and the two disagree for the length of every servo ramp and permanently on a panel that will not
-comply. A clock that conflated them would report a rate nothing had achieved.
+did, and the two disagree for the length of every servo ramp and permanently on a panel that will
+not comply. A clock that conflated them would report a rate nothing had achieved.
 
 **`Invalidate()` and `IsValid()` exist because a clock can become a liar.** After a system resume,
 after a mode set, and after [device migration](#device-migration), the last observation describes a
@@ -604,10 +604,9 @@ So this is the classic periodic real-time task problem, and it should be treated
 `P` is **the shortest interval in which the output may demand a frame**, which on a fixed-refresh
 output is its measured period and nothing more interesting. The distinction earns its keep only on a
 variable-refresh one, where the two genuinely differ and where taking the observed period would
-quietly void the guarantee below — see
-[VRR](#vrr-as-a-scheduling-degree-of-freedom). Processor-demand analysis holds for sporadic tasks
-under a minimum separation exactly as it does for periodic ones, so this changes no symbol in the
-test.
+quietly void the guarantee below — see [VRR](#vrr-as-a-scheduling-degree-of-freedom).
+Processor-demand analysis holds for sporadic tasks under a minimum separation exactly as it does for
+periodic ones, so this changes no symbol in the test.
 
 The property that matters: **the schedulability test does not take phase as an input.** It is a
 processor-demand test over interval lengths rather than a simulation of a schedule, so it holds at
@@ -671,8 +670,9 @@ wrong, not unlucky. That is the whole reason to design against the critical inst
 against the observed schedule, and it is why a rolling collision forecast is the wrong shape — it
 solves reactively, per collision, a problem that admits a static answer.
 
-Measured periods still matter, which is what `FrameClock::Observe` is for. They feed `P` and `C` in
-the test above. Phase does not feed anything.
+Measured periods still matter, which is what `FrameClock::Observe` is for. They are where `P` comes
+from on a fixed output, and where the servo's plant estimate comes from on a variable one — with `C`
+they are the whole of what the test above is computed from. Phase does not feed anything.
 
 ### Admission control
 
@@ -681,8 +681,7 @@ moving the floor, a variable-refresh output's refresh passing to or from a clien
 Stating the trigger as *any input to the test* rather than as a list of events is deliberate: the
 list is what a reader checks against, and the one that was missing is the subject of
 [VRR](#vrr-as-a-scheduling-degree-of-freedom) below. It is solved for `C`, so its output is an
-**allocation**:
-how much each output may spend per frame. See
+**allocation**: how much each output may spend per frame. See
 [decision 29](Decisions.md#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)
 for why `C` is a budget gyro enforces rather than a cost it observes — briefly, `C` is a property of
 the scene as much as of the output, and the peak is an overview transition nobody can predict at
@@ -838,11 +837,11 @@ the property that [the frame loop](#the-frame-loop) runs a schedule it was hande
 about timing itself. Where `2ⁿ` stops being small, the surplus outputs are planned as
 client-controlled — the pessimistic direction, and the one that cannot produce a miss.
 
-**Detection is deliberately asymmetric.** Reading a client as in control when it is not costs a rung;
-reading it as not in control when it is costs missed deadlines on another output. So the
-client-controlled reading is entered readily and left only on hysteresis — the same shape
-[client cadence](#client-cadence-on-multiple-outputs) needs, for the same reason. The signal itself
-is [open](Decisions.md#open); what is settled here is which way it errs.
+**Detection is deliberately asymmetric.** Reading a client as in control when it is not costs a
+rung; reading it as not in control when it is costs missed deadlines on another output. So the
+client-controlled reading is entered readily and left only on hysteresis — the same shape [client
+cadence](#client-cadence-on-multiple-outputs) needs, for the same reason. The signal itself is
+[open](Decisions.md#open); what is settled here is which way it errs.
 
 The adjustment is constrained three ways, all pushing the same direction:
 
@@ -858,32 +857,32 @@ a phase relationship, per [admission control](#admission-control) above.
 **The servo is a property of the clock, not of the present.** It commands a period on the output's
 [`FrameClock`](#the-frame-clock) and the existing machinery carries it from there: `NextDeadline()`
 moves, the frame loop arms its timer against the new value, and on KMS with variable refresh enabled
-a flip presents at or after the commit — so shaping the clock is shaping presentation, and nothing is
-added to `IPresenter`. The one thing that does reach the backend is enabling variable refresh on the
-CRTC at all, which is set when a mode is set rather than per frame, and which therefore belongs to
-the mode-setting path `IPresenter` does not yet have and owes for reasons unrelated to VRR.
+a flip presents at or after the commit — so shaping the clock is shaping presentation, and nothing
+is added to `IPresenter`. The one thing that does reach the backend is enabling variable refresh on
+the CRTC at all, which is set when a mode is set rather than per frame, and which therefore belongs
+to the mode-setting path `IPresenter` does not yet have and owes for reasons unrelated to VRR.
 
 Putting it on the clock also keeps the servo honest about what it knows. It closes on an observation
-rather than on an acknowledgement: it commands a period and learns from the next `Observe()` what the
-panel actually did. Panels misreport their ranges, so a backend that validated a requested period
-would be validating against the same documentation the servo already has reason to distrust.
+rather than on an acknowledgement: it commands a period and learns from the next `Observe()` what
+the panel actually did. Panels misreport their ranges, so a backend that validated a requested
+period would be validating against the same documentation the servo already has reason to distrust.
 
 **An idle VRR output gets no keepalive commit.** [Doing nothing must cost
 nothing](#doing-nothing-must-cost-nothing) is a hard invariant, and a timer armed to hold a refresh
-rate would break it on every VRR laptop, in precisely the way that section exists to prevent. None is
-needed: the panel holds the last buffer scanned out to it without gyro's help, the same property
+rate would break it on every VRR laptop, in precisely the way that section exists to prevent. None
+is needed: the panel holds the last buffer scanned out to it without gyro's help, the same property
 [resume](#suspend-and-resume) relies on. What does go stale is the clock, and here the variable case
 differs from the fixed one in kind rather than in degree — an idle fixed panel keeps its period and
-its clock merely accumulates drift, while an idle VRR panel has genuinely changed period, so its last
-observation is not stale but wrong. Going idle therefore invalidates it. The first frame afterwards
-is driven by damage rather than by a timer, presents as soon as it is ready, and re-seeds the clock
-through `Observe()` — which is variable refresh behaving as variable refresh.
+its clock merely accumulates drift, while an idle VRR panel has genuinely changed period, so its
+last observation is not stale but wrong. Going idle therefore invalidates it. The first frame
+afterwards is driven by damage rather than by a timer, presents as soon as it is ready, and re-seeds
+the clock through `Observe()` — which is variable refresh behaving as variable refresh.
 
 > Written from specification. Panel range behaviour and flicker thresholds are from documentation
-> rather than from hardware, as is the interaction between cursor-plane commits and the refresh timer
-> — [admission control](#admission-control) exempts the cursor plane because it updates independently
-> of the composite, which is a weaker claim on a VRR panel than on a fixed one. All marked `// SPEC:`
-> where they land in code.
+> rather than from hardware, as is the interaction between cursor-plane commits and the refresh
+> timer — [admission control](#admission-control) exempts the cursor plane because it updates
+> independently of the composite, which is a weaker claim on a VRR panel than on a fixed one. All
+> marked `// SPEC:` where they land in code.
 
 ### Client cadence on multiple outputs
 
