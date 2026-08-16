@@ -27,13 +27,21 @@ Codebase Structure:
 		                        gyro's own startup check; see Decisions.md decision 3
 
 	Docs/
-		Architecture.md - Platform seam, backends, boot and display lifetime, rendering devices,
-		                  threads and the publication boundary, presentation timing, geometry and
-		                  coordinate spaces, effects and quality, colour, sessions and users, the
-		                  shell, login agent, event loop, protocol layer
-		Animation.md    - Animation system: springs, motion catalog, commits, transforms, identity,
-		                  lifetime, exit pixels
-		Decisions.md    - Decision log with rejected alternatives and rationale (56 decisions)
+		Experience.md   - Tier 1. What a person perceives, stated without mechanism: the six
+		                  promises, how the system degrades, what is deliberately not promised
+		Architecture.md - Tier 2. Platform seam, backends, boot and display lifetime, rendering
+		                  devices, threads and the publication boundary, presentation timing,
+		                  geometry and coordinate spaces, effects and quality, colour, sessions and
+		                  users, the shell, login agent, event loop, protocol layer
+		Animation.md    - Tier 2. Animation system: springs, motion catalog, commits, transforms,
+		                  interactive transitions, identity, lifetime, exit pixels
+		Decisions.md    - Cross-cutting. Decision log with rejected alternatives and rationale
+		                  (65 decisions), plus the open-question list
+
+	Docs are tiered: Experience (what the user perceives) → Architecture and Animation (mechanism
+	and invariants) → a structural tier that does not exist yet. Citations point up; dependencies
+	point down. A tier-2 document may cite Experience as justification; Experience may never require
+	a mechanism document in order to be understood.
 
 	CMakeLists.txt  - Build configuration, dependency management via CPM
 	.clang-format   - Code style (tabs, Allman braces, 120 col limit)

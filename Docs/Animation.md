@@ -121,9 +121,17 @@ Interruption is the whole game, and closed form makes it trivial and exact:
 	t₀ = now
 ```
 
-Four floats, no allocation, exact velocity preservation. This is also why gyro does not need
-timeline scrubbing for interactive transitions: the target follows the finger and the gesture's
-velocity is handed off on release. Retargeting subsumes the `speed = 0` plus `timeOffset` model.
+Four floats, no allocation, exact velocity preservation. Retargeting subsumes the `speed = 0` plus
+`timeOffset` model for *interruption*, which is what that model is usually reached for.
+
+It does not subsume gesture *driving*, and this paragraph claimed that it did until 2026-08-16 —
+that the target could simply follow the finger, with the gesture's velocity handed off on release. A
+spring whose target follows a finger still lags the finger, by `2v/ω`, and the claim survived
+because nothing had yet asked what world state the moving target was supposed to be reading. See
+[interactive transitions](#interactive-transitions), which keeps the retargeting above for what it
+is good at and parameterizes the driven case by progress rather than by time. The error is worth
+keeping because the conclusion it reached — no timeline model — was right, and the argument for it
+was not.
 
 ## The motion catalog
 
@@ -192,6 +200,12 @@ That is a different transition, not a retuned one. Reduced motion is therefore a
 dimension of a bundle's definition from the start. Retrofitting it means revisiting every transition
 in the catalog.
 
+It also loads one mechanism far harder than the default path does. If movement is replaced by
+fading, then every transition on the accessibility path is a group fade, so the flattening in
+[decision 60](Decisions.md#60-group-opacity-requires-flattening-per-node-alpha-is-not-a-group-fade)
+is exercised constantly there and occasionally elsewhere. Reduced motion is not a cheaper path and
+should never be costed as one.
+
 ## Properties
 
 ### Animatable
@@ -246,6 +260,11 @@ perspective overviews, and depth cues for very little on the render path. What i
 do is intersect — composition stays strict tree order with no depth buffer, because the alternative
 is order-dependent transparency and every surface here has alpha. See
 [Architecture.md](Architecture.md#transforms-are-3d-the-scene-is-not).
+
+Strict tree order costs one more thing, and it is the opacity channel's. **A bundle that fades a
+subtree fades it as one object, not node by node**, or the windows inside it show through each other
+at every value between the endpoints. The transition declares the group and gyro flattens it; see
+[decision 60](Decisions.md#60-group-opacity-requires-flattening-per-node-alpha-is-not-a-group-fade).
 
 **Rotation is a quaternion, sprung in the log map.** Euler triples gimbal and take non-shortest
 paths, and both present as a window travelling a visibly strange route, which is the failure mode
@@ -353,6 +372,139 @@ not state changes and are not forced through the differ. They use a direct imper
 > second half: whichever shape it takes has to be expressible to
 > [the shell](Architecture.md#the-shell) as well, without becoming the per-event channel that the
 > declare-don't-drive rule exists to refuse.
+
+## Interactive transitions
+
+A transition the user is *making* is a different thing from one they are watching, and the
+difference is not a matter of degree. Hold a three-finger swipe halfway and the overview stays
+halfway, for as long as the fingers rest there. Reverse the swipe and it runs backwards under them.
+Let go and it carries the speed it was let go at into whichever end it lands on. None of that is
+interruption, which [retargeting](#retargeting) already answers, and none of it is reachable by
+moving a spring's target.
+
+### Why a moving target is not enough
+
+The construction that changes nothing above is to let the gesture move the targets —
+`Motion::Interactive`, retargeted per input event. It fails three ways, and only the first is about
+feel.
+
+- **A spring tracking a moving target lags it, by a computable amount.** Critically damped, the
+  steady-state error against a target moving at `v` is `2v/ω`. At a 0.3 s response and a 1000 px/s
+  scrub that is ~95 px of trail, and it inverts through zero on every reversal, which is perceived
+  as the picture swimming rather than as latency. Direct manipulation requires the pixels to be
+  *attached* to the fingers, and a spring is by construction attached to nothing.
+- **There is no world state for the target to be.** [Declarative commits](#declarative-commits)
+  derive transitions from a change in state, and the state here is `Workspace.Visible`, a boolean.
+  *The overview is 47% open* is not a value that model holds, and adding one per transition is a
+  timeline with extra steps and a worse name.
+- **It would move the shape of the interpolation into the shell.** Something has to map finger
+  displacement onto per-channel values every event, and if that something is the shell then the
+  shell is authoring motion — [decision
+  51](Decisions.md#51-the-shell-is-a-per-session-client-gyro-owns-mechanism)'s per-event loop and
+  [the catalog](#the-motion-catalog)'s entire reason for existing, lost in one move. This objection
+  stands even if the first two are answered.
+
+### Progress is an ordinary animatable
+
+An interactive transition is a bundle whose channels are functions of one scalar `p ∈ [0, 1]`, and
+`p` is an `Animatable<float>` like any other. It has two regimes and no third:
+
+- **Driven.** `p` follows the gesture, at input rate, on the dispatch thread.
+- **Free.** `p` is sprung toward an end — `0`, `1`, or a detent — with `v₀` the gesture's velocity
+  in progress units and `t₀` the release event's timestamp, as everywhere else.
+
+Release moves `p` from the first regime to the second. A cancelled gesture does the same thing with
+the origin as its target, which is why cancellation needs no separate path.
+
+What falls out is the whole of the behaviour above:
+
+- **Held is settled.** Resting fingers produce no input events, so `p` stops changing and nothing in
+  the scene is active. A held gesture arms no timer and draws no frames — [doing nothing costs
+  nothing](Architecture.md#doing-nothing-must-cost-nothing) reaching a state no other system treats
+  as idle.
+- **Scrubbing is exact**, because nothing is converging on anything.
+- **Taking over a release is one scalar.** A gesture beginning while `p` springs home reads `p`'s
+  current `(x, v)` and re-enters the driven regime: the same retarget as everywhere else, performed
+  once rather than per channel, and exact in both directions.
+- **Reduced motion keeps the driven half.** [Replacing movement with
+  fading](#reduced-motion-is-a-policy-not-a-parameter) is right for a transition being watched and
+  wrong for one being made — a gesture that does not track is not reduced, it is broken. So reduced
+  motion substitutes the bundle's channels and leaves the parameterization alone, which is only
+  statable because they are separate things.
+- **A driven entity is never a retiring one.** Swipe-to-dismiss does not remove anything from model
+  state until the gesture resolves, so no exit is generated and no [snapshot](#where-snapshots-live)
+  is reserved while a finger is down. That is what keeps the atlas admitting bounded-lifetime
+  occupants only; an exit whose duration is under the user's control would be exactly the immortal
+  occupant that rule refuses.
+
+### It crosses the boundary as coefficients, like everything else
+
+Publishing `p` as a number would be publishing an evaluated value, which [the publication
+boundary](Architecture.md#the-publication-boundary) forbids, for a reason that binds here rather
+than merely applying: the frame thread has to produce two correct answers for two outputs in one
+iteration. A bare `p` is the same number on both, so a 144 Hz panel is pinned to the staleness of
+the last input event instead of to its own presentation time, and the defect [Presentation
+timing](Architecture.md#presentation-timing) exists to prevent is reintroduced at the boundary —
+invisible until a second monitor is attached, which is the signature of that whole class.
+
+So the driven regime publishes coefficients too — `(p₀, v₀, t₀, horizon)` — evaluated per output as
+
+```
+	p(T) = p₀ + v₀ · clamp(T − t₀, 0, horizon)
+```
+
+which is the first-order case of the shape a spring already has: an initial value, an initial
+velocity, an origin, and a closed form read at the output's own predicted presentation time. The two
+regimes become one mechanism carrying two coefficient sets, rather than a scalar path running beside
+a spring path.
+
+`(T − t₀)` is exactly the input-to-photon gap that
+[`t₀` as the event timestamp](#timing-and-rates) makes measurable, so this is not prediction into
+the future — it is undoing a latency the system already knows the size of, per output, because the
+two outputs present at different instants. It is the same promise as *a gesture starts where your
+finger is*, applied to the case where breaking it is cheapest.
+
+**The `horizon` does two jobs and both are load-bearing.** It bounds the extrapolation, which is
+what keeps a reversal from overshooting — a fitted velocity is good for about as long as a finger
+holds one, and past that it is invention. And it is what makes *held is settled* true: past
+`t₀ + horizon` the expression is constant, so `p` reports settled and the compositor drops to idle
+with the gesture still in progress.
+
+That bound has one honest cost. A finger that stops abruptly leaves a last event carrying full
+velocity, so `p` runs on by up to `v₀ · horizon` and holds there. The correction is that **the
+absence of an update is information**: a device reporting nothing for longer than its own interval
+is a finger that is not moving, so dispatch republishes with `v₀ = 0` at the horizon. That is one
+timer, once per gesture-stop, on the side that is allowed to allocate — the same analytic-settle
+machinery [storage](#storage) already describes, rather than anything new.
+
+### The mapping belongs to the catalog
+
+Displacement to `p` is not arithmetic, it is motion design: how far the gesture must travel to mean
+*all the way*, how it rubber-bands past the ends, where the detents are. It sits in the catalog with
+the springs and for the same reason, and the shell names the binding without being able to express
+the curve.
+
+Drag is the degenerate case rather than a separate mechanism — the mapping is identity, `p` carries
+a position rather than a fraction, and the driven regime is the whole of the tracking.
+`Motion::Interactive` is then what it always should have been: the motion of the *residual* — the
+pushback when a constraint is hit, the pull into a snap target — and never the motion of the finger
+itself, which no spring should be interposed in.
+
+### What the input side owes it
+
+Three obligations, all cheap, and each of them the usual way this feels wrong.
+
+- **Recognition costs no displacement.** When a recognizer completes past its threshold, `p` is
+  computed from the gesture's origin rather than from the instant of recognition. Otherwise the
+  transition either jumps at recognition or silently discards the travel that triggered it. The
+  shape is the same as `t₀` being the event's timestamp and not the handler's.
+- **Release velocity is a fit over a short window, not the last delta.** Fingers decelerate as they
+  lift, so the final event is frequently near zero, and handing that off produces a flick that dies
+  on release. libinput reports no momentum for swipe gestures — the hardware tells macOS when
+  fingers leave and the system synthesizes the rest — so this estimator is gyro's, and its quality
+  is felt directly.
+- **Cancellation is an outcome, not an error.** libinput cancels gestures, and the free regime
+  already expresses the result.
 
 ## Identity
 
@@ -573,7 +725,16 @@ retargeting.
   hand-rolled XML parse in the protocol generator. Not yet decided.
 - **Settling thresholds** for non-geometric properties. The geometric case is settled — output
   pixels of the finest grid a node intersects — but opacity, blur radius, and corner radius have no
-  output pixel to be expressed in, and the policy for them is unresolved.
+  output pixel to be expressed in, and the policy for them is unresolved. A progress parameter is
+  the one non-geometric channel that escapes the problem rather than adding to it: its
+  [mapping](#the-mapping-belongs-to-the-catalog) carries a distance, so a threshold on `p` converts
+  to output pixels of travel like anything geometric.
+- **The lead horizon for a driven gesture.** How far `p` may be carried toward predicted
+  presentation time before the estimate stops being a correction for known latency and starts being
+  a guess. One output period is the obvious first answer, since that is the gap being undone, and
+  the failure it trades against — overshoot held after an abrupt stop — is bounded by `v₀ · horizon`
+  and is a real artefact rather than a theoretical one. Wants measuring against a touchpad, with
+  reversal as the case that decides it.
 - **Snapshot atlas capacity.** The multiple of the output render target is deliberately not guessed.
   It wants a count of legitimate simultaneous retirements to size it and per-output high-water and
   eviction instrumentation to confirm it; an eviction outside a stress test means the number is

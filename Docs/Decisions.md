@@ -8,8 +8,23 @@ thread split (45) later still, revising 2, 3, 29, 36, and 40; then snapshot stor
 20 and 41; then colour (47 and 48), revising 2, 22, 24, 27, 29, 34, and 40; then the restart
 boundary (49), revising 2, 27, 39, and 45; then the ownership of the world (50) and of the shell
 (51), revising 13, 14, 16, 25, 33, 43, and 45 again; then geometry (52–56), revising 17, 18, and
-28; and the timebase (57) with idle and power (58 and 59) last, annotating 7, 11, and 26. All of it
-before implementation.
+28; and the timebase (57) with idle and power (58 and 59), annotating 7, 11, and 26; then group
+opacity (60), revising 55; then the frame thread's scheduling policy (61), annotating 22, 29, and
+37; and effect composition, effect damage, and scene instantiation (62–64), revising 19 and
+annotating 9, 33, and 34; then interactive transitions (65) last, revising 19 a second time and
+annotating 13, 14, 46, and 51. All of it before implementation.
+
+Two exceptions to that last sentence, and they are the point of having written any of this down.
+Decision 2's decisive argument was read against libwayland's source on 2026-08-16 and did not
+survive, which reversed that decision's conclusion and revised 3, 22, 36, 40, 45, 49, and 51 behind
+it. Decision 49's `// SPEC:` question was read against the kernel's DRM core later the same day and
+inverted: the framebuffer does *not* survive `drm_file` teardown, so the file descriptor store that
+decision had recorded as insurance is in fact the entire mechanism. The same reading confirmed 39
+and annotated 37.
+
+In both cases the reasoning on record was wrong. Only the first changed a conclusion — which is
+exactly why the second was worth reading, because a right answer resting on a wrong argument is the
+kind that survives review and fails in the field. An afternoon each.
 
 Sections are thematic and numbering is chronological, so a later section is not a lower-level one —
 it is simply where the argument had reached. Cross-references are the structure that matters.
@@ -36,74 +51,97 @@ exists to prevent. It also hides presentation timing (`VK_KHR_present_wait` and
 `VK_GOOGLE_display_timing` have patchy coverage and give less than `wp_presentation_feedback` gives
 for free), hides explicit sync, and hides modifier negotiation.
 
-### 2. The wire protocol is implemented in-tree, but not first
+### 2. gyro owns the protocol seam; libwayland implements the server codec
 
-Both halves, with typed C++23 bindings generated at build time — and **libwayland is an admissible
-interim**, because nothing this decision settles has to be settled before the code that would depend
-on it exists.
+The shadow object model and the seam above it are gyro's from line zero. The **client** half of the
+codec is gyro's, because
+[decision 1](#1-the-nested-backend-drives-raw-wayland-protocol-not-vulkan-wsi) needs it for the
+nested backend and there is no alternative that does not fork the renderer. The **server** half is
+`libwayland-server`, behind that seam.
 
-*(Revised twice on 2026-08-16: this decision has outlived two rationales, both kept below, and its
-sequencing has since moved as well.)*
+*(Revised three times, all on 2026-08-16. The first two revisions replaced this decision's
+rationale; this one reverses its conclusion. Both superseded rationales and the superseded
+conclusion are kept below.)*
 
-**The decisive argument is that gyro's restart boundary is ruinously expensive.** libwayland
-resolves allocation failure and internal invariant violations by calling `wl_abort()`, and compiles
-in assertions whose disposition depends on how the distribution built it. For a session compositor
-that is a crash, one lost login, and a greeter that restarts it. For gyro it is every client on the
-machine dying at once, at a moment a linked library chose, with no way to intercept, degrade, or
-contain it — on a system that
-[decision 37](#37-gyro-owns-the-display-from-firmware-handoff-onward-there-are-no-vts) has
-deliberately left with no VT to fall back to, and whose recovery console is gyro itself. The precise
-form of that claim is
-[decision 27](#27-resource-accounting-is-attribution-not-per-user-fairness), which is where this
-document states it once and where it was overstated for this design's first pass. Every other
-decision about failure points the same way: 27 sizes limits to survive rather than to ration, and
-[decision 41](#41-device-migration-is-exercised-on-every-boot) keeps the last frame on glass through
-device loss. Linking a library that terminates the process unilaterally contradicts all of it.
+**The decisive argument was checked, and it did not survive.** It held that libwayland resolves
+allocation failure and internal invariant violations by calling `wl_abort()`, and compiles in
+assertions whose disposition depends on how the distribution built it — so a linked library could
+terminate, at a moment of its own choosing and with no way to intercept, the one process whose death
+takes every client belonging to every user on the machine. The reading, against `1.26.0-9-ged0b9f1`:
 
-Three supporting arguments, none sufficient alone:
+- **18 `wl_abort()` call sites in the server library.** `wayland-client.c` is not linked into
+  `libwayland-server`, which removes 11 of the tree's 29 sites before analysis begins.
+- **Allocation failure never aborts. Not once.** Every OOM path returns `NULL` or `-1`, and the
+  caller answers with `wl_client_post_no_memory` or `wl_resource_post_no_memory` — a protocol error
+  killing the offending client, which is exactly the policy
+  [decision 27](#27-resource-accounting-is-attribution-not-per-user-fairness) prescribes for gyro's
+  own limits. Verified at `wl_resource_create` on both its failure paths, at the demarshal step in
+  `wl_client_connection_data`, at registry bind and `wl_display.sync`, at
+  `ring_buffer_ensure_space`, and on the event-send path, where `handle_array` sets `client->error`
+  and lets `destroy_client_with_error` run.
+- **There are no assertions to have a disposition.** Three `assert()` calls reach the server's
+  include set, all in `timespec-util.h`, inside two functions `event-loop.c` never calls. Nothing
+  depends on how a distribution set `NDEBUG`, and the reason is that upstream removed the dependency
+  deliberately: 1.24's `0cecde3 src: switch asserts to wl_abort` and `58bb6c7 src: Finish assert()
+  clean-up` are what took the server-path count from 6 to 18.
+- **Two sites are reachable from client input**, both in `wl_closure_invoke`: a resource whose
+  `implementation` is still NULL, and a hole at `implementation[opcode]`. The opcode is
+  bounds-checked against `interface->method_count` first, so the second needs gyro to advertise a
+  version whose request set exceeds the function pointers it supplied. Both require a gyro bug as
+  the precondition, and `b26180d` added the first in May 2025 to replace a NULL-deref segfault — so
+  what is being chosen there is an abort over crashing anyway, not an abort over recovery.
+- **The remaining 16** are gyro's own API misuse at gyro's own call site (shm pool and buffer
+  refcount underflow, unbalanced `begin_access` / `end_access`, `wl_array` use-after-release,
+  `wl_global_remove` twice), libwayland's internal timer-heap invariants, or arithmetic guards and
+  startup paths unreachable in practice.
 
-- **A per-client dispatch budget.** libwayland offers no lever for "process at most N messages from
-  this client". Under [decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) one thread serves
-  every client on the machine, so fairness between them is gyro's problem. *(Weakened 2026-08-16.)*
-  This once read "a lever that does not exist", which is too strong: removing a client's event
-  source from the loop and letting the kernel socket buffer apply backpressure is a real lever. It
-  is coarse — it bounds a client's share over many dispatches rather than the cost of any one
-  message — and on a thread nothing above it waits on, coarse may well be enough. What survives is
-  a preference, not a requirement.
-- **No inherited process-global SIGBUS handler.** libwayland guards compositor `wl_shm` access with
-  a `sigsetjmp` / `siglongjmp` trampoline behind a signal handler it installs process-wide on our
-  behalf. Owning the protocol means owning shm truncation, which is a cost below — but the
-  alternative is not free, it is the same hazard handled by a mechanism gyro inherited rather than
-  chose, inside a multi-threaded real-time process.
-- **No intrusive C object model at the boundary.** `wl_list`, `wl_signal`, and `wl_listener` with
-  static trampolines put lifetime management in a linked list that every C++ type must remember to
-  unlink itself from. Destroy-listener use-after-free is the best-known bug family in compositors
-  built this way.
+So the premise is false in both halves. What remains terminates gyro for bugs gyro would equally
+have to not write in its own implementation, and every failure mode a *client* can drive is already
+resolved the way this document resolves them everywhere else — kill the client, keep the compositor.
 
-**What narrows the choice.** Decision 45 has the frame thread read published state, and a
-`wl_resource` is destroyed synchronously on the dispatch thread when its client goes away — so a
-`wl_resource` can never be the thing the frame thread holds. gyro needs its own shadow object model
-with its own lifetime discipline whatever sits underneath. So this is not a choice between
-libwayland's object model and ours. It is narrower: **do we write a demarshaller and a socket
-manager?** That is the mechanical, well-specified part — and it is also where most of the cost
-estimate lives.
+**What that leaves of the three supporting arguments.** The first was already weakened to a
+preference: dropping a client's event source and letting the kernel socket buffer apply backpressure
+is a real lever, it works under libwayland, and under
+[decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) the traffic is on a thread nothing above
+it waits on. The second was already recorded as an even trade, and it inverts cleanly — the
+process-global SIGBUS handler is inherited rather than chosen, which is what this entry always said
+the alternative was. The third **survives intact and is now the strongest of them**: no `wl_list`,
+`wl_signal`, or `wl_listener` object model at the boundary, where destroy-listener use-after-free is
+the best-known bug family in compositors built this way. But it argues for the shadow object model
+and the bindings, which gyro builds regardless — not for a demarshaller and a socket manager, which
+is where the cost estimate lives.
 
-**And what defers it.** That the shadow object model is required either way makes it a *seam*, and a
-seam is exactly what turns libwayland from a foundation into a replaceable implementation of the two
-mechanical pieces above. Nothing is built on it that would have to be unbuilt. Two supporting
-positions had already collapsed on the same day and neither has been re-argued since:
-[decision 3](#3-io_uring-event-loop-via-liburing) retracted the io_uring coupling, and decision 45
-removed the real-time framing. What is left is a decision with no dependants, whose cost is
-concentrated in the part that can be written last, and whose decisive argument is
-[still unverified](#open). Committing up front buys nothing that committing later does not, and it
-forecloses the outcome where the verification comes back weak.
+**One new argument, pointing the same way.** The two client-reachable aborts are precisely the
+failure class a generated, typed dispatch table makes structurally impossible: a table that cannot
+have a hole, and a resource that cannot be published to a client before it has an implementation.
+That is an argument for gyro's *bindings*, which are being written either way. Under libwayland it
+costs a thin wrapper over `wl_resource_set_implementation` that refuses to hand out an id first —
+cheaper than the codec it would otherwise justify.
 
-So the sequencing is: the shadow object model and the seam from line zero; the client half next,
-which the staging below already puts first and which
-[decision 1](#1-the-nested-backend-drives-raw-wayland-protocol-not-vulkan-wsi) gives an immediate
-consumer; and the server half when the abort reading says it is worth writing. A project that never
-reaches the third step has lost an ambition and nothing else. One that commits first and reads
-afterwards has spent the largest single line item in the estimate on a premise it did not check.
+**What is unchanged.** The shadow object model is gyro's, with its own lifetime discipline, because
+decision 45 has the frame thread read published state and a `wl_resource` is destroyed synchronously
+on the dispatch thread when its client goes away. The scene reads a snapshot, never protocol
+objects. Bindings are generated at build time by a host tool with a hand-rolled parser for the XML
+subset the protocols use — no scripting-language dependency, no third-party XML library, no
+generated code in the tree. Cross-thread object lifetime is still gyro's problem and still not
+retrofittable.
+
+**What changes in practice.** libwayland's `wl_event_loop` fd is nested on the dispatch ring, which
+[decision 3](#3-io_uring-event-loop-via-liburing) already prices at a wakeup per dispatch on a
+thread that owes no frame. Continuous fuzzing of the demarshaller moves off gyro's cost column and
+onto upstream's, where that code is the most-exercised part of the ecosystem. `wl_shm`'s SIGBUS
+trampoline is inherited. The 3–6 weeks to parity and the interop tail are not spent.
+
+**Rejected: writing the server codec on the strength of the restart-boundary argument.** The
+position this decision held until the reading was done, and the reason it is worth keeping is the
+shape of the error rather than the conclusion. The argument was never verified, it was load-bearing
+for a commitment measured in weeks, and this entry's own deferral clause named the exact condition
+that would retire it — *"if the answer is 'allocation failure only, and gyro is dead in that case
+regardless', this falls back to the three supporting arguments and the margin is then thin enough
+that the interim becomes the answer."* The answer came back weaker than that clause anticipated: not
+allocation failure only, but not allocation failure at all. The deferral is the part that worked.
+Committing first and reading afterwards would have spent the largest single line item in the
+estimate on a premise that was wrong.
 
 **Rejected: the priority-inversion rationale.** Recorded originally as the decisive argument: that
 libwayland's per-message allocation exposed the `SCHED_FIFO` thread to a malloc arena lock held by a
@@ -115,29 +153,24 @@ stated, and the form the argument should always have taken — not *their* lock 
 *their* message volume deciding how often our frame thread enters the allocator. It was overtaken
 within a day by [decision 45](#45-protocol-dispatch-is-a-thread-not-a-task), which takes dispatch
 off that thread entirely; allocation on the dispatch thread costs one client some latency and costs
-the frame nothing. Both failures are recorded at length because the pattern is the lesson: the
-real-time framing was load-bearing for two rationales and was never what this decision was actually
-about.
+the frame nothing. All three failures are recorded at length because the pattern is the lesson: this
+decision had three rationales and outlived every one of them, and the real-time framing that carried
+two of them was never what it was about.
 
-**Rejected: libwayland** — but on a materially narrower margin than this entry once claimed, and
-the grounds are entirely above rather than anywhere in the real-time design. See
-[decision 3](#3-io_uring-event-loop-via-liburing) for why the io_uring coupling — "the two decisions
-are one decision" — does not survive either.
+**Not foreclosed: the in-tree server half.** The seam is what keeps it a swap rather than a rewrite,
+and nothing is built on libwayland that would have to be unbuilt. Three things would reopen it, and
+they are written down so that "we always meant to" is not itself one of them: a `wl_abort` reachable
+from client input with no gyro bug in front of it, in a version we would have to ship; a per-message
+dispatch budget turning out to matter under a real client load; or an object-lifetime or shm hazard
+that proves cheaper to own than to work around. Absent one of those, the ambition is retired and the
+weeks go to
+[decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget), which is
+where this project is actually differentiated.
 
-**Cost accepted, at the point it is accepted:** 3–6 weeks to parity plus an interop tail; SIGBUS
-handling for `wl_shm` pools becomes ours; and continuous fuzzing of the demarshaller becomes a
-requirement rather than a nicety, because this is where untrusted input from every account on the
-machine terminates. Staged client-half-first against mutter, with wlroots as a second target. The
-deferral above reduces none of it. It moves all of it behind a question that costs an afternoon to
-answer.
-
-**Open: the reachability of libwayland's abort paths is unverified**, and the decisive argument
-rests on it. What is wanted is a count of `wl_abort()` and assertion sites in `wayland-server`
-reachable from ordinary operation rather than from programmer error, and whether any is reachable
-from client input rather than only from allocation failure. If the answer is "allocation failure
-only, and gyro is dead in that case regardless", this falls back to the three supporting arguments —
-now two and a preference — and the margin over libwayland is then thin enough that the interim
-becomes the answer.
+**Cost accepted:** a dependency whose failure modes are now inventoried rather than assumed, and two
+`wl_abort` sites that a wrapper over resource creation closes. The abort inventory is a snapshot of
+one version and the trend is upward — 6 sites in 1.23, 18 in 1.24 — so it wants re-reading on major
+version bumps rather than being treated as settled forever.
 
 ### 3. io_uring event loop via liburing
 
@@ -154,9 +187,11 @@ rather than a concession to it: the frame thread's ring now carries timers and K
 cost or volume a client influences, which is precisely the property `DEFER_TASKRUN` is being bought
 for. The dispatch thread's ring is a convenience there and would be defensible as plain epoll.
 
-**Rejected: `wl_event_loop`.** Makes the frame deadline just another timer competing with client
-traffic. **Rejected: own epoll loop.** Fine, and would deliver most of the real-time benefits via
-decision 2 alone — but having decided to own the socket I/O, io_uring is the natural consequence.
+**Rejected: `wl_event_loop` as the frame loop.** Makes the frame deadline just another timer
+competing with client traffic. Note the narrowing: this rejects `wl_event_loop` on the *frame*
+thread, and decision 2 now puts libwayland's loop on the dispatch thread, nested — which the next
+paragraph already priced and which the frame ring never sees. **Rejected: own epoll loop.** Fine,
+and it would give up little; io_uring earns the frame ring on `DEFER_TASKRUN` alone.
 
 **Rejected: "the two decisions are one decision."** Recorded in decision 2 originally, and the
 mechanism is real: libwayland does its own buffered `recvmsg` / `sendmsg`, so nesting it inside
@@ -165,6 +200,30 @@ libwayland nests perfectly well via `wl_event_loop_get_fd()` polled through io_u
 a wakeup per dispatch and the loss of batching on socket I/O — and on the dispatch thread, which is
 where decision 45 puts that traffic, neither of those costs anything that can be measured against a
 frame. The two decisions are independent, and decision 2 no longer draws support from this one.
+
+*(Annotated 2026-08-16, after decision 2 reversed.)* That last paragraph was written to sever a
+dependency and has turned out to be load-bearing in the other direction: the nesting it describes as
+hypothetical is now the arrangement. Nothing in it changes, which is the useful part — the cost was
+priced before there was any incentive to price it favourably.
+
+**The floor is a capability, not a version, and it is smaller than it was.** *(Added 2026-08-16.)*
+Decision 2's reversal removes multishot `recvmsg` from the requirement outright — libwayland does
+its own buffered `recvmsg` and `sendmsg`, so gyro never issues one — which leaves the frame ring's
+`SINGLE_ISSUER | DEFER_TASKRUN` as the whole of it. Probed rather than inferred, because a version
+number errs in both directions: distributions backport flags into older kernels, and
+`io_uring_disabled` removes them from newer ones. gyro attempts the exact configuration at startup
+and reports which flag failed. **No epoll fallback is built**, on the floor tier's own argument
+inverted — an alternate frame loop that nobody would ever execute is not a recovery path, it is
+untested code. Target kernels are current ones by choice; the past has the past's compositors.
+
+**Open: the determinism claim is unmeasured, and it is the shape decision 2 just lost.** This entry
+rests on `DEFER_TASKRUN` keeping kernel completion work off the render, and that mechanism has been
+argued rather than observed, exactly as decision 2's abort premise was until it was read. The
+measurement is absolute `IORING_OP_TIMEOUT` wake accuracy under `SCHED_FIFO`, with the flag and
+without, against a `timerfd` and epoll control under load. It wants the frame loop's shape, so it
+belongs beside the schedulability sweep in the headless harness rather than now — but it is recorded
+here rather than only in the open list, because the lesson is that an unverified premise is most
+dangerous while it is still comfortable.
 
 ### 45. Protocol dispatch is a thread, not a task
 
@@ -181,7 +240,7 @@ accident of how the loop was scheduled.
 Per-message allocation, `wl_shm` mapping and the SIGBUS window it opens, dmabuf import, and Vulkan
 resource creation from client buffers were all implicitly on the frame path, and the last two are
 far larger than the allocation
-[decision 2](#2-the-wire-protocol-is-implemented-in-tree-but-not-first) was originally written
+[decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec) was originally written
 about. A hostile or merely chatty client now cannot reach the frame thread at all, which is a
 stronger property than bounding what it costs us.
 
@@ -190,6 +249,13 @@ clients, but it is the same kind of work — external data, unbounded library ca
 the frame thread — and it belongs on the same side of the boundary. Ordering within the thread is
 input, then client traffic under a per-client budget, which is decision 2's deterministic-dispatch
 argument finally landing somewhere it applies.
+
+*(Annotated 2026-08-16, after decision 2 reversed.)* That ordering survives the reversal, because it
+is a property of this loop rather than of the codec underneath it: evdev is drained before
+`wl_event_loop_dispatch` is called at all. What does not survive is the *granularity* — a
+message-granular per-client budget is not something libwayland offers, so the budget is coarse,
+dropping a client's event source and letting the kernel socket buffer push back. Decision 2 records
+why that is now judged sufficient.
 
 **`SCHED_FIFO`, in the lowest real-time band.** Not `SCHED_OTHER`: a commit arriving shortly before
 the record point should make that frame, and a normal-priority thread may not be scheduled in time
@@ -428,6 +494,13 @@ Runtime shader compilation is for hot-reloading effect shaders during developmen
 the nested backend for iterating on blur. A compositor's allocation patterns are few and simple
 enough that VMA's convenience does not outweigh direct control.
 
+**Runtime compilation turns out to be a production path.** *(Added 2026-08-16.)*
+[Decision 62](#62-effect-composition-is-an-optimization-and-the-unfused-path-is-the-reference) fuses
+effect chains into pipeline variants and compiles a missing one off the frame path while the frame
+is drawn unfused, so the facility taken here for development convenience is what a shipped machine
+uses to fill its variant cache. The constraint that arrives with it is that compilation must never
+be on the frame thread, which decision 62 states.
+
 ---
 
 ## Animation
@@ -483,6 +556,15 @@ structural for every caller outside gyro itself.
 Reduced motion is a first-class dimension of each bundle, not a scalar — properly implemented it
 replaces movement with cross-fades rather than making springs faster.
 
+**The catalog holds one thing that is not a spring.** *(Annotated 2026-08-16.)*
+[Decision 65](#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)
+puts the map from gesture displacement to progress — travel distance, rubber-banding past the ends,
+detent placement — in the catalog beside the springs, because it is motion design by every test this
+decision applies and would otherwise land in the shell. Being driven is a dimension of a bundle
+alongside reduced motion, and the two interact rather than compose: reduced motion substitutes a
+bundle's channels and must *not* touch its parameterization, since a gesture that stops tracking is
+not reduced.
+
 ### 14. Declarative commits with dirty tracking
 
 Shell code mutates world state inside a commit; the system derives transitions from the catalog. You
@@ -509,6 +591,15 @@ per-session client, so a commit arrives over the protocol and is resolved on the
 Nothing in the model changes — the differ, the dirty set, the shared `t₀`, and uniform interruption
 are all unaffected, and the shared origin becomes *more* valuable, since it is what lets several
 shell processes reacting to one input event move as a single gesture.
+
+**A gesture is one commit, not a commit per event.** *(Annotated 2026-08-16.)* This decision notes
+that gesture tracking commits at input rate and answers it by resolving the dirty set at most once
+per frame.
+[Decision 65](#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)
+makes the answer stronger by removing the traffic rather than pacing it: a driven transition is
+established by one commit at gesture start, and the events that follow retarget a single progress
+parameter instead of dirtying the channels it feeds. The differ runs once per gesture, and what a
+1000 Hz device produces afterwards is one coefficient tuple republished.
 
 ### 15. Identity is a generational handle
 
@@ -567,6 +658,24 @@ Buys subtree slow-motion for debugging without per-property tree walks.
 **Rejected: full CAMediaTiming.** Most of it (`beginTime`, `timeOffset`, `speed`, `repeatCount`,
 `autoreverses`, `fillMode`) is redundant once springs handle interruption by retargeting rather than
 by timeline scrubbing.
+
+**The sample instant is per instance.** *(Revised 2026-08-16.)*
+[Decision 64](#64-the-scene-is-instantiable-an-instance-has-identity-a-clock-and-a-permission) makes
+the scene renderable into several targets at once, and
+[decision 28](#28-the-frame-clock-is-per-output)'s per-output clocks mean two of those targets run
+at different rates. So *when* the world is sampled belongs to the instance rather than to the frame,
+which widens this decision without adding the timing model it rejects: `TimeScale` is still the only
+hierarchy, and the rejection above still holds for the reason given.
+
+**The rejection holds; the reason given for it did not.** *(Revised 2026-08-16.)* [Decision
+65](#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target) finds
+that retargeting subsumes `speed = 0` plus `timeOffset` for *interruption* and not for *driving*, so
+a transition the user holds halfway was not expressible by anything this decision left standing.
+What it adds is a progress parameter, which is not time: no `beginTime`, no `repeatCount`, no
+`autoreverses`, and `TimeScale` still the only hierarchy. That is the second widening in two
+decisions, and the shape is the same both times — the conclusion survives, the sentence justifying
+it does not. Worth reading as a caution about this entry specifically, since it is the shortest
+decision in the log and has now been the least reliable.
 
 ### 20. Exit animations use full-resolution snapshots
 
@@ -709,6 +818,110 @@ through it. Small, but it is new machinery and it is the honest price of the one
 happens under pressure, and the converse helps: resurrection frees a slot, so repeated open-close
 relieves the pressure it creates.
 
+**A gesture cannot produce an immortal occupant.** *(Annotated 2026-08-16.)* The admission rule
+above takes bounded lifetime as a property of exits, and [decision
+65](#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)
+introduces the one shape that could break it: a swipe-to-dismiss held indefinitely under a finger,
+whose "exit" has no duration at all. It is closed there rather than here, by the entity not retiring
+until the gesture resolves — so no rectangle is reserved while a finger is down, and there is no
+driven occupant for eviction to fail to hard-settle. Recorded because the rule reads as safe by
+construction and is in fact safe by a constraint living in another decision.
+
+### 65. Interactive transitions are driven by a progress parameter, not by a moving target
+
+*(Revises [decision 19](#19-hierarchical-time-is-a-per-subtree-timescale-only).)*
+
+A transition the user is *making* is parameterized by a scalar `p ∈ [0, 1]` that the gesture drives
+directly, rather than by springs whose targets the gesture moves. `p` is an ordinary `Animatable`
+with two regimes — driven while a finger is down, sprung to an end on release — and every channel in
+the bundle is a function of it. Mechanism in
+[Animation.md](Animation.md#interactive-transitions).
+
+**What this buys is holding and scrubbing**, which
+[Experience.md](Experience.md#one-hand-made-all-of-it) now asserts: a transition stops where the
+fingers stop, for as long as they rest there, and runs backwards if they reverse. It is not an
+increment on interruption. A system can retarget perfectly, as decisions 11 and 14 already let this
+one do, and still be structurally unable to express a transition held halfway.
+
+**Rejected: the gesture moves the springs' targets** — `Motion::Interactive`, retargeted per input
+event. This is what Animation.md assumed until 2026-08-16, and it fails three ways. A critically
+damped spring tracking a target moving at `v` sits `2v/ω` behind it — ~95 px at a 0.3 s response and
+a 1000 px/s scrub — and that error inverts through zero on every reversal, so the picture swims
+rather than merely lagging. There is no world state for the moving target to read, because [decision
+14](#14-declarative-commits-with-dirty-tracking) holds `Workspace.Visible` and not *47% open*. And
+something has to map displacement onto per-channel values every event: if that something is the
+shell, then the shell authors motion, and [decision
+51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) and [decision
+13](#13-a-closed-motion-vocabulary-with-runtime-configuration-exposing-only-that-vocabulary) fall
+together. The third objection is the decisive one, because it survives solving the other two.
+
+**This is not the timing model decision 19 rejected, and the distinction is exact.** Progress is not
+time. None of `beginTime`, `timeOffset`, `speed`, `repeatCount`, `autoreverses`, or `fillMode`
+arrives with it, `TimeScale` stays the only hierarchy, and 19's rejection holds on its own terms.
+What was wrong is narrower, and it was Animation.md's phrasing of the rationale rather than the
+decision's conclusion: retargeting subsumes `speed = 0` plus `timeOffset` for *interruption*, not
+for *driving*.
+[Decision 64](#64-the-scene-is-instantiable-an-instance-has-identity-a-clock-and-a-permission)
+widened 19 once already from the other side. The pattern is worth naming — 19's conclusion has now
+survived two challenges and its stated rationale has survived neither, which is the reading decision
+2 recommends and the reason this log records arguments rather than outcomes.
+
+**Progress crosses the publication boundary as coefficients, and that constraint shaped the design
+rather than following from it.** [Decision
+50](#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients) forbids
+evaluated values in the snapshot so that the frame thread can produce two correct answers for two
+outputs in one iteration. A bare `p` is one number on both, which pins a 144 Hz panel to the
+staleness of the last input event rather than to its own presentation time — decision 28's defect
+reintroduced at the boundary, invisible until a second monitor is attached. So the driven regime
+publishes `(p₀, v₀, t₀, horizon)`, and the frame thread evaluates
+`p(T) = p₀ + v₀ · clamp(T − t₀, 0, horizon)` per output. That is the first-order case of the shape
+a spring already has, so the two regimes are one mechanism with two coefficient sets rather than a
+scalar path beside a spring path.
+`(T − t₀)` is the input-to-photon gap [decision
+57](#57-one-timebase-clock_monotonic-converted-at-ingest-and-nowhere-else) makes a subtraction, so
+this corrects a known latency per output rather than predicting anything.
+
+**The horizon is load-bearing twice**, which is why it is in the coefficient tuple and not a tuning
+constant somewhere. It bounds the extrapolation, so a reversal cannot overshoot on a stale velocity.
+And it is what makes a held gesture *settle*: past `t₀ + horizon` the expression is constant, so
+[decision 58](#58-idle-is-a-ladder-gyro-executes-and-does-not-choose)'s no-timer-armed invariant is
+reachable with a gesture still in progress — a state no other system treats as idle. Its cost is an
+abrupt stop running on by `v₀ · horizon`, answered by treating the absence of an update as
+information: dispatch republishes with `v₀ = 0` at the horizon, one timer per gesture-stop, on the
+analytic-settle machinery decision 50 already has.
+
+**Rejected: publishing `p` as a scalar and re-deriving channels on the dispatch thread.** The
+simplest version, and it leaves the frame thread untouched. It republishes O(affected channels) per
+input event where the coefficient form republishes one tuple, it puts the extrapolation in as many
+places as there are channels, and it is the evaluated value decision 50 refuses. The cost of the
+chosen form is honest and is the frame thread growing a second evaluation kind, which is admissible
+only because the curve set is closed by decision 13 and therefore cannot arrive from a client.
+
+**Rejected: a driven entity may retire.** Swipe-to-dismiss is the obvious first interactive exit,
+and letting it start retiring at gesture start would put an occupant of unbounded lifetime into
+[decision
+46](#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)'s
+atlas, which admits bounded ones only, and whose eviction path resolves pressure by hard-settling
+springs that a finger is holding. The entity therefore stays live until the gesture resolves. This
+costs nothing — the client still exists and its surface is composited normally — and it is the
+reason decision 46 needs no exception.
+
+**Cost accepted:** interactive-versus-driven becomes a dimension of every bundle's definition, the
+way reduced motion already is under decision 13, so it is first-cut work rather than an addition.
+Retrofitting means revisiting every transition in the catalog, which is
+[decision 18](#18-matched-geometry-is-in-the-first-cut)'s argument arriving for the third time. The
+gesture recognizer, the displacement mapping, and a velocity estimator are new machinery on the
+dispatch thread, and the estimator is the one whose quality is felt directly.
+
+**Prior art, and it is not all Apple's.** `UIViewPropertyAnimator`'s `fractionComplete` is this
+design exactly, and `NSEvent`'s `trackSwipeWithScrollDeltaX:` hands an application a `gestureAmount`
+that is a progress parameter by another name; `CAMediaTiming`'s `speed = 0` plus `timeOffset` is the
+older and worse form of the same idea, which is what makes decision 19's rejection of it easy to
+over-read. GNOME Shell's `SwipeTracker` has done progress-driven gestures with velocity handoff
+since version 40, and does them well — so the gap this closes is not that Linux lacks the
+interaction, but that it exists in one shell rather than in the layer underneath, where per-output
+evaluation, the coefficient boundary, and idle-while-held are available to it.
+
 ---
 
 ## Sessions
@@ -799,8 +1012,10 @@ while leaving the contended resource undefended, and it makes the timing guarant
 the schedulability test is computed against.
 
 **Rejected: running as root.** The process parses untrusted wire data from every account on the
-machine, using a hand-written codec, and its failure takes every session on that machine with it.
-That is the worst available candidate for ambient privilege. `CAP_SYS_NICE` is not a step onto that
+machine, and its failure takes every session on that machine with it. That is the worst available
+candidate for ambient privilege. *(Annotated 2026-08-16: this once read "using a hand-written
+codec", which decision 2's reversal retired. The argument does not depend on it — the codec runs in
+this address space whoever wrote it.)* `CAP_SYS_NICE` is not a step onto that
 path — it is one bounded capability with one named use, and the rest of the set stays refused.
 
 **Note:** `drmSetMaster()` wants `CAP_SYS_ADMIN`, which is effectively root. It is not needed —
@@ -1217,6 +1432,16 @@ second is a broken machine.
 as a physical response; one that varies between 1 and 20 ms reads as unreliability. That is a second
 argument for keeping policy out of the process that also runs the launcher's file indexing.
 
+**What "declares" means for a swipe.** *(Annotated 2026-08-16.)* This decision keeps swipe inside
+gyro and describes the shell's side as constraints declared ahead of time, which is enough for drag
+and resize and was never worked out for a gesture that scrubs a transition.
+[Decision 65](#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)
+supplies it: the shell binds a gesture to a named transition and its endpoints, once, and gyro owns
+the recognizer, the displacement mapping, the progress parameter, and the release. The shell learns
+that the gesture began, committed, or was cancelled, and those arrive whenever — none of them is in
+a loop. That is the case this rule was most likely to lose, since a swipe is the interaction where
+a per-event request looks most reasonable, and it is now the case that demonstrates it.
+
 #### A closed set of node kinds, arbitrary composition, motion only from the catalog
 
 The shell describes scenes from a closed vocabulary of node kinds — surface reference, snapshot
@@ -1263,7 +1488,8 @@ The shell supplies it as a **buffer**, not a path, and gyro persists a copy:
 
 - **A raw dump plus a small header, never an encoded image.** The point of the cache is that gyro
   needs no decoder; accepting a path or a PNG would put an image parser back inside the process with
-  the expensive restart, which is most of what decision 2 is about.
+  the expensive restart, which
+  [decision 27](#27-resource-accounting-is-attribution-not-per-user-fairness) states precisely.
 - **The header carries the colour state**, since every surface has one under
   [decision 47](#47-compositing-happens-in-linear-light-at-wide-primaries) and a background reloaded
   next boot without it renders in the wrong space. Stored as delivered rather than pre-converted, so
@@ -1449,8 +1675,22 @@ ingest rather than leaking inward to be discovered later as "remote feels strang
 
 Outputs are genuinely independent. The only thing coupling them is one frame thread and one GPU
 queue, so this is the classic periodic task problem and is treated as exactly that: each output has
-a measured period `P` and an execution time `C`, deadline equals period, scheduling is
+a period `P` and an execution time `C`, deadline equals period, scheduling is
 earliest-deadline-first, and composites are non-preemptive.
+
+**`P` is a minimum inter-arrival time, not an observed period.** *(Added 2026-08-16.)*
+
+On a fixed-refresh output those are the same number and the distinction is invisible, which is why
+this was written the other way first. On a variable-refresh one they are not, and taking the observed
+period silently voids the guarantee this decision exists to make: the test's whole claim is that it
+holds over every interval without watching the schedule, and an output whose arrivals a client
+controls may demand a frame at the panel's maximum rate at any moment, having demanded them at half
+that rate for the previous hour. So `P` is **the shortest interval in which an output may demand a
+frame**. That is the standard sporadic-task reading, processor-demand analysis holds under a minimum
+separation exactly as it does under a period, and no symbol in the test below changes.
+
+What it costs, and who decides which reading applies to a given output, is
+[decision 66](#66-arrival-control-is-an-input-to-admission-control).
 
 **`C` is a budget gyro enforces, not a cost it observes.** *(Revised 2026-08-15.)*
 
@@ -1513,7 +1753,11 @@ screen — which matters most precisely on the path that has no GPU to blame it 
 **The schedulability test takes phase as no input at all.** It is a processor-demand test over
 interval lengths, not a simulation of a schedule, so it holds at every phase relationship by
 construction. A task set that passes meets every deadline at every phase relationship and the
-outputs never influence each other. One that fails is not rescued by modelling phase.
+outputs never influence each other. One that fails is not rescued by modelling phase — nor, and this
+is the form of the claim that looks like an exception, by *controlling* it. Variable refresh makes a
+phase relationship something gyro can hold rather than merely observe;
+[decision 31](#31-vrr-is-a-scheduling-degree-of-freedom-not-only-a-latency-feature) records why that
+still does not make it a rung.
 
 ```
 	U    = Σᵢ Cᵢ / Pᵢ
@@ -1595,6 +1839,131 @@ is rejected because it parallelizes the cheap half: two outputs' GPU work serial
 matter how it was recorded, so threads help command recording and not execution, and this is a
 GPU-time problem. Available later if CPU recording ever dominates; it is not the answer to this.
 
+### 61. The frame thread is `SCHED_FIFO`; the earliest-deadline-first schedule is gyro's, not the kernel's
+
+The frame thread runs `SCHED_FIFO` at a fixed priority, and decision 29's earliest-deadline-first
+schedule over outputs is executed in userspace. Linux ships a kernel EDF scheduler —
+`SCHED_DEADLINE`, a constant-bandwidth server over global EDF — and a document that describes its own
+scheduler as *"the frame thread is a uniprocessor running them earliest-deadline-first"* owes a
+reason for not using the one in the kernel. Four, and the first is decisive on its own.
+
+**`sched_attr` cannot express the task set.** A `SCHED_DEADLINE` thread carries one
+`(runtime, deadline, period)` triple. Decision 29's frame thread serves N outputs with N periods
+against one non-preemptive submission path, and there is no encoding of that in a single
+reservation. Both escapes cost more than they return:
+
+- **A thread per output, each with its own reservation.** This dissolves the uniprocessor model the
+  test rests on — the kernel would spread them across CPUs under global EDF — and, worse, it admits
+  on the wrong resource. The kernel's admission test is over *CPU* bandwidth. The term that decides
+  feasibility here is `B`, the blocking from a non-preemptive composite already in flight on a GPU
+  the scheduler cannot observe. The 144 + 60 case above is utilization-feasible at `U = 0.88` and
+  non-preemptively infeasible; a kernel admitting on `U` says yes to exactly the set this decision
+  exists to catch. gyro would keep its own test regardless, and then run two schedulers that
+  disagree.
+- **One thread with `period = P_fast` and `runtime = Σ C`.** Expressible, and it asserts the trivial
+  bound while discarding the analysis. It is `U ≤ 1` with extra syscalls.
+
+Re-arming the reservation per frame with the next deadline is the third variant, and it puts a
+`sched_setattr` on the frame path to redefine a CBS period while that period is live. The frame
+loop's thesis is that it has no races with itself.
+
+The single-output case fits `SCHED_DEADLINE` perfectly, and that is the tell rather than the
+consolation. A scheduling policy that is expressive for one display and not for three is the same
+failure [decision 28](#28-the-frame-clock-is-per-output) rejects on the clock axis, arriving one
+layer down.
+
+**Throttling is the wrong answer to an overrun, and decision 29 guarantees overruns.** CBS enforces
+by descheduling: exceed `runtime` and the thread does not run again until its next period, at
+whatever instruction the overrun lands on. That is not a rare fault here. `C` is a property of the
+scene as much as of the output — the argument above turns on it — so a mispredicted `C` is the
+expected case, and the recorded answer to it is
+[decision 34](#34-effect-quality-is-a-tier-gyro-chooses-and-the-floor-tier-is-the-recovery-path)'s
+tier step and [decision 35](#35-a-miss-costs-one-frame-bounded-by-the-floor-composite)'s bounded
+single-frame miss, both of which require the thread to keep running in order to execute them.
+
+The sharp edge is not the dropped frame, which happens either way. It is **lock-holder preemption
+that nothing can undo.** Throttled inside `vkQueueSubmit`, the frame thread holds a driver-internal
+lock for the remainder of its period and every device worker needing that lock stalls behind it.
+This is the inversion
+[decision 40](#40-software-rendering-is-a-device-not-a-backend-and-it-is-the-floor-tier)'s priority
+ordering exists to prevent, inflicted from above rather than from below, and deadline inheritance
+does not reach it — a throttled task is not *blocked on* anything, so there is no holder to boost.
+On a machine with no VT — [decision 37](#37-gyro-owns-the-display-from-firmware-handoff-onward-there-are-no-vts)
+— that is a poor shape to build in deliberately.
+
+`RLIMIT_RTTIME` already provides the half of this that is wanted. It measures continuous CPU time
+without blocking, which for a thread that blocks every frame is a per-frame runtime watchdog — but
+delivered as a signal gyro reacts to, not as a deschedule the kernel imposes.
+
+**Admission can fail at a modeset, and decision 29 has no vocabulary for that.** `sched_setattr`
+returns `EBUSY` when a reservation does not fit the root domain's remaining bandwidth, which is
+capped by `sched_rt_runtime_us` — 95% by default — and shared with every other `SCHED_DEADLINE` task
+on the machine. The moment gyro would re-arm is a hotplug or a mode set: the least margin, the least
+notice. Decision 29 ends on **`Admit()` returns a degraded plan, never a refusal.** A kernel `EBUSY`
+is a refusal arriving from a layer gyro cannot renegotiate with, so a `SCHED_FIFO` fallback would
+exist anyway and both paths would be carried.
+
+**The reservation would guard the resource that does not bind.** The frame thread is blocked on a
+semaphore for most of a frame; what delays a composite is a client's batch ahead of gyro's in the GPU
+queue, which is
+[decision 22](#22-gyro-runs-as-a-dedicated-unprivileged-uid-with-cap_sys_nice-and-nothing-else)'s
+entire subject and is answered by `VK_QUEUE_GLOBAL_PRIORITY_HIGH`. CPU bandwidth is the resource
+already in surplus.
+
+Four smaller frictions, none decisive and all real:
+
+| | Under `SCHED_DEADLINE` |
+| --- | --- |
+| Affinity | Constrained to the root domain rather than freely set; shielding a core means partitioning with cpusets, on a boot service that must come up unconfigured on arbitrary hardware |
+| Placement | Global EDF migrates the frame thread across CPUs; a pinned `SCHED_FIFO` thread keeps its working set |
+| Worker ordering | No rung exists between `SCHED_DEADLINE` and `SCHED_FIFO` 99, so decision 40's *workers one below the frame thread* stops being expressible and flattens |
+| Privilege | Always requires `CAP_SYS_NICE`, re-coupling real-time scheduling to the capability decision 22 deliberately took `LimitRTPRIO=` to avoid |
+
+`fork()` from a `SCHED_DEADLINE` task also fails with `EAGAIN` absent `SCHED_FLAG_RESET_ON_FORK`.
+Moot if only the frame thread carries the policy, and worth knowing before it is not.
+
+**What `SCHED_DEADLINE` would buy, at full strength.** It is the only mechanism on Linux that makes
+gyro unpreemptible by other real-time tasks — an `rtkit`-boosted audio thread, anything a user
+`chrt`s — which for a process whose pitch is *one compositor per machine, hitting every frame* is
+not nothing. And `SCHED_FLAG_DL_OVERRUN` delivers `SIGXCPU` on overrun, a free budget-overrun
+detector. Both are obtainable more cheaply: a `SCHED_FIFO` priority chosen above what `rtkit` grants
+gets most of the first, and `RLIMIT_RTTIME` is the second without the deschedule.
+
+**Rejected: `SCHED_DEADLINE`, one reservation per output thread.** The strongest form, and it trades
+the model in decision 29 for kernel admission over a resource that is not the constraint.
+
+**Rejected: `SCHED_DEADLINE` re-armed per frame.** A syscall on the frame path mutating a live CBS
+period.
+
+**Rejected: `SCHED_DEADLINE` over-provisioned, `SCHED_FLAG_RECLAIM` on, used only for isolation.**
+The coherent middle, and the one worth stating: `runtime` set well above the userspace allocation so
+throttling never fires, CBS taken purely for its precedence over `SCHED_FIFO`, gyro's own EDF still
+doing the real work. It buys one property — immunity to other real-time tasks — at the cost of the
+affinity constraint, the runtime admission failure, and the flattened priority ordering, and it does
+not clear.
+
+**Rejected: `SCHED_RR`.** Its timeslicing is only visible among threads of equal priority, and there
+are none. It adds a preemption point and buys nothing.
+
+**Rejected: `SCHED_OTHER`, with or without `nice`, which is what every other compositor does.** The
+real datum, and it is also why every other compositor is compared on features rather than on frame
+pacing. A boot service with no VT to fall back to is the wrong process to leave at the mercy of an
+unrelated build.
+
+Two consequences that are constants rather than arguments:
+
+- **The priority number is chosen against what `rtkit` grants, and written down.** `rtkit`'s ceiling
+  is well below 99 and PipeWire asks for a specific level; gyro's frame thread must sit above both,
+  its device workers one below it, and dispatch below that — with a stated number for each rather
+  than a constant discovered by reading the source later. `LimitRTPRIO=` in the unit is the ceiling
+  that has to accommodate them.
+- **`sched_rt_runtime_us` is the same knob in both designs, and Architecture.md was imprecise about
+  it.** A spinning `SCHED_FIFO` thread is not quite a hard lock under the default 95% cap —
+  `SCHED_OTHER` still gets 5% of a CPU. It is a hard lock on a tuned system that has set the knob to
+  `-1`, and on a defaulted one it is a machine with 5% of a CPU, a frozen display, and no VT, which
+  is the same deployment outcome by a slower route. `RLIMIT_RTTIME` and decision 37's `sysrq`
+  requirement both stand; the justification is corrected, not withdrawn.
+
 ### 30. Budget shortfalls are answered by spending less; chunking and early rendering are contingencies
 
 When decision 29's allocation is smaller than the current scene wants, the first response — and
@@ -1669,16 +2038,115 @@ external is a common configuration.
 
 Rate-limited, converging over several frames rather than jumping, which answers three constraints at
 once: staying inside the panel's supported range, avoiding the brightness flicker many panels show
-on abrupt refresh changes, and keeping the phase shift below perceptibility.
+on abrupt refresh changes, and keeping each step below perceptibility.
+
+**The lever is the period and never the phase.** *(Added 2026-08-16.)* The original form of this
+decision said "phase and period", and half of that was wrong. Lengthening a period changes `P` and
+therefore changes what
+[decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)'s test
+computes; aligning a phase changes no input to it and therefore cannot move a set from infeasible to
+feasible. The servo converges on a target period, and a phase relationship is whatever falls out.
+
+**Rejected: phase servoing as a rung**, which is what "phase and period" implied. It is not merely
+inert — it is unsound in a specific way. Variable refresh does make phase controllable rather than
+merely observable, so a servo could hold a favourable relationship that
+[drift](Architecture.md#phase-drift-is-not-something-to-track) would otherwise walk through. But a
+set admitted on that basis is feasible only while the lock holds, and the lock breaks at the two
+moments least convenient for it: when the panel's range runs out, and when a client takes the refresh
+rate under decision 66. That converts a scheduling guarantee into a servo's uptime. Phase alignment
+may improve an already-feasible set — coalescing two outputs' wakeups is a real if unmeasured power
+argument — and may never be the reason one is admitted.
+
+**The servo commands a period on the `FrameClock`; the presentation seam is untouched.**
+*(Added 2026-08-16.)* `NextDeadline()` moves, the frame loop arms its existing timer against it, and
+on KMS with variable refresh enabled a flip presents at or after its commit — so shaping the clock is
+shaping presentation. The clock keeps the commanded period and the observed one separately, because
+they disagree throughout every ramp and permanently on a panel that will not comply.
+
+**Rejected: a target presentation time on `Present()`.** The obvious shape, and it buys one thing
+gyro does not need — expressing the servo nested, where the host owns the vblank and a host window
+has no VRR range to servo within anyway. It costs the seam's direction: the backend feeds the clock
+through `Observe()` and the clock never commands the backend, and a validated target time inverts
+that for a request no backend can honestly validate, since panels misreport their ranges. Closing the
+loop on an observation instead is both smaller and the right shape for a controller whose plant lies.
+What would reopen it is tearing control, which maps to `DRM_MODE_PAGE_FLIP_ASYNC` and is genuinely
+per-present rather than a property of the clock. Enabling variable refresh on the CRTC at all is not
+this: it is set with a mode, and belongs to the mode-setting path `IPresenter` does not yet have.
+
+**Rejected: a keepalive commit to hold an idle panel's rate.** It would arm a timer on a static
+screen, which [decision 58](#58-idle-is-a-ladder-gyro-executes-and-does-not-choose) forbids outright
+and which would land hardest on battery-powered machines, the same ones most likely to have a VRR
+panel. Nothing needs it — the panel holds its last scanned-out buffer unaided. The clock does go bad,
+and differently from the fixed case: an idle fixed panel keeps its period and merely accumulates
+drift, while an idle VRR panel has changed period, so its last observation is wrong rather than
+stale. Going idle therefore invalidates the clock, and the next frame is damage-driven, presents when
+ready, and re-seeds it.
 
 **Rejected: VRR as a latency feature only**, present-when-ready and nothing else. That is what
 everyone does and it leaves the one available scheduling lever unused.
 
 **Rejected: servoing against content-driven VRR.** If a fullscreen client is driving the refresh
-rate for its own reasons it wins, and admission control falls through to the next rung.
+rate for its own reasons it wins, and admission control falls through to the next rung. The
+consequence for the test is not a matter of policy and is worked out in
+[decision 66](#66-arrival-control-is-an-input-to-admission-control), which is the price of this
+decision rather than a separate subject.
 
-Written from specification; VRR phase control, panel ranges, and flicker thresholds are marked
-`// SPEC:` where they land in code.
+Written from specification; panel ranges, flicker thresholds, and whether a cursor-plane commit
+disturbs the refresh timer are marked `// SPEC:` where they land in code. The servo's own logic is
+not in that category — it commands a period and reads back an observation, both of which the headless
+fake clock can supply, refusal included.
+
+### 66. Arrival control is an input to admission control
+
+*(Added 2026-08-16.)* Decision 29 makes `P` the shortest interval in which an output may demand a
+frame. Decision 31 makes a variable-refresh output's period gyro's to lengthen — but only while gyro
+is the one deciding when frames are demanded, and decision 31 also hands that decision to a
+fullscreen client whenever one wants it. So `P` for a VRR output depends on **who controls its
+arrivals**: the commanded period when that is gyro, and the panel's minimum period when it is a
+client, regardless of the rate that client is currently choosing. Control changing hands is therefore
+a change to an input of the test, and re-runs it.
+
+The rule reads like bookkeeping, so it is worth recording as the failure it prevents. gyro servoes a
+144 Hz panel to 100 Hz to fit a projector beside it, and admits the set. A game goes fullscreen and
+takes the refresh rate. `P` returns to 6.944 ms, demand rises past what the projector was quoted, and
+the projector begins missing — *quietly*, because
+[decision 35](#35-a-miss-costs-one-frame-bounded-by-the-floor-composite) contains a miss by falling
+to the floor tier rather than by reporting one. Under the previous, event-shaped trigger list —
+output added or removed, mode set, measured cost moving — nothing had changed, so admission control
+never re-ran and never stepped the projector's quality tier, which had been available throughout.
+The trigger is now stated as any input to the test, and this is one.
+
+**The plans are precomputed, not solved on the transition.** `𝓛` is not a usefully bounded loop and
+the frame thread cannot host it. It does not have to: control of each VRR output is binary, so a
+configuration with `n` of them has `2ⁿ` plans, `n` is one or two on real hardware, and decision 29's
+`Admit()` solves all of them at configuration change. The transition is a plan swap, which preserves
+the property that the frame loop runs a schedule it was handed. Beyond a small `n` the surplus
+outputs are planned as client-controlled, which is the pessimistic direction and cannot produce a
+miss.
+
+**Detection errs toward client control.** Reading a client as in control when it is not costs a rung;
+reading it as not in control when it is costs another output its deadlines. The readings are not
+symmetric, so the policy is not either: the client-controlled state is entered readily and left only
+on hysteresis, the same shape decision 32 needs for cadence and for the same reason. What signal
+establishes it is open.
+
+**Rejected: budgeting every VRR output at its minimum period, always.** One plan, no detection, no
+hysteresis, no swap — and it is the honest conservative answer, which is what makes it worth stating
+why it loses. It forecloses decision 31 entirely. A period gyro cannot rely on holding is not a lever
+it can be admitted against, so rung 1 disappears and VRR collapses back to the latency-only feature
+decision 31 exists to reject. The machinery here is precisely the price of that rung, and the rung is
+worth it: it is the only response to an infeasible set that costs the user nothing at all.
+
+**Rejected: holding the flip to rate-limit a client back to its admitted period.** This converts an
+uncontrolled arrival process back into a controlled one and would make the whole problem disappear.
+It also spends exactly the latency variable refresh exists to buy, on the output most likely to be
+the focused one, which inverts decision 30's rule that the output nobody is interacting with is the
+one that gives something up. Falling through to the quality tier instead takes the cost where it is
+not felt.
+
+**Rejected: re-evaluating continuously rather than on transition.** The reactive design decision 29
+rejects, arriving by another road. A client's instantaneous rate is not the input; which party may
+choose the rate is, and that changes rarely.
 
 ### 32. A surface's frame cadence follows its fastest output
 
@@ -1701,8 +2169,8 @@ switches more often is worse even when each individual choice is better justifie
 
 ## Effects
 
-Recorded 2026-08-15, alongside the revision of decisions 29 and 30. These are what make `C` a number
-gyro controls rather than one it discovers.
+Recorded 2026-08-15, alongside the revision of decisions 29 and 30; decisions 62 and 63 on
+2026-08-16. These are what make `C` a number gyro controls rather than one it discovers.
 
 ### 33. Effects are named materials, not parameterized filter calls
 
@@ -1732,6 +2200,15 @@ entirely, and it is a rewrite of every effect call site once the first machine n
 **Cost accepted:** the vocabulary has to be designed before it is needed, and a material that does
 not exist cannot be asked for. Same trade as the motion catalog, made deliberately for the same
 reason.
+
+**Each material is also classified pointwise or gathering.** *(Added 2026-08-16.)* One extra
+property on every entry in the vocabulary, and
+[decision 63](#63-effects-declare-their-kind-and-their-damage-the-verifier-keeps-them-honest) spends
+it three times — fusibility, damage expansion, and cacheability. It is a second reason the
+vocabulary wants designing as a set rather than accumulating: whether the pointwise half stays small
+decides how many pipeline variants
+[decision 62](#62-effect-composition-is-an-optimization-and-the-unfused-path-is-the-reference) has
+to precompile.
 
 ### 34. Effect quality is a tier gyro chooses, and the floor tier is the recovery path
 
@@ -1798,6 +2275,159 @@ only exercised — it is what a machine with a broken GPU driver actually runs o
 optimizes the wrong thing — frame timing improves while visual consistency degrades, and on a system
 whose stated first priority is that everything moves as one system, a look that varies with load is
 the more expensive failure.
+
+**Fusion is a second axis and must not touch this one.** *(Added 2026-08-16.)*
+[Decision 62](#62-effect-composition-is-an-optimization-and-the-unfused-path-is-the-reference)
+introduces a performance axis that is invisible by construction, and the rule that keeps the two
+apart — cost samples from a frame drawn on a non-final variant are not admitted to the table above —
+is stated there.
+
+### 62. Effect composition is an optimization, and the unfused path is the reference
+
+A surface carries several effects at once: a material, a dim, a tint, the alpha of a fade. Executed
+naively each is a pass over a render target, so bandwidth is linear in the count on exactly the
+machines [decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)
+names. **Effects therefore compile to fragment contributions that gyro fuses into one pipeline where
+it can and executes as separate passes where it cannot — and the fused form is never required for
+correctness.** Every effect exists as a standalone pass. Fusion is selected when a variant is
+available and skipped when it is not.
+
+**Gathers segment the chain, which is what makes the variant space enumerable.** A pointwise effect
+— opacity, tint, saturation, [decision 58](#58-idle-is-a-ladder-gyro-executes-and-does-not-choose)'s
+dim — is a function of one sample and composes with its neighbours as function composition. A
+gathering effect — a blur chain, refraction — reads a neighbourhood and cannot consume a value that
+has not been written, so it forces materialisation regardless of what precedes it. The fusible unit
+is therefore a *maximal run of pointwise effects between two gathers*, not an arbitrary subset of
+the vocabulary, and the variants worth precompiling number the contiguous runs over a small closed
+pointwise set rather than 2ⁿ over everything.
+[Decision 33](#33-effects-are-named-materials-not-parameterized-filter-calls)'s closed vocabulary
+pays here for a second reason, having been taken for cohesion.
+
+**No frame blocks on compilation.** Pipeline creation is milliseconds of CPU, and a cold-cache stall
+inside a transition is a missed frame — a defect under
+[decision 35](#35-a-miss-costs-one-frame-bounded-by-the-floor-composite), not a hiccup. The lattice
+is built at startup and persisted; a variant that is nevertheless absent is drawn unfused that frame
+and compiled off the frame path.
+[Decision 9](#9-volk-and-runtime-shader-compilation-in-vma-and-a-test-framework-out)'s runtime
+compilation, taken for hot-reloading during development, is what this runs on. The worker is an
+ordinary thread —
+[decision 61](#61-the-frame-thread-is-sched_fifo-the-earliest-deadline-first-schedule-is-gyros-not-the-kernels)
+makes the *frame* thread `SCHED_FIFO` and says nothing about the rest — so what it can cause is core
+contention rather than preemption, bounded the way
+[decision 40](#40-software-rendering-is-a-device-not-a-backend-and-it-is-the-floor-tier) bounds
+lavapipe's: by reserving cores, not by capping time.
+
+**The unfused path is the oracle.** Two implementations of one rendering, one of them readable and
+always available, is a test: draw both, assert they agree. That makes a generated shader nobody
+wrote falsifiable rather than merely inspectable, and it is decision 34's floor-tier argument again
+— the simple path is a reference exercised constantly, not an emergency mode that has never run.
+
+**Agreement is a precision question, and it is the hard part.** A fused chain keeps intermediates in
+registers at full precision; separate passes round-trip through a render target and round at every
+boundary. [Experience.md](Experience.md#the-picture-is-correct) requires that the image not change
+when the machine changes how it draws it, and that promise now covers the fusion decision itself.
+[Decision 47](#47-compositing-happens-in-linear-light-at-wide-primaries) fixes the space the
+arithmetic happens in; what remains is the intermediate's storage format, which has to be chosen so
+the two paths agree *below the perceptual threshold* rather than merely closely.
+
+**A variant is bound when an animation begins and held for its duration.** A compile completing
+mid-transition must not swap the path under a moving picture: whatever difference remains between
+the two then arrives at an arbitrary moment, attributable to nothing. Same rule and the same reason
+as decision 34's tier stickiness.
+
+**Fusion never influences tier.** They are orthogonal — fusion is invisible and buys performance,
+tier is visible and is chosen once and held. The failure to foreclose is a cold cache after every
+boot and every upgrade producing expensive unfused frames, decision 34's measured cost reading them
+as pressure, and the tier stepping down: the machine would look worse for the first minutes of a
+session and better afterwards, which is precisely the breathing quality decision 34 exists to
+prevent. Concretely, **cost samples taken from a frame drawn on a non-final variant are not admitted
+to decision 34's cost table.**
+
+**Rejected: mandatory fusion**, with the whole lattice precompiled and no separate-pass path. It is
+where this decision started. It makes the vocabulary's size a hard constraint rather than a design
+choice, has no answer for a missing variant except to stall, and forecloses caching a gather's
+result across frames — a static blurred backdrop behind a still window should cost nothing, and
+fused into its consumer it recomputes every frame.
+
+**Rejected: no fusion, always separate passes.** Simple and uniform, and it spends the bandwidth
+this decision exists to save on integrated graphics driving a large external display, which is the
+exact population decision 29 protects.
+
+**Rejected: appending a gather to a fused run.** The tempting shape is a fused prefix with the
+remaining effect on the tail. It is sound only when that tail is genuinely last in declared order
+and pointwise: a neighbourhood read cannot consume registers, and an effect belonging in the
+*middle* of a run requires the run to split. So the general mechanism is contiguous-run fusion, and
+every effect keeps its standalone pass for the splits.
+
+**Cost accepted:** two paths for every combination, and a shader in a capture that nobody wrote. The
+first is answered by the oracle test, the second by being able to emit any variant's source on
+demand.
+
+**Prior art, and where it stops.** Core Image concatenates kernels into as few passes as the
+hardware needs, and Compiz composed plugin-supplied fragment snippets into one program in 2007. The
+idea is old, and it was not carried into any current Wayland compositor, which is the more
+interesting half. What neither had to answer is the paragraph on precision above: fusion is their
+only path, so no second picture has to match.
+
+### 63. Effects declare their kind and their damage; the verifier keeps them honest
+
+**Every effect declares whether it is pointwise or gathering and, when gathering, the bound by which
+its output exceeds its input's extent.** One property does three jobs — it decides fusibility under
+[decision 62](#62-effect-composition-is-an-optimization-and-the-unfused-path-is-the-reference), it
+expands damage, and it decides whether a result can be cached across frames. Three uses of one
+declaration is the usual sign it is the right thing to have asked for.
+
+**It is declared per material and tier, never per site.** Decision 33 puts radius in the material
+and decision 34 puts internal resolution and pass count on a ladder gyro walks, so the extent by
+which a blur exceeds its input is a function of `(material, tier)` and of nothing at the call site.
+That is a small table computed when the tier is chosen, rather than an expansion recomputed per
+frame at the sites least able to afford one.
+
+**Damage propagates backwards, and the propagation has to terminate.** A backdrop material samples
+what is behind it, so a change *behind* `Material::Glass` dirties the glass, and whatever samples
+the glass is dirtied in turn.
+[Decision 60](#60-group-opacity-requires-flattening-per-node-alpha-is-not-a-group-fade) already
+fixes the rule that makes this acyclic: a backdrop is the composite as of the group's base, so a
+material samples strictly below itself in tree order and can never sample its own output.
+Propagation depth is then bounded by nesting depth. Without that rule, a blinking cursor behind one
+pane of glass eventually dirties the screen — decision 58's ladder and
+[Experience.md](Experience.md#doing-nothing-costs-nothing)'s local-cost promise both lost to a cycle
+nobody drew deliberately.
+
+**Over-declaration is the failure that does not report itself.** Under-declaring leaves residue — a
+fringe or a trail at the edge of something that moved — which is visible, attributable, and gets
+fixed. Over-declaring costs frames on an idle machine and looks like nothing at all. A contract with
+one silent direction wants a verifier rather than review, which is
+[decision 36](#36-frame-path-discipline-is-enforced-mechanically-not-by-review)'s discipline pointed
+at a second thing.
+
+**The verifier renders full-output and diffs.** A debug mode composites the whole output, compares
+against the incremental result, and asserts in both directions: nothing changed outside the declared
+region, and the declared region is not grossly larger than what changed. It runs headless over the
+material vocabulary and belongs beside decision 58's idle assertion, which is the same class of test
+— a claim about frames that were *not* drawn, which nothing else can catch.
+
+**Expansion enters accumulation, not the frame.** Architecture's rule that damage accumulates per
+output since its last successful present is what makes a skipped frame recoverable, so an effect's
+expansion is accumulated there. A frame dropped under decision 35 then cannot lose the expanded
+region and leave residue on the next one — which is the bug this would otherwise introduce into the
+one path that must not have it.
+
+**Region arithmetic gets a complexity cap.** Damage is CPU work on the frame path, and past some
+rectangle count computing what to redraw costs more than redrawing. The region is bounded to a fixed
+count and collapses to its enclosing bound beyond it.
+
+**Rejected: deriving expansion from the effect rather than declaring it.** gyro writes every effect,
+so support could in principle be read out of the shader. It would be correct and it would not be
+*checkable*: a derivation and the thing it describes are one artefact, so nothing disagrees when
+both are wrong. The declaration exists in order to be contradicted by the verifier.
+
+**Rejected: full-output damage whenever any effect is on screen.** Trivially correct, and it makes a
+blinking cursor behind a translucent panel cost a full composite — the exact case decision 58 and
+*doing nothing costs nothing* are written against.
+
+**Cost accepted:** a table that must be kept honest as the vocabulary grows, defended mechanically
+rather than by review.
 
 ---
 
@@ -1874,10 +2504,14 @@ across three documents rather than as the thing being promised.
 **Note which decision is absent from that list.** *(Revised 2026-08-16.)* Half those causes are
 client-facing, and the answer to every one of them is
 [decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) — a thread boundary — rather than
-[decision 2](#2-the-wire-protocol-is-implemented-in-tree-but-not-first). Owning the wire protocol
-makes message handling cheap and bounded, which is worth having and is not what protects the frame.
-The distinction is worth stating because the two were conflated for this design's entire first pass:
-the frame is protected by what is *not on the thread*, not by what is fast.
+[decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec). Owning the wire
+protocol makes message handling cheap and bounded, which is worth having and is not what protects
+the frame. The distinction is worth stating because the two were conflated for this design's entire
+first pass: the frame is protected by what is *not on the thread*, not by what is fast.
+
+*(Confirmed 2026-08-16.)* This paragraph was written before decision 2 reversed and is the reason
+the reversal cost nothing here. Nothing in this decision's list moves when the server codec becomes
+somebody else's, which is the test a claim of this kind should pass.
 
 Stated as the target: **no operation on the frame path may take unbounded time.** Every missed frame
 should be traceable to something measured and mispredicted, never to something nobody knew was
@@ -1934,11 +2568,23 @@ rather than a memcpy. Getting it wrong produces a visible jump at precisely the 
 exists to make seamless.
 
 **What replaces VTs.** `Ctrl+Alt+F2` no longer exists, so gyro owes the machine a recovery console —
-[decision 38](#38-the-pre-vulkan-console-is-a-permanent-subsystem-not-a-bootstrap). Two further
+[decision 38](#38-the-pre-vulkan-console-is-a-permanent-subsystem-not-a-bootstrap). Three further
 consequences are not gyro's to solve and become deployment requirements instead:
 
-- **Kernel panics become invisible.** `pstore` must be enabled so the oops is readable on the next
-  boot, and gyro should surface it.
+- **Kernel panics become invisible**, and there are two answers rather than one. `CONFIG_DRM_PANIC`
+  draws the panic straight onto the DRM framebuffer with no VT and no fbcon involved — its own
+  Kconfig help text names this exact arrangement, *useful when using a user-space console instead of
+  fbcon* — and `drm.panic_screen=kmsg` makes it the tail of the log rather than an apology. Every
+  driver on gyro's path implements the hook, `simpledrm` included, so the boot device is covered as
+  well as the final one. `pstore` stays enabled behind it, for what the handler cannot draw, and
+  gyro should surface that on the next boot. *(Added 2026-08-16, from the reading behind decision
+  49.)*
+- **A wedged gyro leaves the keyboard as the only way in**, so `sysrq` must be enabled, and it does
+  two jobs here rather than one. The familiar keys end the process; `SysRq-V` — registered by the
+  DRM core for every device, help text *force-fb* — forces the in-kernel client to restore, which on
+  a machine with no VT is the only key that puts a picture *back* rather than taking one away. What
+  it restores depends on an in-kernel client still being registered under `fbcon=off`, which is
+  [open](#open).
 - **gyro failing to start leaves no local way into the machine** — worse than "no UI", because there
   is no console to fall back to. A systemd `OnFailure=` unit runs `gyro --console`, which reaches
   the console path without touching Vulkan.
@@ -2008,6 +2654,15 @@ screen stays valid across the exec. Vulkan does not survive — but there is no 
 to lose, because Mesa plus LLVM is far too large to ship there, which is why the initramfs gyro is
 exactly decision 38's console.
 
+*(Confirmed by reading, 2026-08-16.)* The reading that settled
+[decision 49](#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot)
+verifies this from the other side, and strengthens it. The kernel tears a framebuffer off its planes
+in `drm_file_free()`, which runs only when the open file description is released — so clearing
+`FD_CLOEXEC` does not merely preserve a handle across the exec, it keeps that release path from
+running at all. Master, the mode, the GEM handles, and the image on screen are held by one fact
+rather than four, and the initramfs re-exec and the crash restart are consequently one mechanism
+rather than two similar ones.
+
 Deferred rather than designed out, so what matters now is not foreclosing it. Two affordances, both
 close to free and both recorded under
 [what to build before it is needed](Architecture.md#what-to-build-before-it-is-needed):
@@ -2047,24 +2702,53 @@ mechanism to design toward, and a system reaching for it often has already lost.
 **The display survives a restart, and this is nearly free.**
 [Decision 39](#39-running-from-the-initramfs-is-deferred-and-deliberately-not-foreclosed) rests on
 DRM master being a property of the open file description, which is what makes switch-root re-exec
-seamless. A crash borrows the same property: the fd goes to the service manager's file descriptor
-store and comes back on restart, via `sd_notify` with `FDSTORE=1` — an `AF_UNIX` datagram carrying
-`SCM_RIGHTS`, roughly thirty lines, no libsystemd, and emphatically not D-Bus, so
+seamless. A crash borrows the same property, and more literally than "the fd is saved and restored"
+suggests: `SCM_RIGHTS` passes a reference to the *same* open file description rather than a copy, so
+while the service manager holds one the description never reaches a refcount of zero and is
+therefore never released. The fd reaches the store via `sd_notify` with `FDSTORE=1` — an `AF_UNIX`
+datagram, roughly thirty lines, no libsystemd, and emphatically not D-Bus, so
 [decision 7](#7-session-claiming-is-deferred-basu-rejected)'s position is untouched. The coupling is
 to the service manager gyro already needs for `LimitRTPRIO=`, `LimitMEMLOCK=`, and `OnFailure=`.
 
 The consumer already exists. Decision 39's rule that gyro adopts an existing mode rather than
-unconditionally modesetting named three callers and this is the fourth, so the failure becomes *the
-last frame holds, then a greeter fades in* rather than *the machine goes black*, at the cost of an
-affordance already committed to.
+unconditionally modesetting counts recovery after a crash among its callers, so the failure becomes
+*the last frame holds, then a greeter fades in* rather than *the machine goes black*, at the cost of
+an affordance already committed to.
 
-**Whether the fd store is strictly required is a `// SPEC:` question**, and it is recorded as one
-rather than assumed either way. With `fbcon=off` and no other master, nothing re-modesets when
-gyro's fd closes, so the CRTC ought to keep scanning out — but whether the framebuffer survives
-`drm_file` teardown on the strength of the plane's reference is exactly the class of behaviour
-[decision 5](#5-the-drm-backend-is-designed-from-specification-with-no-hardware-spike) says to mark
-rather than trust. The fd store turns *probably* into *by construction*, which on the one process
-that owns the machine's display is worth thirty lines whichever way the reading comes out.
+**The fd store is not insurance. It is the mechanism.** *(Settled by reading, 2026-08-16.)* This was
+recorded as a `// SPEC:` question — whether the framebuffer survives `drm_file` teardown on the
+strength of the plane's reference — and the answer is no, by explicit ABI rather than by accident.
+`drm_file_free()` calls `drm_fb_release()` *before* it releases master, so the teardown runs while
+the dying file can still commit. `drm_fb_release()` branches on the framebuffer's refcount, and a
+refcount above one is exactly the on-screen case, because a plane scanning a buffer out holds a
+reference to it. That branch reaches `drm_framebuffer_remove()`, whose comment states the rule
+outright — *drm ABI mandates that we remove any deleted framebuffers from active usage* — and thence
+`atomic_remove_fb()`, which walks every plane holding the framebuffer, sets its `fb` and `crtc` to
+`NULL`, and commits; if that commit is rejected it retries with the CRTC's `active` cleared and its
+mode unset. **The kernel performs a modeset to take gyro's last frame off the glass, synchronously,
+as part of `close()`.**
+
+So there is no fallback in which the CRTC keeps scanning out on its own. Every promise that the last
+frame holds — across a crash, a restart, or a re-exec — rests entirely on the file description never
+being released, which is what the fd store here and `FD_CLOEXEC` clearing in
+[decision 39](#39-running-from-the-initramfs-is-deferred-and-deliberately-not-foreclosed) separately
+achieve. Two consequences follow that the original framing would not have produced:
+
+- **`FDSTORE=1` is sent immediately after first-open master**, before Vulkan initialization and
+  before anything else that can fail. The interval between taking master and populating the store is
+  the entire width of gyro's exposure to a black screen, so it is made as narrow as the code allows
+  rather than left wherever the startup path happens to reach it.
+- **Closing the DRM fd blocks on a modeset.** `drm_fb_release()` schedules the removal onto a
+  workqueue and then flushes it, so a deliberate close is not cheap and gyro's death is not instant.
+  It costs nothing on the frame path and is worth knowing on the shutdown path.
+
+**Rejected: the reasoning this decision was first recorded with.** It read that with `fbcon=off` and
+no other master, nothing would re-modeset when gyro's fd closed, so the CRTC ought to keep scanning
+out and the fd store merely turned *probably* into *by construction*. The premise was wrong in a way
+worth keeping: it went looking for a second party that might disturb the display and correctly found
+none, when the party that disturbs it is the closing file's own release path. The conclusion
+survived the premise — which is the outcome most in need of catching, since a sound mechanism
+resting on an unsound argument is one tidying-up away from being deleted as redundant.
 
 **A restart loop is worse than a crash**, so restart is rate-limited and exhausting the limit falls
 through to `gyro --console`. That is decision 37's `OnFailure=` unit doing the job it already had,
@@ -2094,11 +2778,14 @@ tested as a single behaviour.
 
 **Deferred, and it is the only lever that actually shrinks a restart: dispatch as a process per
 session.** The blast radius is large because one address space holds both the riskiest code and the
-most catastrophic responsibility. Decision 2's own cost column names the demarshaller as the thing
-needing continuous fuzzing, because it terminates untrusted input from every account on the machine
-— and it currently shares an address space with DRM master. Split it, and a demarshaller crash costs
-one user's session, which is precisely the failure mode decision 2 calls acceptable for a session
-compositor.
+most catastrophic responsibility: the demarshaller terminates untrusted input from every account on
+the machine, and it currently shares an address space with DRM master. Split it, and a demarshaller
+crash costs one user's session, which is the failure mode a session compositor has by construction.
+
+*(Annotated 2026-08-16.)* [Decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)
+now puts libwayland's demarshaller there rather than gyro's, which changes who is responsible for
+fuzzing it and changes nothing about this argument — the code is no less untrusted-input-facing for
+being upstream's, and it is in the same address space either way.
 
 [Decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) pre-figures this almost entirely. The
 publication boundary is already the only channel, already single-producer / single-consumer, already
@@ -2130,7 +2817,7 @@ definition. The moment sessions survive a render-process restart it becomes a lo
 which is the oldest trick there is. **A session whose lock state cannot be reconstructed is locked,
 never unlocked.**
 
-**Consequence for decision 2, recorded rather than left to be met later.** Its decisive argument is
+**Consequence for decision 2, recorded rather than left to be met later.** Its decisive argument was
 that `wl_abort()` puts the machine's display going out at a moment a linked library chose outside
 gyro's control. With the display surviving a restart, that sentence is weaker: what a library-chosen
 abort costs is every client on the machine, not the display itself. The margin over libwayland
@@ -2138,6 +2825,13 @@ narrows a second time, on top of the narrowing decision 2 already records. The c
 move — every client on the machine is a great deal to lose to somebody else's `assert` — but
 decision 2 is now deferred rather than committed, and this is one more reason to do the abort
 reading before a demarshaller is written rather than after.
+
+*(Superseded later the same day.)* The reading was done, and the conclusion did move: there is no
+`assert` to lose anything to, and no abort on allocation failure at all. See
+[decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec). The paragraph
+above is kept because its final clause is the one that mattered — this decision's narrowing is what
+made the reading worth doing before the demarshaller rather than after, and doing it in that order
+is what saved the weeks.
 
 ---
 
@@ -2367,7 +3061,7 @@ Three riders:
   leave cores structurally reserved.
 
 This is a genuine in-process priority inversion, and it was briefly offered as the repair for
-[decision 2](#2-the-wire-protocol-is-implemented-in-tree-but-not-first)'s broken rationale. It is
+[decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)'s broken rationale. It is
 not one. A lavapipe worker holding a driver lock exists whether or not gyro owns the wire protocol,
 and the fix is the priority ladder above rather than anything about Wayland — what it establishes is
 that in-process inversion is real on this project, not that owning the protocol addresses it.
@@ -2398,17 +3092,23 @@ a watchdog that `SIGXCPU` s then `SIGKILL` s a `SCHED_FIFO` thread running conti
 blocking. Cheap insurance against a runaway frame loop hard-locking a machine that decision 37 has
 deliberately left with no VT to escape to.
 
-**This is gyro choosing for itself what decision 2 refuses to let a library choose for it**, and the
-two should be read together rather than met later as a contradiction. *(Added 2026-08-16.)* The
-distinction is not that one unilateral termination is acceptable and the other is not. It is *who
-decides, against what condition, and with what alternative*. The watchdog fires on a condition gyro
-named, at a threshold gyro set, against the one outcome strictly worse than dying: a `SCHED_FIFO`
-thread spinning on a VT-less machine is unrecoverable without a power cycle, whereas a dead gyro is
-recovered by decision 37's `OnFailure=` unit at the cost
+**This is gyro choosing deliberate death for itself, and the test it passes is worth stating**, since
+[decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec) spent three
+rationales on a library doing the same thing. *(Added 2026-08-16.)* The distinction is not that one
+unilateral termination is acceptable and the other is not. It is *who decides, against what
+condition, and with what alternative*. The watchdog fires on a condition gyro named, at a threshold
+gyro set, against the one outcome strictly worse than dying: a `SCHED_FIFO` thread spinning on a
+VT-less machine is unrecoverable without a power cycle, whereas a dead gyro is recovered by decision
+37's `OnFailure=` unit at the cost
 [decision 27](#27-resource-accounting-is-attribution-not-per-user-fairness) now states precisely.
-What [decision 2](#2-the-wire-protocol-is-implemented-in-tree-but-not-first) objects to is
-termination at a moment a third party chose, for a condition gyro did not name and cannot intercept,
-where the alternative was simply not dying.
+
+*(Revised later the same day.)* This paragraph used to end by contrasting that with what decision 2
+objected to — termination at a moment a third party chose, for a condition gyro did not name, where
+the alternative was simply not dying. The contrast is retired, because the reading behind decision 2's
+reversal found that libwayland's remaining aborts pass this same test: the conditions are gyro's own
+API misuse, and the alternative to aborting is a corrupted refcount or a NULL dereference rather than
+not dying. The test was the right one. It just does not discriminate the way this decision assumed
+when it was written.
 
 **And it does not cover the case it most resembles.** A frame thread deadlocked on a driver lock —
 the inversion named at the top of this decision — is *blocked*, not running, so it accrues no
@@ -2557,9 +3257,23 @@ foreclose it.
 
 **Requirement this creates:** the greeter is now on the critical path for getting back into the
 machine, and one greeter serves every session, so a greeter crash locks out everybody. The login
-agent must respawn it, and gyro's lock state must be entirely independent of the greeter's liveness
-— the output stays black across a respawn. Decision 25 already says gyro owns lock state and not
-lock UI; that is now load-bearing rather than tidy.
+agent must respawn it, and gyro's lock state must be entirely independent of the greeter's liveness.
+Decision 25 already says gyro owns lock state and not lock UI; that is now load-bearing rather than
+tidy.
+
+**And a locked output is never blank.** *(Amended 2026-08-16; this entry previously said the output
+stays black across a respawn.)* Decision 51 gives gyro the background and a persisted copy per uid,
+so the locked state gyro composites is available with no client running — locking is immediate, the
+greeter's UI arrives over the wallpaper when it is ready, and a greeter crash costs the password
+prompt rather than the picture. Decision 51's session-ready gate does **not** apply to lock: waiting
+for the greeter would hold the outgoing session's pixels on a screen that is supposed to be locked,
+which is the failure decision 59 exists to prevent, at a seam that recurs many times a day rather
+than once. **Lock is the one output reassignment that may not wait.**
+
+The general form is worth stating, because the first reading of this went the other way: a conflict
+between isolation and the experience is a defect in the architecture, not a trade to be settled by
+ranking them. Here the second look found that gyro already held the pixels, and the conflict was
+never real. See [Experience.md](Experience.md#the-six-promises).
 
 **Rejected: `ext-session-lock-v1` 's model**, with the lock surface as a client of the locked
 session. It is the ecosystem-standard approach and it solves the notification problem for free. It
@@ -2910,8 +3624,10 @@ test still has an area to key on.
 
 What does not survive is depth-buffered intersection with transparency. Painter's algorithm fails on
 intersecting geometry, a depth buffer does not fix order-dependent transparency, and every surface
-here has alpha with a backdrop reading through it. That is the one thing excluded, and excluding it
-is what makes all the rest affordable.
+here has alpha with a backdrop reading through it. That is one of the two things a strict-tree-order
+composite gives up; the other is group opacity, and it is
+[decision 60](#60-group-opacity-requires-flattening-per-node-alpha-is-not-a-group-fade). Excluding
+the first and paying for the second is what makes all the rest affordable.
 
 **There is no camera**, which is the non-obvious half. Perspective is a property of a node's own
 transform, applied in its parent's space, rather than a frustum belonging to an output. A per-output
@@ -2944,6 +3660,91 @@ surface in this system is translucent somewhere and `Material::Glass` samples wh
 **Rejected: Euler angles.** Gimbal lock, and interpolation that does not take the shortest path.
 Both present as a window taking a visibly strange route through a rotation, which is the failure
 mode hardest to attribute to its cause.
+
+**Considered: Fuchsia's retreat from a 3D scene graph, which is the field's one real datum here and
+does not bind.** Scenic shipped `fuchsia.ui.gfx`, a 3D scene graph, and replaced it with Flatland, a
+strictly 2D one. Three reasons are recorded and the first two do not transfer. Their clients were 2D
+products that *declared* the 3D themselves, so the expressiveness was a mismatch with the people
+using it; gyro's clients declare no transform at all — a shell names a catalog transition and gyro
+owns the matrix, per [decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism), so
+there is nobody to mismatch. And their display controllers take strictly 2D rectangular layers, so a
+client-declared 3D transform foreclosed plane promotion at arbitrary times and for arbitrarily long;
+here a non-axis-aligned transform exists only while something is in flight, and
+[decision 54](#54-settled-geometry-snaps-to-the-outputs-device-grid) returns the settled state to
+the device grid — so the frames that lose scanout eligibility are the frames that were compositing
+anyway. Their third reason is group opacity, and that one transfers in full; it is decision 60.
+
+The corroborating detail is worth more than the argument. Flatland's entire client-facing transform
+vocabulary is a ninety-degree-only orientation enum, a float scale, and an **integer** translation —
+which is the restricted transform type
+[Architecture.md](Architecture.md#resample-once-and-know-when-it-is-zero) asks for, promoted to
+being the whole API. Two designs arriving independently at the same predicate is evidence the seam
+is real rather than convenient. The integer translation is where they could afford to stop and gyro
+cannot: it forecloses sub-pixel motion, which is the product.
+
+### 60. Group opacity requires flattening; per-node alpha is not a group fade
+
+*(Revises [decision 55](#55-transforms-are-3d-the-scene-is-a-painters-algorithm).)*
+
+**Fading a subtree is not the same operation as fading each node in it, and the difference is
+visible at every value except the two endpoints.** A subtree faded per node is transparent *to
+itself*: an occluded window shows through the one in front of it, and the backdrop is weighted twice
+where they overlap. Both artefacts vanish at `g = 0` and `g = 1`, which is precisely why this
+survives review — it is correct in every screenshot anyone thinks to take.
+
+The arithmetic, in an overlap region where the front node `a` and the occluded node `b` are both
+fully covering, over a backdrop `D`, at group opacity `g`:
+
+```
+	flattened     g·a + (1−g)·D                        a alone, blended once
+	per-node      g·a + g(1−g)·b + (1−g)²·D            b leaks in
+	error         g(1−g)·(b − D)                       maximal at g = ½
+```
+
+So at the midpoint of every fade, a quarter of the difference between the hidden window and the
+backdrop is added to the picture. It is not subtle, it is not confined to translucent content, and
+it gets worse rather than better as the content becomes more ordinary — two opaque overlapping
+windows is the common case, not the exotic one.
+
+**Reduced motion is what makes this unavoidable rather than occasional.**
+[Decision 13](#13-a-closed-motion-vocabulary-with-runtime-configuration-exposing-only-that-vocabulary)
+replaces movement with cross-fades and drops parallax and scale entirely, so on the accessibility
+path *every* transition in the system is a group fade. The same shape as
+[decision 48](#48-linear-blending-is-a-visible-ecosystem-change-and-gyro-takes-it)'s luminance dip,
+which lands in the same place for the same reason: the path taken by the people least able to
+tolerate a defect is the path with the most fades on it. Workspace switching, overview dismissal, a
+shell restart, and the greeter cross-fade in
+[decision 43](#43-lock-and-greeter-are-one-ui-locking-is-an-output-reassignment) are the everyday
+cases underneath that.
+
+**An opacity group is a node property, and it flattens.** The subtree renders to an offscreen at its
+screen-space bound, opaque to itself, and is composited once at `g`. The extent is the bound
+[decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget) already
+keys effect cost on, so the cost enters `C` as an area like everything else, and the storage
+reservation follows the discipline of
+[decision 46](#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)
+— reserved at output configuration, never allocated at the moment a transition starts. Only nodes
+that declare a group pay, which keeps the ordinary case free.
+
+**Backdrop materials inside a group are resolved rather than forbidden.** `Material::Glass` inside a
+flattening subtree samples the composite *as of the group's base* — the scene below the group,
+which is already rendered when the group begins. That is the same backdrop it would have sampled
+unflattened, so the rule costs nothing and the alternative, prohibiting glass inside anything that
+fades, would be unenforceable in a vocabulary a shell composes freely.
+
+**Rejected: per-node alpha, and state the limitation.** This was the position implied by decision 55
+until 2026-08-16. It is the cheapest option and the only one with no render target, and it fails the
+test [Experience.md](Experience.md#the-picture-is-correct) sets — light behaving like light — at the
+moment the system is most watched. A limitation that is invisible in stills and obvious in motion is
+the worst kind to admit deliberately.
+
+**Rejected: forbidding overlap inside a fading group.** The catalog could be designed so that no
+transition fades a subtree containing overlapping content, which would make per-node alpha exact.
+The constraint is not satisfiable: a workspace is a stack of overlapping windows, and fading one out
+is the transition this rule would have to forbid first.
+
+**Rejected: a depth buffer.** For the same reason decision 55 rejects it. This is a
+compositing-order problem, not a visibility problem, and depth does not touch it.
 
 ### 56. Clients render at the ceiling and gyro downscales
 
@@ -2996,20 +3797,112 @@ fractional scaling has the reputation it has.
 excommunicate toolkits, and ceiling-and-downscale is a real answer for them rather than a
 placeholder.
 
+### 64. The scene is instantiable; an instance has identity, a clock, and a permission
+
+*(Revises [decision 19](#19-hierarchical-time-is-a-per-subtree-timescale-only).)*
+
+**"Render this subtree, under this transform, to this target" is one primitive with several
+consumers**: an output, a virtual output
+([decision 26](#26-remote-presentation-is-a-virtual-output-with-client-supplied-targets)), an
+overview thumbnail, a switcher tile, a screen capture, and the flattening offscreen of an opacity
+group ([decision 60](#60-group-opacity-requires-flattening-per-node-alpha-is-not-a-group-fade)).
+They are the same operation. The reason to say so once is that the alternative — a path per consumer
+— is how a live thumbnail quietly becomes a stale one, and how a switcher tile and an overview
+thumbnail drift into being two different renderings of one window.
+
+**An instance is an object with identity, not a render parameter.**
+[Decision 18](#18-matched-geometry-is-in-the-first-cut)'s matched geometry between a tile and a
+thumbnail requires them to be the *same* thing rather than two renderings that agree, because
+interruption mid-gesture has to retarget one object. Identity is
+[decision 15](#15-identity-is-a-generational-handle)'s generational handle, as everywhere else.
+
+**Each instance samples its own time, and closed-form springs are what make that free.**
+[Decision 28](#28-the-frame-clock-is-per-output) gives every output its own clock, so an instance on
+a 30 Hz virtual output and one on a 144 Hz panel cannot read a single global animation time — and
+that is the everyday configuration rather than an exotic one.
+[Decision 11](#11-springs-are-closed-form-not-numerically-integrated) makes evaluating one animation
+at two instants exact and nearly free; a numerically integrated spring would have to be stepped once
+per instance and would drift between them, which is the same argument decision 11 already won on
+different grounds. This *extends* decision 19 rather than reversing it: `TimeScale` remains the only
+hierarchical time, and what is per instance is the instant the world is sampled at, not a second
+timing model. Decision 19 was right that most of `CAMediaTiming` is redundant once springs retarget;
+this is the part of it that turns out to be load-bearing, and it arrives from per-output clocks
+rather than from animation.
+
+**Instantiation is the capture primitive, so the permission belongs on it.** A thumbnail, a
+screenshot, a recording, and a remote output are one mechanism, and a permission attached to
+consumers is bypassed by whichever consumer is added in three years. The primitive takes the
+requesting connection's trust tier and the subtree's owning session and refuses across the boundary.
+That is what keeps
+[decision 43](#43-lock-and-greeter-are-one-ui-locking-is-an-output-reassignment)'s locking a
+property of the system rather than a rule the system tries to enforce — that phrasing is
+[Experience.md](Experience.md#the-machine-holds-several-people)'s, and this primitive is where it is
+either true or merely intended.
+
+**Cost enters admission control per instance.**
+[Decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget) keys `C` on
+area and an instance has one, so no new machinery is needed — but the *count* is a new axis, and
+overview entry instantiates a subtree per window in the frame least able to afford it. Decision 34's
+cut point at commit time is already the right shape, because
+[decision 14](#14-declarative-commits-with-dirty-tracking) means gyro knows the instance set before
+it draws.
+
+**Damage crosses instances.** One surface changing dirties every instance containing it, each in its
+own space, and the mapped bound is
+[decision 55](#55-transforms-are-3d-the-scene-is-a-painters-algorithm)'s projected quad under
+[decision 63](#63-effects-declare-their-kind-and-their-damage-the-verifier-keeps-them-honest)'s
+expansion. This is the cost the primitive actually carries, and it is why an off-screen thumbnail of
+a playing video is not free.
+
+**Rejected: snapshot-backed overviews.** Cheaper, steadier, and it makes the overview a picture of
+the desktop rather than the desktop. A window that stops updating when it becomes a thumbnail is a
+cross-fade wearing a transform, which is decision 18's failure mode arriving by another route.
+[Decision 20](#20-exit-animations-use-full-resolution-snapshots)'s snapshots are for content that no
+longer exists; a live window is not that.
+
+**Rejected: a path per consumer**, which is the ordinary arrangement — thumbnails, capture, and
+remote presentation each with their own renderer. It is how the primitive would emerge anyway, three
+times, with three answers to instance timing and three places to forget the permission check.
+
+**Rejected: instances without identity** — a transform passed to a render call, nothing retained. It
+is the cheapest version and it is sufficient for capture and for thumbnails taken one at a time. It
+cannot express two presentations of one window being the same object, so matched geometry between
+them is not statable, and decision 18 is in the first cut precisely so that this is not discovered
+later.
+
+**Cost accepted:** instance count becomes a dimension of the budget and of
+[decision 46](#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)'s
+atlas sizing, and instances acquire lifetime rules that nothing previously needed.
+
+**Prior art.** `CAReplicatorLayer` is this primitive exposed publicly, and macOS's Exposé has shown
+live windows rather than snapshots since 2003; Compiz's `paintOutput` took a transform for the same
+reason. It is the least-copied of the three ideas recorded here and the one with the longest
+uninterrupted track record.
+
 ---
 
 ## Open
 
-Carried forward, roughly in the order they will bite:
+Carried forward, roughly in the order they will bite.
 
-- **libwayland's abort reachability.** Decision 2's decisive argument rests on it and nothing else
-  does, so it should be checked first, and it is an afternoon's reading. Count the `wl_abort()` and
-  assertion sites in `wayland-server` reachable from ordinary operation rather than from programmer
-  error, and establish whether any is reachable from client input rather than only from allocation
-  failure. Decision 2 now defers the commitment instead of resting on the answer, so this blocks
-  nothing — but it is what decides whether the server half is ever written, and answering it late
-  means answering it after the moment the answer was worth most. Decision 49 narrows the margin a
-  second time, which raises rather than lowers the value of reading first.
+One entry has left this list by being answered rather than deferred: *libwayland's abort
+reachability*, which stood first here because decision 2's decisive argument rested on it. It was
+read on 2026-08-16, the argument did not survive, and the outcome is recorded in
+[decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec). Two smaller
+items below replace it. Noted because the list is otherwise a record of things not yet done, and the
+one thing it has retired is the one that changed a decision.
+
+- **The two client-reachable `wl_abort` sites**, which [decision
+  2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec) closes with a wrapper
+  that refuses to publish a resource id before its implementation is set, and with a generated
+  dispatch table that cannot have a hole. Neither is written, both are small, and the failure they
+  prevent is a machine-wide abort at a moment a client picks. The wrapper is the sort of thing that
+  is obvious now and invisible once there are two hundred `wl_resource_create` calls.
+- **Re-reading the abort inventory on major libwayland bumps.** The count went 6 → 18 across 1.23 to
+  1.24, and the reading behind decision 2 is a snapshot of `1.26.0-9-ged0b9f1` rather than a
+  property of the library. What wants watching specifically is a new site reachable from client
+  input with no gyro bug in front of it, since that is the first of the three conditions decision 2
+  names for reopening the in-tree server half.
 - **Tone mapping and gamut mapping policy**, in both directions, deferred by decision 47 as
   additive. The SDR-on-HDR direction is where every shipping system has gone wrong, and the rule is
   that SDR white maps to a reference — BT.2408 says 203 nits — or to a stated user preference, and
@@ -3029,6 +3922,18 @@ Carried forward, roughly in the order they will bite:
   not know about it yet. It also wants a rule for when the chain is worth building at all, since a
   surface minified by 1.05 does not need one and a surface minified by 2 does. A measurement, not an
   argument.
+- **Promotion quality for a minified surface.** The item above makes a mip chain, built in linear
+  light, the answer to minification. A hardware plane scaler is not that chain and cannot read it —
+  it is fixed function and its quality is the vendor's. So promoting a minified surface to a plane
+  is a visible sharpness change, in a system whose fourth promise is that the picture does not
+  change when the machine changes how it is drawing it — the argument in [direct scanout is
+  conditional](Architecture.md#direct-scanout-is-conditional) arriving once more, in the sampling
+  domain, and not obviously answerable the same way, because "composite instead" gives up the entire
+  offload on precisely the outputs [decision
+  56](#56-clients-render-at-the-ceiling-and-gyro-downscales) makes ordinary. Sizing bounds the
+  stakes: an sc7180 tablet has one scaling pipe against three flat ones, so *promote the minified
+  layer* is a budget of one however the quality question lands. Wants a golden-image comparison
+  against the mip path, not an argument.
 - **Per-output characterisation.** The inverse of the display's measured behaviour belongs at the
   very end of the pipeline and preferably in KMS hardware. EDID routinely misdescribes the panel, so
   a user-supplied profile has to be possible, which implies a configuration surface and somewhere to
@@ -3037,27 +3942,41 @@ Carried forward, roughly in the order they will bite:
 - **Publication granularity across outputs.** Decision 45's boundary is wait-free, so the frame
   thread could acquire client state once per iteration or once per output. Architecture.md takes
   once per iteration, on the grounds that a window straddling two outputs would otherwise show two
-  different client frames in one iteration — visible on exactly the configuration decision 28
-  exists to serve. Per-output acquisition is strictly fresher, and the trade has been reasoned
-  rather than measured.
+  different client frames in one iteration — visible on exactly the configuration decision 28 exists
+  to serve. Per-output acquisition is strictly fresher, and the trade has been reasoned rather than
+  measured.
 - **Publication pacing**, which is the producer-side twin of the item above and is stated at the
-  foot of
-  [decision 50](#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients).
-  Eager per resolved commit serializes the scene once per input event; pacing to the fastest
-  output's period spends up to a period of gesture latency, which is the worst currency available. A
-  copy-on-write arena makes eager cost proportional to the dirty set and is the likely answer, but
-  the first cut should be the naive one and the question should be settled by measurement.
+  foot of [decision
+  50](#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients). Eager per
+  resolved commit serializes the scene once per input event; pacing to the fastest output's period
+  spends up to a period of gesture latency, which is the worst currency available. A copy-on-write
+  arena makes eager cost proportional to the dirty set and is the likely answer, but the first cut
+  should be the naive one and the question should be settled by measurement. Decision 65 removes the
+  case that made this sharpest — a driven gesture republishes one coefficient tuple rather than
+  re-serializing a scene per input event — which lowers the stakes without settling the question,
+  since ordinary commits at device rate remain.
 - **The shell's scene vocabulary.** Decision 51 commits to a closed set of node kinds — surface
   reference, snapshot reference, solid, effect layer — and that list is a sketch rather than a
   design. It is the same problem as the material vocabulary below and wants solving with it and with
   the motion catalog, since a node, the material that dresses it, and the transition that reveals it
   are one design problem seen three ways. The test named in decision 51 is the constraint: a shell
   must not be able to produce motion that does not match the catalog.
+- **Which transitions declare an opacity group.** Decision 60 settles that a group fade flattens and
+  what it costs; it does not settle which bundles in the catalog ask for one. The answer is not
+  "every fade" — a single window fading out needs no group, and paying for an offscreen there would
+  put a render target on the most frequent transition in the system. It wants deciding with the
+  scene vocabulary above and with the catalog, since whether a subtree is a group is a property of
+  the transition and of the node kinds underneath it at once.
 - **What the shell declares for continuous manipulation.** Decision 51 keeps drag, resize, and swipe
   inside gyro on the strength of the shell declaring constraints ahead of time — minimum and maximum
-  sizes, snap targets, tiling gravity, and whatever else turns out to be needed. That set is not
-  enumerated, and enumerating it is what decides whether the rule holds or whether the first awkward
-  case adds a per-event request and quietly undoes it.
+  sizes, snap targets, tiling gravity, and whatever else turns out to be needed. Decision 65 answers
+  the half most likely to break the rule, since a swipe now declares a transition binding and
+  nothing per event; what is left is narrower rather than closed. The constraint set for drag and
+  resize is still not enumerated, and enumerating it is what decides whether the rule holds or
+  whether the first awkward case adds a per-event request and quietly undoes it. The gesture
+  vocabulary itself — which gestures exist, and what each binds to — belongs with the scene and
+  material vocabularies above and for the same reason: a gesture, the transition it drives, and the
+  nodes it moves are one design problem seen three ways.
 - **Colour format for virtual outputs.** Encoders want NV12 or P010, not RGBA. The agent can convert
   (an extra full-frame pass and its bandwidth), or gyro can fold RGB→YUV into its final composite
   pass (much cheaper, but the renderer grows a YUV output path it otherwise would not have), or both
@@ -3103,6 +4022,32 @@ Carried forward, roughly in the order they will bite:
   It needs designing before the first effect is written, the same way the motion catalog does, and
   the two should be designed together — a material and the transitions that reveal it are one design
   problem.
+- **Which materials are pointwise.** Decision 33 now carries a classification it does not populate,
+  and the answer sizes decision 62's variant lattice. It wants doing *with* the vocabulary rather
+  than after it: a set designed without the question in mind produces a gathering material where a
+  pointwise one would have done, and each of those is a pass boundary that can never be fused away.
+- **The intermediate format for unfused effect passes.** Decision 62 requires the fused and unfused
+  paths to agree below the perceptual threshold, and the whole of the difference is rounding at pass
+  boundaries — registers at full precision against whatever the intermediate stores. `fp16` is
+  probably sufficient and 8-bit certainly is not, which is decision 47's precision argument on a
+  smaller surface; but *probably sufficient* is the standing that argument rejects. A measurement
+  with a tolerance attached, and the tolerance is the harder half.
+- **The damage verifier's waste threshold.** Decision 63 asserts that declared damage is not
+  "grossly larger" than what changed, and grossly is not a number. Too tight and every gathering
+  material fails on content that happens to be static; too loose and the silent direction stays
+  silent, which is the whole reason the verifier exists. Probably a ratio with a floor area, and it
+  should be calibrated against a real scene rather than chosen.
+- **Damage region complexity cap.** The rectangle count past which decision 63 collapses a region to
+  its enclosing bound. One of the few numbers in this list that is cheap to obtain, and it wants
+  obtaining before the region implementation is tuned around a guess.
+- **What may instantiate what.** Decision 64 puts the capture permission on the primitive and does
+  not say how the check is expressed. It is the same question as the System tier's listener below —
+  a trust level per connection deciding an operation — and the two want answering together, because
+  a thumbnail of another session and an output moved between sessions are one bypass at two sizes.
+- **Instance count in the budget and in the atlas.** Decision 64 makes instances an axis of decision
+  29's allocation and of decision 46's sizing, and overview entry is the worst case for both at once
+  — a subtree instantiated per window, in a frame that may also be retiring surfaces. It belongs in
+  the same derivation as the atlas multiple above rather than in one of its own.
 - **`C_min` as a number.** Decision 35 makes the floor composite's cost the bound on recoverable
   overrun, which makes it a target rather than a measurement. What that target should be, and what
   the floor composite is allowed to contain, is undecided.
@@ -3115,15 +4060,15 @@ Carried forward, roughly in the order they will bite:
   The number is then confirmed by instrumentation, not argument: per-output atlas high-water and
   eviction count, tracked the way decision 29 tracks the budget. An eviction outside a stress test
   means the multiple is wrong.
-- **The snapshot atlas has no home for a surface on two outputs.**
-  [Decision 32](#32-a-surfaces-frame-cadence-follows-its-fastest-output) makes multi-output surfaces
-  first class, while decision 46's storage, capacity, attribution, and eviction locality are all per
-  output. A window retiring while it straddles the seam is either in both atlases, doubling its
-  cost on the configuration decision 28 exists to serve, or in one and sampled by the other, which
-  breaks the argument that pressure is resolved against the slots that caused it. Surfaced by the
-  same reading that produced decision 47, and it is a sizing question as much as a correctness one.
-  Decision 52 shifts the trade rather than settling it: an atlas is at its output's density, so
-  "in both" is the horn that is *correct* about density on both, and "in one, sampled by the other"
+- **The snapshot atlas has no home for a surface on two outputs.** [Decision
+  32](#32-a-surfaces-frame-cadence-follows-its-fastest-output) makes multi-output surfaces first
+  class, while decision 46's storage, capacity, attribution, and eviction locality are all per
+  output. A window retiring while it straddles the seam is either in both atlases, doubling its cost
+  on the configuration decision 28 exists to serve, or in one and sampled by the other, which breaks
+  the argument that pressure is resolved against the slots that caused it. Surfaced by the same
+  reading that produced decision 47, and it is a sizing question as much as a correctness one.
+  Decision 52 shifts the trade rather than settling it: an atlas is at its output's density, so "in
+  both" is the horn that is *correct* about density on both, and "in one, sampled by the other"
   resamples an already-resampled snapshot — the one place the resample-once rule would be broken by
   storage rather than by geometry.
 - **Whether session switch and lock want output-sized snapshots.** Decision 21 keeps unpresented
@@ -3180,9 +4125,12 @@ Carried forward, roughly in the order they will bite:
   assuming.
 - **BGRT reproduction.** Scaling and placement from the firmware's mode into gyro's, and what to do
   when the firmware framebuffer and the native mode disagree about aspect ratio.
-- **`LP_NUM_THREADS` sizing.** Decision 40 bounds interference by reserving cores rather than
-  capping time, which turns "how many" into a number that wants measuring on machines with 4, 8, and
-  16 cores.
+- **`LP_NUM_THREADS` sizing, and the shader compilation worker with it.** Decision 40 bounds
+  interference by reserving cores rather than capping time, which turns "how many" into a number
+  that wants measuring on machines with 4, 8, and 16 cores. Decision 62's compilation worker is
+  bounded the same way and is probably the same reservation rather than a second one, since the two
+  do not contend at the same times — lavapipe is busy when there is no GPU, and variant compilation
+  is busy when there is one.
 - **The lock-screen content surface.** Decision 43 defers it with a design; the protocol, the
   surface role, and how it interacts with multiple outputs are unspecified.
 - **Respawn policy, for the greeter, the shell, and gyro itself.** One greeter serves every session
@@ -3192,13 +4140,49 @@ Carried forward, roughly in the order they will bite:
   radii — the thing that gets you back to work is itself crashing — and want one answer, covering
   the rate limits, what the output shows meanwhile (decision 51's floor policy and background, for
   the shell), and whether a crash loop should escalate the way gyro's own does.
-- **Does the framebuffer survive `drm_file` teardown?** Decision 49 stores the DRM fd rather than
-  relying on this, so nothing depends on the answer — but it decides whether the fd store is
-  insurance or the mechanism, and it is one experiment on real hardware.
-- **Presentation timing needs hardware validation.** Decisions 28–32 are designed rather than
+- **What `SysRq-V` actually restores under `fbcon=off`.** Decision 37 now leans on it as the last
+  key that can put a picture on a panel whose owner is wedged, and the DRM core registers it for
+  every device — but it forces an *in-kernel client* to restore, so it does nothing unless one is on
+  that device's client list. `fbcon=off` disables the console's binding rather than fbdev emulation
+  itself, so the client is most likely still there; that is a configuration observation on the
+  target rather than an argument, and it rides free on the first boot the DRM backend completes.
+- **What a refused promotion costs.** A surface bound for a plane can skip the linearised copy and
+  the mip chain entirely, which is most of the win for video. If the atomic test then refuses the
+  partition, gyro must composite that surface on the frame it had planned not to — and the import it
+  skipped is an allocation and a conversion pass on the frame path, which is the one place nothing
+  may allocate. Three answers, none free. Import speculatively on the dispatch thread, and spend the
+  memory and bandwidth the offload existed to save. Treat a refusal as a miss and fall that output
+  to the floor tier for one frame, which [decision
+  35](#35-a-miss-costs-one-frame-bounded-by-the-floor-composite) already sanctions and which costs
+  nothing new. Or forbid the skip, and keep only the scanout half of the win. The middle answer
+  looks right and is left here rather than written into a decision because it has not been measured
+  against a real driver's refusal rate — a controller that refuses often turns it from a rarity into
+  a stutter, and that number is not knowable from the specification.
+- **`IPresenter` has no mode-setting path.** Targets, acquire, present, and two signals — while "mode
+  set" runs through Architecture as the event that invalidates a `FrameClock`, rebuilds targets, and
+  re-runs admission control, and decision 31's variable-refresh enable is a CRTC property set with a
+  mode rather than per frame. Something owns mode setting and nothing says what, which also leaves
+  *adopt an existing mode rather than modeset unconditionally* — load-bearing for re-exec, for
+  `simpledrm` → real driver, and for crash recovery — with no interface to be a property of.
+  Surfaced by the VRR reading and independent of it; the seam was over-provisioned for plane
+  assignment and fencing and not for this.
+- **Presentation timing needs hardware validation.** Decisions 28–32 and 66 are designed rather than
   measured. The scheduling half is testable headless with fake clocks at arbitrary mixed rates, and
-  should be the first thing that harness is pointed at. The VRR half is not testable without a
-  panel, and the flicker and range behaviour is the part most likely to come back different.
+  should be the first thing that harness is pointed at. *(Revised 2026-08-16: the VRR half divides
+  rather than deferring whole.)* The servo's own logic belongs on the testable side now that decision
+  31 puts it on the clock — it commands a period and reads back an observation, and a fake clock can
+  refuse a command as readily as a real panel can. What still needs a panel is the panel's answer:
+  the flicker threshold, what the advertised range is worth in practice, and whether a cursor-plane
+  commit disturbs the refresh timer — which matters more than it sounds, because decision 29 exempts
+  the cursor plane from the budget on the grounds that it updates independently of the composite, and
+  that is a weaker claim on a VRR panel than on a fixed one.
+- **What signal says a client controls the refresh rate.** Decision 66 rests on the distinction and
+  settles only which way it must err. The candidates are a fullscreen surface committing above the
+  servo's target rate, `wp_tearing_control_v1`'s hint, and `wp_fifo_v1` or `wp_commit_timing_v1`
+  letting a client state what it intends rather than leaving gyro to infer it from what it did. None
+  of the three appears in the protocol set Architecture currently names, so this is a protocol
+  question wearing a scheduling question's clothes. It is also the one entry on this list with a
+  decision already resting its weight on it, which is why it sits here rather than further down.
 - **Chunk granularity and GPU preemption.** Chunking assumes a submission boundary is a scheduling
   opportunity for the GPU. It is not a guaranteed preemption point and the behaviour is
   hardware-dependent. Decision 30 now gates chunking on this being measured, so the question is no
@@ -3216,20 +4200,41 @@ Carried forward, roughly in the order they will bite:
   does. The limitation is the protocol's and is not gyro's to fix; what is undecided is whether to
   compound it by re-rounding, absorb it the way decision 52 absorbs the configure remainder, or
   leave the sub-pixel offset in place and let the subsurface be the one soft thing on the screen.
-- **Scheduling policy constants** — the VRR servo's per-frame bound, how recently a surface must
-  have committed to disqualify its output from early rendering, and decision 56's debounce before a
-  surface's preferred scale is lowered.
+- **The real-time priority numbers.** Decision 61 settles the policy and requires the levels to be
+  stated rather than discovered, and does not state them. Frame thread, device workers one below,
+  dispatch below that, and `LimitRTPRIO=` above all three — chosen against what `rtkit` actually
+  grants on a running system, which is a number to read rather than to reason about. It also wants
+  confirming that a `SCHED_FIFO` frame thread is in fact not preempted by the audio stack in
+  practice, since that is the one property decision 61 declines `SCHED_DEADLINE` in order to
+  approximate.
+- **Scheduling policy constants** — the VRR servo's per-frame bound, the clearance it holds above the
+  bottom of the panel's range so that low-framerate compensation never engages underneath it,
+  decision 66's hysteresis before an output is read as no longer client-controlled, how recently a
+  surface must have committed to disqualify its output from early rendering, and decision 56's
+  debounce before a surface's preferred scale is lowered.
 - **The imperative escape hatch** for event-driven one-shots — shape and boundary.
-- **Colour interpolation space for animation** — Oklab proposed over sRGB. Distinct from
-  [decision 47](#47-compositing-happens-in-linear-light-at-wide-primaries)'s composite space and
-  easily conflated with it, so worth stating apart: 47 governs the space pixels are *combined* in
-  and is settled by physics; this governs the path a single colour takes while *animating* between
-  two values, and is settled by perception. Linear light is right for the first and visibly wrong
-  for the second, where it crushes the middle of a hue transition.
+- **Colour interpolation space for animation** — Oklab proposed over sRGB. Distinct from [decision
+  47](#47-compositing-happens-in-linear-light-at-wide-primaries)'s composite space and easily
+  conflated with it, so worth stating apart: 47 governs the space pixels are *combined* in and is
+  settled by physics; this governs the path a single colour takes while *animating* between two
+  values, and is settled by perception. Linear light is right for the first and visibly wrong for
+  the second, where it crushes the middle of a hue transition.
 - **Configuration format** — a hand-rolled flat key-value parser is proposed, consistent with the
   hand-rolled XML parse in the protocol generator.
 - **Settling thresholds** for non-geometric properties. The geometric half is settled by decision
-  54; opacity, blur radius, and corner radius have no output pixel to be expressed in.
-- **io_uring kernel floor** — 6.0+ for `SINGLE_ISSUER`, `DEFER_TASKRUN`, and multishot `recvmsg`.
-  Needs to be stated and checked, not assumed.
+  54; opacity, blur radius, and corner radius have no output pixel to be expressed in. Decision 65's
+  progress parameter is the one such channel that escapes rather than joins them, since its mapping
+  carries a travel distance and a threshold on it converts back to output pixels.
+- **The lead horizon for a driven gesture.** Decision 65 carries progress toward predicted
+  presentation time to undo the input-to-photon gap, bounded so that the correction does not become
+  a guess. One output period is the obvious first answer, being the gap actually being undone. The
+  bound trades against a real artefact rather than a theoretical one — an abrupt stop runs on by `v₀
+  · horizon` until dispatch republishes at zero velocity — so it wants measuring against a touchpad,
+  with direction reversal as the case that decides it.
+- **io_uring's determinism claim.** *(Replaces the kernel-floor entry, 2026-08-16, which is settled
+  — see [decision 3](#3-io_uring-event-loop-via-liburing): the floor is one probed ring
+  configuration, multishot `recvmsg` is gone with decision 2, and there is no epoll fallback.)* What
+  is left open is the premise underneath, which is that `DEFER_TASKRUN` measurably keeps kernel
+  completion work off the render. Unmeasured, load-bearing, and the same shape as the argument
+  decision 2 lost. Wants the headless harness, alongside the presentation-timing sweep.
 - **spdlog async sink** — file I/O from the frame thread punts to io-wq and surfaces as jitter.
