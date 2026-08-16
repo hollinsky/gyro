@@ -90,22 +90,37 @@ class FrameClock
 {
 public:
 	void Observe(const PresentationInfo& info);   // presented-at, period, sequence, flags
+	void Invalidate();                            // resume, mode set, device migration
 
-	// The next frame this output owes.
-	Nanoseconds NextDeadline() const;             // when the commit must land
-	Nanoseconds NextPresentation() const;         // when that commit reaches glass
-	Nanoseconds NextWakeup() const;               // deadline - renderBudget - safety
+	// The next frame this output owes. Undefined until an Observe() re-seeds the
+	// clock after an Invalidate(); IsValid() is how the loop asks.
+	Instant PresentationAt(uint64_t sequence) const;  // any future frame
+	Instant NextDeadline() const;                 // when the commit must land
+	Instant NextPresentation() const;             // when that commit reaches glass
+	Instant NextWakeup() const;                   // deadline - renderBudget - safety
 
-	// Any future frame. Speculative rendering needs this, and it is only answerable
-	// because animation is a pure function of time.
-	Nanoseconds PresentationAt(uint64_t sequence) const;
-
-	Nanoseconds        Period() const;
-	Range<Nanoseconds> PeriodRange() const;       // VRR window; degenerate when fixed
-	bool               IsVariable() const;        // deadline may be deliberately deferred
-	bool               IsPrecise() const;         // hardware clock, or best-effort
+	Duration        Period() const;
+	Range<Duration> PeriodRange() const;          // VRR window; degenerate when fixed
+	bool            IsValid() const;              // observed since the last invalidation
+	bool            IsVariable() const;           // deadline may be deliberately deferred
+	bool            IsPrecise() const;            // hardware clock, or best-effort
 };
 ```
+
+`PresentationAt()` answers for an arbitrary future sequence, which
+[speculative early rendering](#speculative-early-rendering) needs and which is only answerable
+because animation is a pure function of time.
+
+**`Instant` and `Duration` are different types**, and the distinction is load-bearing rather than
+decorative — see [the timebase](#the-timebase). `Instant - Instant → Duration`,
+`Instant + Duration → Instant`, `Instant + Instant` ill-formed.
+
+**`Invalidate()` and `IsValid()` exist because a clock can become a liar.** After a system resume,
+after a mode set, and after [device migration](#device-migration), the last observation describes a
+world that no longer exists — and a stale observation is worse than none, because `NextDeadline()`
+then returns an instant in the deep past and [the frame loop](#the-frame-loop)'s timing policy fails
+every branch forever rather than falling to the floor tier. An invalid clock owes no frame and arms
+no timer until an observation re-seeds it.
 
 Sources per backend:
 
@@ -166,7 +181,8 @@ pays for the backend.
 Two features to build deliberately rather than let emerge:
 
 - **`--outputs N`** — one host window per virtual output. Multi-monitor layout, cross-output window
-  drags, and per-output scale become testable without owning three monitors.
+  drags, and per-output scale — including mixed *fractional* scales, which is where
+  [Geometry](#geometry) is hardest — become testable without owning three monitors.
 - **Dynamic modes** — a window resize *is* a mode change. Handling that from day one means real
   hotplug and mode-setting work when the DRM backend arrives instead of being a rewrite.
 
@@ -188,8 +204,10 @@ nothing, including on rate combinations nobody has on a desk.
 
 ### DRM / KMS
 
-Atomic modesetting, plane assignment, hardware cursor, explicit fencing, VRR, and the colour
-pipeline. Built third, designed for from the start.
+Atomic modesetting, plane assignment, hardware cursor, explicit fencing, VRR, and the
+[colour](#colour) pipeline — which plane assignment depends on, since direct scanout is conditional
+on the hardware expressing the transform the composite would have applied. Built third, designed for
+from the start.
 
 ### Selection
 
@@ -233,6 +251,36 @@ Two things follow that gyro cannot solve and that become deployment requirements
   to be readable on the next boot.
 - **A systemd `OnFailure=` unit runs `gyro --console`.** gyro failing to start otherwise leaves no
   local way into the machine at all — worse than "no UI", because there is no VT to fall back to.
+- **`sysrq` must be enabled.** `RLIMIT_RTTIME` catches a real-time thread that spins; a frame thread
+  blocked on a driver lock accrues no real-time budget and trips nothing. With no VT, the keyboard
+  is the only remaining way in.
+
+### Restart
+
+gyro can die, and what that costs is settled in
+[decision 49](Decisions.md#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot).
+Three things are separable and only the last is forced:
+
+| | Survives a restart? | How |
+| --- | --- | --- |
+| The display | yes | the DRM fd goes to the service manager's fd store and comes back; the mode is adopted rather than re-set |
+| The listeners | yes | session agents re-offer, which is why the [handover](#listener-handover) is a stable ABI |
+| The clients | **no** | a connection is an fd, and every toolkit treats its closure as fatal |
+
+So a restart reads as *the last frame holds, then a greeter fades in*, rather than as the machine
+going black — and everyone loses everything they had open. The first two rows are why the phrase
+"gyro has no restart boundary" is retired throughout this document in favour of the accurate one:
+the boundary is ruinously expensive, not absent.
+
+**Most failures must never reach here.** Parse failures, resource exhaustion, and protocol
+violations are client-fatal by construction, per [resource accounting](#resource-accounting).
+Restart is for the bugs that escape that, it is rate-limited, and exhausting the limit falls through
+to the `OnFailure=` console above — because a crash loop with the last frame frozen on glass is
+worse than a black screen, and it is the shape a malformed message replayed on reconnect would take.
+
+**The one lever that would shrink a restart is dispatch as a process per session**, containing a
+demarshaller crash to one user. It is deferred, not foreclosed, and the affordance that keeps it
+available is a representation choice on [the publication boundary](#the-publication-boundary).
 
 ### The pre-Vulkan console
 
@@ -340,13 +388,26 @@ discipline everywhere it can be met, and for permitting loss in the one place it
 
 ## Threads
 
-Three of them, and the boundaries between them are the design.
+Three of them carry the design, and the boundaries between them are it. A fourth exists to hold work
+that has no deadline at all.
 
 | Thread | Runs | May allocate |
 | --- | --- | --- |
 | Frame | Evaluate, record, submit, present | No, inside the frame section |
 | Device workers | llvmpipe rasterization, [software path only](#software-rendering-is-the-floor-tier) | Not ours to say |
-| Dispatch | Wire protocol, input, buffer import | Yes, and it must |
+| Dispatch | Wire protocol, input, buffer import, **the world** | Yes, and it must |
+| Helper | Configuration parsing, background persistence | Yes, and it blocks freely |
+
+**The world is on the dispatch thread**, and this is the part that is easy to leave unstated until
+it is wrong. Window-management mechanism, the entity graph, the differ, and every `Animatable` live
+beside the wire protocol and input, because the chain from an input event to a commit is one causal
+sequence and its front end is already here. The frame thread receives the result through [the
+publication boundary](#the-publication-boundary) and authors none of it. Policy above that mechanism
+is not here at all — it is a client, per [The shell](#the-shell).
+
+The helper thread is not part of the argument; it is where multi-megabyte writes and configuration
+parses go so that they are not on the dispatch thread, whose latency a user feels through input even
+though it owes no frame.
 
 **The priority order follows from what blocks on what**, and is the same on every device: frame
 thread highest, device workers below it, dispatch last. The frame thread *waits* on device workers —
@@ -358,9 +419,10 @@ altogether, consistently with their exemption from `mlockall` and DRM master.
 
 ### The publication boundary
 
-The frame thread reads client state through a one-way, single-producer / single-consumer
-publication. It is the *only* channel between the two threads, and three of its properties are
-requirements rather than optimizations:
+The frame thread reads the world through a single-producer / single-consumer publication. It is the
+*only* path into the frame thread. A return path exists and is described below, but it carries no
+state anything renders from. Four of the forward channel's properties are requirements rather than
+optimizations:
 
 - **Wait-free on the reader.** The frame thread swaps in the newest published snapshot. It never
   takes a lock the dispatch thread can hold, because a lock shared with a thread it outranks is
@@ -369,9 +431,28 @@ requirements rather than optimizations:
   commits](Decisions.md#14-declarative-commits-with-dirty-tracking) already make an atomic set of
   surface state the natural granularity, so a surface and its subsurfaces cross together or not at
   all. Publishing per message would let a frame observe half a transaction.
+- **Animation crosses as coefficients, never as values.** A published spring is
+  `(u₀, v₀, t₀, ω, ζ, target)`, and the frame thread evaluates it once per output at that output's
+  own predicted presentation time. Publishing evaluated values would be cheaper and would silently
+  collapse the scene back to a single timeline — the defect
+  [Presentation timing](#presentation-timing) exists to avoid, reintroduced at the boundary instead
+  of in the solver, and invisible until a second monitor is plugged in.
 - **Reclamation is deferred and one-way.** The frame thread publishes the sequence it last consumed;
   the dispatch thread frees below that. Shared ownership across the boundary puts `free` on the
   frame path wearing a destructor's clothes, where the debug allocator will not catch it.
+
+Publishing coefficients is only available because animation is [closed
+form](Animation.md#closed-form-not-integrated). An integrated spring must be *advanced* by whoever
+evaluates it, so the frame thread would write to what it reads and the boundary would need to be
+bidirectional and stateful — a lock, across exactly the priority ordering above. This is the largest
+thing the closed-form solver buys that is not visible from the solver.
+
+Two consequences follow for free. The active-spring array is not a mirror maintained alongside the
+nodes but the **serialization the publisher emits**, so it is contiguous by construction and cannot
+disagree with anything. And settling needs no coordination: settling time is analytic, so the
+dispatch thread knows when each spring finishes without evaluating it, and schedules entity
+destruction, retiring-set drainage, and [atlas](Animation.md#where-snapshots-live) release on its
+own timer — all on the side that is permitted to allocate.
 
 **A commit lands in the frame whose record point it beats, and otherwise in the next one.** Wayland
 permits this unconditionally — clients are paced by frame callbacks and have no say in when a
@@ -381,6 +462,20 @@ compositor reads them — so nothing is given up to get it. See
 **What is deliberately on the far side:** per-message allocation, `wl_shm` mapping and the SIGBUS
 window it opens, dmabuf import, Vulkan resource creation from client buffers, and libinput. Every
 one of them is unbounded, and every one of them was implicitly on the frame path before the split.
+
+**The return path is a second channel, and it is designed rather than incidental.** Some things are
+frame-thread knowledge that the dispatch thread needs: `wl_surface.frame` callbacks,
+`wp_presentation_feedback` with the timestamp the flip actually landed at, `wl_buffer.release`, the
+per-buffer hold below, and the measured costs that feed
+[budgets](#budgets) and admission control. None of it is state anything renders from, which is what
+keeps the forward channel's exclusivity meaningful — but it is real traffic, and leaving it
+undescribed only scatters it across a handful of ad-hoc mechanisms with a handful of lifetimes.
+
+So: a second SPSC queue, frame → dispatch, carrying small POD records. It is wait-free on the
+**writer** this time, which means bounded, with a stated policy for what happens when it fills. The
+bound is easy — records per frame cannot exceed outputs × surfaces — and the failure mode to design
+against is a stall on the frame thread, not a dropped callback. The consumed-sequence watermark
+rides the same channel.
 
 **Cross-thread lifetime is the cost.** A client may destroy a surface while the frame thread holds
 it. [Generational handles](Decisions.md#15-identity-is-a-generational-handle) supply the detection
@@ -392,9 +487,9 @@ is new, and it is the one part of this split that is not free.
 blit by a frame or two to keep it off the budget of the frame where the surface died
 ([Animation.md](Animation.md#exit-pixels)), which means the frame thread holds one client buffer
 past the commit that carried it. The consumed-sequence watermark cannot express that — withholding
-it would stall reclamation of every unrelated commit below — so an individual hold, released when
-the blit lands, sits alongside the watermark rather than being encoded in it. It is the only
-reader-side hold in the design, and it should stay that way.
+it would stall reclamation of every unrelated commit below — so an individual hold, released over
+the return path when the blit lands, sits alongside the watermark rather than being encoded in it.
+It is the only reader-side hold in the design, and it should stay that way.
 
 ## Presentation timing
 
@@ -412,6 +507,35 @@ at the slowest output's rate or shows the slow output stale frames. Per-output f
 Mutter and KWin both adopted years ago — fix the *scheduling* half, but the animation state
 underneath remains one timeline advanced by one delta, so the visible problem survives the fix.
 
+### The timebase
+
+Before any of that: **there is no global clock, and there is exactly one timebase.** Those are
+different statements and both are needed. The first says outputs do not share a schedule and is the
+whole of this section. The second says every timestamp in the process is comparable — monotonic
+nanoseconds, converted once at ingest and never observed anywhere else. See
+[decision 57](Decisions.md#57-one-timebase-clock_monotonic-converted-at-ingest-and-nowhere-else).
+
+gyro does not choose the clock; everything it speaks chose already. libinput reports
+`CLOCK_MONOTONIC` in microseconds, DRM page flips report it only when
+`DRM_CAP_TIMESTAMP_MONOTONIC` says so, io_uring times out against it by default, and
+`wp_presentation` makes gyro *advertise* a `clock_id` to clients — once, at bind, for the life of
+the connection. That last one is why this is fixed by fiat rather than adopted per device: outputs
+are hotpluggable and the advertisement is not, so a device whose driver disagrees is converted at
+its own ingest.
+
+Two clocks are refused, and one of them is refused for a reason that is invisible until it is
+expensive. `CLOCK_REALTIME` steps, and a stepped clock on the frame path schedules a frame into last
+Tuesday. `CLOCK_BOOTTIME` looks correct for idle timers and is worse, because **Linux's
+`CLOCK_MONOTONIC` does not advance across suspend and `CLOCK_BOOTTIME` does** — so mixing the two
+puts the frame ring's timers and every `FrameClock` observation in domains separated by the suspend
+duration, exactly once, on the first lid-open. What replaces it is an explicit resume event, which
+[Idle and power](#idle-and-power) needs to exist regardless.
+
+The consequence for everything below is that a `FrameClock` reading, an input event's `t₀`, a
+`renderBudget` high-water mark, and a page-flip timestamp are all in one domain — so
+**input-to-photon is a subtraction rather than an estimate**, per output, and can be asserted on
+rather than described.
+
 ### Per-output evaluation
 
 gyro cannot have that bug, and the reason is
@@ -427,6 +551,11 @@ is the largest single thing separating gyro from the field on this problem.
 The consequence, which everything below assumes: **a frame is `(output, predicted presentation
 time)`, not a tick.** Animation evaluation is per presentation target. There is no global "now" on
 the render path.
+
+The traversal that makes this possible carries a second per-output property nearly for free. A frame
+is also `(output, device grid)`, and [Geometry](#quantization-belongs-to-the-output) puts rounding
+there for the same reason evaluation is there: one model value, two correct answers, and no way to
+express either by storing a single result.
 
 ### Outputs are independent periodic tasks
 
@@ -664,6 +793,315 @@ GPU work from two outputs serializes on the queue regardless of how it was recor
 parallel command recording does not make an infeasible set feasible — see
 [decision 29](Decisions.md#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget).
 
+## Idle and power
+
+Everything above is about hitting deadlines. This is about the frames gyro does not draw, and it is
+as much the product as the other kind — a compositor that never misses and costs two hours of
+battery has not succeeded at anything.
+
+[Boot](#boot-and-the-display-lifetime) covers the two ends of the display's lifetime. This is the
+middle, and it is the part a user meets several times a day. Rationale and rejected alternatives in
+[decisions 58 and 59](Decisions.md#idle-and-power).
+
+### Doing nothing must cost nothing
+
+The invariant is hard: **when nothing is animating and nothing has committed, no timer is armed and
+the frame thread blocks indefinitely.**
+
+This is only exactly answerable because settling time is
+[analytic](Animation.md#closed-form-not-integrated). The dispatch thread knows the instant the last
+spring settles without evaluating anything, so it knows when there is nothing to wake for — an
+integrated spring would have to be woken to discover it had nothing to do, which is the same defect
+[Per-output evaluation](#per-output-evaluation) rejects, showing up on the power bill instead of on
+the seam between two monitors.
+
+Two things follow that are easy to get wrong by omission. Cursor motion over an otherwise static
+screen updates the cursor plane and triggers no composite — the plane is already exempt from
+[admission control](#admission-control), and this is the other half of that exemption. And a
+blinking text cursor on one output must not wake the other, which per-output damage already gives.
+
+It is falsifiable, so it is a test rather than an aspiration: a static scene in the headless
+harness, N seconds, assert zero composites. That belongs beside the schedulability sweep, and it is
+the same argument [the floor tier](#the-floor-tier) makes — a property nobody exercises is a
+property nobody has.
+
+### The ladder
+
+gyro owns the rungs and does not own the timeouts. Each rung trades wake latency for power, in the
+same shape as the [effect quality](#quality-tiers) ladder and closed for the same reason:
+
+| Rung | Mechanism | Wake latency |
+| --- | --- | --- |
+| Dim | backlight, animated | instant |
+| Backlight off | connector property, CRTC still live | instant |
+| Display off | atomic commit, `ACTIVE=0` | ~100 ms |
+| Lock | [output reassignment](#locking) | — |
+| Suspend | **not gyro's** — see [Suspend and resume](#suspend-and-resume) | seconds |
+
+**Dimming is the backlight, not an overlay.** An alpha overlay cannot go below the panel's black and
+changes colour rendition on the way down. So gyro drives `/sys/class/backlight`, which adds a udev
+rule to the table under [Privilege](#privilege) alongside the DRM and input ones. It also means the
+idle dim and the user's brightness key are **one mechanism**: [Colour](#the-composite-space) makes
+brightness change available HDR headroom rather than scaling pixels, so a dim that overwrote the
+user's setting instead of composing with it would silently change headroom, and one that failed to
+restore it exactly would leave the display wrong after a keypress.
+
+**The dim ramp is animated**, and it is probably the most-watched animation in the system — more
+often seen than any window transition, and animated by nobody. It costs nothing here: the dim level
+is a compositor-owned `Animatable`, so it is a catalog motion, and undimming on input is
+interruption by retargeting, which springs do natively.
+
+**Timeouts are configuration; the lock rung has an envelope.** Dim and blank are comfort and
+battery, and a shell sets them freely. Lock is the one rung with a security consequence, so the
+system configures a maximum and a shell may only be stricter — permissive by default on a laptop,
+because "never lock" is a legitimate thing to want at home, and present at all because its absence
+is what makes a system undeployable somewhere with a policy. Overrides are **state in gyro, not a
+live subscription**: they persist when a shell dies, and a hung shell can neither change the ladder
+nor hold the screen unlocked. A shell names rungs and cannot invent them, which is the same closure
+[materials](#materials-not-filter-calls) and the motion catalog already have.
+
+**Battery versus AC is a ladder selector, not a ladder.** Both profiles are gyro's configuration and
+something above chooses between them. gyro does not read `/sys/class/power_supply` — power source is
+not a display concern, and sampling it is exactly the kind of drift from
+[declare, do not drive](#declare-do-not-drive) that starts as one exception.
+
+### Idleness is a fold
+
+Every other compositor's idle state is per session because the process is. gyro's is a fold over
+seats, sessions, and consumers, and the terms are unfamiliar:
+
+- **Activity belongs to a seat**, not a session. It is input activity, and it is the only thing that
+  undims a panel.
+- **An output's power state follows the session currently assigned to it.** A locked panel has been
+  reassigned to the greeter ([Locking](#locking)), so the greeter's ladder governs it and an
+  inhibitor held by the locked user's clients must not keep it lit.
+- **A session with no local output but a live consumer of a
+  [virtual output](#virtual-outputs-and-why-remote-desktop-is-one) is not idle**, and the machine
+  must not suspend under it. [A session is not a display](#a-session-is-not-a-display) already says
+  a session with no output assigned is not suspended; this is that sentence's power consequence.
+
+**Injected input does not wake a local panel.** Injected input enters the same pipeline as local
+input so that `t₀` is the event time, which is right for animation and wrong for display power —
+otherwise someone remoting into a locked machine on a desk lights up its screen in a room they
+cannot see. Activity is attributed to a seat, and a virtual output's input drives that output only.
+
+**The lid is an input event.** `SW_LID` arrives through libinput like anything else, so gyro sees it
+with no bus and no agent. Lid close with an external attached is an output reconfiguration, which is
+gyro's; the suspend consequence, if any, is not.
+
+### Inhibition
+
+`zwp_idle_inhibit_v1` is [session-scoped](#filtered-globals) and is mechanism. Three details are
+where implementations usually go wrong:
+
+- **An inhibitor is effective only while its surface is genuinely presented** — mapped, on an
+  output, on an output that is on. gyro is uniquely able to evaluate that, and the common
+  approximation of "mapped" is why a backgrounded video tab keeps a laptop awake.
+- **Inhibitors are attributed** under [resource accounting](#resource-accounting), because an
+  inhibitor is how a client spends the user's battery. The attribution is a feature rather than
+  bookkeeping: *what is keeping this machine awake* is a question users ask and that no Linux
+  desktop answers well.
+- **"Nobody has touched anything" and "the system may go idle" are different facts.**
+  `ext-idle-notify-v1` grew an input-only notification because conflating them breaks activity
+  tracking, and both are answerable here.
+
+### Suspend and resume
+
+**gyro still holds no bus connection.** The handshake rides the control connection that
+[listener handover](#listener-handover) already established, with the greeter's session agent —
+persistent from boot, already running a PAM stack — as the machine-level peer. It takes logind's
+`delay` inhibitor, sends `suspending`, waits for gyro inside the delay window, releases.
+
+The handshake exists because two things must happen *before* the machine stops, neither of which is
+expressible as a reaction afterwards:
+
+- **The locked state must be presented**, not merely entered. Otherwise the machine wakes showing
+  the desktop for several frames while the lock screen paints — which the user experiences as their
+  session being briefly readable by whoever opened the lid.
+- **The frame loop must quiesce**, because it is about to schedule against a clock that stops.
+
+**Resume is a modeset, not a wakeup.** The checklist:
+
+| | Why |
+| --- | --- |
+| Invalidate every `FrameClock` | its last observation predates the suspend, and its mode may be gone |
+| Reconcile outputs, re-run admission control | the machine may have been docked with the lid shut |
+| Hard-settle every spring, drain the retiring set | nobody should resume into the middle of yesterday's transition |
+| Expect `VK_ERROR_DEVICE_LOST` | a discrete GPU may have powered off; [migration](#device-migration) is this path |
+| Absorb the client burst | every frame callback that did not fire for nine hours fires at once |
+
+The first row is the one that bites hardest if it is forgotten: a stale clock returns a deadline in
+the deep past, and [the frame loop](#the-frame-loop)'s timing policy then fails every branch forever
+instead of falling to the floor tier.
+
+**And the last frame is the resume image.** KMS holds the scanout buffer across suspend — the same
+property [device migration](#device-migration) relies on — so if the locked state was presented
+before suspending, resume is *the panel lighting up already showing the correct final image*. No
+black frame, no flash of pre-suspend content, no repaint race. That is
+[the boot seam's](#from-firmware-to-gyro) continuity argument at a seam that recurs ten times a day
+rather than once, and it is what this whole section is for.
+
+Hibernate is the same shape: the monotonic clock does not advance, KMS state is rebuilt by the
+kernel, and the checklist is unchanged.
+
+## Geometry
+
+Scaling is the most visible thing a compositor gets wrong and the least diagnosable afterwards,
+because nearly every artefact of it is a value that got rounded once and then stored. One rule fixes
+most of what follows: **quantization is a property of an output, never of the world.** Rationale and
+rejected alternatives in [decisions 52–56](Decisions.md#geometry).
+
+### The spaces
+
+| Space | Extent | Type | Determined by |
+| ----- | ------ | ---- | ------------- |
+| Buffer | one per attached buffer | integer texels | the client |
+| *surface adapter* | one per surface | exact rational | `buffer_transform`, `buffer_scale`, viewport `src` and `dst` |
+| Global | exactly one, continuous | real, Y-down | gyro's model |
+| *output adapter* | one per output | exact rational plus an integer rotation | output configuration |
+| Output device | one per output | integer at the boundary only | the composite target |
+| *panel adapter* | one per output | integer rotation and flip | KMS, or the composite |
+
+The adapters are called out separately because both are **exact and declared rather than inferred.**
+The surface adapter is whatever the client's protocol state says it is, never recomputed from a
+scale factor. The panel adapter is distinct from output device space because a ninety-degree
+rotation may be executed by a KMS plane or by us, and
+[direct scanout](#direct-scanout-is-conditional) already depends on knowing which.
+
+Global space is continuous, real-valued, output-independent, and Y-down, which matches Wayland's
+convention and Vulkan's clip space alike. Its basis unit is "one logical pixel at scale 1", for wire
+compatibility and for nothing else — nothing assumes integer alignment in it, and no logical size of
+a window is stored anywhere. Positions cross [the publication boundary](#the-publication-boundary)
+at double precision and everything else at single, because single gives 1/256 of a pixel around
+±32768, which is exactly `wl_fixed`'s resolution and too near the floor for a large arrangement of
+outputs.
+
+### Quantization belongs to the output
+
+No integer flows backwards into the model. Every rounding is a pure function of
+`(node, output, frame)` and dies with the frame that computed it.
+
+This is the same seam twice more. [Per-output evaluation](#per-output-evaluation) already splits one
+scene into evaluations at different *times*; this splits it into evaluations on different *grids*. A
+frame was `(output, predicted presentation time)`; it is also `(output, device grid)`, and the
+second half is nearly free because the first already forced the traversal to be per output.
+
+**Settled content snaps to the grid of the output being evaluated for.** A surface sampling
+one-to-one at a half-device-pixel offset is soft across its whole area, which is what gets reported
+as blurry text. Snapping *during* motion is worse than not snapping — it stair-steps — so it happens
+exactly at the transition to settled, where the residual is below the settling threshold by
+construction and the snap is therefore sub-pixel and invisible.
+
+The snap cannot live in the model, because one model position on a 1× and a 1.5× output has to
+produce two different snapped positions. It also makes the settling threshold acquire an output:
+geometric thresholds are in device pixels of the **finest** grid the node currently intersects,
+since settling against the coarse one leaves the fine one crawling. Angular and scale channels
+convert through the node's bounding radius. See [Animation.md](Animation.md#implementation-notes).
+
+### Scale is an exact rational
+
+`wp_fractional_scale_v1` speaks 120ths. Store the numerator and do size arithmetic in integers,
+because gyro and the client must arrive independently at the same integer or there is a gap, an
+overlap, or a protocol error:
+
+```
+1000 × 1.1        = 1100.0000000000001  → ceil → 1101
+1000 × 132 / 120  = 1100                            exactly
+```
+
+1.25, 1.5, 1.75, and 2.0 are all exact in binary, so the ordinary settings ladder never shows this
+and 110% at a large surface size does — on one output, intermittently. That failure profile is why
+it is a type rather than a code comment.
+
+### Resample once, and know when it is zero
+
+The composite pass samples each client buffer directly, through the fully composed buffer-to-output
+transform. There is no per-surface intermediate, and no logical-space intermediate that is then
+scaled to the mode.
+
+This wants a first-class predicate on the composed transform — *is this axis-aligned, unit-scale,
+and at an integer device offset?* Three subsystems need that answer and none of them should be
+deriving it separately: [plane promotion](#direct-scanout-is-conditional) needs it, damage rectangle
+mapping needs it to stay exact, and sharpness simply *is* it. Which argues for a restricted
+transform type representing ninety-degree rotation, flip, positive scale, and translation exactly,
+widening to a general affine only where an animation demands it.
+
+**Minification needs mip levels, and they are built in linear light.** [Colour](#colour)'s one rule
+already names mipmapping among the weighted sums of light, and gyro already holds a linearised copy
+of every surface from import, so the chain has a correct source — building it from the encoded
+buffer would darken every level and compound down the chain.
+[Perspective](#transforms-are-3d-the-scene-is-not) wants anisotropic sampling on top of that, free
+where the hardware has it and absent on the [floor tier](#the-floor-tier), which has already dropped
+effects by the time it matters.
+
+The one sanctioned second resample is the [exit snapshot](Animation.md#exit-pixels), captured at
+output device resolution and then scaled by the animation. It is transient, and the per-output atlas
+means the capture happens at the right density on each output a retiring window straddles.
+
+### Transforms are 3D; the scene is not
+
+Nodes carry a full 3D affine with node-local perspective and no camera. Composition is strict tree
+order with no depth buffer, so intersecting geometry does not render correctly. That is the one
+thing excluded, and excluding it is what makes the rest affordable: the failure is order-dependent
+transparency, a depth buffer does not fix it, and every surface here has alpha with a backdrop
+reading through it.
+
+Nothing else in the pipeline is destroyed by a transform. Damage becomes the axis-aligned bound of a
+projected quad. Scanout eligibility is the predicate above returning false. Hit-testing becomes
+ray-versus-plane and is barely exercised, since it reads model and settled model transforms are
+axis-aligned. A blur backdrop is the screen-space bound at a screen-space radius, which still has an
+area for [admission control](#admission-control) to key on.
+
+**There is no camera**, because a per-output frustum would project a straddling window differently
+on each output and change its shape across the seam. Perspective is a property of a node's own
+transform, applied in its parent's space.
+
+Two guards: the perspective distance is clamped so the near plane never crosses the quad, and back
+faces cull by default. A card flip is two nodes and a catalog transition rather than a double-sided
+quad.
+
+### What clients are asked for
+
+**`wp_viewporter` and `wp_fractional_scale_v1` are the main path.** `wl_surface.set_buffer_scale` is
+correct and second-class; it cannot be required, so legacy is deprecated by being visibly worse
+rather than by being refused. The structural gain is that the buffer-to-surface adapter is
+*declared* — `src` in `wl_fixed`, `dst` in integers, an exact rational — so no logical size is ever
+derived from buffer dimensions and a float.
+
+**Preferred scale is the maximum over the outputs a surface intersects**, and clients that speak
+only integer scale get the ceiling of that. Minification degrades gracefully and magnification does
+not, so the trade is accepted along with its bill: the client's memory and GPU time, and a sampling
+cost here.
+
+**Changes are asymmetric** — raised immediately on any overlap, lowered only after the manipulation
+settles and a debounce elapses. The symmetric rule turns dragging a window along a monitor boundary
+into a buffer reallocation storm inside the client. Same shape as [sticky quality
+tiers](#quality-tiers) and as [client cadence](#client-cadence-on-multiple-outputs): a surface
+follows the most demanding output it is on, in density as in rate.
+
+X11 clients have no notion of scale, so Xwayland surfaces live at one scale and are resampled
+everywhere else.
+
+### Where the integers are
+
+- **`xdg_toplevel.configure`** is integer logical and does not divide evenly at fractional scale.
+  Layout is computed in device pixels for the output the window is on, the logical size is rounded
+  for the wire, and **gyro absorbs the remainder into its own gap**. A one-pixel seam showing the
+  background between two tiled windows is that remainder, placed wrongly. A configure is also a
+  *request*: the client may answer with something else, and nothing may assume it did not.
+- **Pointer position** is real-valued in global space, accumulated from libinput's own doubles and
+  constrained in global space. It is rounded once into the cursor plane's device position and once
+  into `wl_fixed` for delivery, and never round-tripped back through either. Quantized to logical
+  pixels, a 3840-wide output at 1.5 would have 2560 addressable columns — a mouse that physically
+  cannot reach a third of the display.
+- **Damage and scissor rectangles** are the enclosing integer rectangle plus the resampling filter's
+  support radius in output pixels. Without the kernel footprint, moving content leaves one-pixel
+  trails that never show up in a screenshot.
+- **`wl_subsurface.set_position`** is integer surface-local, so a subsurface cannot be
+  device-aligned on a fractional output at all. That one belongs to the protocol and is not gyro's
+  to fix; what gyro controls is whether it compounds it by rounding a second time.
+  [Open](Decisions.md#open).
+
 ## Effects and quality
 
 Effects are where `C` comes from, so they are also where it is controlled. Plain composition has not
@@ -672,7 +1110,7 @@ been a scheduling problem for a decade; blur is, and blur is the feature.
 ### Materials, not filter calls
 
 A surface declares a **material** from a closed vocabulary — `Material::Glass`, `Material::Sidebar`,
-`Material::Hud` — and gyro decides what that means this frame. Shell code names no radius, no pass
+`Material::Hud` — and gyro decides what that means this frame. The shell names no radius, no pass
 count, no chain resolution, exactly as it names no spring parameters.
 
 This is forced twice over. Structurally, only the compositor has the backdrop: a client cannot blur
@@ -699,6 +1137,10 @@ The cut point is computed at commit time, not per frame. Effects are recorded in
 order against a running cost sum, and where that sum crosses the allocation is where optional work
 stops.
 
+Region area is the node's screen-space bound, which under a
+[3D transform](#transforms-are-3d-the-scene-is-not) is the bound of the projected quad. Still an
+area, which is what keeps the cost model intact when a material is on something in flight.
+
 ### The floor tier
 
 The floor composite — no effects, base composite only — is a first-class render mode used by tests
@@ -709,6 +1151,78 @@ Its cost `C_min` is a design target rather than a residue, because it bounds wha
 absorb: an overrun is recoverable in one frame only if `t_done + C_min ≤ deadline`. A cheap floor
 composite is what buys the promise in
 [decision 35](Decisions.md#35-a-miss-costs-one-frame-bounded-by-the-floor-composite).
+
+## Colour
+
+Blending, scaling, mipmapping, and blur are weighted sums of light, and are correct only in a space
+proportional to light. That single rule fixes most of what follows; the rest of colour management is
+appearance matching, which is policy. Rationale and rejected alternatives in
+[decisions 47 and 48](Decisions.md#colour).
+
+### The composite space
+
+**Linear, Rec.2020 primaries, brightness-relative** — 1.0 is SDR reference white and HDR headroom
+lives above it as a multiple that varies with display brightness. Every surface carries a colour
+state: primaries, transfer function, alpha mode, reference luminance. Untagged content is sRGB by
+rule and never by inspection.
+
+Brightness-relative is the consequential half. It makes SDR-beside-HDR definitional rather than a
+policy question answered separately in each case, and it makes the brightness control change
+available headroom rather than scale pixels.
+
+### Precision, and why the blur chain is affordable
+
+| Target | Format | Why |
+| ------ | ------ | --- |
+| Blur pass chain | `B10G11R11_UFLOAT_PACK32` | a backdrop is opaque, so no alpha is needed — 32 bpp, the same bandwidth as the `RGBA8` it replaces |
+| Composite target | 16-bit float, one per output | carries alpha, so it pays the width |
+| Scanout | output's own format | 8-bit sRGB or 10-bit PQ depending on the mode |
+
+Linear light at 8 bits bands unacceptably in the shadows, which looks at first like a doubling of
+bandwidth on the pass chain [Effects and quality](#effects-and-quality) identifies as the dominant
+term in `C`. It is not, because the chain needs no alpha. Rec.2020 is what makes the packed float
+usable — it has no sign bit, so it wants a primary set wide enough that ordinary content stays
+non-negative.
+
+### Premultiplied alpha is the sharp edge
+
+`ARGB8888` is premultiplied and the client computed `S = encode(C)·α`, so a hardware sRGB sampler
+returns `EOTF(C·α)` where the wanted value is `EOTF(C)·α` — an error factor of `α^1.2`, about 13% at
+`α = 0.5`, on every soft edge in the system. Surfaces are un-premultiplied, linearised, and
+re-premultiplied once at import on the [dispatch thread](#threads), never per sample.
+
+Half-correct is worse than consistently wrong here: encoded-space blending is wrong but
+self-consistent, while linearising without un-premultiplying is wrong by an amount that varies with
+alpha.
+
+### What it costs the ecosystem
+
+Client-drawn CSD shadows were tuned against encoded-space blending, because that is what every
+Wayland compositor does. Under linear blending they lose roughly half their depth on a light
+background and flatten as well as lighten. This is a mistuning rather than a defect — macOS
+composites in linear and its shadows look excellent, because they were tuned against it — and the
+answer is server-side decorations, which is where the closed-vocabulary argument in
+[Materials, not filter calls](#materials-not-filter-calls) already points.
+
+### Direct scanout is conditional
+
+A client buffer flipped straight to a plane bypasses the composite pass, so every transform the
+composite would have applied must be expressible in the KMS colour pipeline — per-plane degamma,
+CTM, gamma, or the newer pipeline properties. Where it is not expressible, gyro composites instead.
+Otherwise the picture changes at the moment a fullscreen client is promoted to a plane, which is a
+visible flash and a correctness bug wearing an optimization's clothes. This is a constraint on
+`IPresenter` and on plane assignment, and it is why it appears in
+[what to build before it is needed](#what-to-build-before-it-is-needed).
+
+[Geometry](#resample-once-and-know-when-it-is-zero) asks the identical question about the *spatial*
+transform and answers it with one shared predicate, which damage mapping and the sharpness path also
+consume. Promotion is admissible only where both halves say yes.
+
+### Deferred
+
+Tone mapping, gamut mapping, per-output characterisation and ICC profiles, and the colour-management
+protocol itself are all additive on the structure above and are carried in decision 47's open items.
+The structure is not additive, which is the whole reason it is here this early.
 
 ## Event loop
 
@@ -790,8 +1304,10 @@ Its own ring, its own thread, and no deadline of its own:
 
 Input is drained ahead of client traffic because it is the only thing here whose latency the user
 feels directly. The per-client budget is what stops one chatty connection delaying twenty others,
-and it is the lever [decision 2](Decisions.md#2-the-wayland-wire-protocol-is-implemented-in-tree)
-notes libwayland does not offer.
+and a message-granular budget is the lever
+[decision 2](Decisions.md#2-the-wire-protocol-is-implemented-in-tree-but-not-first) prefers to own —
+though a coarser one, unsubscribing a client's socket and letting kernel buffering push back,
+exists either way.
 
 ### Why io_uring
 
@@ -871,10 +1387,10 @@ memory the consumer already owns. Decision 1 buys it: because the renderer never
 
 **gyro contains no encoder and no network stack.** Putting them here would repeat, in a worse form,
 the mistake [locking](#locking) refuses — a network stack is a *remote* attack surface on the one
-process with no restart boundary, where the local wire protocol at least requires an account on the
-machine. So remote desktop is a client, a screen recorder wanting per-output pre-composite frames is
-a client, and a tablet used as a second display is a client. The word "remote" does not appear in
-gyro.
+process whose death takes every session on the machine, where the local wire protocol at least
+requires an account on it first. So remote desktop is a client, a screen recorder wanting per-output
+pre-composite frames is a client, and a tablet used as a second display is a client. The word
+"remote" does not appear in gyro.
 
 What the shape obliges:
 
@@ -995,9 +1511,10 @@ What the shape obliges:
   their clipboard and their surfaces. **gyro rejects any connection whose peer uid does not match
   the session's user.** This check is redundant only under the design that was not chosen, and it
   must not be optimized off the accept path.
-- **The control socket is an unauthenticated entry point** into the one process on the machine with
-  no restart boundary. Bounded by `SO_PEERCRED` on the offer, a per-uid offer cap, and one accepted
-  listener per session.
+- **The control socket is an unauthenticated entry point** into the one process whose death takes
+  every session on the machine. Bounded by `SO_PEERCRED` on the offer, validation that the offered
+  fd is a listening `AF_UNIX` stream socket bound inside the offering uid's runtime directory, a
+  per-uid offer cap, and one accepted listener per session.
 - **The handshake is a stable ABI.** It must survive gyro restarting — every listener is lost, so
   helpers re-offer — and version skew across upgrades.
 - **`WAYLAND_DISPLAY` must be in the session environment before the first client starts.** Ordering
@@ -1031,8 +1548,12 @@ systemd (pid 1)
                                    · bind, offer, export WAYLAND_DISPLAY
                                    · start graphical-session.target
                                    · idle, holding the control connection
-   gyro reassigns the output: greeter ──cross-fade──▶ user session
+   gyro shows the user's background, waits for their shell to present,
+   then reassigns the output: greeter ──cross-fade──▶ user session
 ```
+
+The wait is [required](#an-output-waits-for-its-sessions-shell), not an optimization: reassigning as
+soon as the listener arrives puts a blank screen between the greeter and the shell's first frame.
 
 **gyro's independence from logind is gyro's alone.** The login agent runs an ordinary PAM stack, and
 `pam_systemd` is in it — which is how `XDG_RUNTIME_DIR`, `systemd --user`, and therefore portals
@@ -1068,10 +1589,16 @@ global's bind path afterwards. The tiers it enforces are policy and can move:
   text-input and input-method, idle-inhibit.
 - **System tier** — screencopy and screencast, [virtual output
   registration](#virtual-outputs-and-why-remote-desktop-is-one), foreign-toplevel management,
-  layer-shell, output configuration, and the lock protocol below.
+  layer-shell, output configuration, the lock protocol below, and [the shell's](#the-shell) own
+  scene, policy, and background protocols.
 
 Connections carry a trust level of `User` or `System`. The enum is what is expensive to add later;
 its membership is not.
+
+Trust is a property of the *listener*, since that is where connection identity comes from — so a
+`System` connection cannot arrive on the ordinary per-user socket, and the shell needs a second
+listener with different permissions. Who creates it and how a process is judged worthy of it is
+[open](Decisions.md#open), and the shell is what makes it urgent rather than theoretical.
 
 ### Locking
 
@@ -1101,8 +1628,15 @@ assigned elsewhere and the user's session is not composited at all — a malicio
 a false password prompt because it cannot draw.
 
 The cost is that the locked screen cannot show user-owned content: notifications, media controls,
-per-user wallpaper, and widgets are all the same problem, since they live at the user's uid and the
-greeter is not it. The designed answer, deliberately not built initially, is a **lock-screen content
+and widgets are all the same problem, since they live at the user's uid and the greeter is not it.
+
+Wallpaper is the exception, and the route it takes is the one any further exception has to take.
+[gyro owns the background](#the-background) and holds a persisted copy, so a locked output shows the
+wallpaper of the user who locked it with gyro compositing the image and the greeter never receiving
+it. The isolation is not relaxed to allow this; it works because gyro, rather than the greeter, is
+already the party holding the pixels.
+
+The designed answer for the rest, deliberately not built initially, is a **lock-screen content
 surface** — one non-interactive surface a locked session may present, composited below the greeter's
 UI on the output it was locked out of. Non-interactivity is the safety property: keystrokes meant
 for the password field can never reach a client of the locked session, which also puts notification
@@ -1141,16 +1675,33 @@ part that cannot be retrofitted through a wire implementation that assumed a sin
 
 Policy is deliberately thin. Per-user fairness budgets would be solving a problem a laptop does not
 have, and every threshold becomes a ceiling some legitimate workload eventually hits. The reason any
-limit exists is narrower: **gyro has no restart boundary.** A session compositor that dies loses one
-login and is restarted by its greeter. gyro dying takes the machine's UI to black with nothing
-underneath. So limits are backstops an order of magnitude above anything real — total mapped shm
-bytes, total imported dmabuf bytes, per-connection object count, with `LimitNOFILE` raised well past
-where it can bind — and the response is a protocol error killing the offending client, which the
-protocol already sanctions, rather than throttling anyone.
+limit exists is narrower: **gyro's restart boundary is ruinously expensive.** A session compositor
+that dies loses one login and is restarted by its greeter. gyro dying takes every client belonging
+to every user on the machine at once. So limits are backstops an order of magnitude above anything
+real — total mapped shm bytes, total imported dmabuf bytes, per-connection object count, with
+`LimitNOFILE` raised well past where it can bind — and the response is a protocol error killing the
+offending client, which the protocol already sanctions, rather than throttling anyone.
+
+**Restart is possible, and it is worth being exact about that**, because several arguments in this
+document lean on the phrase above. gyro comes back, the display holds across it, and the listeners
+return — see [Restart](#restart) for the contract and for what does not come back, which is every
+client's state for everyone logged in. The boundary is ruinously expensive rather than absent, and
+since it is a real recovery path it earns the same treatment as the others here: exercised rather
+than assumed.
+
+That is also what limits this section. Backstops are sized against compositor-selected resources
+because a client-selected one behind a survival backstop is a client choosing when gyro dies, and
+the restart it would trigger is expensive rather than free.
 
 One thing that is not policy at all: a client that stops reading its socket. Unbounded send
 buffering is a memory bug, so something must be decided regardless of how many users exist. That
 belongs with backpressure in the protocol layer, not here.
+
+`mlockall` is a related trap and is recorded under
+[decision 22](Decisions.md#22-gyro-runs-as-a-dedicated-unprivileged-uid-with-cap_sys_nice-and-nothing-else):
+locking the whole process pins every `wl_shm` pool gyro maps, whose size and count a client chooses,
+which is a client-selected resource sitting behind a backstop meant for compositor-selected ones.
+Residency is for the frame thread's working set, not for the process.
 
 ### Consequences for the protocol layer
 
@@ -1158,9 +1709,128 @@ The wire implementation now terminates untrusted input from every account on the
 hand-written. Continuous fuzzing of the demarshaller is a requirement rather than a nicety, and it
 belongs in decision 2's cost column.
 
+## The shell
+
+gyro is a system layer, so it does not contain a desktop. Window-management policy and every piece
+of shell chrome run as clients at the user's own uid; gyro owns the mechanism underneath them.
+Rationale and rejected alternatives in
+[decision 51](Decisions.md#51-the-shell-is-a-per-session-client-gyro-owns-mechanism).
+
+| | gyro | The shell |
+| --- | --- | --- |
+| **Composition** | z-order, the entity graph, transitions, materials, the background | which entities exist and how they are arranged |
+| **Input** | routing, hit-testing, grabs, cursor | the focus *model*, declared in advance |
+| **Manipulation** | drag, resize, swipe, at device rate | the constraints those run under |
+| **Cross-session** | outputs, session assignment, lock state | nothing — it is inside one session |
+
+The last row is not a boundary of convenience. Session switching, locking, and output assignment
+span sessions by definition, so no per-session client can own them; the shell operates on a subtree
+of a scene whose top belongs to gyro.
+
+A shell reaches all of this through the `System` tier of [filtered globals](#filtered-globals), and
+trust is a property of the listener rather than of the connection — so being the shell is something
+a process is granted at the socket it connects to, not something it claims. Which listener that is,
+and who decides who may use it, is [open](Decisions.md#open).
+
+### Declare, do not drive
+
+**The shell is never in a per-event loop.** It is the same rule
+[materials](#materials-not-filter-calls) and [the motion catalog](Animation.md#the-motion-catalog)
+already follow — name a material and gyro decides what it costs, name a transition and gyro owns the
+springs — applied to interaction. A window drag is not motion events forwarded to a client and
+positions sent back; it is a declaration that an entity tracks the pointer under
+`Motion::Interactive` until release, executed by gyro at input rate with no process in the loop.
+
+The line between what may round trip and what may not is the *shape* of the interaction rather than
+the subsystem it belongs to:
+
+- **Continuous manipulation is gyro's.** Resize is already a round trip through the client, which is
+  why it rubber-bands everywhere; adding a second one through the shell would make gyro worse than
+  the field at the interaction users judge hardest.
+- **Discrete state changes may round trip.** Maximize, tile, move-to-workspace, and placement of a
+  new window all animate compositor-side while the client's pixels catch up, so the felt latency is
+  when the animation starts, not when the client renders. A hop costs one frame against no
+  reference.
+
+Consistency matters more than speed here: a configure that takes 8 ms every time reads as a physical
+response, and one varying between 1 and 20 ms reads as unreliability.
+
+### One policy client, several chrome clients
+
+Panel, launcher, overview, and notifications are separate clients from the policy client and from
+each other, because a bug in a launcher's search should not take window management with it.
+
+The reason that decomposition is safe is [`t₀`](Animation.md#timing-and-rates): a commit's origin is
+the input event's timestamp rather than the moment of handling, so several processes reacting to one
+event produce one gesture with one origin, and a commit that arrives a frame late renders *already
+in progress* rather than starting late. Cohesion across processes costs nothing here and would be
+impossible in a system that integrated its animations.
+
+Login is the case that does not inherit an origin, since nothing about it is input-driven. That is
+what the session-ready gate below is for.
+
+### The scene vocabulary is closed; composition is not
+
+The shell builds scenes from a closed set of node kinds — surface reference, snapshot reference,
+solid, effect layer — into arbitrary trees, and moves them only with catalog transitions. **Cohesion
+lives in the motion, not in the arrangement.** A shell may invent any idiom it likes and cannot
+invent a spring, which is what lets two desktops on gyro look nothing alike and still feel like the
+same machine. The test that keeps the line honest: if a shell can produce motion that does not match
+the catalog, the vocabulary is wrong.
+
+The closed set is also what makes a shell replaceable, because gyro can go on presenting windows
+under default policy while one restarts. Anonymous nodes would leave gyro holding a scene it cannot
+interpret, with nothing to do but freeze or drop it. That default policy is the same
+[floor tier](#the-floor-tier) argument in a second place: the behaviour gyro falls back to is the
+behaviour it uses to come up before any shell exists.
+
+### The background
+
+The background belongs to gyro. Three things follow that would otherwise each need answering
+separately: [`Material::Glass`](#materials-not-filter-calls) always has a backdrop to sample, so the
+effect path has no degenerate case; [the firmware handoff](#from-firmware-to-gyro) reaches a
+gyro-owned image with no client in the path, so one continuous picture from BGRT onward does not
+depend on anything having started; and both a shell restart and the gate below have something to
+show that is not black.
+
+The shell supplies it as a **buffer**, never a path, and gyro persists a copy so it is available
+before any shell is running:
+
+- **A raw dump plus a header**, not an encoded image — the whole point is that gyro contains no
+  decoder. The header carries the surface's [colour state](#colour), stored as delivered so that
+  loading it reuses the client-buffer import path rather than adding a second one.
+- **Written by the [helper thread](#threads)**, debounced so a rotating-wallpaper slideshow does not
+  write to disk every thirty seconds, and kept in gyro's own state directory keyed by uid.
+- **Scaled and placed** when the mode it is shown at differs from the mode it was captured at, which
+  is the computation [BGRT continuation](#from-firmware-to-gyro) already needs.
+- **Never composited before that user has authenticated.** Showing a selected user's wallpaper on
+  the login screen is tempting and would put user-controlled pixels where another user may be about
+  to type a password. After authentication the question dissolves, since the wallpaper on a locked
+  output belongs to the uid that supplied it.
+
+That last rule is what lets [locking](#locking) show a user's own wallpaper at all: gyro composites
+the image and the greeter never receives it, so the isolation is not weakened to get it.
+
+Whether a background is one image per session or one per output is deliberately
+[open](Decisions.md#open). The cache is written and read at moments when no per-output intent has
+been expressed — before the shell exists, and at the greeter — so the live case and the cached case
+may not want the same answer, and nothing here depends on which way it goes.
+
+### An output waits for its session's shell
+
+**An output is not reassigned to a session until that session's shell has presented.** Between
+`graphical-session.target` and a shell's first frame is a second or more, and without the gate login
+reads as greeter, blank, shell — three beats where the design promises one continuous image. With
+it, and with the background above, it is greeter, then that user's background, then the shell
+arriving over it.
+
 ## Wayland protocol layer
 
-gyro implements the Wayland wire protocol itself, on both sides, rather than using libwayland.
+gyro implements the Wayland wire protocol itself, on both sides, rather than using libwayland — but
+not from line zero. The shadow object model below is required whichever codec sits underneath, which
+makes it a seam, and libwayland behind that seam is an admissible interim rather than a foundation
+anything is built on. The intent is in-tree; the commitment waits on the open question in the first
+bullet.
 
 **Why — and the reason is not real-time.** [Threads](#threads) takes wire dispatch off the frame
 thread, so libwayland's per-message allocation would land somewhere unbounded latency costs one
@@ -1168,13 +1838,18 @@ client some latency and costs the frame nothing. Nor is it io_uring: libwayland 
 `wl_event_loop_get_fd()` at the price of a wakeup per dispatch, which on the dispatch thread is not
 a price. What actually remains:
 
-- **gyro has no restart boundary.** libwayland resolves allocation failure and internal invariant
-  violations by calling `wl_abort()`. A session compositor that dies loses one login; gyro dying
-  takes the machine's display, on a system with [no VT](#boot-and-the-display-lifetime) to fall back
-  to and whose recovery console is gyro itself. This is the decisive argument, and it is the one
-  still awaiting verification against libwayland's source — see decision 2's open item.
-- **A per-client dispatch budget**, which libwayland does not offer and which one dispatch thread
-  serving every client on the machine needs.
+- **gyro's restart boundary is ruinously expensive.** libwayland resolves allocation failure and
+  internal invariant violations by calling `wl_abort()`. A session compositor that dies loses one
+  login; gyro dying takes every client belonging to every user on the machine, on a system with
+  [no VT](#boot-and-the-display-lifetime) to fall back to and whose recovery console is gyro itself.
+  Restart exists — see [resource accounting](#resource-accounting) for what it does and does not
+  cost — and it is the *expense* rather than the impossibility that carries the argument. This is
+  the decisive point, and the one still awaiting verification against libwayland's source; see
+  decision 2's open item.
+- **A message-granular per-client dispatch budget**, which libwayland does not offer and which one
+  dispatch thread serving every client on the machine would prefer. Not a hard requirement:
+  dropping a client's event source and letting the kernel socket buffer push back is a coarser lever
+  that works under either codec.
 - **Typed C++23 bindings**, and no `wl_list` / `wl_listener` object model at the boundary, where
   destroy-listener lifetime bugs are the best-known failure family in compositors built this way.
 - **Deterministic dispatch ordering.** Input, then client traffic under budget. epoll readiness
@@ -1262,9 +1937,16 @@ Runtime requirements are a separate list, and they are deployment facts rather t
 | `mesa-vulkan-drivers`             | lavapipe — [software rendering](#software-rendering-is-the-floor-tier) |
 | `fbcon=off`, no Plymouth          | [firmware handoff](#from-firmware-to-gyro)                 |
 | `pstore` enabled                  | kernel panics with no console to print to                  |
+| `sysrq` enabled                   | a wedged gyro that `RLIMIT_RTTIME` cannot catch             |
 | `pam_systemd` in the PAM stack    | `XDG_RUNTIME_DIR` and `systemd --user`, via the login agent |
 | udev rules for `/dev/dri`, `/dev/input` | device access without capabilities                    |
-| `LimitRTPRIO=`, `LimitMEMLOCK=`   | `SCHED_FIFO` and `mlockall` without capabilities            |
+| `LimitRTPRIO=`, `LimitMEMLOCK=`   | `SCHED_FIFO` and page residency without capabilities        |
+
+`sysrq` deserves its place. `RLIMIT_RTTIME` catches a real-time thread that spins, which is one
+failure mode; a frame thread deadlocked on a driver lock is *blocked*, accrues no real-time budget,
+and trips nothing. On a machine
+[decision 37](Decisions.md#37-gyro-owns-the-display-from-firmware-handoff-onward-there-are-no-vts)
+has deliberately left with no VT, that leaves the keyboard as the only way in.
 
 ## What nested can and cannot prove
 
@@ -1273,18 +1955,29 @@ Testable nested — the majority of the codebase:
 Protocol implementation and client compatibility · surface lifecycle and damage tracking · **client
 dmabuf import** (clients connecting to gyro are ordinary Linux clients handing over real dmabufs, so
 this path is fully live) · Xwayland · scene graph and transforms · animations and effect shaders ·
-input routing and xkb · window management policy · multi-output layout · fractional scale and DPI ·
-**the session model** — nested can fake several sessions and hand each a listener, which makes
-session switching, per-session registry filtering, lock state, and output reassignment testable
-without a second user or a second machine.
+input routing and xkb · window management policy · multi-output layout · **[geometry](#geometry)** —
+`--outputs N` with a different fractional scale per host window exercises snapping, rational scale,
+the straddle case, and the resample-once rule, and golden images make the crispness claim
+falsifiable rather than felt · **the session model** — nested can fake several sessions and hand
+each a listener, which makes session switching, per-session registry filtering, lock state, and
+output reassignment testable without a second user or a second machine · **the composite half of
+[colour](#colour)** — linear
+blending, premultiplied-alpha handling, blur in linear light, and the client-shadow question in
+[decision 48](Decisions.md#48-linear-blending-is-a-visible-ecosystem-change-and-gyro-takes-it) are
+all pixels in a buffer and need no display to settle · **[the shell split](#the-shell)** — a shell
+is an ordinary client, so the scene vocabulary, the declare-don't-drive rule, gesture cohesion
+across several chrome processes, the background cache, and what a shell restart looks like against
+the floor policy are all exercisable nested, and the session model above already fakes the sessions
+to hang them on.
 
 Not testable nested:
 
 Real vblank pacing and latency budgets · `SCHED_FIFO` behaviour under contention · atomic
-modesetting, plane assignment, hardware cursor · **direct scanout of client buffers** · VRR ·
-HDR, colour pipeline, gamma LUTs, EDID · tearing control · multi-GPU · DRM master
-loss, device pause/resume · real hotplug and DPMS · **the boot path** — BGRT reproduction, the
-firmware-mode handoff, and `simpledrm` → real-driver
+modesetting, plane assignment, hardware cursor · **direct scanout of client buffers**, and with it
+whether the KMS colour pipeline can express what the composite would have done · VRR · **the display
+half of colour** — HDR output modes, gamma LUTs, EDID and panel characterisation · tearing control ·
+multi-GPU · DRM master loss, device pause/resume · real hotplug and DPMS · **the boot path** — BGRT
+reproduction, the firmware-mode handoff, and `simpledrm` → real-driver
 [migration](#device-migration), none of which have a nested equivalent.
 
 The second list is largely the DRM backend's own code, which is work done in front of real hardware
@@ -1308,6 +2001,12 @@ In the animation system, as it is written:
 - **`Evaluate(presentationTime)` and nothing else.** No ambient clock, no `deltaTime`, no global
   "now" reachable from the render path. Enforce it mechanically rather than by review — if a global
   now is reachable, something eventually reaches it.
+- **One reachable time source, and `Instant` distinct from `Duration`.** The stronger form of the
+  point above: not merely no ambient now on the render path, but one place in the process that calls
+  `clock_gettime` at all, injectable so the headless fake clock is real rather than a fiction. The
+  type split is what stops a cross-domain subtraction from compiling, and retrofitting it means
+  touching every timestamp in the system at once. See
+  [the timebase](#the-timebase).
 - **A debug allocator that aborts.** Global `operator new` overridden in debug builds against a
   thread-local flag set around the frame section. Thirty lines before there is anything to catch;
   archaeology afterwards. Thread-local is the operative word — the dispatch thread allocates and
@@ -1328,9 +2027,75 @@ and is the least retrofittable thing here:
   counter, so `free` never runs on the frame thread. A `shared_ptr` crossing the boundary is an
   allocator call on the frame path that the debug allocator cannot catch, because the destructor
   runs wherever the last reference happens to die.
+- **The published snapshot is offset-addressed POD, and the frame side bounds-checks what it
+  resolves.** Pointers and standard-library containers are the obvious choice and they foreclose
+  moving the snapshot into a shared mapping, which is what
+  [decision 49](Decisions.md#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot)
+  needs if dispatch ever becomes a process rather than a thread. Base addresses differ between two
+  processes; offsets survive that and pointers do not. Generational handles already supply most of
+  the checking half.
 - **The scene reads a snapshot, not the protocol objects.** The shadow object model is needed
   whether or not the wire protocol is gyro's own, so writing the scene against `wl_resource`-shaped
   types would be wrong even under libwayland.
+- **Springs cross as coefficients from the first published spring.** Evaluated values are cheaper,
+  correct on one monitor, and wrong in a way that only appears on the configuration
+  [Presentation timing](#presentation-timing) exists to serve.
+- **The return path is a channel, not four exceptions.** Frame callbacks, presentation feedback,
+  buffer release, and the exit-blit hold all flow frame → dispatch whether or not anything is built
+  to carry them. Building the queue first is a few dozen lines; discovering it afterwards means
+  finding four ad-hoc mechanisms with four different lifetimes.
+
+For [the shell](#the-shell), which is a boundary rather than a feature and will have exactly one
+implementation for a long time:
+
+- **gyro's built-in policy speaks the same protocol a shell would.** The default window management
+  that brings the system up is not a privileged internal path with a client interface added later —
+  it is the first consumer of the seam. That is what keeps the floor policy honest, and it is the
+  same argument [the floor tier](#the-floor-tier) makes about render modes.
+- **The node vocabulary is closed from the first node kind.** Adding kinds is easy; removing the
+  ability to describe arbitrary ones is not, and an open vocabulary loses cohesion silently.
+- **Output assignment goes through a gate that can wait**, even while the only thing it waits for is
+  trivially ready. Retrofitting the wait means retrofitting it into every path that assigns an
+  output, including lock and session switch.
+- **The background is gyro's from line zero**, because the effect path, the boot path, and every
+  fallback screen assume something is behind them.
+
+For [colour](#colour), which is structural in the same way and for the same reason — it is chosen
+the day the renderer is written, and everything authored against the wrong answer is re-authored:
+
+- **The composite space is linear, wide, and brightness-relative**, and it is not the output space.
+  The moment it is the output space, two monitors with different gamuts force two composites and a
+  surface's appearance depends on which one it is on.
+- **A colour state on every surface from line zero**, defaulting to sRGB by rule. It is a field on
+  the shadow object model, which [the publication boundary](#the-publication-boundary) requires
+  building regardless.
+- **Alpha is un-premultiplied before linearisation, once, at import.** Retrofitting this means
+  finding every sample site rather than one import path.
+- **The composite target format is stated, and the blur chain carries no alpha.** Both are trivial
+  now and are a renderer rewrite once passes are written against them.
+- **Direct scanout is conditional on the KMS pipeline expressing the same transform.** A rule
+  attached to plane assignment before plane assignment exists, rather than a special case added to
+  it afterwards.
+
+For [geometry](#geometry), which is chosen the day the scene graph is written and re-authored
+afterwards if it is chosen wrongly:
+
+- **Scale is a rational type from the first surface**, never a float that a rational replaces later.
+  The replacement means auditing every size computation in the system to find the one that still
+  rounds, and that one is on somebody else's monitor.
+- **Nothing stores a rounded coordinate.** Rounding is a function of `(node, output, frame)` and the
+  result is never written back. A discipline rather than a feature, free now, and the retrofit is
+  finding every place a logical integer was cached.
+- **The transform classification predicate exists before it has a second caller.** Plane promotion,
+  damage mapping, and the sharpness path ask the same question, and three independently derived
+  answers is how they drift apart.
+- **Transforms are 3D from the first node**, with an explicit anchor point and rotation carried as a
+  quaternion. Widening a 2D transform afterwards means revisiting every spring, every hit test, and
+  every damage bound.
+- **Geometry crosses the publication boundary at double precision.** Four bytes, decided once.
+- **The mip chain is built in linear light**, off the same import path that already
+  un-premultiplies. Built from the encoded buffer it looks right in one screenshot and is wrong at
+  every level.
 
 Recorded now, honoured when the renderer lands:
 

@@ -23,11 +23,12 @@ Codebase Structure:
 
 	Docs/
 		Architecture.md - Platform seam, backends, boot and display lifetime, rendering devices,
-		                  threads and the publication boundary, presentation timing, effects and
-		                  quality, sessions and users, login agent, event loop, protocol layer
-		Animation.md    - Animation system: springs, motion catalog, commits, identity, lifetime,
-		                  exit pixels
-		Decisions.md    - Decision log with rejected alternatives and rationale (46 decisions)
+		                  threads and the publication boundary, presentation timing, geometry and
+		                  coordinate spaces, effects and quality, colour, sessions and users, the
+		                  shell, login agent, event loop, protocol layer
+		Animation.md    - Animation system: springs, motion catalog, commits, transforms, identity,
+		                  lifetime, exit pixels
+		Decisions.md    - Decision log with rejected alternatives and rationale (56 decisions)
 
 	CMakeLists.txt  - Build configuration, dependency management via CPM
 	.clang-format   - Code style (tabs, Allman braces, 120 col limit)

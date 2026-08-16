@@ -17,13 +17,18 @@ Companion documents: [Architecture.md](Architecture.md) for the platform seam an
 3. **Implementation complexity is acceptable** where it buys 1 or 2. It is not acceptable where it
    only buys development speed.
 
-Three invariants follow and are assumed everywhere below:
+Four invariants follow and are assumed everywhere below:
 
 - **Animations are pure functions of time.** `Evaluate(presentationTime)`, never `Tick(delta)`.
 - **Evaluation happens at predicted presentation time**, supplied by the `FrameClock` of the output
   being rendered. There is one clock per output and no global "now" — see
   [Architecture.md](Architecture.md#presentation-timing).
 - **No allocation on the frame path.**
+- **Authoring and evaluation are on different threads.** Everything in this document up to the point
+  a spring is published happens on the dispatch thread; everything after it happens on the frame
+  thread, which receives coefficients and never writes back. See
+  [the publication boundary](Architecture.md#the-publication-boundary). It is the closed form that
+  makes this a one-way relationship rather than a lock.
 
 ## Springs
 
@@ -75,15 +80,23 @@ reproducible. Everything downstream depends on this:
 - Headless tests with a fake clock are bit-reproducible, so golden images work.
 - **Settling time is analytic.** For the underdamped envelope, `t = ln(A/ε) / (ζω)`. The scheduler
   can therefore answer "will anything still be animating at time T" without simulating, which is
-  what lets the compositor drop to idle cleanly.
+  what lets the compositor drop to idle cleanly — and "cleanly" is a hard invariant rather than a
+  tidiness claim: no timer armed, the frame thread blocked indefinitely. See
+  [Idle and power](Architecture.md#doing-nothing-must-cost-nothing). An integrated spring must be
+  woken to discover it has nothing to do.
 
 ### Implementation notes
 
 - **ζ near 1 is numerically hostile.** `ω_d → 0` in the underdamped form and `r₁ → r₂` in the
   overdamped one. Pick a threshold and fall into the critical form inside it.
 - **Springs never arrive.** Settling needs both a position and a velocity threshold, or the system
-  damages forever at sub-pixel amplitude. Thresholds should be expressed in output pixels where the
-  property is geometric, so they scale correctly with DPI.
+  damages forever at sub-pixel amplitude. Geometric thresholds are in output pixels so they scale
+  correctly with DPI — and on a node spanning outputs of different densities, in pixels of the
+  **finest** grid it intersects, since settling against the coarse one leaves the fine one crawling.
+  Angular and scale channels have no pixels of their own and convert through the node's bounding
+  radius: a rotation residual of ε displaces a corner by roughly ε·r. Settling is also the moment a
+  node's geometry snaps to the device grid, so the threshold has to be small enough that the snap is
+  invisible — see [Architecture.md](Architecture.md#quantization-belongs-to-the-output).
 
 ### Parameterization
 
@@ -134,6 +147,10 @@ from a closed vocabulary:
 Five to seven entries. Growth past that is cohesion leaking. `Motion::Custom` exists as an escape
 hatch and should look like one: greppable in a single command, and obvious in review.
 
+For [the shell](Architecture.md#the-shell) the enforcement is stronger than a rule, because the
+vocabulary is a protocol: a client naming a transition has no way to express a damping ratio at all.
+The escape hatch is for gyro's own code, which is the only code that has one.
+
 ### Bundles are the real unit
 
 Per-channel springs (see [transforms](#transforms) below) are what make motion feel designed rather
@@ -142,7 +159,7 @@ when geometry does. They are also where incohesion multiplies fastest if call si
 individually.
 
 So the catalog's unit is not a spring but a **transition**: `Transition::WindowOpen` defines its
-position, scale, and opacity springs *designed together*. Shell code names the transition and never
+position, scale, and opacity springs *designed together*. The shell names the transition and never
 the channels.
 
 ### Runtime configuration
@@ -159,8 +176,8 @@ Practical requirements:
 
 - **Validation.** A system-layer compositor cannot fail to start because someone fat-fingered a
   damping ratio. Clamp to sane ranges, warn on nonsense, fall back per key rather than wholesale.
-- **Never parse on the frame thread.** Parse on a helper thread, validate, publish atomically, adopt
-  at the next commit boundary.
+- **Never parse on the frame thread.** Parse on [the helper thread](Architecture.md#threads),
+  validate, publish atomically, adopt at the next commit boundary.
 - **Hot reload is clean by construction.** Because springs are closed form, applying new parameters
   mid-flight is just a retarget from the current `(x, v)` — live retuning produces no visible
   discontinuity even while things are moving.
@@ -188,10 +205,10 @@ class Animatable
 {
 public:
 	const T& Model() const;
-	T        Presentation(Nanoseconds t) const;   // pure; closed form
-	bool     IsSettled(Nanoseconds t) const;
+	T        Presentation(Instant t) const;       // pure; closed form
+	bool     IsSettled(Instant t) const;
 
-	void AnimateTo(const T& target, MotionRef motion, Nanoseconds t0);
+	void AnimateTo(const T& target, MotionRef motion, Instant t0);
 	void SetImmediate(const T& value);
 };
 ```
@@ -207,31 +224,58 @@ Every animatable property carries two values: the **model** value the shell set,
   *is* rather than where it happens to be drawn. Presentation hit-testing is available where the
   opposite is wanted.
 
+Presentation is also where the per-output work lands. One model value yields a different
+presentation value on each output — evaluated at that output's predicted presentation time, and
+rounded to that output's device grid once it settles — which is why neither result is ever written
+back. See [Architecture.md](Architecture.md#quantization-belongs-to-the-output).
+
 Omitting this split is cheap on day one and expensive at month six, because retrofitting it means
 auditing every read of every property.
 
 ### Transforms
 
 Matrices are never interpolated — lerping them shears and collapses. Transforms are stored
-decomposed into translation, rotation, and scale, **each driven by its own spring**, and composed to
-a matrix at render time. Per-channel springs are what let position be snappier than scale, which is
-a real expressive win for window transitions.
+decomposed into translation, rotation, and scale about an explicit **anchor point**, each channel
+driven by its own spring, and composed to a matrix at render time. Per-channel springs are what let
+position be snappier than scale, which is a real expressive win for window transitions. The anchor
+point is what makes a window grow out of the corner it was summoned from rather than out of its own
+middle, and that is most of what makes a transition read as intentional rather than as a scale.
+
+The transform is three-dimensional, with node-local perspective and no camera. That buys card flips,
+perspective overviews, and depth cues for very little on the render path. What it is not allowed to
+do is intersect — composition stays strict tree order with no depth buffer, because the alternative
+is order-dependent transparency and every surface here has alpha. See
+[Architecture.md](Architecture.md#transforms-are-3d-the-scene-is-not).
+
+**Rotation is a quaternion, sprung in the log map.** Euler triples gimbal and take non-shortest
+paths, and both present as a window travelling a visibly strange route, which is the failure mode
+hardest to attribute to its cause. In the log map rotation stays one channel with one spring, which
+is what [decision 17](Decisions.md#17-transforms-are-decomposed-into-trs-with-per-channel-springs)
+meant by per-channel and what three Euler springs would quietly undo.
 
 ### Storage
 
-Nodes own their `Animatable<T>` members, which is how shell code wants to read and write them. The
-per-frame evaluation pass instead walks a flat array of *active* springs, so it touches only what is
-moving and stays cache-friendly.
+Nodes own their `Animatable<T>` members, which is how the code that mutates them wants to read and
+write them. The per-frame evaluation pass instead walks a flat array of *active* springs, so it
+touches only what is moving and stays cache-friendly.
 
-The rule that makes the mirror safe: **it is derived, never maintained.** Registration into the
-active array happens only inside `Animatable<T>`'s own methods, when a spring becomes active or
-settles. If that is the sole path that can change activity state, the two representations cannot
-desync, because no other code is able to disagree with them.
+The rule that makes the flat array safe: **it is derived, never maintained.** Registration happens
+only inside `Animatable<T>`'s own methods, when a spring becomes active or settles. If that is the
+sole path that can change activity state, the two representations cannot disagree, because no other
+code is able to make them.
+
+The two are not even on the same thread. Nodes live on the dispatch thread with the rest of the
+world; the flat array is what the publisher **emits** into the snapshot the frame thread walks, so
+it is a serialization rather than a mirror — contiguous by construction, and with no second live
+copy that could drift. Settling is likewise a dispatch-side event: the settle time is analytic, so
+nothing has to observe an evaluation to know a spring has finished, which is what keeps entity
+destruction, [retirement](#lifetime), and [atlas](#where-snapshots-live) release off the frame
+thread entirely.
 
 ## Declarative commits
 
-Shell code does not animate properties. It mutates world state inside a commit, and the system
-derives the transitions:
+Nothing animates properties. Callers mutate world state inside a commit, and the system derives the
+transitions:
 
 ```cpp
 Compositor.Commit(Transition::WorkspaceSwitch, [&](World& w)
@@ -247,11 +291,20 @@ animatable property means adding it to the state and to the catalog, after which
 correctly everywhere with no call-site changes. That retroactivity is what makes the machinery worth
 its cost: cohesion becomes structural rather than maintained by discipline.
 
+The form above is gyro's own, and [the shell](Architecture.md#the-shell) is a client rather than a
+caller — so most commits arrive over a protocol and are resolved on the dispatch thread. The model
+is unchanged by that, deliberately: a commit is a transaction against world state whether it was
+written as a lambda or demarshalled from a socket, and everything below holds either way.
+
 Three things fall out:
 
 - **Shared `t₀`.** Every transition in a commit starts at the same timestamp. Eight windows in a
   workspace switch move as one gesture rather than eight nearly-simultaneous ones. Hand-written
-  calls desync the moment a commit straddles a frame boundary.
+  calls desync the moment a commit straddles a frame boundary. Because `t₀` is the *event's*
+  timestamp rather than the moment of handling, the sharing survives leaving the process: two shell
+  clients reacting to one input event name the same origin, so a panel animating out and thumbnails
+  animating in compose into a single gesture across a process boundary with no coordination between
+  them.
 - **Staggering.** "Each subsequent item starts 20 ms later" is only expressible against a shared
   origin, so it is a catalog-level policy that applies consistently or not at all.
 - **Uniform interruption.** A commit landing mid-flight retargets every affected spring from its
@@ -267,11 +320,24 @@ new model value from the property.
 
 ### Timing and rates
 
-**`t₀` is the input event's timestamp, not the moment the event was handled.** Input events carry
+**`t₀` is the input event's timestamp, not the moment the event was handled.** This only means
+anything because the event's clock and the presentation clock are the same clock — libinput's
+timestamps and a page flip's are comparable by
+[decision 57](Decisions.md#57-one-timebase-clock_monotonic-converted-at-ingest-and-nowhere-else)
+rather than by luck, and the one place they are not is injected input from another machine, which is
+converted at its ingest. Input events carry
 timestamps, and animations are evaluated at predicted presentation time — so the first rendered
 frame shows the animation *already in progress* by exactly the input-to-photon latency. Using `now`
 instead silently adds a frame of lag to every gesture. This is most of what makes a system feel like
 it is tracking a finger rather than following it.
+
+The same property is what makes a *late* commit harmless. A commit delayed past a record point — by
+a slow buffer import on the dispatch thread, or by a shell client that was not scheduled promptly —
+still carries the event's timestamp, so when it is finally evaluated it renders already in progress
+by exactly the elapsed amount rather than starting from zero. Lateness costs the first frame or two
+of the animation, never its shape, and it never affects anything already in flight, which continues
+to evaluate correctly from the coefficients already published. The degradation mode of the whole
+authoring side is therefore input latency and not judder.
 
 Commits happen at event rate; evaluation happens at frame rate. The declarative machinery therefore
 never executes inside the frame budget. One case needs care: gesture tracking commits at input rate,
@@ -283,7 +349,10 @@ at most once per frame.
 Genuinely event-driven one-shots — a ripple at a click point, a shake on failed authentication — are
 not state changes and are not forced through the differ. They use a direct imperative API.
 
-> **Open.** The exact shape of that API, and where the boundary sits, is undecided.
+> **Open.** The exact shape of that API, and where the boundary sits, is undecided. It now has a
+> second half: whichever shape it takes has to be expressible to
+> [the shell](Architecture.md#the-shell) as well, without becoming the per-event channel that the
+> declare-don't-drive rule exists to refuse.
 
 ## Identity
 
@@ -406,7 +475,7 @@ object. Three properties make the atlas the right shape rather than a generic al
 - **Fragmentation needs no compaction**, because every occupant dies within one exit transition. The
   pool drains to empty on any idle moment, which is what makes shelf packing sufficient.
 - **Failure is a packing miss, not a device OOM.** A packing miss can be handled deliberately. A
-  `VK_ERROR_OUT_OF_DEVICE_MEMORY` in a process with no restart boundary cannot be handled at all.
+  `VK_ERROR_OUT_OF_DEVICE_MEMORY` in a process this expensive to restart cannot be handled at all.
 
 Capacity is denominated in **output render-target equivalents, not bytes** — a byte count is right
 only on the machine it was tuned on, while a multiple of the output's own render target scales with
@@ -475,6 +544,10 @@ Built in the first cut. The risk is designing against imagined requirements, so 
 against one real transition rather than a synthetic test: **window to overview thumbnail**, which
 exercises mismatched aspect ratios, cross-tree parenting, and interruption mid-gesture at once.
 
+It is also a large minification, which makes it the first thing in the system to need a mip chain —
+built in linear light, off the import path. Without one it aliases, and it aliases worst while the
+geometry is moving.
+
 ## Hierarchical time
 
 A `TimeScale` per subtree, composed down the tree and resolved once per frame during traversal —
@@ -489,12 +562,18 @@ retargeting.
 
 - **Colour interpolation space.** Oklab is proposed over sRGB; it matters most when cross-fading
   blurred backdrops, which gyro does constantly. Not yet decided.
-- **The imperative escape hatch** for event-driven one-shots — shape and boundary undecided.
+- **The imperative escape hatch** for event-driven one-shots — shape and boundary undecided, in
+  process and over the protocol both.
+- **The node vocabulary the shell composes with**, which is the same design problem as the motion
+  catalog and the material set and should be solved with them — a node, the material dressing it,
+  and the transition revealing it are one thing seen three ways. See
+  [Architecture.md](Architecture.md#the-scene-vocabulary-is-closed-composition-is-not).
 - **Configuration format.** A hand-rolled parser for flat key-value float configuration keeps the
   dependency count at zero and is less code than wiring up a TOML library, consistent with the
   hand-rolled XML parse in the protocol generator. Not yet decided.
-- **Settling thresholds** expressed in output pixels for geometric properties — the exact policy for
-  non-geometric properties (opacity, blur radius, corner radius) is unresolved.
+- **Settling thresholds** for non-geometric properties. The geometric case is settled — output
+  pixels of the finest grid a node intersects — but opacity, blur radius, and corner radius have no
+  output pixel to be expressed in, and the policy for them is unresolved.
 - **Snapshot atlas capacity.** The multiple of the output render target is deliberately not guessed.
   It wants a count of legitimate simultaneous retirements to size it and per-output high-water and
   eviction instrumentation to confirm it; an eviction outside a stress test means the number is
