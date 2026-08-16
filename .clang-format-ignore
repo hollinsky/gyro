@@ -1,0 +1,16 @@
+# Paths clang-format skips, matched against the path relative to this file.
+#
+# The syntax resembles .gitignore but is not it, in two ways worth knowing before editing:
+# `*` does not cross a path separator, so a bare `*.in` matches only at the top level and a
+# pattern meant to apply at any depth needs a leading `**/`, which also covers zero directories
+# and so subsumes the bare form. A leading `/` does not anchor — it simply fails to match.
+# Verified against clang-format 22.
+
+# CMake configure_file templates. Not compilable C++ — the @VAR@ placeholders are substituted
+# at configure time — so clang-format parses them as C++ and reformats around the substitutions.
+**/*.in
+
+# Third-party sources. clang-format does not read .gitignore, so a recursive -i over the tree
+# would otherwise rewrite every dependency CPM has fetched.
+.cpm-cache/**
+build*/**

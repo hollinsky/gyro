@@ -54,3 +54,9 @@ target_link_libraries(gyro
 	PUBLIC
 		spdlog::spdlog
 )
+
+# Standalone diagnostics. Not linked into gyro, and deliberately dependency-free so they can be
+# built and run on a target machine on their own.
+add_executable(UringProbe
+	Tools/UringProbe.cpp
+)

@@ -21,6 +21,11 @@ Codebase Structure:
 		Main.cpp              - Thin entry point: CLI arg parsing (--version, --help)
 		Version.h.in          - CMake-configured version string template
 
+	Tools/
+		UringProbe.cpp        - Standalone io_uring capability probe. Raw syscalls, no liburing,
+		                        so it runs on a target machine before gyro does. First draft of
+		                        gyro's own startup check; see Decisions.md decision 3
+
 	Docs/
 		Architecture.md - Platform seam, backends, boot and display lifetime, rendering devices,
 		                  threads and the publication boundary, presentation timing, geometry and
