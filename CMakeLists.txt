@@ -49,6 +49,7 @@ add_dependencies(gyro AppVersion)
 target_include_directories(gyro
 	PRIVATE
 		${CMAKE_CURRENT_BINARY_DIR}/Generated
+		${CMAKE_CURRENT_SOURCE_DIR}/Source
 )
 target_link_libraries(gyro
 	PUBLIC
