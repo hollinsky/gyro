@@ -1104,6 +1104,67 @@ expressible as a disposition table over one node's channels. `Cut` is the entry 
 wrong, what it needs is a fourth form and not a per-bundle table, and the argument above is the one
 that has to be beaten to get there.
 
+### 72. The driven regime is a distinct record; the snapshot's arrays stay homogeneous
+
+*(Settles [Open.md](Open.md)'s "where the driven regime lives", surfaced 2026-08-16 writing
+`Animatable`. Turns on [decision
+50](#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients) and [decision
+65](#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target).)*
+
+Driven progress — `(p₀, v₀, t₀, horizon)`, read as `p₀ + v₀·clamp(T − t₀, 0, horizon)` — is its own
+type on the dispatch side and its own array in the snapshot. `Animatable` stays spring-only and
+uniform, so the flat array of active springs stays one shape, and the driven records travel beside it
+as a second homogeneous run. The frame thread walks two fixed-stride, offset-addressed arrays, each
+with a fixed evaluation kind and no per-record discriminant.
+
+The ramp is a second closed form and not a corner of the first — decision 65 settled that it is "not
+reachable from any `(ω, ζ)`", and its wake settles at an *authored* instant that `Spring::WakeAt`
+cannot compute. So this is not a choice about whether to fold it into `Spring`, which is impossible,
+but only about where the discriminant that has to exist somewhere should live.
+
+**Rejected: a discriminated pair inside `Animatable<float>`**, which is the shape that keeps
+[Animation.md](Animation.md#progress-is-an-ordinary-animatable)'s *an `Animatable<float>` like any
+other* literally true, and it is rejected on where the tag lands. The driven arm only ever inhabits
+*progress* — one scalar per gesture in flight, usually none — but `Animatable<float>` is also
+opacity, blur radius, and corner radius. A tag on the type puts a dead ramp arm and a branch on every
+one of those, and grows every record they serialize into. The snapshot array becomes tagged with it:
+a branch in the frame thread's hot loop, and every spring record padded to the larger arm.
+Offset-addressed POD wants fixed-stride homogeneous runs — the flat array of active springs
+[Animation.md](Animation.md#storage) has the publisher emit — and a tagged array of two arm sizes is
+neither. It also breaks the invariant `Animatable` was written to hold, that a property is exactly
+its coefficients and carries no discriminant beside them.
+
+**"Like any other" is a claim about the free regime, and that is where it earns its keep.** The
+sprung regime *is* an `Animatable<float>`: a progress released toward an end springs, rests, and
+settles like any property, and a gesture taking one over in flight reads its `(x, v)` and retargets
+like any other. That is the composition with the idle fold and with interruption the phrase is
+asserting. The driven regime is a distinct closed form by decision 65's own finding — its exactness
+comes from being a direct map and not from any `(ω, ζ)` — and giving a distinct closed form a
+distinct type is honesty rather than a second mechanism.
+
+**It is not the "scalar path beside a spring path" decision 65 rejected.** That phrase named
+publishing an evaluated `p` and re-deriving the channels on the dispatch thread — a different data
+flow, and the evaluated value decision 50 forbids at the boundary. Two coefficient arrays, both
+evaluated per output at predicted presentation time by a closed form, are the *one mechanism with two
+coefficient sets* decision 65 chose; the mechanism is publish-coefficients-and-evaluate-per-output,
+and a second array is not a second mechanism. Nor is it a second boundary: decision 50's "one
+channel, not a second one" is about the thread crossing, and how many arrays live inside one snapshot
+is not the crossing.
+
+**`NextWake` was the member Open.md said decides it, and it decides for this shape.** It comes out as
+two methods on two types rather than one branch: `Spring::WakeAt` over the spring array, and a
+driven-progress wake that is `Continuous` until `t₀ + horizon` and `Settled` past it — the horizon
+decision 65 already arms a `v₀ = 0` republish at. Each type answers its own wake and the fold reduces
+both, which is what the commutative monoid in
+[Animation.md](Animation.md#settling-answers-with-a-wake-not-a-boolean) is for.
+
+**Cost accepted:** the differ and the gesture handler carry a regime switch for the one progress
+channel — a retarget in each direction, reading the ramp's `(p, v)` to spring it home on release and
+the spring's `(x, v)` to seed a ramp on takeover. It is the same retarget as everywhere, performed
+once per gesture rather than per channel, and it never touches the frame path. Animation.md's *like
+any other* gains the clause that it means the free regime, and the snapshot representation is fixed: a
+spring-coefficient array and a driven-progress array, both offset-addressed, the second usually empty.
+
 ---
 
 ## Sessions

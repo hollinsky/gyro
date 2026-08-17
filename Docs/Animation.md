@@ -656,7 +656,10 @@ feel.
 ### Progress is an ordinary animatable
 
 An interactive transition is a bundle whose channels are functions of one scalar `p ∈ [0, 1]`, and
-`p` is an `Animatable<float>` like any other. It has two regimes and no third:
+`p` is an `Animatable<float>` like any other — in its *free* regime; the *driven* regime is a
+distinct coefficient record with its own snapshot array, not a spring, by [decision
+72](Decisions.md#72-the-driven-regime-is-a-distinct-record-the-snapshots-arrays-stay-homogeneous). It
+has two regimes and no third:
 
 - **Driven.** `p` follows the gesture, at input rate, on the dispatch thread.
 - **Free.** `p` is sprung toward an end — `0`, `1`, or a detent — with `v₀` the gesture's velocity

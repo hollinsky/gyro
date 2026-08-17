@@ -71,13 +71,17 @@
 // and a spring's settle instant is computed from its coefficients rather than authored, so
 // Spring::WakeAt cannot answer it however the wake is spelled.
 //
-// There are two ways out and they are not equivalent. Either the driven regime lives outside this
-// type, and what gives is Animation.md's *like any other* — a gesture then runs on a second
-// mechanism beside the springs, which is the shape decision 65 explicitly says it does not want.
-// Or this type carries a discriminated pair, the size assertion below becomes a statement about the
-// larger arm, and the flat array of active channels becomes a tagged one. That is a decision about
-// the snapshot's layout at least as much as about this file, so it is carried in Docs/Open.md rather
-// than answered here by whichever shape was cheapest to write first.
+// There were two ways out and they are not equivalent, and Docs/Decisions.md decision 72 takes the
+// first: the driven regime lives outside this type. It is its own coefficient record with its own
+// homogeneous array in the snapshot, so this type stays spring-only and the flat array of active
+// springs stays one shape rather than a tagged one. What gives is Animation.md's *like any other*,
+// which decision 72 reads as a claim about the *free* regime — the sprung one, which is an ordinary
+// Animatable and composes with the idle fold and interruption as such — rather than about the driven
+// one, whose exactness comes from being a direct map and not from any (omega, zeta). The rejected
+// shape carried a discriminated pair here, made the size assertion below a statement about the larger
+// arm, and put a branch on every float channel — opacity, blur, corner radius — to serve a case only
+// progress ever reaches. That it was the snapshot's layout as much as this file's is why it was a
+// decision and not a default.
 //
 // **What is deferred for a smaller reason.** Docs/Animation.md#storage has registration into the
 // flat array of active springs happen inside this type's own methods, when a spring becomes active
