@@ -105,18 +105,35 @@ gyro_add_module(Geometry PORTABLE
 )
 
 # Split by direction rather than by tier: Solve consumes spring coefficients and is what the frame
-# thread may call, Author produces them and is dispatch-side. Docs/Structure.md's module graph gives
-# Animation an edge to Geometry as well, which the solver does not need — settling thresholds arrive
-# as arguments precisely so that neither the geometric ones nor the unresolved non-geometric ones
-# have to be known here. The edge lands when the catalog does.
+# thread may call, Author produces them and is dispatch-side.
+#
+# The Geometry edge is the catalog's and only the catalog's, and it is worth knowing which half of it
+# drew the edge. Not the springs: a spring's parameters are scalar whatever its channel's value type
+# is, so the bundle table names channels without naming their types. Not the settling thresholds
+# either — those arrive as arguments precisely so that neither the geometric ones nor the unresolved
+# non-geometric ones have to be known here. It is the gesture mapping: a travel distance is a
+# displacement in global space, and typing it is what keeps a device-pixel distance from being
+# written where an output-independent one belongs.
+#
+# FRAME_DEPENDS is what makes that a rule rather than a description. The edge arrived with authoring,
+# so it stops at the publication boundary: Solve is scalar throughout and reaches Core only, and a
+# geometric type appearing in the half the frame thread calls is a build failure rather than something
+# a reader has to notice.
 gyro_add_module(Animation PORTABLE
 	DISPATCH_HALF
 		Author
 	DEPENDS
 		Core
+		Geometry
+	FRAME_DEPENDS
+		Core
 	TESTS
 		Solve/Spring.Test.cpp
 		Author/Animatable.Test.cpp
+		Author/Bundle.Test.cpp
+		Author/Catalog.Test.cpp
+		Author/Drive.Test.cpp
+		Author/Motion.Test.cpp
 		Author/Retarget.Test.cpp
 )
 
@@ -153,10 +170,23 @@ get_property(GYRO_DISPATCH_HALVES GLOBAL PROPERTY GYRO_DISPATCH_HALVES)
 list(JOIN GYRO_DISPATCH_MODULES "," GYRO_DISPATCH_MODULES)
 list(JOIN GYRO_DISPATCH_HALVES "," GYRO_DISPATCH_HALVES)
 
+# The same partition applied to the edges rather than to the includes: what a straddling module's
+# frame half may reach, for the modules that narrow it. Same flattening as the graph above, because
+# it is read the same way and against the same closure.
+get_property(GYRO_FRAME_LIMITED_MODULES GLOBAL PROPERTY GYRO_FRAME_LIMITED_MODULES)
+set(GYRO_FRAME_GRAPH "")
+foreach(MODULE IN LISTS GYRO_FRAME_LIMITED_MODULES)
+	get_property(FRAME_DEPENDS GLOBAL PROPERTY GYRO_MODULE_FRAME_DEPENDS_${MODULE})
+	list(JOIN FRAME_DEPENDS "," FRAME_DEPENDS)
+	list(APPEND GYRO_FRAME_GRAPH "${MODULE}=${FRAME_DEPENDS}")
+endforeach()
+list(JOIN GYRO_FRAME_GRAPH "|" GYRO_FRAME_GRAPH)
+
 add_custom_target(Layering ALL
 	COMMAND ${CMAKE_COMMAND}
 		-D SOURCE_DIR=${GYRO_SOURCE_DIR}
 		-D GRAPH=${GYRO_MODULE_GRAPH}
+		-D FRAME_GRAPH=${GYRO_FRAME_GRAPH}
 		-D DISPATCH_MODULES=${GYRO_DISPATCH_MODULES}
 		-D DISPATCH_HALVES=${GYRO_DISPATCH_HALVES}
 		-P ${CMAKE_CURRENT_SOURCE_DIR}/CMake/CheckLayering.cmake

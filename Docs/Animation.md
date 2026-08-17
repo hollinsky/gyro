@@ -196,11 +196,23 @@ from a closed vocabulary:
 	Motion::Snappy        direct-manipulation feedback, minimal overshoot
 	Motion::Gentle        ambient and background changes, no bounce
 	Motion::Expressive    large or attention-drawing changes
-	Motion::Interactive   tracks input, never overshoots under the finger
+	Motion::Interactive   the residual under a finger — pushback, snap, the settle on release
 ```
 
-Five to seven entries. Growth past that is cohesion leaking. `Motion::Custom` exists as an escape
-hatch and should look like one: greppable in a single command, and obvious in review.
+`Motion::Interactive` read *tracks input* until 2026-08-17, which was the moving-target model
+[decision 65](Decisions.md#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)
+rejects. Nothing tracks a finger through a spring; the tracking is
+[driven](#progress-is-an-ordinary-animatable), and this entry is the motion of what is left over.
+
+Five to seven entries. Growth past that is cohesion leaking.
+
+**The escape hatch is a call, not a sixth name.** It exists, and it should look like one: greppable
+in a single command and obvious in review. But it cannot be an enumerator, because an enumerator is
+resolved by looking it up in the table above — and the whole content of an escape hatch is that it
+is *not* in the table. Giving it a row would make it a sixth motion that configuration retunes,
+which is the opposite of what it is for. So it is a direct construction of spring parameters from a
+response and a damping ratio, reachable only from gyro's own code and, unlike a name, not reachable
+from a bundle at all.
 
 For [the shell](Architecture.md#the-shell) the enforcement is stronger than a rule, because the
 vocabulary is a protocol: a client naming a transition has no way to express a damping ratio at all.
@@ -216,6 +228,47 @@ individually.
 So the catalog's unit is not a spring but a **transition**: `Transition::WindowOpen` defines its
 position, scale, and opacity springs *designed together*. The shell names the transition and never
 the channels.
+
+A bundle says four things and is not permitted a fifth:
+
+- **What each channel does.** Three dispositions and not two — absent, immediate, or sprung under a
+  named motion. The middle one is what makes reduced motion expressible: a slide-in that becomes a
+  fade-in has a translation channel that is neither animated nor untouched, because the window has
+  to *be* at its model position immediately, and that is a different statement from *this transition
+  has no opinion about position*.
+- **What it becomes when movement is not wanted**, which is
+  [its own section](#reduced-motion-is-a-policy-not-a-parameter) below.
+- **Where its scale and rotation are fixed** — a *policy* rather than a coordinate, because the
+  coordinate is not knowable here. The anchor is in the node's own space and depends on its extent,
+  and for the case that matters most it depends on something that does not exist until the gesture
+  happens: a menu grows from where it was opened. So a bundle names the anchor's *source* and the
+  scene resolves it.
+- **How a gesture drives it**, if one can — [the mapping](#the-mapping-belongs-to-the-catalog)
+  below. A bundle with no travel is one nobody can drive, so a transition that is only ever watched
+  says nothing about gestures.
+
+The last two sit beside the channels rather than inside them, and that placement is what makes
+[reduced motion keeping the driven half](#interactive-transitions) structural: the substitution's
+entire domain is the channel table, so it cannot reach the anchor or the mapping even by mistake.
+
+**Four things said is not four fields, and the difference is the test rather than the count.** All
+four above are motion design, which is what the refusal protects: a fifth *statement* is a fifth way
+for two transitions to disagree about how the system moves. A bundle also carries whether the
+transition needs [an opacity group](Decisions.md#60-group-opacity-requires-flattening-per-node-alpha-is-not-a-group-fade),
+and that is not one of them — it declares what the transition costs to draw, and it is keyed by
+transition only because the transition is what knows whether a subtree is underneath it. So the
+question to ask of anything wanting to join the struct is which of the two it is. A member that
+changes how the motion reads is refused by decision 13; a member that changes what the renderer must
+allocate is the other kind, and has to win decision 60's argument instead. The group flag is
+currently the only one, and [which entries set it](Open.md) is open.
+
+**Staggering is not among them, and its absence is a decision rather than an omission.** Every
+transition worth writing today is unstaggered, so a field defaulting to *no stagger* would change
+nothing about any of them. What the design does need is already settled: the delay and its cap are
+global modifiers, because an amount is tuning and must move the system together, while the *order*
+items go in — list order, or outward from a focal point — is per transition, because it reads
+completely differently and is motion design. Mechanically it costs nothing whenever it arrives, a
+staggered entity being one whose spring carries an origin of `t₀ + i·delay`.
 
 ### Runtime configuration
 
@@ -247,11 +300,44 @@ That is a different transition, not a retuned one. Reduced motion is therefore a
 dimension of a bundle's definition from the start. Retrofitting it means revisiting every transition
 in the catalog.
 
+**It is a closed vocabulary of forms, for the same reason the motions are.** A bundle names one of
+three, and the three are what survived collapsing the obvious five:
+
+```
+	Fade          movement is replaced by a cross-fade — the ordinary case
+	Cut           the change simply arrives — too structural to fade at all
+	Unchanged     this was already pure opacity and is its own reduced form
+```
+
+Fade-in, fade-out, and cross-fade are not three forms. They differ only in what opacity is heading
+*for*, and that is model state the differ already holds — an enter targets one, an exit targets zero
+— so the direction is not the catalog's to know. What is left is the fade; the transition with
+nothing to cross-fade, since there is no cross-fade of a *size* and a reduced resize simply arrives;
+and the transition that was already opacity and would otherwise have to duplicate itself.
+
+Two rules hold across all three. **Participation is inherited and disposition is not** — a reduced
+form may snap a channel its transition already touched, and may never seize one it did not, because
+forcing a rotation to land immediately would cancel whatever that rotation was doing for somebody
+else. Opacity under `Fade` is the single deliberate exception, and it is the one the policy exists
+for: a window that slides in with no opacity channel at all still has to fade in when its movement
+is removed. And **reduced motion removes movement, not rhythm** — a fade standing in for a workspace
+switch takes about as long as the movement it replaced, or the accessibility path runs at a tempo
+the rest of the system does not share.
+
+There is deliberately no per-bundle reduced *table*. It would be the rejected alternative arriving
+one entry at a time, and it would put two independently authored fades on the path that gets the
+least review, free to drift apart. A transition that needs something these three cannot say wants a
+fourth **named** form — because a bespoke reduced shape that recurs is a form, and one that does not
+is almost certainly a mistake.
+
 It also loads one mechanism far harder than the default path does. If movement is replaced by
-fading, then every transition on the accessibility path is a group fade, so the flattening in
+fading, then every reduced transition covering a *subtree* is a group fade, so the flattening in
 [decision 60](Decisions.md#60-group-opacity-requires-flattening-per-node-alpha-is-not-a-group-fade)
-is exercised constantly there and occasionally elsewhere. Reduced motion is not a cheaper path and
-should never be costed as one.
+is exercised constantly there and occasionally elsewhere. Not literally every transition — a `Cut`
+fades nothing, and a single window fading out is one object rather than a group — but the
+distinction does not soften the conclusion, because what the reduced path converts to fades is
+precisely the transitions that move whole stacks of windows around. Reduced motion is not a cheaper
+path and should never be costed as one.
 
 ## Properties
 
@@ -486,7 +572,9 @@ Three things fall out:
   animating in compose into a single gesture across a process boundary with no coordination between
   them.
 - **Staggering.** "Each subsequent item starts 20 ms later" is only expressible against a shared
-  origin, so it is a catalog-level policy that applies consistently or not at all.
+  origin, so it is a catalog-level policy that applies consistently or not at all — and it splits
+  once it gets there, into a global delay and a per-transition order. See
+  [bundles](#bundles-are-the-real-unit), where it is deferred rather than built.
 - **Uniform interruption.** A commit landing mid-flight retargets every affected spring from its
   current `(x, v)`.
 
@@ -899,6 +987,12 @@ retargeting.
   motion at all, and if so what `interval` it is authored with — a rate is a permission to draw less,
   and picking one is motion design rather than scheduling, which puts it with the catalog and the
   vocabularies below.
+- **Detents, and the flick threshold underneath them.** [The mapping](#the-mapping-belongs-to-the-catalog)
+  owns where a release may land besides the two ends, and no transition has an interior stop today.
+  What keeps this from being a field nobody sets is that a detent is not inert data: choosing
+  between one and an end at release needs a threshold in progress per second, which interacts with
+  the same velocity estimator whose quality is felt directly. Wants deciding alongside a transition
+  that needs it.
 - **The lead horizon for a driven gesture.** How far `p` may be carried toward predicted
   presentation time before the estimate stops being a correction for known latency and starts being
   a guess. One output period is the obvious first answer, since that is the gap being undone, and

@@ -2010,8 +2010,13 @@ and who decides who may use it, is [open](Open.md).
 [materials](#materials-not-filter-calls) and [the motion catalog](Animation.md#the-motion-catalog)
 already follow — name a material and gyro decides what it costs, name a transition and gyro owns the
 springs — applied to interaction. A window drag is not motion events forwarded to a client and
-positions sent back; it is a declaration that an entity tracks the pointer under
-`Motion::Interactive` until release, executed by gyro at input rate with no process in the loop.
+positions sent back; it is a declaration that an entity tracks the pointer until release, executed
+by gyro at input rate with no process in the loop. Tracking is
+[driven](Animation.md#interactive-transitions) rather than sprung, and no spring is interposed
+between the pointer and the pixels — which is what `Motion::Interactive` would have meant here, and
+is what [decision
+65](Decisions.md#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)
+rejects.
 
 The line between what may round trip and what may not is the *shape* of the interaction rather than
 the subsystem it belongs to:

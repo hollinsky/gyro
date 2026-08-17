@@ -83,12 +83,19 @@ done, and the one thing it has retired is the one that changed a decision.
   the motion catalog, since a node, the material that dresses it, and the transition that reveals it
   are one design problem seen three ways. The test named in decision 51 is the constraint: a shell
   must not be able to produce motion that does not match the catalog.
-- **Which transitions declare an opacity group.** Decision 60 settles that a group fade flattens and
-  what it costs; it does not settle which bundles in the catalog ask for one. The answer is not
-  "every fade" — a single window fading out needs no group, and paying for an offscreen there would
-  put a render target on the most frequent transition in the system. It wants deciding with the
-  scene vocabulary above and with the catalog, since whether a subtree is a group is a property of
-  the transition and of the node kinds underneath it at once.
+- **Which transitions declare an opacity group.** *(Narrowed 2026-08-17.)* Decision 60 settles that
+  a group fade flattens and what it costs; it does not settle which bundles ask for one, and "every
+  fade" is the wrong answer — paying for an offscreen on a single window fading out would put a
+  render target on the most frequent transition in the system. Three of the seed entries now answer
+  it locally and the reasoning is what generalizes rather than the verdicts: a menu dismissal
+  declares one because a submenu can be open at dismissal and never at appearance, so the group is
+  declared where a subtree *can* exist; a workspace switch declares one for its reduced path alone,
+  since cross-fading a stack of windows needs flattening and sliding it does not; a window close
+  declares none, because [exit pixels](Animation.md#exit-pixels) snapshot into a single texture that
+  is already flat. What is left open is the general rule, and it still wants deciding with the scene
+  vocabulary above, since whether a subtree is a group is a property of the transition and of the
+  node kinds underneath it at once. The third case is the one to watch: it is a mechanism claim
+  rather than a judgement, so an exit that ever runs off the live subtree takes the flag with it.
 - **What the shell declares for continuous manipulation.** Decision 51 keeps drag, resize, and swipe
   inside gyro on the strength of the shell declaring constraints ahead of time — minimum and maximum
   sizes, snap targets, tiling gravity, and whatever else turns out to be needed. Decision 65 answers
@@ -407,6 +414,13 @@ done, and the one thing it has retired is the one that changed a decision.
   54; opacity, blur radius, and corner radius have no output pixel to be expressed in. Decision 65's
   progress parameter is the one such channel that escapes rather than joins them, since its mapping
   carries a travel distance and a threshold on it converts back to output pixels.
+- **Detents, and the flick threshold underneath them.** Decision 13 names detent placement as part
+  of the displacement mapping the catalog owns, and no seed transition has one — correct for all of
+  them today, so the field is absent rather than defaulted. What keeps this from being a matter of
+  adding one is that detents cannot be inert data: choosing between a detent and an end at release
+  needs a threshold in progress per second, which is input-side tuning nobody has measured, and it
+  interacts with the velocity estimator whose quality decision 65 already flags as felt directly.
+  Wants deciding with a real transition that needs an interior stop, rather than ahead of one.
 - **The lead horizon for a driven gesture.** Decision 65 carries progress toward predicted
   presentation time to undo the input-to-photon gap, bounded so that the correction does not become
   a guess. One output period is the obvious first answer, being the gap actually being undone. The

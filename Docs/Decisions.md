@@ -23,6 +23,13 @@ subsurface position. What implementation supplied was the occasion to ask. Decis
 here to change a type rather than a rule, and the argument for making it when it was made is that
 the type had one caller.
 
+Decisions 70 and 71 are the first that would not have been reached any other way, and the mechanism
+is worth naming because it is the argument for building the catalog early rather than last. Both
+came from trying to *write* a transition down: the three dispositions from finding that a slide-in
+which becomes a fade-in needs a channel that is neither animated nor untouched, and the three
+reduced forms from finding that the obvious five collapse. Neither is a fact about C++ — each is a
+question the prose had passed over because nothing had yet been obliged to answer it.
+
 Twice, reasoning on record has failed against the source it rested on, and those two are the point
 of having written any of this down. Decision 2's decisive argument was read against libwayland and
 did not survive, reversing that decision's conclusion. Decision 49's `// SPEC:` question was read
@@ -566,7 +573,7 @@ means it does not happen. **Rejected: exposing transitions to configuration.** T
 system-wide cohesion is lost.
 
 **The enforcement got stronger than "cannot".** *(Added 2026-08-16.)* Written in-process, this was a
-convention backed by review and a greppable `Motion::Custom`.
+convention backed by review and a greppable escape hatch.
 [Decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) puts the shell on the far
 side of a protocol whose vocabulary has no way to express a damping ratio, so the closure is
 structural for every caller outside gyro itself.
@@ -582,6 +589,32 @@ decision applies and would otherwise land in the shell. Being driven is a dimens
 alongside reduced motion, and the two interact rather than compose: reduced motion substitutes a
 bundle's channels and must *not* touch its parameterization, since a gesture that stops tracking is
 not reduced.
+
+**The escape hatch is a call rather than a name.** *(Revised 2026-08-17.)* This was written with
+`Motion::Custom` as an enumerator a call site reaches for instead of `Motion::Standard`, which is
+the natural shape while the catalog's unit is a spring. It is not available once the unit is a
+bundle: an enumerator is resolved by looking it up in the configurable table, and the whole content
+of the hatch is that it is *not* in that table — giving it a row would make it a sixth motion that
+configuration retunes, which is the opposite of an escape hatch. So it is a direct construction of
+spring coefficients from a response and a damping ratio. Everything the original clause asked for
+survives and one thing improves: it is greppable in one command, obvious in review, and unlike a
+name it cannot be reached from a bundle at all. Only the spelling was superseded, and only because
+this decision's own conclusion made the old one unbuildable.
+
+The greppability clause makes one demand on the spelling, and it is easy to miss. The hatch is a
+*name of its own* rather than the ingest conversion the authoring path already runs through — that
+function is called for every motion in the table and by every test that builds a spring, so a hatch
+spelled as it would be a hatch whose one command returns the machinery. The name is what carries the
+claim; the arithmetic underneath is deliberately the same, since a hatch that skipped the clamps
+would also skip the settling floor those clamps exist to hold.
+
+**What a bundle holds, and what a reduced form may be.** *(Annotated 2026-08-17.)* Both halves are
+worked out in [decision
+70](#70-a-bundle-is-channels-a-reduced-form-an-anchor-policy-and-a-drive-mapping) and [decision
+71](#71-reduced-motion-is-three-named-forms-not-a-per-bundle-reduced-table), which carry the
+rejected alternatives each generated. This decision is unchanged by them: the catalog is still a
+closed set of transitions referenced by name, holding numbers nothing outside the vocabulary can
+reach.
 
 ### 14. Declarative commits with dirty tracking
 
@@ -939,6 +972,137 @@ over-read. GNOME Shell's `SwipeTracker` has done progress-driven gestures with v
 since version 40, and does them well — so the gap this closes is not that Linux lacks the
 interaction, but that it exists in one shell rather than in the layer underneath, where per-output
 evaluation, the coefficient boundary, and idle-while-held are available to it.
+
+### 70. A bundle is channels, a reduced form, an anchor policy, and a drive mapping
+
+*(Elaborates [decision
+13](#13-a-closed-motion-vocabulary-with-runtime-configuration-exposing-only-that-vocabulary).)*
+
+Four members, and the shape is more constrained than the count suggests. Mechanism in
+[Animation.md](Animation.md#bundles-are-the-real-unit).
+
+**A channel has three dispositions and not two**, which is the load-bearing part. Absent, immediate,
+or sprung under a named motion — and the middle one exists because a slide-in that becomes a fade-in
+has a translation channel that is *neither* animated nor untouched. The window has to be at its
+model position immediately, and that is a different statement from *this transition has no opinion
+about position*. Collapse the two and the reduced path either leaves windows at stale positions or
+seizes channels it was never part of, and which of the two you get depends on which way you
+collapsed them.
+
+**Channels are labels rather than types**, so the catalog names translation, rotation, scale, and
+opacity without `Animation` needing to know what any of them is. A spring's parameters are scalar
+whatever its channel's value type is, by [decision
+17](#17-transforms-are-decomposed-into-trs-with-per-channel-springs)'s per-channel construction, so
+a bundle holds a motion per channel and never a value. The one place a type does appear is the drive
+mapping's travel, which is why `Animation` depends on `Geometry` at all — see
+[Structure.md](Structure.md#animations-geometry-edge-is-one-member).
+
+**The anchor is a policy rather than a coordinate**, because the coordinate is not knowable in the
+catalog. It is in the node's own space and depends on the node's extent, and for the case that
+matters most it depends on something that does not exist until the gesture happens: a menu grows
+from where it was opened. So a bundle names the anchor's *source* and the scene resolves it, which
+is the same division of labour that keeps the differ's entity knowledge out of the module.
+
+**The anchor and the mapping sit beside the channel table rather than inside it**, and that is what
+makes decision 13's *the two dimensions interact rather than compose* structural instead of
+intended. The reduced substitution's entire domain is the channel table, so it cannot reach either
+one even by mistake — a gesture that stops tracking is not reduced, it is broken, and now nothing
+has to remember that.
+
+**Rejected: a stagger field.** Every transition worth writing today is unstaggered, so a field
+defaulting to *no stagger* would change nothing about any of them, and it is the one member that
+would have been inert data. What the design needs is recorded instead of built: the delay and its
+cap are global modifiers beside speed, because an amount is tuning and must move the system
+together, while the *order* items go in — list order, or outward from a focal point — is per
+transition, because it reads completely differently and is motion design. One trap comes with it and
+is worth writing down while it is cheap: **a staggered retarget must sample the old spring at its
+own staggered origin**, not at `t₀`, or a mid-flight interruption freezes each entity where it was
+for the length of its delay and then starts — a visible stall on exactly the case uniform
+retargeting exists to keep smooth.
+
+**Rejected: deferring the anchor the same way.** It fails the same test in the other direction. A
+default is not harmless here — growing out of the middle rather than out of the corner a window was
+summoned from is most of what makes a transition read as intentional — so entries authored before
+the field existed would each need revisiting to decide something only their author knows. That is
+the retrofit hazard reduced motion is first-class to avoid, arriving through a smaller door.
+
+**The release motion is a rule rather than a fifth member.** A driven bundle's progress springs to
+an end on release, and that spring is `Motion::Interactive` always, by what that vocabulary entry is
+for. A per-bundle release motion would be exactly the incohesion decision 13 exists to prevent — two
+swipes that let go differently — so it is not expressible. If it ever has to vary it is one field,
+and the argument has to be made then rather than assumed now.
+
+**The struct has five members, and the fifth is not a fifth thing said.** *(Annotated 2026-08-17.)*
+`Bundle` also carries whether the transition needs an opacity group, and the title above does not
+count it because the four are the statements this decision is about — what the motion *is* — while
+the group flag declares what the transition costs to draw. It belongs to
+[decision 60](#60-group-opacity-requires-flattening-per-node-alpha-is-not-a-group-fade) and is keyed
+by transition only because the transition is what knows whether a subtree is underneath it; which
+entries set it is [open](Open.md), and no answer there changes how anything moves.
+
+That distinction is the test for the next member, and it is a better test than the count. **A member
+that changes how the motion reads is refused by decision 13** — the count is downstream of that, not
+the reason for it. **A member that changes what the renderer must allocate has to win decision 60's
+argument instead**, which is a cost argument and answers to the frame budget rather than to cohesion.
+A member that cannot be sorted into one of the two is the case to stop on, because it is probably two
+members.
+
+**One limit is worth recording while it costs nothing.** The flag is policy-invariant: one bool
+serves both the authored table and its reduced form, so a transition needing a group on one path and
+not the other cannot say so. `Transition::WorkspaceSwitch` is already that case and is fine only
+because its ordinary path animates no opacity, which makes the flag unread rather than wrong. The
+first entry that fades on both paths and needs a group on one turns this into a pair — and a pair
+rather than a per-policy table, since the reduced substitution's domain is the channels and
+[decision 71](#71-reduced-motion-is-three-named-forms-not-a-per-bundle-reduced-table) is why it must
+stay there.
+
+### 71. Reduced motion is three named forms, not a per-bundle reduced table
+
+*(Elaborates [decision
+13](#13-a-closed-motion-vocabulary-with-runtime-configuration-exposing-only-that-vocabulary).)*
+
+`Fade`, `Cut`, `Unchanged`, and a bundle names one. Mechanism in
+[Animation.md](Animation.md#reduced-motion-is-a-policy-not-a-parameter).
+
+**Rejected: five forms.** The obvious vocabulary is fade-in, fade-out, cross-fade, cut, and
+unchanged. The first three are one form: they differ only in what opacity is heading *for*, and that
+is model state [decision 14](#14-declarative-commits-with-dirty-tracking)'s differ already holds —
+an enter targets one, an exit targets zero. The direction is not the catalog's to know, and a
+vocabulary that names it is one where an entry can be authored inconsistent with its own transition.
+
+**Rejected: a per-bundle reduced channel table**, which is the flexible answer and the one that
+arrives by itself if nothing is decided. It is decision 13's rejected *exposing transitions to
+configuration* wearing accessibility's clothes: two independently authored fades, free to drift
+apart, on the path that gets the least review and whose users are least able to tolerate a defect. A
+transition needing something these three cannot say wants a fourth **named** form — a bespoke
+reduced shape that recurs is a form, and one that does not is almost certainly a mistake.
+
+**Rejected: deriving the reduced form from the authored channels.** Attractive because it cannot go
+stale, and it gets the interesting case exactly backwards. A window that slides in with *no opacity
+channel at all* still has to fade in when its movement is removed, so the reduction has to **add** a
+channel rather than retune the ones present, and nothing in the authored table says which motion
+that fade should take. Derivation also cannot express `Cut`, since a bundle that animates a size
+looks identical to one that animates a position.
+
+**Two rules hold across all three forms.** *Participation is inherited and disposition is not* — a
+reduced form may snap a channel its transition already touched and may never seize one it did not,
+because forcing an unrelated rotation to land immediately cancels whatever that rotation was doing
+for somebody else. Opacity under `Fade` is the single deliberate exception, and it is the one the
+policy exists for. And *reduced motion removes movement, not rhythm*: a fade standing in for a
+workspace switch takes about as long as the movement it replaced, or the accessibility path runs at
+a tempo the rest of the system does not share.
+
+**`Unchanged` is a claim about an entry rather than an escape from the rule.** It returns the
+authored table untouched, so it is the one form under which a transition could animate movement on
+the accessibility path with every layer below agreeing it was fine. It is safe only because it must
+be *named* — a bundle cannot arrive at it by omission — and because *only a transition that was
+already pure opacity may declare it* is checked over the real entries rather than argued.
+
+**Cost accepted:** the vocabulary will be tested first by matched geometry, and may lose. A reduced
+matched-move is either a cut or a genuine cross-fade between two endpoints, and the second is not
+expressible as a disposition table over one node's channels. `Cut` is the entry today; if it is
+wrong, what it needs is a fourth form and not a per-bundle table, and the argument above is the one
+that has to be beaten to get there.
 
 ---
 
@@ -1404,8 +1568,8 @@ and
 [decision 13](#13-a-closed-motion-vocabulary-with-runtime-configuration-exposing-only-that-vocabulary)
 already apply — name a material and gyro decides what it costs, name a transition and gyro owns the
 springs — extended once more. Direct manipulation is then declarative too: the shell does not
-receive motion events and reply with positions, it declares that an entity tracks the pointer under
-`Motion::Interactive` until release, and gyro runs that at device rate with no round trip at all.
+receive motion events and reply with positions, it declares that an entity tracks the pointer until
+release, and gyro runs that at device rate with no round trip at all.
 
 #### Several clients, not one
 
@@ -1460,6 +1624,13 @@ that the gesture began, committed, or was cancelled, and those arrive whenever �
 a loop. That is the case this rule was most likely to lose, since a swipe is the interaction where
 a per-event request looks most reasonable, and it is now the case that demonstrates it.
 
+It corrects the drag sentence above as well, which said the entity tracks the pointer *under*
+`Motion::Interactive`. That was the moving-target model 65 rejects, written before there was a
+distinction to violate. Drag is the degenerate driven case — the mapping is identity and the
+tracking is exact — and `Motion::Interactive` is the motion of the residual: the pushback at a
+constraint, the pull into a snap, the settle on release. Never the motion of the finger, which no
+spring should be interposed in.
+
 #### A closed set of node kinds, arbitrary composition, motion only from the catalog
 
 The shell describes scenes from a closed vocabulary of node kinds — surface reference, snapshot
@@ -1481,8 +1652,8 @@ comes with a falsifiable test: **if a shell can produce motion that does not mat
 line is in the wrong place.**
 
 A wire vocabulary is also *stronger* enforcement than decision 13 currently has. In-process, "call
-sites cannot name spring parameters" is a convention backed by review and a greppable
-`Motion::Custom`. Across a protocol, the shell has no way to express a damping ratio at all.
+sites cannot name spring parameters" is a convention backed by review and a greppable escape hatch.
+Across a protocol, the shell has no way to express a damping ratio at all.
 
 The second argument for the closed set is shell restart. With known node kinds gyro can keep showing
 windows under default policy while the shell is upgraded or respawns, and the session stays coherent
@@ -3857,6 +4028,15 @@ tolerate a defect is the path with the most fades on it. Workspace switching, ov
 shell restart, and the greeter cross-fade in
 [decision 43](#43-lock-and-greeter-are-one-ui-locking-is-an-output-reassignment) are the everyday
 cases underneath that.
+
+*(Corrected 2026-08-17.)* "*Every* transition" overstates it, and the correction is worth making
+because it is the sentence someone would cost this against. [Decision
+71](#71-reduced-motion-is-three-named-forms-not-a-per-bundle-reduced-table) gives reduced motion a
+form that fades nothing, and a single window fading out is one object rather than a group — [exit
+pixels](Animation.md#exit-pixels) even hand it a snapshot that is already flat. The claim that
+survives is the one that matters here: what the reduced path converts to fades is exactly the
+transitions that move whole stacks of windows, so subtree fades stop being occasional. Which bundles
+declare a group is [open](Open.md).
 
 **An opacity group is a node property, and it flattens.** The subtree renders to an offscreen at its
 screen-space bound, opaque to itself, and is composited once at `g`. The extent is the bound

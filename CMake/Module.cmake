@@ -22,9 +22,19 @@
 # edge. DISPATCH_HALF names the subdirectories that are dispatch-side, DISPATCH says the whole module
 # is, and everything else is denied — the frame side is the default because it is the side being
 # protected, and a new module has to say it is dispatch-side rather than say it is not.
+#
+# FRAME_DEPENDS is that partition applied to the module's own edges, and it is what makes "a
+# dependency that arrives with authoring stops at the publication boundary" a build failure rather
+# than a paragraph. Animation depends on Geometry for one member of the gesture mapping, which is
+# authoring; the solver the frame thread calls is scalar throughout and must not acquire it. Naming
+# the subset the frame half may reach is what holds that. Optional, and silence means both halves get
+# DEPENDS: a module whose halves want the same edges should not have to say so twice, and the check
+# it turns on is worth having exactly where somebody has a reason to claim it.
 
 function(gyro_add_module NAME)
-	cmake_parse_arguments(PARSE_ARGV 1 MODULE "PORTABLE;OBJECT;DISPATCH" "" "SOURCES;TESTS;DEPENDS;DISPATCH_HALF")
+	cmake_parse_arguments(
+		PARSE_ARGV 1 MODULE "PORTABLE;OBJECT;DISPATCH" "" "SOURCES;TESTS;DEPENDS;DISPATCH_HALF;FRAME_DEPENDS"
+	)
 
 	if(MODULE_UNPARSED_ARGUMENTS)
 		message(FATAL_ERROR "gyro_add_module(${NAME}): unexpected argument ${MODULE_UNPARSED_ARGUMENTS}")
@@ -35,6 +45,18 @@ function(gyro_add_module NAME)
 	if(MODULE_DISPATCH AND MODULE_DISPATCH_HALF)
 		message(FATAL_ERROR "gyro_add_module(${NAME}): DISPATCH is the whole module; it has no half to name")
 	endif()
+
+	# A module with no dispatch half has no frame half to narrow, and one whose frame half may reach
+	# something the module itself does not is declaring an edge in the wrong place. Both are caught
+	# here rather than in the check, since a graph that never had the edge cannot report losing it.
+	if(MODULE_FRAME_DEPENDS AND NOT MODULE_DISPATCH_HALF)
+		message(FATAL_ERROR "gyro_add_module(${NAME}): FRAME_DEPENDS narrows a DISPATCH_HALF, and there is none")
+	endif()
+	foreach(FRAME_DEPENDENCY IN LISTS MODULE_FRAME_DEPENDS)
+		if(NOT FRAME_DEPENDENCY IN_LIST MODULE_DEPENDS)
+			message(FATAL_ERROR "gyro_add_module(${NAME}): FRAME_DEPENDS ${FRAME_DEPENDENCY} is not in DEPENDS")
+		endif()
+	endforeach()
 
 	# A module with no translation unit of its own is header-only, and it is an INTERFACE library
 	# because a static archive needs something to archive. Most of this codebase is headed that way —
@@ -68,6 +90,11 @@ function(gyro_add_module NAME)
 
 	set_property(GLOBAL APPEND PROPERTY GYRO_MODULES ${NAME})
 	set_property(GLOBAL PROPERTY GYRO_MODULE_DEPENDS_${NAME} "${MODULE_DEPENDS}")
+
+	if(MODULE_FRAME_DEPENDS)
+		set_property(GLOBAL APPEND PROPERTY GYRO_FRAME_LIMITED_MODULES ${NAME})
+		set_property(GLOBAL PROPERTY GYRO_MODULE_FRAME_DEPENDS_${NAME} "${MODULE_FRAME_DEPENDS}")
+	endif()
 
 	if(MODULE_PORTABLE)
 		set_property(GLOBAL APPEND PROPERTY GYRO_PORTABLE_MODULES ${NAME})

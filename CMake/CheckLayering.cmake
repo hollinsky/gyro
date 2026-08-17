@@ -26,6 +26,15 @@
 # so it is the default and the exception is what gets declared — a module that has said nothing
 # cannot reach authoring, which is the polarity that survives someone adding a module and not
 # reading this file.
+#
+# The third half of the file is the same edge seen from the other end. A straddling module's two
+# halves do not need the same dependencies, and the one that matters is the frame half: Animation
+# depends on Geometry for a single member of the gesture mapping, which is authoring, so the solver
+# the frame thread calls has no business with it. That is Docs/Structure.md's general shape rather
+# than one module's quirk — a dependency that arrives with authoring stops at the publication
+# boundary — and without FRAME_DEPENDS it is a sentence in a document while the build permits the
+# opposite. Declaring it is optional and silence means the old behaviour, because a module whose
+# halves genuinely want the same edges should not have to say so twice.
 
 if(NOT DEFINED SOURCE_DIR)
 	message(FATAL_ERROR "CheckLayering requires -D SOURCE_DIR=<path>")
@@ -44,8 +53,14 @@ foreach(OPTIONAL IN ITEMS DISPATCH_MODULES DISPATCH_HALVES)
 endforeach()
 
 # "Name=Dep,Dep|Name=Dep,Dep" because a -P script takes no maps, and because a semicolon list handed
-# to a custom command is split into separate arguments before the script ever sees it.
+# to a custom command is split into separate arguments before the script ever sees it. FRAME_GRAPH is
+# the same shape and is empty until a straddling module narrows its frame half.
 string(REPLACE "|" ";" GRAPH "${GRAPH}")
+
+if(NOT DEFINED FRAME_GRAPH)
+	set(FRAME_GRAPH "")
+endif()
+string(REPLACE "|" ";" FRAME_GRAPH "${FRAME_GRAPH}")
 
 set(MODULES "")
 foreach(ENTRY IN LISTS GRAPH)
@@ -93,6 +108,34 @@ if(CYCLES)
 	message(FATAL_ERROR "The module graph is a DAG. These modules reach themselves: ${REPORT}\n")
 endif()
 
+# What each narrowed frame half may reach, closed over the same graph. A frame dependency has to be
+# one the module already declares, so this is a subset of a closure that is already computed rather
+# than a second graph that could disagree with the first.
+foreach(ENTRY IN LISTS FRAME_GRAPH)
+	string(FIND "${ENTRY}" "=" SPLIT)
+	if(SPLIT EQUAL -1)
+		message(FATAL_ERROR "CheckLayering: malformed frame graph entry '${ENTRY}'")
+	endif()
+
+	string(SUBSTRING "${ENTRY}" 0 ${SPLIT} NAME)
+	math(EXPR AFTER "${SPLIT} + 1")
+	string(SUBSTRING "${ENTRY}" ${AFTER} -1 DEPENDS)
+	string(REPLACE "," ";" DEPENDS "${DEPENDS}")
+
+	set(REACHED "")
+	foreach(DEPENDENCY IN LISTS DEPENDS)
+		if(DEPENDENCY STREQUAL "")
+			continue()
+		endif()
+
+		list(APPEND REACHED ${DEPENDENCY} ${CLOSURE_${DEPENDENCY}})
+	endforeach()
+
+	list(REMOVE_DUPLICATES REACHED)
+	set(FRAME_CLOSURE_${NAME} "${REACHED}")
+	set(FRAME_LIMITED_${NAME} TRUE)
+endforeach()
+
 set(VIOLATIONS "")
 
 foreach(MODULE IN LISTS MODULES)
@@ -104,13 +147,6 @@ foreach(MODULE IN LISTS MODULES)
 		string(REGEX MATCHALL "#[ \t]*include[ \t]*\"[^\"]+\"" INCLUDES "${CONTENT}")
 
 		file(RELATIVE_PATH RELATIVE "${SOURCE_DIR}" "${SOURCE}")
-
-		# A test is not part of its module's public shape, so it may reach the harness that runs it
-		# without every module declaring a dependency on Testing that only its tests have.
-		set(ALLOWED "${MODULE}" ${CLOSURE_${MODULE}})
-		if(SOURCE MATCHES "\\.Test\\.cpp$")
-			list(APPEND ALLOWED "Testing")
-		endif()
 
 		# A file is dispatch-side by where it sits, tests included. That is deliberate: a test for
 		# something in a dispatch half belongs in that half, and one written at the module root
@@ -124,6 +160,20 @@ foreach(MODULE IN LISTS MODULES)
 				set(DISPATCH_SIDE TRUE)
 			endif()
 		endforeach()
+
+		# A test is not part of its module's public shape, so it may reach the harness that runs it
+		# without every module declaring a dependency on Testing that only its tests have.
+		#
+		# The frame half of a narrowed module gets the narrower allowance, and its tests get it too:
+		# a test that may include what the code beside it may not is a test that stops being able to
+		# fail on the thing this rule exists for.
+		set(ALLOWED "${MODULE}" ${CLOSURE_${MODULE}})
+		if(NOT DISPATCH_SIDE AND FRAME_LIMITED_${MODULE})
+			set(ALLOWED "${MODULE}" ${FRAME_CLOSURE_${MODULE}})
+		endif()
+		if(SOURCE MATCHES "\\.Test\\.cpp$")
+			list(APPEND ALLOWED "Testing")
+		endif()
 
 		foreach(INCLUDE IN LISTS INCLUDES)
 			string(REGEX REPLACE "^.*\"([^\"]+)\"$" "\\1" HEADER "${INCLUDE}")
@@ -148,7 +198,16 @@ foreach(MODULE IN LISTS MODULES)
 				continue()
 			endif()
 
-			list(APPEND VIOLATIONS "${RELATIVE}: \"${HEADER}\" — ${MODULE} does not depend on ${OWNER}")
+			# Two different mistakes, and the report says which. An edge the module does not have at
+			# all is a graph question; an edge it has but only for its dispatch half is a boundary
+			# question, and telling someone to add a DEPENDS it already declared is how a check
+			# teaches the wrong lesson.
+			if(OWNER IN_LIST CLOSURE_${MODULE})
+				list(APPEND VIOLATIONS
+					"${RELATIVE}: \"${HEADER}\" — ${OWNER} arrives with ${MODULE}'s dispatch half and stops there")
+			else()
+				list(APPEND VIOLATIONS "${RELATIVE}: \"${HEADER}\" — ${MODULE} does not depend on ${OWNER}")
+			endif()
 		endforeach()
 	endforeach()
 endforeach()
@@ -158,7 +217,8 @@ if(VIOLATIONS)
 	list(JOIN VIOLATIONS "\n    " REPORT)
 	message(FATAL_ERROR
 		"An include crosses a line the module graph draws:\n    ${REPORT}\n\n"
-		"Either the include is wrong, or gyro_add_module's DEPENDS, DISPATCH, or DISPATCH_HALF is.\n"
+		"Either the include is wrong, or gyro_add_module's DEPENDS, DISPATCH, DISPATCH_HALF, or\n"
+		"FRAME_DEPENDS is.\n"
 		"Docs/Structure.md is the graph, and its thread table is the second partition.\n"
 	)
 endif()

@@ -99,7 +99,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | --- | --- | --- | --- |
 | `Core` | portable | either | — |
 | `Geometry` | portable | either | `Core` |
-| `Animation` | portable | **both** | `Core` |
+| `Animation` | portable | **both** | `Core`, `Geometry` |
 | `Publication` | portable | **both** | `Core`, `Geometry` |
 | `Seam` | portable | **both** | `Core`, `Geometry` |
 | `Scene` | portable | dispatch | `Core`, `Geometry`, `Animation`, `Publication` |
@@ -139,6 +139,46 @@ The split earns itself on one file.
 classification predicate to exist before it has a second caller, because plane promotion, damage
 mapping, and the sharpness path all ask the same question and three independently derived answers is
 how they drift apart. One module gives it one home.
+
+### Animation's Geometry edge is one member
+
+The edge is worth a paragraph because the obvious reasons for it are all wrong, and each of them
+would have put it in a different place.
+
+Not the springs. A spring's parameters are scalar whatever its channel's value type is — a
+translation, a rotation, and an opacity are solved by the same two coefficients — so the solver is
+generic over the channel and names none of its types. Not the settling thresholds either: those
+arrive as arguments precisely so that neither the geometric ones settled by [decision
+54](Decisions.md#54-settled-geometry-snaps-to-the-outputs-device-grid) nor the non-geometric ones
+still [open](Open.md) have to be known inside `Animation`. And not the catalog's channel set, which
+names translation, rotation, scale, and opacity as *labels* — a bundle holds a motion per channel
+and never a value.
+
+It is one member of one structure: the travel distance in a bundle's gesture mapping, which
+[decision
+13](Decisions.md#13-a-closed-motion-vocabulary-with-runtime-configuration-exposing-only-that-vocabulary)
+puts in the catalog and [decision
+65](Decisions.md#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)
+makes a displacement rather than a scalar. It has to be output-independent — a travel in device
+pixels would make the same swipe mean a different fraction of the transition on a 1× and a 1.5×
+monitor — and global space is the only space with that property, so the type is what obliges the two
+conversions in front of it to be written rather than assumed. That is [decision
+52](Decisions.md#52-coordinate-spaces-are-three-and-quantization-belongs-to-the-output) being
+load-bearing at a distance from where it was made, and it is the whole of why this row says
+`Geometry`.
+
+The edge is also confined to `Author`, and that is checked rather than described. `Solve` is scalar
+throughout, so the frame half of the module carries none of it — which is the general shape of this
+table rather than a coincidence: a dependency that arrives with authoring stops at the publication
+boundary. `gyro_add_module`'s `FRAME_DEPENDS` is where a module names the subset its frame half may
+reach, and `CheckLayering.cmake` holds it to that, so a geometric type appearing in `Solve` fails the
+build with the reason rather than with the generic missing-edge message.
+
+It is worth noticing which of the two the module graph could see. The graph is per module, so it
+would have permitted the include and had nothing to say: the row above says `Geometry` and `Solve` is
+in the module the row is about. The rule that catches it is the thread partition rather than the
+dependency one, which is the same shape as the halves themselves — the graph draws what may be
+reached, and the boundary draws which half may reach it.
 
 ### The wake is in Core, and the table above is why
 
@@ -193,6 +233,17 @@ producing spring coefficients is dispatch-side and consuming them is not, so the
 A file is dispatch-side by where it sits, tests included. A test for something in a dispatch half
 belongs in that half; one written at the module root fails the check rather than quietly
 establishing that the root may reach authoring.
+
+**The same partition applies to the module's own edges, and that is `FRAME_DEPENDS`.** A straddler's
+two halves need not want the same dependencies, and the interesting direction is a dependency that
+arrives with authoring: `Animation` reaches `Geometry` for
+[one member of the gesture mapping](#animations-geometry-edge-is-one-member), which is authoring, so
+the solver the frame thread calls has no business with it. Naming the subset the frame half may
+reach is what turns that from a sentence in this document into a build failure, and the report says
+which of the two lines was crossed — an edge the module does not have is a graph question, an edge it
+has but only for its dispatch half is a boundary one. Declaring it is optional and silence means both
+halves get `DEPENDS`, since a module whose halves want the same edges should not have to say so
+twice.
 
 The rest of thread discipline is runtime instrumentation rather than structure — the debug allocator
 of [decision 36](Decisions.md#36-frame-path-discipline-is-enforced-mechanically-not-by-review),
@@ -254,7 +305,7 @@ establishes for the frame path and this file extends to the module graph.
 | --- | --- | --- |
 | `CheckClockDiscipline.cmake` | one reader of the timebase | [decision 57](Decisions.md#57-one-timebase-clock_monotonic-converted-at-ingest-and-nowhere-else) |
 | `CheckPortability.cmake` | no platform headers in a `PORTABLE` module | [decision 6](Decisions.md#6-no-macos-port-development-continues-over-ssh) |
-| `CheckLayering.cmake` | every `#include` lies on a declared edge; the graph is a DAG; nothing outside a dispatch half includes one | this document |
+| `CheckLayering.cmake` | every `#include` lies on a declared edge; the graph is a DAG; nothing outside a dispatch half includes one; a narrowed frame half reaches only its `FRAME_DEPENDS` | this document |
 
 The fourth is not a build check and belongs in the table anyway, because it is the one decision 36
 actually names: `Core/DebugAllocator.cpp` replaces the global `operator new` and `operator delete`

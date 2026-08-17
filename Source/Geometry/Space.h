@@ -207,6 +207,22 @@ template<SpaceTag S, typename T>
 	return { point.X - offset.X, point.Y - offset.Y };
 }
 
+// The scalar product of two displacements.
+//
+// Here rather than left to the caller because it has exactly one job in this codebase and that job
+// is a projection: Animation/Author's gesture mapping resolves a finger's displacement against an
+// authored travel by projecting the first onto the second, and a call site spelling the two products
+// and the sum inline is a call site that can spell it with a component transposed. That failure does
+// not crash and does not look wrong in review; it makes a horizontal swipe answer to vertical motion.
+//
+// Named as Geometry/NodeTransform.h already names the three-dimensional one, so there is one word for
+// the operation rather than one per dimension count.
+template<SpaceTag S, typename T>
+[[nodiscard]] constexpr T Dot(Offset<S, T> left, Offset<S, T> right) noexcept
+{
+	return left.X * right.X + left.Y * right.Y;
+}
+
 // The integer grid, where a space has one. Named rather than spelled inline at every use, because
 // the scissor rectangle, the damage rectangle, the buffer's own extents, and a subsurface's
 // position are all this and there is no reason for four spellings.
@@ -355,6 +371,19 @@ static_assert(std::is_same_v<decltype(Point<GlobalSpace>{} + Offset<GlobalSpace>
 static_assert(
 	Point<GlobalSpace>{ 1.0, 2.0 } + (Point<GlobalSpace>{ 4.0, 6.0 } - Point<GlobalSpace>{ 1.0, 2.0 }) ==
 	Point<GlobalSpace>{ 4.0, 6.0 }
+);
+
+// The projection the gesture mapping is built on, and the three properties it needs. A displacement
+// along the travel is the travel's own square; one across it is nothing; one against it is negative,
+// which is what makes a reversal fall out of the arithmetic rather than out of a comparison somebody
+// has to remember to write.
+static_assert(Dot(Offset<GlobalSpace>{ 3.0, 4.0 }, Offset<GlobalSpace>{ 3.0, 4.0 }) == 25.0);
+static_assert(Dot(Offset<GlobalSpace>{ 1000.0, 0.0 }, Offset<GlobalSpace>{ 0.0, 1000.0 }) == 0.0);
+static_assert(Dot(Offset<GlobalSpace>{ -600.0, 0.0 }, Offset<GlobalSpace>{ 1200.0, 0.0 }) < 0.0);
+static_assert(
+	Dot(Offset<GlobalSpace>{ 2.0, 5.0 }, Offset<GlobalSpace>{ 7.0, 11.0 }) ==
+		Dot(Offset<GlobalSpace>{ 7.0, 11.0 }, Offset<GlobalSpace>{ 2.0, 5.0 }),
+	"Symmetric, so a projection cannot depend on which argument the caller thought was the travel"
 );
 
 // Edges in, extent out. The origin is kept and the extent is derived, which is the only ordering
