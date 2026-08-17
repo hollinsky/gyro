@@ -23,7 +23,9 @@ Codebase Structure:
 
 		Core/                 - Portable tier. Time.h is the timebase (Instant, Duration, the
 		                        ingest conversions); Clock.h is IClock, MonotonicClock, and the
-		                        ManualClock the headless backend and tests drive
+		                        ManualClock the headless backend and tests drive; Wake.h is the
+		                        contribution the idle fold reduces, and is in Core rather than
+		                        Animation because Console contributes to it too (decision 69)
 		Geometry/             - Portable tier. Scale.h is the exact rational output scale; Space.h is
 		                        the coordinate spaces and the values that live in them, with the
 		                        integer grid kept off the world
@@ -55,7 +57,7 @@ Codebase Structure:
 		                  it hangs off, which thread each piece runs on, the composition root, and
 		                  what the build checks enforce
 		Decisions.md    - Cross-cutting. Decision log with rejected alternatives and rationale
-		                  (68 decisions), plus the open-question list
+		                  (69 decisions), plus the open-question list
 
 	Docs are tiered: Experience (what the user perceives) → Architecture and Animation (mechanism
 	and invariants) → Structure (where the mechanism lives). Citations point up; dependencies

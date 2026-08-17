@@ -80,7 +80,8 @@ reproducible. Everything downstream depends on this:
 - Headless tests with a fake clock are bit-reproducible, so golden images work.
 - **Settling time is analytic.** For the underdamped envelope, `t = ln(A/ε) / (ζω)`. The scheduler
   can therefore answer "will anything still be animating at time T" without simulating, which is
-  what lets the compositor drop to idle cleanly — and "cleanly" is a hard invariant rather than a
+  what lets the compositor drop to idle cleanly. What shape that answer takes is
+  [its own question](#settling-answers-with-a-wake-not-a-boolean), and "cleanly" is a hard invariant rather than a
   tidiness claim: no timer armed, the frame thread blocked indefinitely. See
   [Idle and power](Architecture.md#doing-nothing-must-cost-nothing). An integrated spring must be
   woken to discover it has nothing to do.
@@ -266,12 +267,77 @@ class Animatable
 public:
 	const T& Model() const;
 	T        Presentation(Instant t) const;       // pure; closed form
-	bool     IsSettled(Instant t) const;
+	Wake     NextWake(Instant t) const;           // Core/Wake.h; see below
 
 	void AnimateTo(const T& target, MotionRef motion, Instant t0);
 	void SetImmediate(const T& value);
 };
 ```
+
+### Settling answers with a wake, not a boolean
+
+*(Written against the implementation, 2026-08-16.)* The third method was `bool IsSettled(Instant t)`
+until this section replaced it. The boolean is the ergonomic answer, and it is wrong in a way that
+does not surface as a bug — it surfaces years later as a feature that cannot be added.
+
+[Doing nothing must cost nothing](Architecture.md#doing-nothing-must-cost-nothing) is a **fold**:
+every animating channel, every pending timeout, every retiring entity contributes an answer, and the
+schedule is what they reduce to. With a boolean the reduction is an OR, and an OR has terms for
+*resting* and *moving* and none for *something will happen later*. So it forecloses every motion that
+is neither settled nor settling — an indeterminate spinner, a marquee for text that does not fit, a
+breathing focus ring, and the blinking cursor the [recovery console](Architecture.md#the-pre-vulkan-console)
+owes as a shipping requirement. Each is cheap on the frame path, since an undamped oscillator is O(1)
+and exact at a predicted time like any other spring; none of them has a way into the idle ladder.
+Adding the first one means changing the fold, admission control, and the wake path together.
+
+**An instant alone is not the answer either**, which is the half that is easy to miss. The obvious
+repair is `std::optional<Instant>` with `nullopt` for never, turning the any-reduce into a min-reduce
+at identical code volume. It fails on the commonest case in the system: a spring in flight has no
+next interesting instant to name, because every instant between now and settling is one. It must
+answer *now*, which the reduction cannot tell from a one-shot that is merely overdue — and that is
+exactly the distinction under which a standing commitment gets priced by
+[admission control](Architecture.md#admission-control) and by
+[the VRR servo](Architecture.md#vrr-as-a-scheduling-degree-of-freedom). The excluded motions are not
+one kind either. A blink is discrete and wants a wake per edge with nothing drawn between them; a
+marquee is continuous and wants every frame for as long as it lives. An optional fits the first and
+has to spell the second as a lie.
+
+`Wake` is therefore three cases. It lives in `Core` rather than in `Animation` because `Console` and
+the idle ladder contribute to the same fold and neither may depend on the animation system — a
+placement `CheckLayering.cmake` enforces rather than merely recommends.
+
+| Case | Means | Contributed by |
+| --- | --- | --- |
+| `Settled` | nothing further, ever | a settled spring; an output with no pending timeout |
+| `Timed(when)` | one frame, at `when` | a cursor blink; the [gesture-stop republish](#it-crosses-the-boundary-as-coefficients-like-everything-else); a dim or blank timeout |
+| `Continuous(when, interval)` | a frame at `when`, and another every `interval`, without end | a spring in flight; a marquee; a throb |
+
+`interval` zero is every frame the output offers, which is what a spring asks for. A non-zero one is
+what makes a periodic motion **priced** rather than absorbed: a throb authored at 30 Hz is a quarter
+of the composites on a 144 Hz panel and is a rate the VRR servo can hold, and neither statement is
+expressible if the answer is a bare instant.
+
+`Sooner` reduces two contributions to the more demanding, with `Settled` as its identity. That it is
+a **commutative monoid** is the property worth having rather than an incidental one: associativity is
+what lets the fold be partitioned per output — a blinking cursor on one panel must not wake the
+other, and a scene-wide reduce would reintroduce the coupling per-output damage removed — and what
+lets it be cached per subtree and recomputed along the dirty path, instead of swept over every node
+each time anything moves.
+
+**The saturation the solver already chose composes with this in the safe direction.** `SettlesAt`
+returns an instant no frame reaches for a spring that never settles, so the comparison against it is
+false forever and an undamped oscillator contributes `Continuous` — correct, and visible to whatever
+prices it. Under the optional, the same value reads as *never interesting again*: one keystroke from
+dropping the compositor to idle with the one motion in the design that genuinely never stops. That is
+[the error direction](#settling-is-a-bound-not-a-solution)'s failure arriving from the scheduler side
+rather than from a subscript, and it is the argument for the third case rather than for the second.
+
+Two obligations sit on contributors rather than on the fold, because nothing in the reduction can
+check them. A timed instant is **strictly after** the instant it was computed for, or the scheduler
+spins at full rate on a wake it has already served. And a periodic contributor computes its next edge
+from its own origin, `t₀ + n·period`, **never from its last wake** — a wake is served at the
+following vblank, and adding to a rounded value accumulates exactly the drift closed form exists to
+avoid.
 
 ### Model versus presentation
 
@@ -376,7 +442,9 @@ it is a serialization rather than a mirror — contiguous by construction, and w
 copy that could drift. Settling is likewise a dispatch-side event: the settle time is analytic, so
 nothing has to observe an evaluation to know a spring has finished, which is what keeps entity
 destruction, [retirement](#lifetime), and [atlas](#where-snapshots-live) release off the frame
-thread entirely.
+thread entirely. The [wake fold](#settling-answers-with-a-wake-not-a-boolean) runs on the same side
+and for the same reason, and its result crosses in the snapshot header — one per output, beside the
+coefficients — so the frame thread reads a schedule rather than deriving one.
 
 ## Declarative commits
 
@@ -816,6 +884,15 @@ retargeting.
   the one non-geometric channel that escapes the problem rather than adding to it: its
   [mapping](#the-mapping-belongs-to-the-catalog) carries a distance, so a threshold on `p` converts
   to output pixels of travel like anything geometric.
+- **Which periodic motions the catalog admits, and at what rate.**
+  [The wake](#settling-answers-with-a-wake-not-a-boolean) gives periodic motion a way into the idle
+  ladder; it does not decide that any belongs in [the catalog](#the-motion-catalog), whose five
+  entries all converge. The recovery console's cursor needs no catalog entry, since it is
+  [not a Vulkan path](Architecture.md#the-pre-vulkan-console) and its blink is a `Timed` contribution
+  and nothing else. What is unresolved is whether the shell may name a pulsing or indeterminate
+  motion at all, and if so what `interval` it is authored with — a rate is a permission to draw less,
+  and picking one is motion design rather than scheduling, which puts it with the catalog and the
+  vocabularies below.
 - **The lead horizon for a driven gesture.** How far `p` may be carried toward predicted
   presentation time before the estimate stops being a correction for known latency and starts being
   a guess. One output period is the obvious first answer, since that is the gap being undone, and

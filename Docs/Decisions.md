@@ -22,6 +22,13 @@ the narrower rule could not keep, and 68 from working the arithmetic of what a c
 rasterized by the time it declares a subsurface position. What implementation supplied was the
 occasion to ask.
 
+The spring solver supplied a third occasion and a larger one. Comparing the design against
+`CAMediaTiming` showed that every animation in it converges, which quietly excludes the periodic
+motion decision 38's console already owes — so 69 revises 58, annotating 11 and 16: settling reports
+a wake rather than a boolean, and idleness folds a monoid rather than an OR. It is the first entry
+here to change a type rather than a rule, and the argument for making it now is that the type had one
+caller.
+
 Two exceptions to that last sentence, and they are the point of having written any of this down.
 Decision 2's decisive argument was read against libwayland's source on 2026-08-16 and did not
 survive, which reversed that decision's conclusion and revised 3, 22, 36, 40, 45, 49, and 51 behind
@@ -3054,6 +3061,86 @@ frames have already been scanned out.
 it conflates a device that went away with a machine that stopped. Device pause is decision 41's
 territory and is answered by migration; suspend is a global time discontinuity that every clock,
 every spring, and every output must be told about.
+
+### 69. Settling answers with a wake; idleness folds a monoid, not an OR
+
+*(Decided 2026-08-16, against the spring solver. Revises 58 and annotates 11 and 16.)*
+
+Decision 58 makes *doing nothing costs nothing* a hard invariant, and decision 11's analytic settle
+is what makes it exactly answerable. What neither settled is the **shape of the per-channel answer**,
+and Animation.md carried `bool IsSettled(Instant t)` on `Animatable` by default rather than by
+argument. The invariant is a fold over every animating channel, every pending timeout, and every
+retiring entity; with a boolean, that fold is an OR.
+
+**An OR has a term for resting and a term for moving and none for *later*.** So it excludes every
+motion that is periodic rather than convergent — an indeterminate spinner, a marquee, a breathing
+focus ring, and the blinking cursor decision 38's console owes. The closed form is indifferent: an
+undamped oscillator is O(1) and exact at a predicted time like any other spring, so the frame path
+does not care. What is missing is a way for such a channel to enter the ladder at all, and *one node
+is pulsing* currently means the whole output can never fold to idle. That cost is paid invisibly by
+systems with a mutable timeline; decision 58 makes it explicit, and until this decision it was
+unpriced.
+
+**The answer is a three-case `Wake`, reduced by `Sooner`, a commutative monoid with *settled* as its
+identity.** `Settled` is nothing further ever; `Timed(when)` is one frame at an instant; and
+`Continuous(when, interval)` is a frame at an instant and another every interval, without end. It
+lives in `Core`. Architecture.md's invariant is restated from *no timer armed* to **at most one timer
+armed per output, and its instant is the fold**, which is a stronger claim and a more testable one:
+the dim and blank timeouts, the gesture-stop republish of decision 65, and retirement expiry become
+contributions to one reduction rather than three separate arms.
+
+**Rejected: `bool IsSettled(Instant)`** — the position this decision replaces. It is the ergonomic
+signature, it costs the same as the alternative today, and its defect never presents as a bug. It
+presents years later as a feature request that cannot be served without changing the fold, admission
+control, and the wake path together. Kept here because *the boolean was adequate for everything we
+had* is exactly the reasoning that makes a vocabulary permanent.
+
+**Rejected: `std::optional<Instant> NextInteresting(Instant)`**, with `nullopt` for never. The
+obvious repair — an any-reduce becomes a min-reduce at identical code volume — and it fails on the
+commonest channel in the system. A spring in flight cannot name a next interesting instant, because
+every instant between now and settling is one; it has to answer *now*, which the reduction cannot
+distinguish from a one-shot that is merely overdue. That distinction is where a standing commitment
+gets priced by decisions 29 and 31, so collapsing it reintroduces the invisibility this decision
+exists to remove. It also splits the excluded motions wrongly: a blink is discrete and wants a wake
+per edge, a marquee is continuous and wants every frame, and `t + period` describes only the first.
+
+**And it collides with a sentinel the solver had already chosen.** `SettlesAt` returns a saturated
+instant for a spring that never settles, deliberately, so that no frame reaches it. Under the
+optional, the natural adapter spells that value as `nullopt` — *never interesting again* — and the
+one motion in the design that genuinely never stops reports as idle. The correct adapter is one
+keystroke away and looks equally reasonable. Under the three-case form the same comparison is false
+forever and the answer is `Continuous`, so the composition is safe by construction rather than by
+review. **A representation in which two opposite facts share a spelling is the wrong representation**
+even when every current caller happens to write the right one.
+
+**Rejected: spelling `Continuous` as `Timed(now)`.** Operationally identical for the scheduler's next
+step and it discards the standing-ness, which is the only part admission control and the VRR servo
+can act on. A throb that re-arms a one-shot every edge is indistinguishable from a cursor blink, so
+the panel cannot be held at the throb's rate and the commitment cannot be charged.
+
+**Rejected: `Continuous` without an interval.** Every frame is the conservative default and it is the
+wrong ceiling for authored periodic motion: a 30 Hz throb on a 144 Hz panel is a quarter of the
+composites and a rate the servo can hold. One defaulted field now, zero meaning every frame, against
+a field that cannot be added later without revisiting every contributor.
+
+**Rejected: `Wake` in `Animation`.** It reads as animation content and its commonest contributor is a
+spring. `Console` depends on `Core`, `Geometry`, and `Seam` alone, and the recovery console's blink
+is precisely a contribution the fold must accept — so the placement would force a second vocabulary
+beside the first, and `CheckLayering.cmake` would say so. The idle ladder's own timeouts make the
+same argument.
+
+**What the monoid buys beyond the vocabulary**, and the reason to do this before `Animatable` exists
+rather than after: associativity is what allows the fold to be partitioned per output, which decision
+58's *a blinking cursor on one output must not wake the other* requires and which a scene-wide
+reduction would undo; and it is what allows the result to be cached per subtree and recomputed along
+the dirty path, instead of swept over every node whenever anything moves. An OR is also a monoid, and
+a useless one. Retrofitting the algebra is more expensive than retrofitting the signature.
+
+**Two obligations are on contributors and cannot be checked by the fold.** A timed instant is
+strictly after the instant it was computed for, or the scheduler spins at full rate on a wake it has
+already served. And a periodic contributor computes its next edge from its own origin, never from its
+last wake — a wake is served at the following vblank, and adding to a rounded value accumulates
+exactly the drift decision 11 exists to avoid, reappearing in the timer instead of in the trajectory.
 
 ## Rendering devices
 

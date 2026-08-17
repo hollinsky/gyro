@@ -130,7 +130,7 @@ testing a reimplementation of the loop — which is the thing that rots.
 
 ### Geometry is not part of Core
 
-`Core` is dependency-free primitives: the timebase, handles, the slot allocator, logging.
+`Core` is dependency-free primitives: the timebase, the wake, handles, the slot allocator, logging.
 `Geometry` is domain content: the exact rational scale, the restricted transform and its
 classification predicate, the 3D TRS with anchor and quaternion, the coordinate spaces.
 
@@ -139,6 +139,23 @@ The split earns itself on one file.
 classification predicate to exist before it has a second caller, because plane promotion, damage
 mapping, and the sharpness path all ask the same question and three independently derived answers is
 how they drift apart. One module gives it one home.
+
+### The wake is in Core, and the table above is why
+
+`Wake` is what [doing nothing must cost
+nothing](Architecture.md#doing-nothing-must-cost-nothing) folds over, and it reads as animation
+content — a spring is its commonest contributor and
+[Animation.md](Animation.md#settling-answers-with-a-wake-not-a-boolean) carries the argument for its
+shape. It is in `Core` anyway, and the module table settles it rather than taste: `Console` depends
+on `Core`, `Geometry`, and `Seam` alone, and the recovery console's blinking cursor is one of the
+contributions the fold exists to accept. Putting `Wake` in `Animation` would make the console unable
+to name its own blink in the vocabulary the scheduler reduces, and `CheckLayering.cmake` would say so
+rather than letting a second vocabulary grow beside the first. The idle ladder's timeouts and
+retirement expiry make the same argument more quietly.
+
+It is a `Core` primitive on its own terms too, by the test the paragraph above uses: it is a
+statement about the timebase, it names nothing in any domain, and it has more than one caller before
+it has two implementations.
 
 ## Threads are a second partition
 

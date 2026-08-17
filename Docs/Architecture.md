@@ -934,19 +934,34 @@ integrated spring would have to be woken to discover it had nothing to do, which
 [Per-output evaluation](#per-output-evaluation) rejects, showing up on the power bill instead of on
 the seam between two monitors.
 
+**The invariant is a fold, and what it folds is a `Wake` rather than a boolean.** *(Written against
+the implementation, 2026-08-16.)* Every animating channel, every pending timeout, and every retiring
+entity contributes one; `Sooner` reduces them to the schedule, with *settled* as the identity, so a
+scene in which nothing contributes arms nothing. Stating it that way strengthens the invariant rather
+than restating it: *no timer armed* becomes **at most one timer armed per output, and its instant is
+the fold** — which absorbs the dim and blank timeouts below, the gesture-stop republish in
+[Animation.md](Animation.md#it-crosses-the-boundary-as-coefficients-like-everything-else), and
+retirement expiry into one reduction instead of leaving each of them a separate arm. It is also the
+only thing that gives periodic motion a way into this ladder at all, which the recovery console's
+[blinking cursor](#the-pre-vulkan-console) makes a shipping requirement rather than a nicety. The
+argument for the shape, including why an optional instant is not it, is in
+[Animation.md](Animation.md#settling-answers-with-a-wake-not-a-boolean).
+
 Three things follow that are easy to get wrong by omission. Cursor motion over an otherwise static
 screen updates the cursor plane and triggers no composite — the plane is already exempt from
 [admission control](#admission-control), and this is the other half of that exemption. A blinking
-text cursor on one output must not wake the other, which per-output damage already gives. And a
-variable-refresh panel needs no keepalive commit to hold its rate, which is the omission-error
+text cursor on one output must not wake the other, which per-output damage already gives, and which
+the fold above is partitioned by for the same reason: it is associative, so it may be reduced over
+the contributors to one output alone. And a variable-refresh panel needs no keepalive commit to hold
+its rate, which is the omission-error
 [the VRR servo](#vrr-as-a-scheduling-degree-of-freedom) is most likely to introduce and the one that
 would cost the most, since it would arm a timer on the machine most likely to be running on a
 battery.
 
 It is falsifiable, so it is a test rather than an aspiration: a static scene in the headless
-harness, N seconds, assert zero composites. That belongs beside the schedulability sweep, and it is
-the same argument [the floor tier](#the-floor-tier) makes — a property nobody exercises is a
-property nobody has.
+harness, N seconds, assert zero composites and no armed timer. That belongs beside the schedulability
+sweep, and it is the same argument [the floor tier](#the-floor-tier) makes — a property nobody
+exercises is a property nobody has.
 
 ### The ladder
 
