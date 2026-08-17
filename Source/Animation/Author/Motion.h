@@ -176,10 +176,14 @@ inline constexpr double MaximumSpeed = 16.0;
 // only the field it was given would leave the other reading as an explicit 0.4, and Overlay would lay
 // that taste value over the catalog and silently move a motion nobody configured. std::optional is
 // what makes absence representable, so the empty overlay overrides nothing and omission cannot clobber.
+// The default members are spelled rather than left to std::optional's own default constructor. Absence
+// is this type's meaningful state, so writing it is worth the width — and a designated initializer that
+// names one field is the idiom every use of this type is built around, which -Wmissing-field-initializers
+// diagnoses on a member with no initializer of its own.
 struct ConfiguredMotion
 {
-	std::optional<double> Response;
-	std::optional<double> Damping;
+	std::optional<double> Response = std::nullopt;
+	std::optional<double> Damping = std::nullopt;
 
 	friend constexpr bool operator==(ConfiguredMotion, ConfiguredMotion) noexcept = default;
 };
