@@ -87,6 +87,7 @@ gyro_add_module(Geometry PORTABLE
 		Core
 	TESTS
 		Scale.Test.cpp
+		Space.Test.cpp
 )
 
 # Declared after the modules, because the module list is what they check. ALL for the same reason as
