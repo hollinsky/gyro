@@ -3893,6 +3893,108 @@ live windows rather than snapshots since 2003; Compiz's `paintOutput` took a tra
 reason. It is the least-copied of the three ideas recorded here and the one with the longest
 uninterrupted track record.
 
+### 67. The settled snap is unconditional
+
+[Decision 54](#54-settled-geometry-snaps-to-the-outputs-device-grid) left open whether the snap
+applies to a node that is not sampling one-to-one. It does. Settled geometry snaps to the grid of
+the output being evaluated for, whatever its content is doing.
+
+The question reads as *a resampled node gains nothing, so why move it*, and that is true of the
+node's **content** and false of everything else about it. Three things about a node are geometry
+gyro draws rather than pixels it samples, and all three are one-to-one no matter what the interior
+does:
+
+- **The node's own edge.** A rect whose boundary lands at a non-integer device position has
+  partially covered pixels along its entire perimeter, so the composite blends it against whatever
+  is behind it. On a dark desktop under a light window that is a visible halo.
+- **Decorations.** [Decision
+  48](#48-linear-blending-is-a-visible-ecosystem-change-and-gyro-takes-it) pushes gyro toward
+  drawing borders and shadows itself, and their crispness is entirely a function of the node rect
+  being on the grid.
+- **Adjacency.** Two rects abut exactly when both are on the grid, and not otherwise.
+
+Adjacency decides it, because [Experience.md](Experience.md#the-picture-is-correct) states the
+tiling promise unconditionally — *two tiled windows meet with no line of background showing between
+them* — and a rule covering only one-to-one nodes cannot keep it. The configure remainder does not
+rescue that: [decision 52](#52-coordinate-spaces-are-three-and-quantization-belongs-to-the-output)
+absorbs the remainder into gyro's own gap and thereby governs device *extent*, while abutment
+additionally requires the *position* to be on the grid — and positions arrive continuously, from a
+drag released, a window animated into place, or a popup anchored to a control.
+
+The case that settles it is ordinary rather than exotic. A 1.5× panel with two windows tiled side by
+side, both Xwayland or integer-scale-only clients: [decision
+56](#56-clients-render-at-the-ceiling-and-gyro-downscales) has them render at 2× and be minified to
+0.75, so neither samples one-to-one, so under the narrower rule neither snaps, their shared boundary
+lands at an arbitrary sub-device-pixel offset, and a hairline of wallpaper shows between two windows
+that are supposed to be touching.
+
+The converse costs nothing. An overview thumbnail settled at scale 0.25 is snapped, gains nothing
+for its interior, loses nothing, and has a crisp edge. A node settled at a rotation that is not a
+multiple of ninety degrees gets a snap that is meaningless and harmless.
+
+**Consequence: the transform classification predicate is not a placement input.** The resample-once
+rule needs to know whether a node samples one-to-one; the snap does not ask. The predicate is
+diagnostic, and it drives plane promotion and effect quality. Wiring it into the snap path is how
+the second rule gets back in, so the type that answers it says as much.
+
+**Rejected: snapping only nodes that sample one-to-one.** Snap exactly where it buys crispness and
+skip where it cannot. It is the more precise-sounding rule, it fails the tiling promise on the most
+common fractional configuration there is, and it makes the settle path branch on a classification it
+otherwise has no reason to consult.
+
+**Rejected: "it keeps one rule instead of two."** The argument this decision was expected to rest
+on, and too weak to carry it — tidiness is not a reason to move a window. Recorded because the real
+argument was found only by asking what the snap buys a node whose content cannot benefit, and the
+answer turned out to be *everything except the content*.
+
+### 68. A subsurface snaps like any other settled node
+
+`wl_subsurface.set_position` is integer surface-local, so a subsurface cannot be device-aligned on a
+fractional output whatever gyro does. Decision 52 records that the limitation is the protocol's;
+what was open is whether gyro compounds it by rounding a second time. It does not compound it —
+because the misalignment is not gyro's to introduce. It is already there, inside the client, before
+gyro is involved.
+
+Work the arithmetic on the ordinary case: a 1.5× output, a client that speaks
+`wp_fractional_scale_v1` correctly, a video player drawing a frame around a video in a subsurface at
+surface-local offset (1, 1).
+
+- The client renders its parent buffer at 1.5×, so it rasterizes the hole for the video at buffer
+  texel `round(1 × 1.5) = 2`. Cairo and Skia both round to device pixels, and neither can draw a
+  hole at texel 1.5. - The client declares the subsurface position as the integer `1`, because that
+  is all `set_position` can express. In device space that is 1.5.
+
+**So the client has put its hole at device offset 2 and declared its child at 1.5.** The half-pixel
+disagreement exists in the client's own output before gyro touches anything, which means the
+candidates are not *exact versus approximate*. They are *which of the client's two contradictory
+statements do we believe*, and snapping believes the rasterization — which is where the pixels
+actually are.
+
+**Rejected: leaving the sub-pixel offset in place.** Believes the declaration, places the child at
+1.5, and lands it half a pixel from the hole the client drew, so the result is a soft child *and* a
+hairline at its boundary. It was the intuitive answer and it is the worst of the three, which is
+worth recording: it is what *do not introduce error* looks like when the error is already there.
+
+**Rejected: absorbing the remainder** the way decision 52 absorbs the configure remainder. There is
+no gap to absorb into, since a subsurface sits on its parent rather than beside it. The only
+coherent reading is choosing the *parent's* snap phase to favour its child, which trades the
+parent's crispness for the child's, cannot satisfy two subsurfaces at once, and needs an ordering
+rule that changes whenever a client attaches a differently scaled buffer. Three rules to serve a
+case that one rule already serves.
+
+**Rejected: ceiling the child's extent outward** so that a gap becomes an invisible overlap instead.
+It sounds free and it is not: ceiling the extent moves the child's sampling ratio off exactly one,
+so it resamples a child that was about to be crisp and defeats the thing the snap was for. Snap the
+position; leave the extent exact.
+
+**This rests on a claim about other people's code**, so it is worth being explicit that it is a bet
+rather than a proof. It assumes clients round their internal geometry to device pixels, at the scale
+they were told, to nearest. That is true of Cairo and Skia and of anything doing ordinary
+fractional-scale layout, and it is not guaranteed. A client that floored internally would put its
+hole at texel 1 while gyro snapped the child to 2 — a full device pixel of disagreement, and worse
+than leaving the offset alone. It is measurable rather than arguable, and the measurement is carried
+in [Open](#open).
+
 ---
 
 ## Open
