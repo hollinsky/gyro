@@ -337,13 +337,21 @@ pointed, and a channel could be two-thirds settled — which means nothing, and 
 above is on the magnitude, so the solver is generic over the channel's value type rather than
 instantiated once per component.
 
-**A chart-valued channel transports its velocity rather than copying it.** The log map is anchored at
-the target, so retargeting a rotation is a change of chart and not a subtraction: the deviation is
-recomputed against the new target, and the stored velocity — a tangent vector at the old base point —
-is carried across through the right-Jacobian of the exponential map. Copying it instead is wrong to
-*first* order in the change of deviation, which a ninety-degree retarget turns into roughly
-thirty-eight degrees of error in the angular velocity. Position stays continuous either way, so the
-symptom is not a jump but an interruption that leaves along slightly the wrong course.
+**A chart-valued channel transports its velocity rather than copying it.** The log map is anchored
+at the target, so retargeting a rotation is a change of chart and not a subtraction: the deviation
+is recomputed against the new target, and the stored velocity — a tangent vector at the old base
+point — is carried across through the right-Jacobian of the exponential map. Copying it instead is
+wrong to *first* order in the change of deviation rather than second. Position stays continuous
+either way, so the symptom is not a jump but an interruption that leaves along the wrong course — at
+a large retarget, visibly turning about a different axis rather than a slightly wrong one.
+
+**The linear term is not a bound in either direction**, and a figure quoted from it was wrong here
+until 2026-08-16. `½[u′−u]×v` describes the error only while the change of deviation is small; past
+about a radian the higher-order terms are the same size and may cancel it, so at `|Δu| = 1.83` the
+linear estimate is three times the true error. The honest statement is that the correction is O(1)
+in the change of deviation with a magnitude the linear term does not predict — which matters for one
+reason: anything tempted to skip the transport when `|Δu|` looks small enough cannot use the linear
+form to decide, and there is no cheaper test than doing it.
 
 This is why [Retargeting](#retargeting)'s exactness claim holds for rotation rather than nearly
 holding, and it is the reason the transport is one named call: the naive copy is the ergonomic path,

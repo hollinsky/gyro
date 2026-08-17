@@ -3506,6 +3506,13 @@ connect them and both are exact rather than inferred: the *surface* adapter is w
 `buffer_transform`, `buffer_scale`, and the viewport's `src` and `dst` say it is, and the *panel*
 adapter is an integer rotation and flip that KMS may execute or the composite may.
 
+**Those four inputs produce a scale per axis, not one number.** *(Corrected 2026-08-16.)* `src` and
+`dst` may disagree in aspect ratio — which is how anamorphic video reaches a compositor — so the
+sentence above reads as though the surface adapter were a single rational when it is two. The
+restricted transform stays exactly closed under the widening, since a quarter turn merely exchanges
+the two factors, which is what lets one type serve all three adapters rather than the surface one
+needing an algebra of its own that would have to agree with theirs.
+
 The rule that makes this a design rather than a diagram: **no integer ever flows backwards into the
 model.** Every rounding is a pure function of `(node, output, frame)` and is discarded with the
 frame that computed it.
@@ -3836,9 +3843,10 @@ on top of it, free where the hardware has it and absent on the software floor ti
 `wl_surface.set_buffer_scale` is correct but second-class. It cannot be *required*, since a client
 may simply not bind viewporter, so legacy is deprecated by being visibly worse rather than by being
 refused. What it buys structurally is that the buffer-to-surface adapter becomes **declared rather
-than inferred** — `src` is `wl_fixed` and `dst` is integer, so the mapping is an exact rational and
-gyro never derives a logical size from buffer dimensions and a floating-point scale. Decision 53's
-rule gets a structural home instead of remaining a discipline somebody has to remember.
+than inferred** — `src` is `wl_fixed` and `dst` is integer, so the mapping is an exact rational per
+axis (see decision 52; `src` and `dst` may disagree in aspect ratio) and gyro never derives a
+logical size from buffer dimensions and a floating-point scale. Decision 53's rule gets a structural
+home instead of remaining a discipline somebody has to remember.
 
 X11 clients have no notion of scale, so Xwayland surfaces live at one scale and are resampled
 everywhere else. A visible consequence, recorded rather than discovered.

@@ -1091,6 +1091,13 @@ scale factor. The panel adapter is distinct from output device space because a n
 rotation may be executed by a KMS plane or by us, and
 [direct scanout](#direct-scanout-is-conditional) already depends on knowing which.
 
+**All three adapters are one kind of thing**, and the table's differing descriptions of them are
+constraints rather than types: a rotation, a flip, a scale per axis, and a translation, closed under
+composition. What varies is which values each is held to — the panel adapter's translation is
+integral, and its scale is one *unless a plane's scaler is doing the work*, which is a property of
+the hardware rather than of the adapter. Reading the rows as three types costs the thing the closure
+buys, which is that a chain of them composes exactly and in any grouping.
+
 Global space is continuous, real-valued, output-independent, and Y-down, which matches Wayland's
 convention and Vulkan's clip space alike. Its basis unit is "one logical pixel at scale 1", for wire
 compatibility and for nothing else — nothing assumes integer alignment in it, and no logical size of

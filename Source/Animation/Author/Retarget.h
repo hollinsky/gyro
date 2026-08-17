@@ -100,10 +100,13 @@ Begin(SpringParameters<SpringScalar<V>> parameters, V position, V velocity, V ta
 // Velocity is the half that would go wrong quietly. The stored velocity is a tangent vector at the
 // old base point, and re-anchoring relates the two through the right-Jacobian of the exponential
 // map: the correct new velocity is J_r^-1(u')*J_r(u)*v, and copying it across unchanged is wrong by
-// roughly (u' - u) x v / 2. That is first order in the change of deviation rather than second, so a
-// retarget moving the deviation by ninety degrees puts the angular velocity some thirty-eight
-// degrees off course. Position stays continuous either way, so it does not read as a jump — it reads
-// as the interruption having gone somewhere slightly wrong, which is harder to attribute.
+// (u' - u) x v / 2 while the change of deviation is small — first order in it rather than second.
+// Past about a radian that linear form stops bounding anything, because the higher-order terms are
+// the same size and may cancel it, so it under- and overstates by turns; measured, a quarter-turn
+// retarget leaves the node turning about a visibly different axis. Position stays continuous either
+// way, so it does not read as a jump — it reads as the interruption having gone somewhere wrong,
+// which is harder to attribute. The practical consequence is that there is no cheap test for when
+// the transport can be skipped: the linear form is what such a test would use, and it does not hold.
 //
 // Geometry owns the chart and therefore owns all three conversions, so the rotation path is
 //
