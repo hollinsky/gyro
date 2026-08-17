@@ -1,0 +1,257 @@
+# Structure
+
+Where gyro's code lives, what may depend on what, and which thread each piece runs on.
+
+Companion documents: [Architecture.md](Architecture.md) for the platform seam and the frame loop,
+[Animation.md](Animation.md) for the animation system, [Decisions.md](Decisions.md) for the decision
+log.
+
+This is the third tier. [Experience.md](Experience.md) says what a person perceives;
+[Architecture.md](Architecture.md) and [Animation.md](Animation.md) say by what mechanism; this says
+where that mechanism lives and what stops the parts reaching each other. Citations point up:
+everything here rests on a decision recorded above it, and nothing above it needs this file in order
+to be understood.
+
+**Volatility: this document changes when the code moves**, which will be often. It is the most
+volatile of the three tiers and that is the arrangement working correctly — a module appearing,
+splitting, or being renamed changes this file and nothing else. If a change here forces a change in
+[Architecture.md](Architecture.md), the change was not structural.
+
+> **Most of this does not exist yet.** `Core` and `Testing` are built; the rest is a declaration of
+> where code goes when it is written. What is worth writing down this early is the *graph* rather
+> than the file list, because the graph is enforced from the first module and the edge that must not
+> exist is cheapest to forbid while there is nothing to forbid.
+
+## Two waists
+
+Everything hangs off two modules that nothing hangs off of.
+
+**`Publication` is the data waist** — what crosses between threads. The snapshot representation, the
+single-producer / single-consumer ring, the return channel, the consumed-sequence watermark, the
+per-buffer hold. It is
+[decision 45](Decisions.md#45-protocol-dispatch-is-a-thread-not-a-task) and
+[decision 50](Decisions.md#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients)
+given somewhere to live.
+
+**`Seam` is the control waist** — every interface with more than one implementation, and the plain
+data that crosses them: `IPresenter`, `IRenderer`, `IClock`, `ISession`, `IInput`, alongside
+`RenderTarget`, `SyncPoint`, `PresentationInfo`, and `Region`. It is
+[the seam](Architecture.md#the-seam) plus the one interface that is not platform at all, for the
+reason under [Frame is portable](#frame-is-portable).
+
+Both are portable, both depend only on `Core` and `Geometry`, and **the composition root is the only
+thing that knows both sides of either.**
+
+## The runtime
+
+```mermaid
+flowchart TB
+    subgraph dispatch["Dispatch thread — allocates freely"]
+        direction LR
+        Protocol["Protocol, input"] --> Scene --> Publisher
+    end
+
+    subgraph boundary["Publication boundary — the only two channels"]
+        direction LR
+        Return["Return channel"]
+        Snapshot
+    end
+
+    subgraph frame["Frame thread — no allocation"]
+        direction RL
+        Reader --> Loop["Frame loop"] --> Evaluate["Evaluate, record"]
+    end
+
+    Publisher --> Snapshot --> Reader
+    Evaluate --> Return --> Protocol
+```
+
+The shape is a cycle, and the two crossings are the whole of the traffic between the threads. Down
+the right goes the snapshot: offset-addressed POD, spring coefficients rather than evaluated values,
+acquired once per iteration. Up the left goes the return channel: frame callbacks,
+`wp_presentation_feedback`, `wl_buffer.release`, the exit-blit hold, and the measured costs that
+feed [budgets](Architecture.md#budgets).
+
+A third channel would be a design error rather than an addition, which is why the return channel is
+one bounded queue and not four ad-hoc mechanisms — see
+[the publication boundary](Architecture.md#the-publication-boundary).
+
+## The modules
+
+```mermaid
+flowchart TB
+    Compositor --> Dispatch["Dispatch side<br/>Protocol · Session · Scene"]
+    Compositor --> Frame["Frame side<br/>Frame · Render · backends"]
+    Dispatch --> Publication
+    Frame --> Publication
+    Dispatch --> Seam
+    Frame --> Seam
+    Publication --> Base["Core · Geometry"]
+    Seam --> Base
+```
+
+**The frame side does not depend on `Scene`, `Protocol`, or `Session`, and that edge must never be
+added.** It is the one thing in this document worth enforcing rather than describing: an include of
+`Scene` from `Frame` compiles, links, runs, and surfaces months later as jitter with no obvious
+cause. `CMake/CheckLayering.cmake` is what draws the line.
+
+| Module | Tier | Thread | Depends on |
+| --- | --- | --- | --- |
+| `Core` | portable | either | — |
+| `Geometry` | portable | either | `Core` |
+| `Animation` | portable | **both** | `Core`, `Geometry` |
+| `Publication` | portable | **both** | `Core`, `Geometry` |
+| `Seam` | portable | **both** | `Core`, `Geometry` |
+| `Scene` | portable | dispatch | `Core`, `Geometry`, `Animation`, `Publication` |
+| `Frame` | portable | frame | `Core`, `Geometry`, `Animation`, `Publication`, `Seam` |
+| `Render` | platform | **both** | `Core`, `Geometry`, `Publication`, `Seam` |
+| `Protocol` | platform | dispatch | `Core`, `Geometry`, `Scene` |
+| `Session` | platform | dispatch | `Core`, `Protocol`, `Scene`, `Seam` |
+| `Headless`, `Nested`, `Drm` | platform | split | `Core`, `Geometry`, `Seam` |
+| `Console` | platform | own | `Core`, `Geometry`, `Seam` |
+| `Compositor` | platform | constructs | everything |
+| `Testing` | portable | — | — |
+
+Portable means what [decision 6](Decisions.md#6-no-macos-port-development-continues-over-ssh) means:
+ISO C++ and POSIX, no Linux-only or platform-stack headers, so the tests build and run on a machine
+with no GPU, no seat, and no compositor. `CMake/CheckPortability.cmake` enforces it.
+
+### Frame is portable
+
+`Frame` holds the frame loop, `FrameClock`, admission control, and the timing policy, and it drives
+`IRenderer` and `IPresenter` as interfaces rather than as Vulkan and KMS. That is what lets the
+schedulability sweep and the idle assertion run in CI against fake clocks and a null renderer that
+merely charges a simulated `C`, which is the first point at which
+[decision 29](Decisions.md#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)
+becomes falsifiable rather than argued.
+
+If those interfaces lived in `Render` instead, `Frame` would be platform code and the sweep would be
+testing a reimplementation of the loop — which is the thing that rots.
+
+### Geometry is not part of Core
+
+`Core` is dependency-free primitives: the timebase, handles, the slot allocator, logging.
+`Geometry` is domain content: the exact rational scale, the restricted transform and its
+classification predicate, the 3D TRS with anchor and quaternion, the coordinate spaces.
+
+The split earns itself on one file.
+[Architecture.md](Architecture.md#resample-once-and-know-when-it-is-zero) requires the transform
+classification predicate to exist before it has a second caller, because plane promotion, damage
+mapping, and the sharpness path all ask the same question and three independently derived answers is
+how they drift apart. One module gives it one home.
+
+## Threads are a second partition
+
+The module graph is a dependency graph. Thread affinity is a different partition over the same code,
+and the two are not the same shape. Four modules straddle the boundary, and each splits in half:
+
+| Module | Frame half | Dispatch half |
+| --- | --- | --- |
+| `Animation` | `Solve` — closed form over published coefficients | `Author` — `Animatable`, catalog, retargeting |
+| `Publication` | `Reader` — wait-free, const | `Publisher` — serializes, allocates, reclaims |
+| `Render` | `Record` — passes, submission | `Import` — dmabuf, shm upload, resource creation |
+| `Platform` | presentation | input, session |
+
+That last row is worth noticing rather than arranging: [the seam](Architecture.md#the-seam) keeps
+session, presentation, input, and outputs independent on testability grounds, and **they turn out to
+split by thread as well.** Presentation is frame-side; input and session are dispatch-side. Keeping
+them unfused buys the thread separation for nothing.
+
+What the module graph enforces is the negative form, and that is the half that matters: the frame
+side cannot reach the world, because the edge does not exist. What it cannot express is that `Frame`
+must not reach `Animation::Author` — both are modules `Frame` legitimately depends on. For the four
+straddlers, that check has to run at header granularity, which is a small extension to
+`CheckLayering.cmake` and is deliberately not built until the modules exist.
+
+The rest of thread discipline is runtime instrumentation rather than structure — the debug allocator
+of [decision 36](Decisions.md#36-frame-path-discipline-is-enforced-mechanically-not-by-review),
+which aborts on an allocation inside the frame section, and the priority ordering of
+[decision 45](Decisions.md#45-protocol-dispatch-is-a-thread-not-a-task).
+
+## Orchestration
+
+**One composition root.** `Compositor` constructs the clock, the backend, the rendering device, the
+publication channel, the scene, the protocol, and the threads, and hands each subsystem what it
+needs. Nothing else names an implementation. This is `IClock`'s argument generalized: a subsystem
+that can reach a dependency ambiently is a subsystem that eventually does, and *a singleton would
+put a reachable now back exactly where this design just took one out.*
+
+**An interface exists where there is a fake.** Clock, presenter, renderer, session, input — that set
+is exactly what the headless backend substitutes, which is a serviceable test of whether a seam is
+real or merely tasteful. An interface with one implementation and no prospect of a second is a cost
+with no buyer.
+
+**`Signal<>` is intra-thread only.** [The seam](Architecture.md#the-seam) puts signals on
+`IPresenter` and `ISession`, and they are ordinary observer callbacks within one thread. A signal
+crossing the boundary would be a third channel, and the design turns on there being two.
+
+**Nothing crosses the boundary by ownership.** No `shared_ptr`, no mutex spanning it. Shared
+ownership puts `free` on the frame path wearing a destructor's clothes, where the debug allocator
+cannot catch it, and a shared lock rebuilds the priority inversion the thread ordering exists to
+prevent. Reclamation is deferred against the consumed-sequence watermark.
+
+## The three cases that decide ownership
+
+Ownership questions are settled by the paths that tear things down, not by the paths that build
+them. These three decide most of it.
+
+**[Device migration](Architecture.md#device-migration) runs on every boot**, because `simpledrm`
+binds the framebuffer before the real driver loads. `Render` must tear down and rebuild whole while
+`Frame` keeps running and the presenter holds the last frame on glass. So `Frame` holds nothing of
+`Render`'s beyond an interface pointer, no Vulkan handle outlives the device that made it, and the
+swap is the composition root's.
+
+**[Restart](Architecture.md#restart)** returns the DRM fd from the service manager's fd store, and
+the mode is adopted rather than re-set. So `Seam` takes an already-open fd as its primary path with
+"open one yourself" as a provider rather than as the only option —
+[decision 39](Decisions.md#39-running-from-the-initramfs-is-deferred-and-deliberately-not-foreclosed)
+wants the same affordance.
+
+**[Resume](Architecture.md#suspend-and-resume) is a modeset**, and its checklist touches `Frame`
+(invalidate every clock), `Scene` (hard-settle every spring, drain the retiring set), and `Render`
+(expect `VK_ERROR_DEVICE_LOST`) in that order. Something has to sequence that, and the composition
+root is the one place a cross-module sequence is allowed to exist. A subsystem reaching sideways to
+another during resume is how this becomes a graph with no top.
+
+## What is enforced
+
+Each of these is a build failure rather than a review comment, which is the standing
+[decision 36](Decisions.md#36-frame-path-discipline-is-enforced-mechanically-not-by-review)
+establishes for the frame path and this file extends to the module graph.
+
+| Check | Rule | Recorded in |
+| --- | --- | --- |
+| `CheckClockDiscipline.cmake` | one reader of the timebase | [decision 57](Decisions.md#57-one-timebase-clock_monotonic-converted-at-ingest-and-nowhere-else) |
+| `CheckPortability.cmake` | no platform headers in a `PORTABLE` module | [decision 6](Decisions.md#6-no-macos-port-development-continues-over-ssh) |
+| `CheckLayering.cmake` | every `#include` lies on a declared edge; the graph is a DAG | this document |
+
+`gyro_add_module` is where a module declares itself to all three. `PORTABLE` enrols it in the
+second; `DEPENDS` is the graph the third holds it to. Dependencies are transitive, matching
+`PUBLIC` linkage, so `Core` does not have to be named by everything — the frame-side edge is caught
+either way, because nothing in that closure leads to the world.
+
+The check exists because CMake enforces a dependency it can see a *symbol* for, and most of this
+codebase is headers. The timebase, handles, geometry, `Animatable`, and the snapshot accessors all
+have no symbol to link, so CMake has nothing to notice and an include is the only dependency there
+is.
+
+## Open
+
+- **Header-granularity layering for the four straddling modules.** `Frame` reaching
+  `Animation::Author` is a real violation the module-level check cannot see. Deferred until those
+  modules exist, since the rule needs the halves to be named before it can name them.
+- **Header-only modules.** `add_library(STATIC)` needs a translation unit, so a module that is all
+  headers cannot currently be declared. It should become an `INTERFACE` library whose tests are what
+  compile it — which makes a rule true that is worth having: a header with no test is a header
+  nothing has compiled.
+- **Generated sources.** `gyro_add_module` prepends the module directory to every source, so the
+  protocol bindings — generated into the build tree by a host tool — cannot yet be expressed.
+- **Where the differ lives.** Placed in `Scene` here, so that `Animation` stays a pure library of
+  springs and catalog with no knowledge of entities and can be built first per
+  [decision 10](Decisions.md#10-the-animation-system-is-built-first).
+  [Animation.md](Animation.md#declarative-commits) reads the other way, and the two should be
+  reconciled before either is written.
+- **Whether `Console` shares `Seam`'s presenter.** The pre-Vulkan console writes dumb buffers with
+  CPU blits and needs no renderer, no device, and no scene. Whether that is a third implementation
+  of `IPresenter` or a path beside the seam entirely is unresolved, and it decides whether `Seam`
+  has to express a target nobody renders into.

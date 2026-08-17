@@ -4,8 +4,8 @@ What a person perceives when they use a machine running gyro, stated independent
 is achieved.
 
 This is the first tier of the documentation. [Architecture.md](Architecture.md) is the second and
-describes mechanism; a third tier describing structure does not exist yet. The relationship between
-them is directional and it is the point of the arrangement:
+describes mechanism; [Structure.md](Structure.md) is the third and describes where that mechanism
+lives. The relationship between them is directional and it is the point of the arrangement:
 
 - **Citations point up; dependencies point down.** Architecture cites this document as
   justification. This document may not require Architecture in order to be understood. If an

@@ -51,6 +51,7 @@ add_custom_target(ClockDiscipline ALL
 	COMMAND ${CMAKE_COMMAND}
 		-D SOURCE_DIR=${GYRO_SOURCE_DIR}
 		-P ${CMAKE_CURRENT_SOURCE_DIR}/CMake/CheckClockDiscipline.cmake
+	VERBATIM
 )
 
 # spdlog
@@ -74,11 +75,12 @@ gyro_add_module(Core PORTABLE
 		Clock.cpp
 )
 
-# Declared after the modules, because the module list is what it checks. ALL for the same reason as
+# Declared after the modules, because the module list is what they check. ALL for the same reason as
 # the clock check above.
 #
 # A semicolon inside a custom command's argument is split into separate arguments before the script
-# sees it, so the check is handed a separator of its own and splits it itself.
+# sees it, so both checks are handed a separator of their own and split it themselves. VERBATIM is
+# what keeps the graph's `|` from reaching the shell as a pipe.
 get_property(GYRO_PORTABLE_MODULES GLOBAL PROPERTY GYRO_PORTABLE_MODULES)
 list(JOIN GYRO_PORTABLE_MODULES "," GYRO_PORTABLE_MODULES)
 add_custom_target(Portability ALL
@@ -86,6 +88,25 @@ add_custom_target(Portability ALL
 		-D SOURCE_DIR=${GYRO_SOURCE_DIR}
 		-D MODULES=${GYRO_PORTABLE_MODULES}
 		-P ${CMAKE_CURRENT_SOURCE_DIR}/CMake/CheckPortability.cmake
+	VERBATIM
+)
+
+# The module graph, flattened to "Name=Dep,Dep|Name=Dep,Dep" because a -P script takes no maps.
+get_property(GYRO_MODULES GLOBAL PROPERTY GYRO_MODULES)
+set(GYRO_MODULE_GRAPH "")
+foreach(MODULE IN LISTS GYRO_MODULES)
+	get_property(MODULE_DEPENDS GLOBAL PROPERTY GYRO_MODULE_DEPENDS_${MODULE})
+	list(JOIN MODULE_DEPENDS "," MODULE_DEPENDS)
+	list(APPEND GYRO_MODULE_GRAPH "${MODULE}=${MODULE_DEPENDS}")
+endforeach()
+list(JOIN GYRO_MODULE_GRAPH "|" GYRO_MODULE_GRAPH)
+
+add_custom_target(Layering ALL
+	COMMAND ${CMAKE_COMMAND}
+		-D SOURCE_DIR=${GYRO_SOURCE_DIR}
+		-D GRAPH=${GYRO_MODULE_GRAPH}
+		-P ${CMAKE_CURRENT_SOURCE_DIR}/CMake/CheckLayering.cmake
+	VERBATIM
 )
 
 add_executable(gyro

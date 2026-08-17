@@ -9,6 +9,11 @@
 # The keyword is not documentation. Declaring it enrolls the module in CheckPortability.cmake, so
 # the tier is a build failure rather than a convention that erodes the first time something is
 # convenient — the same standing CheckClockDiscipline.cmake gives the timebase.
+#
+# DEPENDS has the same standing. It is the module graph in Docs/Structure.md, and
+# CheckLayering.cmake holds every #include in the module to it — because CMake enforces a link
+# dependency and this codebase is mostly headers, where there is no symbol to link and therefore
+# nothing for CMake to notice.
 
 function(gyro_add_module NAME)
 	cmake_parse_arguments(PARSE_ARGV 1 MODULE "PORTABLE;OBJECT" "" "SOURCES;TESTS;DEPENDS")
@@ -33,6 +38,9 @@ function(gyro_add_module NAME)
 	endif()
 
 	target_link_libraries(${NAME} PUBLIC BuildFlags ${MODULE_DEPENDS})
+
+	set_property(GLOBAL APPEND PROPERTY GYRO_MODULES ${NAME})
+	set_property(GLOBAL PROPERTY GYRO_MODULE_DEPENDS_${NAME} "${MODULE_DEPENDS}")
 
 	if(MODULE_PORTABLE)
 		set_property(GLOBAL APPEND PROPERTY GYRO_PORTABLE_MODULES ${NAME})
