@@ -99,6 +99,21 @@ done, and the one thing it has retired is the one that changed a decision.
   vocabulary itself — which gestures exist, and what each binds to — belongs with the scene and
   material vocabularies above and for the same reason: a gesture, the transition it drives, and the
   nodes it moves are one design problem seen three ways.
+- **Where the driven regime lives.** *(Surfaced 2026-08-16, writing `Animatable`.)* Decision 65 and
+  [Animation.md](Animation.md#progress-is-an-ordinary-animatable) make progress an `Animatable<float>`
+  *like any other*, with a sprung regime and a driven one, and the driven one publishes
+  `(p₀, v₀, t₀, horizon)` read as `p₀ + v₀·clamp(T − t₀, 0, horizon)`. That is not reachable from any
+  `(ω, ζ)` — a spring converges on a target and this is a ramp that stops at an authored instant — so
+  the two coefficient sets are genuinely two. `Animatable` as written carries one, and says so.
+
+  The member that decides it is `NextWake`. *Held is settled* wants every frame until `t₀ + horizon`
+  and nothing after, and a spring's settle instant is computed from its coefficients rather than
+  authored, so no spelling of the wake lets `Spring::WakeAt` answer for the driven case. Either the
+  driven regime lives outside `Animatable`, and what gives is *like any other* — a gesture then runs
+  on a second mechanism beside the springs, which is the shape decision 65 says it does not want — or
+  the type carries a discriminated pair. It wants deciding before the publisher exists rather than
+  after, because it is the same question as whether the snapshot's per-node record is one array or a
+  tagged one, and that is answered once.
 - **Colour format for virtual outputs.** Encoders want NV12 or P010, not RGBA. The agent can convert
   (an extra full-frame pass and its bandwidth), or gyro can fold RGB→YUV into its final composite
   pass (much cheaper, but the renderer grows a YUV output path it otherwise would not have), or both

@@ -261,16 +261,22 @@ No keypaths, no boxing, no string lookup. A typed wrapper holding the model valu
 state — a handful of floats, evaluable without allocation.
 
 ```cpp
-template <Interpolatable T>
+template <SpringValue T>
 class Animatable
 {
 public:
-	const T& Model() const;
-	T        Presentation(Instant t) const;       // pure; closed form
-	Wake     NextWake(Instant t) const;           // Core/Wake.h; see below
+	using Scalar = SpringScalar<T>;
 
-	void AnimateTo(const T& target, MotionRef motion, Instant t0);
+	const T&       Model() const;
+	T              Presentation(Instant t) const;       // pure; closed form
+	SpringState<T> PresentationState(Instant t) const;  // (x, v); what a gesture takeover reads
+	Wake           NextWake(Instant t, SettleThresholds<Scalar>) const;  // Core/Wake.h; see below
+	bool           IsAtRest() const;                    // derived from the coefficients, not flagged
+
+	void AnimateTo(const T& target, SpringParameters<Scalar> motion, Instant t0);
+	void AnimateTo(const T& target, SpringParameters<Scalar> motion, Instant t0, const T& v₀);
 	void SetImmediate(const T& value);
+	void Settle();                                      // onto the model value, at rest, now
 };
 ```
 
@@ -902,4 +908,4 @@ retargeting.
 - **Snapshot atlas capacity.** The multiple of the output render target is deliberately not guessed.
   It wants a count of legitimate simultaneous retirements to size it and per-output high-water and
   eviction instrumentation to confirm it; an eviction outside a stress test means the number is
-  wrong. See [Decisions.md](Decisions.md#open).
+  wrong. See [Open.md](Open.md).

@@ -21,6 +21,11 @@ namespace
 	return Monotonic::FromNanoseconds(static_cast<std::int64_t>(seconds * 1'000'000'000.0));
 }
 
+// Named once with the fields spelled out, which is what the threshold pair being a type buys: two
+// adjacent scalars at a call site transpose silently, and the cost is a wrong settle instant.
+constexpr SettleThresholds<double> Ordinary{ .Position = 1e-3, .Velocity = 1e-3 };
+constexpr SettleThresholds<double> Tight{ .Position = 1e-9, .Velocity = 1e-9 };
+
 [[nodiscard]] Spring<double> Moving()
 {
 	return Begin(ParametersFromResponse(0.4, 0.7), 100.0, -250.0, 0.0, Instant{});
@@ -153,8 +158,8 @@ GYRO_TEST(HardSettle, LandsExactlyOnTheTarget)
 {
 	const Spring<double> settled = HardSettle(Moving());
 
-	GYRO_CHECK(settled.IsSettled(settled.Origin, 1e-9, 1e-9));
-	GYRO_CHECK_EQ(settled.SettlesAt(1e-9, 1e-9), settled.Origin);
+	GYRO_CHECK(settled.IsSettled(settled.Origin, Tight));
+	GYRO_CHECK_EQ(settled.SettlesAt(Tight), settled.Origin);
 
 	for (const double seconds : { 0.0, 0.01, 5.0, 1e5 })
 	{
@@ -188,7 +193,7 @@ GYRO_TEST(ParametersFromResponse, ClampsNonsenseIntoSomethingThatSettles)
 			GYRO_REQUIRE(std::isfinite(parameters.Damping) && parameters.Damping > 0.0);
 
 			const Spring<double> spring = Begin(parameters, 250.0, -600.0, 0.0, Instant{});
-			const Instant settled = spring.SettlesAt(1e-3, 1e-3);
+			const Instant settled = spring.SettlesAt(Ordinary);
 
 			GYRO_CHECK(settled != Instant{ Duration::max() });
 			GYRO_CHECK(std::isfinite(spring.Evaluate(settled).Position));
@@ -234,5 +239,5 @@ GYRO_TEST(Author, WorksOnAVectorChannel)
 	GYRO_CHECK_EQ(settled.Offset, Pair{});
 	GYRO_CHECK_EQ(settled.Velocity, Pair{});
 	GYRO_CHECK_EQ(settled.Evaluate(At(3.0)).Position, spring.Target);
-	GYRO_CHECK(settled.IsSettled(settled.Origin, 1e-9, 1e-9));
+	GYRO_CHECK(settled.IsSettled(settled.Origin, Tight));
 }

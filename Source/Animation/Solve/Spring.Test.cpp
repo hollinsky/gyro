@@ -35,6 +35,11 @@ constexpr double Offsets[] = { -240.0, -1.0, 0.25, 60.0 };
 // well past the initial displacement before the envelope takes hold.
 constexpr double Velocities[] = { -900.0, 0.0, 7.0, 450.0 };
 
+// Stand-ins rather than policy: the geometric thresholds are in device pixels and the non-geometric
+// ones are open in Docs/Open.md, which is why the solver takes them as an argument. Named once and
+// with the fields spelled out, which is the whole ergonomic point of the pair being a type.
+constexpr SettleThresholds<double> Thresholds{ .Position = 1e-3, .Velocity = 1e-3 };
+
 template<typename Body>
 void Sweep(Body&& body)
 {
@@ -311,11 +316,8 @@ GYRO_TEST(Spring, AMissedFrameCostsNothing)
 // animation freezes mid-flight.
 GYRO_TEST(Spring, SettlesNoEarlierThanItClaims)
 {
-	constexpr double PositionEpsilon = 1e-3;
-	constexpr double VelocityEpsilon = 1e-3;
-
 	Sweep([&](const Spring<double>& spring) {
-		const Instant settled = spring.SettlesAt(PositionEpsilon, VelocityEpsilon);
+		const Instant settled = spring.SettlesAt(Thresholds);
 
 		GYRO_REQUIRE(settled != Instant{ Duration::max() });
 		GYRO_REQUIRE(settled >= spring.Origin);
@@ -330,9 +332,9 @@ GYRO_TEST(Spring, SettlesNoEarlierThanItClaims)
 			const Instant at = settled + DurationFromSeconds(ToSeconds(elapsed) * multiple);
 			const SpringState<double> state = spring.Evaluate(at);
 
-			GYRO_CHECK(std::abs(state.Position - Target) <= PositionEpsilon);
-			GYRO_CHECK(std::abs(state.Velocity) <= VelocityEpsilon);
-			GYRO_CHECK(spring.IsSettled(at, PositionEpsilon, VelocityEpsilon));
+			GYRO_CHECK(std::abs(state.Position - Target) <= Thresholds.Position);
+			GYRO_CHECK(std::abs(state.Velocity) <= Thresholds.Velocity);
+			GYRO_CHECK(spring.IsSettled(at, Thresholds));
 		}
 	});
 }
@@ -343,8 +345,8 @@ GYRO_TEST(Spring, SettlesImmediatelyWhenItHasNowhereToGo)
 {
 	const Spring<double> spring{ Instant{}, { 6.283, 1.0 }, Target, 0.0, 0.0 };
 
-	GYRO_CHECK_EQ(spring.SettlesAt(1e-3, 1e-3), spring.Origin);
-	GYRO_CHECK(spring.IsSettled(spring.Origin, 1e-3, 1e-3));
+	GYRO_CHECK_EQ(spring.SettlesAt(Thresholds), spring.Origin);
+	GYRO_CHECK(spring.IsSettled(spring.Origin, Thresholds));
 	GYRO_CHECK_EQ(spring.Evaluate(At(10.0)).Position, Target);
 }
 
@@ -354,31 +356,28 @@ GYRO_TEST(Spring, NeverSettlesWithoutDamping)
 {
 	const Spring<double> spring{ Instant{}, { 6.283, 0.0 }, Target, 5.0, 0.0 };
 
-	GYRO_CHECK_EQ(spring.SettlesAt(1e-3, 1e-3), Instant{ Duration::max() });
-	GYRO_CHECK(!spring.IsSettled(At(1e6), 1e-3, 1e-3));
+	GYRO_CHECK_EQ(spring.SettlesAt(Thresholds), Instant{ Duration::max() });
+	GYRO_CHECK(!spring.IsSettled(At(1e6), Thresholds));
 }
 
 // What the spring hands the scheduler, swept for the one property the fold depends on: a spring that
 // is not settled must contribute something the reduction cannot fold away.
 GYRO_TEST(Spring, ContributesEveryFrameUntilItSettlesAndNothingAfterwards)
 {
-	constexpr double PositionEpsilon = 1e-3;
-	constexpr double VelocityEpsilon = 1e-3;
-
 	Sweep([&](const Spring<double>& spring) {
-		const Instant settled = spring.SettlesAt(PositionEpsilon, VelocityEpsilon);
+		const Instant settled = spring.SettlesAt(Thresholds);
 
 		GYRO_REQUIRE(settled > spring.Origin);
 
 		const Instant before = settled - Duration{ 1 };
-		const Wake inFlight = spring.WakeAt(before, PositionEpsilon, VelocityEpsilon);
+		const Wake inFlight = spring.WakeAt(before, Thresholds);
 
 		GYRO_CHECK_EQ(inFlight, Wake::EveryFrame(before));
 		GYRO_CHECK(inFlight.IsDue(before));
 		GYRO_CHECK_EQ(Sooner(inFlight, Wake::Never()), inFlight);
 
-		GYRO_CHECK_EQ(spring.WakeAt(settled, PositionEpsilon, VelocityEpsilon), Wake::Never());
-		GYRO_CHECK_EQ(spring.WakeAt(settled + Duration{ 1 }, PositionEpsilon, VelocityEpsilon), Wake::Never());
+		GYRO_CHECK_EQ(spring.WakeAt(settled, Thresholds), Wake::Never());
+		GYRO_CHECK_EQ(spring.WakeAt(settled + Duration{ 1 }, Thresholds), Wake::Never());
 	});
 }
 
@@ -392,7 +391,7 @@ GYRO_TEST(Spring, NeverSettlingContributesAStandingCommitmentRatherThanIdle)
 
 	for (const double seconds : { 0.0, 1.0, 1e6 })
 	{
-		const Wake wake = spring.WakeAt(At(seconds), 1e-3, 1e-3);
+		const Wake wake = spring.WakeAt(At(seconds), Thresholds);
 
 		GYRO_CHECK_EQ(wake.Which, Wake::Kind::Continuous);
 		GYRO_CHECK(wake.IsDue(At(seconds)));
@@ -459,8 +458,8 @@ GYRO_TEST(Spring, ProducesNoNonFiniteValues)
 			GYRO_CHECK(std::isfinite(state.Position) && std::isfinite(state.Velocity));
 		}
 
-		GYRO_CHECK(spring.SettlesAt(1e-3, 1e-3) >= spring.Origin);
-		GYRO_CHECK(spring.SettlesAt(0.0, 0.0) == Instant{ Duration::max() });
+		GYRO_CHECK(spring.SettlesAt(Thresholds) >= spring.Origin);
+		GYRO_CHECK(spring.SettlesAt({}) == Instant{ Duration::max() });
 	});
 }
 
@@ -543,7 +542,7 @@ GYRO_TEST(SpringVector, MatchesThreeScalarSpringsSharingOneMotion)
 // pointed. The device-grid snap happens at that moment.
 GYRO_TEST(SpringVector, SettlesOnTheMagnitudeAndNotOnAComponent)
 {
-	constexpr double Epsilon = 1e-3;
+	constexpr SettleThresholds<double> Epsilon{ .Position = 1e-3, .Velocity = 1e-3 };
 	constexpr SpringParameters<double> Parameters{ 9.0, 0.55 };
 
 	// Same magnitude, different axis. The magnitude criterion cannot tell these apart, and that is
@@ -555,7 +554,7 @@ GYRO_TEST(SpringVector, SettlesOnTheMagnitudeAndNotOnAComponent)
 
 	// To within the norm's own rounding, since sqrt(9 + 16) and sqrt(25) are not obliged to be the
 	// same double even though both are five.
-	GYRO_CHECK(std::abs(ToSeconds(spread.SettlesAt(Epsilon, Epsilon) - along.SettlesAt(Epsilon, Epsilon))) <= 1e-6);
+	GYRO_CHECK(std::abs(ToSeconds(spread.SettlesAt(Epsilon) - along.SettlesAt(Epsilon))) <= 1e-6);
 
 	// And an evenly spread displacement crosses the threshold as a vector strictly later than any one
 	// of its components does alone — by exactly the root three between their amplitudes, since the
@@ -565,12 +564,12 @@ GYRO_TEST(SpringVector, SettlesOnTheMagnitudeAndNotOnAComponent)
 	const Spring<Triple> vector{ Instant{}, Parameters, Triple{}, Triple{ component, component, component }, Triple{} };
 	const Spring<double> single{ Instant{}, Parameters, 0.0, component, 0.0 };
 
-	const Instant whole = vector.SettlesAt(Epsilon, Epsilon);
-	const Instant part = single.SettlesAt(Epsilon, Epsilon);
+	const Instant whole = vector.SettlesAt(Epsilon);
+	const Instant part = single.SettlesAt(Epsilon);
 	const double gap = std::log(std::sqrt(3.0)) / (Parameters.Damping * Parameters.Frequency);
 
 	GYRO_CHECK(whole > part);
-	GYRO_CHECK(!vector.IsSettled(part, Epsilon, Epsilon));
+	GYRO_CHECK(!vector.IsSettled(part, Epsilon));
 	GYRO_CHECK(std::abs(ToSeconds(whole - part) - gap) <= 1e-6);
 
 	// And the criterion the solver actually applies holds, at the instant it nominates and after it.
@@ -579,7 +578,7 @@ GYRO_TEST(SpringVector, SettlesOnTheMagnitudeAndNotOnAComponent)
 		const Instant at = whole + DurationFromSeconds(ToSeconds(whole - vector.Origin) * multiple);
 		const SpringState<Triple> state = vector.Evaluate(at);
 
-		GYRO_CHECK(Magnitude(state.Position - vector.Target) <= Epsilon);
-		GYRO_CHECK(Magnitude(state.Velocity) <= Epsilon);
+		GYRO_CHECK(Magnitude(state.Position - vector.Target) <= Epsilon.Position);
+		GYRO_CHECK(Magnitude(state.Velocity) <= Epsilon.Velocity);
 	}
 }

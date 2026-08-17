@@ -116,6 +116,7 @@ gyro_add_module(Animation PORTABLE
 		Core
 	TESTS
 		Solve/Spring.Test.cpp
+		Author/Animatable.Test.cpp
 		Author/Retarget.Test.cpp
 )
 

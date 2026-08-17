@@ -222,6 +222,36 @@ struct SpringParameters
 	friend constexpr bool operator==(SpringParameters, SpringParameters) noexcept = default;
 };
 
+// What *close enough* means for a channel, as one named thing rather than as two arguments.
+//
+// Both halves are needed, and this file is where that is argued: springs never arrive, so a position
+// threshold alone leaves the system damaging forever at sub-pixel amplitude. Neither half is this
+// module's to know — the geometric ones are in device pixels of the finest grid a node intersects,
+// and the policy for opacity, blur radius, and corner radius is open in Docs/Open.md — so both
+// arrive as an argument.
+//
+// **A pair rather than two parameters, because two adjacent scalars of the same type transpose
+// silently.** The result of transposing them is not a crash and not a wrong picture; it is a settle
+// instant off by however far apart the two numbers were, and that instant is what decides when the
+// compositor stops drawing. Docs/Animation.md#priorities' second priority calls a divergence between
+// the ergonomic path and the correct one a design bug rather than a discipline problem, and one
+// designated initializer at the definition is what closes it for every call site downstream. It is
+// also what the unresolved non-geometric policy eventually attaches to: a named type can grow a
+// third field or a per-channel-kind constructor, and a loose pair can only grow another argument.
+//
+// Zero by default, which is the conservative direction and the one this whole file is built on. A
+// zero threshold is never crossed, so a channel handed a default-constructed pair never settles and
+// the compositor keeps drawing. The opposite default would let a field somebody forgot to fill in
+// settle a channel early, which is an animation freezing mid-flight.
+template<std::floating_point T>
+struct SettleThresholds
+{
+	T Position = T(0); // in the channel's own units
+	T Velocity = T(0); // and per second
+
+	friend constexpr bool operator==(SettleThresholds, SettleThresholds) noexcept = default;
+};
+
 // What evaluation yields. Both halves are wanted at once: retargeting needs the velocity to hand
 // off, and computing it separately would evaluate the same transcendentals twice.
 template<SpringValue V>
@@ -326,15 +356,13 @@ struct Spring
 	// still moving, and the user watches an animation freeze mid-flight. So every bound below is an
 	// envelope the trajectory provably sits inside, never an estimate of where it actually is.
 	//
-	// Both thresholds are arguments rather than constants, because neither is this module's to
-	// know: the geometric ones are in device pixels of the finest grid a node intersects, and the
-	// policy for opacity, blur radius, and corner radius is an open question in Docs/Decisions.md.
-	// Springs never arrive, so a position threshold alone leaves the system damaging forever at
-	// sub-pixel amplitude.
+	// The thresholds are an argument rather than constants, for the reasons SettleThresholds
+	// records above — neither half is this module's to know, and the pair is one named thing so that
+	// a call site cannot transpose them.
 	//
 	// On a vector channel both thresholds are on the magnitude, which is the whole reason the solver
 	// is generic over the value type rather than instantiated once per component.
-	[[nodiscard]] Instant SettlesAt(Scalar positionEpsilon, Scalar velocityEpsilon) const noexcept
+	[[nodiscard]] Instant SettlesAt(SettleThresholds<Scalar> thresholds) const noexcept
 	{
 		const Scalar w = Parameters.Frequency;
 		const Scalar z = Parameters.Damping;
@@ -360,8 +388,8 @@ struct Spring
 				const Scalar rate = z * w;
 
 				seconds = std::max(
-					Detail::DecayTime(amplitude, positionEpsilon, rate),
-					Detail::DecayTime(amplitude * w, velocityEpsilon, rate)
+					Detail::DecayTime(amplitude, thresholds.Position, rate),
+					Detail::DecayTime(amplitude * w, thresholds.Velocity, rate)
 				);
 				break;
 			}
@@ -384,8 +412,8 @@ struct Spring
 				const Scalar rate = (Scalar(1) - Alpha) * w;
 
 				seconds = std::max(
-					Detail::DecayTime(Magnitude(u0) + reach, positionEpsilon, rate),
-					Detail::DecayTime(Magnitude(v0) + w * reach, velocityEpsilon, rate)
+					Detail::DecayTime(Magnitude(u0) + reach, thresholds.Position, rate),
+					Detail::DecayTime(Magnitude(v0) + w * reach, thresholds.Velocity, rate)
 				);
 				break;
 			}
@@ -398,9 +426,9 @@ struct Spring
 				const Scalar rate = -roots.Slow;
 
 				seconds = std::max(
-					Detail::DecayTime(Magnitude(roots.C1) + Magnitude(roots.C2), positionEpsilon, rate),
+					Detail::DecayTime(Magnitude(roots.C1) + Magnitude(roots.C2), thresholds.Position, rate),
 					Detail::DecayTime(
-						Magnitude(roots.C1) * -roots.Slow + Magnitude(roots.C2) * -roots.Fast, velocityEpsilon, rate
+						Magnitude(roots.C1) * -roots.Slow + Magnitude(roots.C2) * -roots.Fast, thresholds.Velocity, rate
 					)
 				);
 				break;
@@ -413,9 +441,9 @@ struct Spring
 	// Defined in terms of SettlesAt rather than by evaluating and comparing, so the two cannot
 	// disagree. An exact test would sometimes report settled before the conservative instant, which
 	// is two answers to one question and the way the scheduler and the differ drift apart.
-	[[nodiscard]] bool IsSettled(Instant at, Scalar positionEpsilon, Scalar velocityEpsilon) const noexcept
+	[[nodiscard]] bool IsSettled(Instant at, SettleThresholds<Scalar> thresholds) const noexcept
 	{
-		return at >= SettlesAt(positionEpsilon, velocityEpsilon);
+		return at >= SettlesAt(thresholds);
 	}
 
 	// What this spring contributes to the schedule, which is what Core/Wake.h reduces over.
@@ -431,9 +459,9 @@ struct Spring
 	// A representation whose "never again" could be spelled from a "never settles" would instead have
 	// reported the one motion in the design that genuinely never stops as the one thing idle is
 	// allowed to fold away.
-	[[nodiscard]] Wake WakeAt(Instant at, Scalar positionEpsilon, Scalar velocityEpsilon) const noexcept
+	[[nodiscard]] Wake WakeAt(Instant at, SettleThresholds<Scalar> thresholds) const noexcept
 	{
-		return IsSettled(at, positionEpsilon, velocityEpsilon) ? Wake::Never() : Wake::EveryFrame(at);
+		return IsSettled(at, thresholds) ? Wake::Never() : Wake::EveryFrame(at);
 	}
 
 private:
