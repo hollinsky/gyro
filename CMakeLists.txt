@@ -80,6 +80,15 @@ gyro_add_module(Core PORTABLE
 		Time.Test.cpp
 )
 
+# Header-only, so the tests are the only thing that compiles it. See Docs/Structure.md, both for why
+# Geometry is not part of Core and for what that arrangement makes true.
+gyro_add_module(Geometry PORTABLE
+	DEPENDS
+		Core
+	TESTS
+		Scale.Test.cpp
+)
+
 # Declared after the modules, because the module list is what they check. ALL for the same reason as
 # the clock check above.
 #

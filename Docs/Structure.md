@@ -17,7 +17,7 @@ volatile of the three tiers and that is the arrangement working correctly — a 
 splitting, or being renamed changes this file and nothing else. If a change here forces a change in
 [Architecture.md](Architecture.md), the change was not structural.
 
-> **Most of this does not exist yet.** `Core` and `Testing` are built; the rest is a declaration of
+> **Most of this does not exist yet.** `Core`, `Geometry`, and `Testing` are built; the rest is a declaration of
 > where code goes when it is written. What is worth writing down this early is the *graph* rather
 > than the file list, because the graph is enforced from the first module and the edge that must not
 > exist is cheapest to forbid while there is nothing to forbid.
@@ -230,6 +230,13 @@ second; `DEPENDS` is the graph the third holds it to. Dependencies are transitiv
 `PUBLIC` linkage, so `Core` does not have to be named by everything — the frame-side edge is caught
 either way, because nothing in that closure leads to the world.
 
+A module with no `SOURCES` is header-only and becomes an `INTERFACE` library, since a static archive
+needs something to archive. Most of this codebase is headed that way, so it is the ordinary case
+rather than the exception, and it makes one more rule true by construction: the tests are then the
+only thing that compiles the module, so **a header with no test is a header nothing has compiled.**
+`gyro_add_module` requires `TESTS` where `SOURCES` is absent, which is what keeps that from being a
+coincidence.
+
 The check exists because CMake enforces a dependency it can see a *symbol* for, and most of this
 codebase is headers. The timebase, handles, geometry, `Animatable`, and the snapshot accessors all
 have no symbol to link, so CMake has nothing to notice and an include is the only dependency there
@@ -240,10 +247,6 @@ is.
 - **Header-granularity layering for the four straddling modules.** `Frame` reaching
   `Animation::Author` is a real violation the module-level check cannot see. Deferred until those
   modules exist, since the rule needs the halves to be named before it can name them.
-- **Header-only modules.** `add_library(STATIC)` needs a translation unit, so a module that is all
-  headers cannot currently be declared. It should become an `INTERFACE` library whose tests are what
-  compile it — which makes a rule true that is worth having: a header with no test is a header
-  nothing has compiled.
 - **Generated sources.** `gyro_add_module` prepends the module directory to every source, so the
   protocol bindings — generated into the build tree by a host tool — cannot yet be expressed.
 - **Where the differ lives.** Placed in `Scene` here, so that `Animation` stays a pure library of
