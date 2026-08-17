@@ -1297,8 +1297,10 @@ everywhere else.
   trails that never show up in a screenshot.
 - **`wl_subsurface.set_position`** is integer surface-local, so a subsurface cannot be
   device-aligned on a fractional output at all. That one belongs to the protocol and is not gyro's
-  to fix; what gyro controls is whether it compounds it by rounding a second time.
-  [Open](Open.md).
+  to fix; what gyro controls is whether it compounds it by rounding a second time, and
+  [decision 68](Decisions.md#68-a-subsurface-snaps-like-any-other-settled-node) settles that it does
+  not — a settled subsurface snaps to the device grid like any other node. What stays
+  [open](Open.md) is narrower: whether clients round their interior the way that snap assumes.
 
 ## Effects and quality
 

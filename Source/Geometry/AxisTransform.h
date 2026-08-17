@@ -258,8 +258,9 @@ template<std::floating_point T>
 // one-to-one even when the interior is not, and Docs/Experience.md's "two tiled windows meet with no
 // line of background showing between them" is stated with no condition attached to it. A snap that
 // consulted this would keep that promise only for the nodes that happened to be sampling one-to-one.
-// So this is diagnostic, and it decides quality and promotion; the snap path must not read it. That
-// reading of decision 54 is newer than the decision log's entry for it.
+// So this is diagnostic, and it decides quality and promotion; the snap path must not read it, which
+// is decision 67: the settled snap is unconditional, so this predicate is a diagnostic rather than a
+// placement input, and wiring it into the snap path is how the second rule gets back in.
 struct TransformClass
 {
 	// The image of an axis-aligned rectangle is an axis-aligned rectangle, so a rectangle maps to a
