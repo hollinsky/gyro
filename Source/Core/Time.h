@@ -117,10 +117,17 @@ struct Monotonic
 // The standard supplies formatters only for the calendar clocks, and a time_point over a private
 // tag is not one of them. Prints time since the timebase's epoch, which is boot, and which is the
 // only reading of an Instant that means anything on its own.
+//
+// The context is a template parameter rather than std::format_context, and it has to be. The
+// std::formattable concept instantiates a formatter against an unspecified context type that is not
+// required to be, and in libstdc++ is not, the one std::format uses — so naming the concrete type
+// leaves std::format working while the concept reports false. Nothing here would notice; the test
+// harness would, by printing <unprintable> in place of the two instants that failed to match.
 template<>
 struct std::formatter<Instant> : std::formatter<Duration>
 {
-	auto format(Instant instant, std::format_context& context) const
+	template<typename Context>
+	auto format(Instant instant, Context& context) const
 	{
 		return std::formatter<Duration>::format(instant.time_since_epoch(), context);
 	}
@@ -137,6 +144,8 @@ concept Addable = requires(T a, T b) { a + b; };
 // The contract everything downstream assumes. The runtime half waits on the test harness.
 static_assert(sizeof(Instant) == sizeof(std::int64_t) && sizeof(Duration) == sizeof(std::int64_t));
 static_assert(std::is_trivially_copyable_v<Instant> && std::is_trivially_copyable_v<Duration>);
+static_assert(std::formattable<Instant, char>, "A report prints the instant rather than <unprintable>");
+static_assert(std::formattable<Duration, char>);
 static_assert(!Detail::Addable<Instant>, "Two points in time do not add");
 static_assert(Detail::Addable<Duration>);
 static_assert(!std::is_convertible_v<Duration, Instant>, "Entering the domain must be explicit");

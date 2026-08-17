@@ -73,6 +73,9 @@ gyro_add_module(Testing PORTABLE OBJECT
 gyro_add_module(Core PORTABLE
 	SOURCES
 		Clock.cpp
+	TESTS
+		Clock.Test.cpp
+		Time.Test.cpp
 )
 
 # Declared after the modules, because the module list is what they check. ALL for the same reason as
