@@ -35,10 +35,9 @@ per-buffer hold. It is
 given somewhere to live.
 
 **`Seam` is the control waist** — every interface with more than one implementation, and the plain
-data that crosses them: `IPresenter`, `IRenderer`, `IClock`, `ISession`, `IInput`, alongside
-`RenderTarget`, `SyncPoint`, `PresentationInfo`, and `Region`. It is
-[the seam](Architecture.md#the-seam) plus the one interface that is not platform at all, for the
-reason under [Frame is portable](#frame-is-portable).
+data that crosses them: `IPresenter`, `IRenderer`, `ISession`, `IInput`, alongside `RenderTarget`,
+`SyncPoint`, `PresentationInfo`, and `Region`. It is [the seam](Architecture.md#the-seam) plus the
+one interface that is not platform at all, for the reason under [Frame is portable](#frame-is-portable).
 
 Both are portable, both depend only on `Core` and `Geometry`, and **the composition root is the only
 thing that knows both sides of either.**
