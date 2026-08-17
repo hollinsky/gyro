@@ -90,6 +90,19 @@ gyro_add_module(Geometry PORTABLE
 		Space.Test.cpp
 )
 
+# Split by direction rather than by tier: Solve consumes spring coefficients and is what the frame
+# thread may call, Author produces them and is dispatch-side. Docs/Structure.md's module graph gives
+# Animation an edge to Geometry as well, which the solver does not need — settling thresholds arrive
+# as arguments precisely so that neither the geometric ones nor the unresolved non-geometric ones
+# have to be known here. The edge lands when the catalog does.
+gyro_add_module(Animation PORTABLE
+	DEPENDS
+		Core
+	TESTS
+		Solve/Spring.Test.cpp
+		Author/Retarget.Test.cpp
+)
+
 # Declared after the modules, because the module list is what they check. ALL for the same reason as
 # the clock check above.
 #

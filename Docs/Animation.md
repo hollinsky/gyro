@@ -85,10 +85,52 @@ reproducible. Everything downstream depends on this:
   [Idle and power](Architecture.md#doing-nothing-must-cost-nothing). An integrated spring must be
   woken to discover it has nothing to do.
 
+### Settling is a bound, not a solution
+
+*(Written against the implementation, 2026-08-16.)* The formula above is the underdamped envelope
+and it is the only one of the three that is quoted anywhere. The other two are not the same shape,
+and the one that differs most is the one the catalog sits on.
+
+**The error direction is what sets the whole design.** An answer later than the true settle costs a
+few redundant composites at the tail of an animation. An answer earlier drops the compositor to idle
+with something still moving, and the user watches an animation freeze. So each regime supplies an
+envelope the trajectory provably sits inside, never an estimate of where it is, and each supplies one
+for velocity as well — the answer is the later of the two crossings.
+
+- **Underdamped.** Exact rather than merely conservative. With `A = √(u₀² + B²)`, position is
+  bounded by `A·e^(−ζωt)` and velocity by `A·ω·e^(−ζωt)` — the velocity amplitude being
+  `A·√(ζ²ω² + ω_d²)`, which collapses to `A·ω`. The only slack is the phase within the final cycle.
+- **Overdamped.** The slower root bounds the sum, so `|u| ≤ (|C₁|+|C₂|)·e^(r₁t)` and
+  `|u′| ≤ (|C₁r₁|+|C₂r₂|)·e^(r₁t)`. Slack is the triangle inequality alone. Note that `r₁` is the
+  **slow** root under this document's sign convention, and that using the fast one is
+  anti-conservative — the failure above, arrived at by a subscript.
+- **Critical.** Transcendental, and the only regime that pays. `(u₀ + Ct)·e^(−ωt) < ε` has no closed
+  solution, so the polynomial factor is absorbed into a slower exponential: `t·e^(−αωt) ≤ 1/(αωe)`
+  for any `α ∈ (0,1)` bounds the whole expression by a pure exponential decaying at `(1−α)ω`.
+
+`α = ½` keeps it to one logarithm and costs **up to twice the true settling time** — roughly six
+tenths of a second of extra armed timers on a half-second response. That is the tail of an animation
+rather than steady-state idle, so it does not touch
+[the idle invariant](Architecture.md#doing-nothing-must-cost-nothing), and it is the accepted cost.
+Tightening means optimizing `α` or taking a Newton step, and neither changes what is asserted.
+
+**Two numerical hazards, both in the overdamped form.** `ζ − √(ζ²−1)` is a subtraction of
+near-equals for large ζ and loses most of its digits; it is computed as `ω/(ζ + √(ζ²−1))`, which is
+algebraically identical and has no cancellation. And the root span `r₁ − r₂ = 2ω√(ζ²−1)` vanishes as
+ζ → 1 from above, which is why the band below is two-sided rather than a floor.
+
 ### Implementation notes
 
 - **ζ near 1 is numerically hostile.** `ω_d → 0` in the underdamped form and `r₁ → r₂` in the
   overdamped one. Pick a threshold and fall into the critical form inside it.
+
+  *(Annotated 2026-08-16.)* The threshold is a property of the stored precision rather than a
+  constant. At `|1−ζ| = δ` the underdamped form's cancellation error grows like `ε/√δ` while the
+  critical form's approximation error grows like `δ`, so balancing them gives `δ = ε^(2/3)` — with
+  the exponent rounded down to keep the band exact in binary and to err toward the form that is well
+  conditioned there. It is pinned by a trajectory-continuity test across both crossings rather than
+  by the derivation. This is not a rare corner: "no bounce" is ζ ≥ 1, so the catalog is expected to
+  sit on or beside the band.
 - **Springs never arrive.** Settling needs both a position and a velocity threshold, or the system
   damages forever at sub-pixel amplitude. Geometric thresholds are in output pixels so they scale
   correctly with DPI — and on a node spanning outputs of different densities, in pixels of the
@@ -123,6 +165,10 @@ Interruption is the whole game, and closed form makes it trivial and exact:
 
 Four floats, no allocation, exact velocity preservation. Retargeting subsumes the `speed = 0` plus
 `timeOffset` model for *interruption*, which is what that model is usually reached for.
+
+Exactness survives a channel whose coordinates move with its target — rotation is the one — but not
+by this arithmetic. See [transforms](#transforms), where the subtraction above stops being the right
+operation and the velocity is transported rather than copied.
 
 It does not subsume gesture *driving*, and this paragraph claimed that it did until 2026-08-16 —
 that the target could simply follow the finger, with the gesture's velocity handed off on release. A
@@ -271,6 +317,30 @@ paths, and both present as a window travelling a visibly strange route, which is
 hardest to attribute to its cause. In the log map rotation stays one channel with one spring, which
 is what [decision 17](Decisions.md#17-transforms-are-decomposed-into-trs-with-per-channel-springs)
 meant by per-channel and what three Euler springs would quietly undo.
+
+**One spring, not three, is a claim about settling rather than about the path.** *(Written against
+the implementation, 2026-08-16.)* Three scalar springs sharing one motion produce an identical
+trajectory, because the equation is decoupled and a shared `(ω, ζ, t₀)` gives every component the
+same solution. What they cannot share is a settling criterion: three per-component thresholds is
+axis-dependent, so the same rotation would finish at different moments depending on where its axis
+pointed, and a channel could be two-thirds settled — which means nothing, and which is the moment
+[the device-grid snap](Architecture.md#quantization-belongs-to-the-output) happens at. The threshold
+above is on the magnitude, so the solver is generic over the channel's value type rather than
+instantiated once per component.
+
+**A chart-valued channel transports its velocity rather than copying it.** The log map is anchored at
+the target, so retargeting a rotation is a change of chart and not a subtraction: the deviation is
+recomputed against the new target, and the stored velocity — a tangent vector at the old base point —
+is carried across through the right-Jacobian of the exponential map. Copying it instead is wrong to
+*first* order in the change of deviation, which a ninety-degree retarget turns into roughly
+thirty-eight degrees of error in the angular velocity. Position stays continuous either way, so the
+symptom is not a jump but an interruption that leaves along slightly the wrong course.
+
+This is why [Retargeting](#retargeting)'s exactness claim holds for rotation rather than nearly
+holding, and it is the reason the transport is one named call: the naive copy is the ergonomic path,
+and [priority 2](#priorities) says that where the ergonomic path and the correct path diverge, the
+design is at fault rather than the author. The cost is two Jacobians and a matrix-vector product on
+the dispatch thread at event rate, so nothing about it is a trade.
 
 ### Storage
 
