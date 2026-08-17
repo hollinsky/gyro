@@ -358,6 +358,48 @@ GYRO_TEST(Spring, NeverSettlesWithoutDamping)
 	GYRO_CHECK(!spring.IsSettled(At(1e6), 1e-3, 1e-3));
 }
 
+// What the spring hands the scheduler, swept for the one property the fold depends on: a spring that
+// is not settled must contribute something the reduction cannot fold away.
+GYRO_TEST(Spring, ContributesEveryFrameUntilItSettlesAndNothingAfterwards)
+{
+	constexpr double PositionEpsilon = 1e-3;
+	constexpr double VelocityEpsilon = 1e-3;
+
+	Sweep([&](const Spring<double>& spring) {
+		const Instant settled = spring.SettlesAt(PositionEpsilon, VelocityEpsilon);
+
+		GYRO_REQUIRE(settled > spring.Origin);
+
+		const Instant before = settled - Duration{ 1 };
+		const Wake inFlight = spring.WakeAt(before, PositionEpsilon, VelocityEpsilon);
+
+		GYRO_CHECK_EQ(inFlight, Wake::EveryFrame(before));
+		GYRO_CHECK(inFlight.IsDue(before));
+		GYRO_CHECK_EQ(Sooner(inFlight, Wake::Never()), inFlight);
+
+		GYRO_CHECK_EQ(spring.WakeAt(settled, PositionEpsilon, VelocityEpsilon), Wake::Never());
+		GYRO_CHECK_EQ(spring.WakeAt(settled + Duration{ 1 }, PositionEpsilon, VelocityEpsilon), Wake::Never());
+	});
+}
+
+// The composition the third case exists for. SettlesAt saturates for an undamped oscillator, and the
+// comparison against a saturated instant is false forever — so the one motion in the design that
+// genuinely never stops contributes a standing commitment rather than an absence of one, and folding
+// it against an otherwise idle scene cannot produce idle.
+GYRO_TEST(Spring, NeverSettlingContributesAStandingCommitmentRatherThanIdle)
+{
+	const Spring<double> spring{ Instant{}, { 6.283, 0.0 }, Target, 5.0, 0.0 };
+
+	for (const double seconds : { 0.0, 1.0, 1e6 })
+	{
+		const Wake wake = spring.WakeAt(At(seconds), 1e-3, 1e-3);
+
+		GYRO_CHECK_EQ(wake.Which, Wake::Kind::Continuous);
+		GYRO_CHECK(wake.IsDue(At(seconds)));
+		GYRO_CHECK_EQ(Sooner(Wake::Never(), wake).Which, Wake::Kind::Continuous);
+	}
+}
+
 // Evaluating before the origin runs the exponential backwards into an overflow, so it yields the
 // initial state instead. The ordering holds by construction — t0 is an input event's timestamp and
 // evaluation happens at predicted presentation time — which is what makes this a guard rather than

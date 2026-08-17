@@ -10,6 +10,7 @@
 #include <type_traits>
 
 #include "Core/Time.h"
+#include "Core/Wake.h"
 
 // The damped harmonic oscillator, in closed form.
 //
@@ -415,6 +416,24 @@ struct Spring
 	[[nodiscard]] bool IsSettled(Instant at, Scalar positionEpsilon, Scalar velocityEpsilon) const noexcept
 	{
 		return at >= SettlesAt(positionEpsilon, velocityEpsilon);
+	}
+
+	// What this spring contributes to the schedule, which is what Core/Wake.h reduces over.
+	//
+	// A spring in flight cannot name a next interesting instant, because every instant between here
+	// and settling is one — so the answer is a standing commitment to every frame, and then nothing.
+	// This is the shape a boolean at this seam is adequate for and a next-instant is not, and it is
+	// why the type has a third case rather than being an optional.
+	//
+	// The saturation in SettlesAt composes with this in the safe direction rather than by
+	// arrangement. An undamped oscillator settles at an instant no frame reaches, so the comparison
+	// is false forever and the answer stays continuous — correct, and visible to whatever prices it.
+	// A representation whose "never again" could be spelled from a "never settles" would instead have
+	// reported the one motion in the design that genuinely never stops as the one thing idle is
+	// allowed to fold away.
+	[[nodiscard]] Wake WakeAt(Instant at, Scalar positionEpsilon, Scalar velocityEpsilon) const noexcept
+	{
+		return IsSettled(at, positionEpsilon, velocityEpsilon) ? Wake::Never() : Wake::EveryFrame(at);
 	}
 
 private:

@@ -89,6 +89,7 @@ gyro_add_module(Core PORTABLE OBJECT
 		Handle.Test.cpp
 		SlotAllocator.Test.cpp
 		Time.Test.cpp
+		Wake.Test.cpp
 )
 
 # Header-only, so the tests are the only thing that compiles it. See Docs/Structure.md, both for why
