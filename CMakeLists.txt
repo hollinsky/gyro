@@ -75,6 +75,7 @@ gyro_add_module(Core PORTABLE
 		Clock.cpp
 	TESTS
 		Clock.Test.cpp
+		Handle.Test.cpp
 		Time.Test.cpp
 )
 
