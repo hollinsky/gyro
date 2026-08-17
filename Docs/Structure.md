@@ -17,7 +17,8 @@ volatile of the three tiers and that is the arrangement working correctly — a 
 splitting, or being renamed changes this file and nothing else. If a change here forces a change in
 [Architecture.md](Architecture.md), the change was not structural.
 
-> **Most of this does not exist yet.** `Core`, `Geometry`, `Animation`, and `Testing` are built; the rest is a declaration of
+> **Most of this does not exist yet.** `Core`, `Geometry`, `Animation`, `Publication`, and `Testing` are built; the rest is a
+> declaration of
 > where code goes when it is written. What is worth writing down this early is the *graph* rather
 > than the file list, because the graph is enforced from the first module and the edge that must not
 > exist is cheapest to forbid while there is nothing to forbid.

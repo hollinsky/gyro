@@ -7,6 +7,8 @@ firmware's BGRT logo, and provides the recovery console that replaces VTs.
 
 Nothing commercial. Do not add dependencies without asking first and justifying their inclusion.
 
+None of these code or architecture decisions are sacred, there's no "mine" vs "yours," we're building this in its entirety together. We should also treat the world around us as malleable if it helps us. If we need to propose some change to the kernel or create a new standard for userspace, let's talk about it.
+
 Ask questions before implementing where it helps you to implement more effectively.
 
 Always format C++ code using the project's `.clang-format` configuration before finalizing changes.

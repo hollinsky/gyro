@@ -137,6 +137,30 @@ gyro_add_module(Animation PORTABLE
 		Author/Retarget.Test.cpp
 )
 
+# The data waist: what crosses between the two threads. This cut is the snapshot representation and
+# its wait-free reader; the SPSC ring, the return channel, the watermark, and the per-buffer hold are
+# later parts of the same module. Split by direction like Animation is: Reader is the frame half and
+# is the default, Publisher is the dispatch half that serialises and allocates.
+#
+# FRAME_DEPENDS Core narrows the frame half to Core alone. The waist rests on Core and Geometry
+# (Docs/Structure.md), but Geometry is authoring-side content — the coordinate spaces a position is
+# expressed in before it is serialised — so it stops at the boundary the same way Animation's does. A
+# geometric type reaching the reader would be a build failure with the reason attached rather than
+# something a reader has to notice.
+gyro_add_module(Publication PORTABLE
+	DISPATCH_HALF
+		Publisher
+	DEPENDS
+		Core
+		Geometry
+	FRAME_DEPENDS
+		Core
+	TESTS
+		Snapshot.Test.cpp
+		Reader/Reader.Test.cpp
+		Publisher/Publisher.Test.cpp
+)
+
 # Declared after the modules, because the module list is what they check. ALL for the same reason as
 # the clock check above.
 #
@@ -212,3 +236,23 @@ target_link_libraries(gyro
 add_executable(UringProbe
 	Tools/UringProbe.cpp
 )
+
+# The one test that stands on both sides of the publication waist: it publishes real spring
+# coefficients through Publication and reconstitutes them through Animation/Solve, which no single
+# module may do — Publication does not depend on Animation, by the graph. So it is a bespoke
+# executable rather than a gyro_add_module, outside the per-module layering the crossing is the whole
+# point of, and it is a temporary home for the round trip until Scene and Frame own their ends of it.
+# Core and Testing are named directly for the reason gyro_add_module names them: they are OBJECT
+# libraries, and an object library's members reach only the targets that name it.
+add_executable(IntegrationTests
+	Source/Integration/PublicationRoundTrip.Test.cpp
+)
+target_link_libraries(IntegrationTests
+	PRIVATE
+		Publication
+		Animation
+		Geometry
+		Core
+		Testing
+)
+add_test(NAME Integration COMMAND IntegrationTests)
