@@ -21,6 +21,15 @@ Codebase Structure:
 		Main.cpp              - Thin entry point: CLI arg parsing (--version, --help)
 		Version.h.in          - CMake-configured version string template
 
+		Core/                 - Portable tier. Time.h is the timebase (Instant, Duration, the
+		                        ingest conversions); Clock.h is IClock, MonotonicClock, and the
+		                        ManualClock the headless backend and tests drive
+		Testing/              - The hand-rolled test harness and every test binary's main().
+		                        GYRO_TEST / GYRO_CHECK / GYRO_REQUIRE; see decision 9
+
+		Tests live beside what they test, as <Unit>.Test.cpp, and are listed in the module's
+		TESTS rather than compiled into it.
+
 	Tools/
 		UringProbe.cpp        - Standalone io_uring capability probe. Raw syscalls, no liburing,
 		                        so it runs on a target machine before gyro does. First draft of
@@ -35,17 +44,35 @@ Codebase Structure:
 		                  users, the shell, login agent, event loop, protocol layer
 		Animation.md    - Tier 2. Animation system: springs, motion catalog, commits, transforms,
 		                  interactive transitions, identity, lifetime, exit pixels
+		Structure.md    - Tier 3. Modules and their tiers, the dependency graph and the two waists
+		                  it hangs off, which thread each piece runs on, the composition root, and
+		                  what the build checks enforce
 		Decisions.md    - Cross-cutting. Decision log with rejected alternatives and rationale
 		                  (66 decisions), plus the open-question list
 
 	Docs are tiered: Experience (what the user perceives) → Architecture and Animation (mechanism
-	and invariants) → a structural tier that does not exist yet. Citations point up; dependencies
+	and invariants) → Structure (where the mechanism lives). Citations point up; dependencies
 	point down. A tier-2 document may cite Experience as justification; Experience may never require
 	a mechanism document in order to be understood.
 
 	CMakeLists.txt  - Build configuration, dependency management via CPM
 	.clang-format   - Code style (tabs, Allman braces, 120 col limit)
 	AGENTS.md       - Project context for AI agents (note that CLAUDE.md is a symlink for Claude)
+
+	CMake/
+		BuildFlags.cmake           - The warning set, sanitizers (GYRO_SANITIZE), GYRO_WERROR,
+		                             GYRO_LTO, and the source-root include path. Everything links it
+		Module.cmake               - gyro_add_module(). PORTABLE declares a module part of the tier
+		                             decision 6 keeps free of Linux headers; DEPENDS declares its
+		                             edges in Structure.md's module graph
+		CheckClockDiscipline.cmake - One reader of the timebase, enforced (decision 57)
+		CheckPortability.cmake     - No platform headers in a PORTABLE module (decision 6)
+		CheckLayering.cmake        - Every #include lies on a declared DEPENDS edge; graph is a DAG
+
+	All three checks are ALL targets, so an ordinary build runs them; a violation fails the build
+	rather than waiting for review. Add a discipline here rather than to a style guide nobody greps.
+
+	Build: cmake -S . -B build -G Ninja && ninja -C build && ctest --test-dir build
 
 Read Docs/ before proposing architectural changes. Decisions.md records what was rejected and why;
 re-litigating a settled decision requires engaging with the recorded rationale.
