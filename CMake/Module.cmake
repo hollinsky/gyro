@@ -21,8 +21,18 @@ function(gyro_add_module NAME)
 	if(MODULE_UNPARSED_ARGUMENTS)
 		message(FATAL_ERROR "gyro_add_module(${NAME}): unexpected argument ${MODULE_UNPARSED_ARGUMENTS}")
 	endif()
-	if(NOT MODULE_SOURCES)
-		message(FATAL_ERROR "gyro_add_module(${NAME}): SOURCES is required")
+	if(MODULE_OBJECT AND NOT MODULE_SOURCES)
+		message(FATAL_ERROR "gyro_add_module(${NAME}): OBJECT needs SOURCES to hold the objects")
+	endif()
+
+	# A module with no translation unit of its own is header-only, and it is an INTERFACE library
+	# because a static archive needs something to archive. Most of this codebase is headed that way —
+	# geometry, Animatable, the snapshot accessors — so this is the ordinary case rather than the
+	# exception, and the tests are then the only thing that ever compiles the module. That makes a
+	# rule worth having true by construction rather than by habit: a header with no test is a header
+	# nothing has compiled. Requiring TESTS here is what stops it being a coincidence.
+	if(NOT MODULE_SOURCES AND NOT MODULE_TESTS)
+		message(FATAL_ERROR "gyro_add_module(${NAME}): a module with no SOURCES is compiled only by its TESTS")
 	endif()
 
 	# Sources are named relative to the module, because a module listing another module's files is
@@ -30,14 +40,20 @@ function(gyro_add_module NAME)
 	list(TRANSFORM MODULE_SOURCES PREPEND "${GYRO_SOURCE_DIR}/${NAME}/")
 
 	# OBJECT is for a module something links but nothing references by symbol — the test harness,
-	# whose main() a static archive would leave on the shelf.
+	# whose main() a static archive would leave on the shelf. The scope keyword travels with the
+	# library kind, since an INTERFACE target has no private half to describe.
 	if(MODULE_OBJECT)
 		add_library(${NAME} OBJECT ${MODULE_SOURCES})
-	else()
+		set(SCOPE PUBLIC)
+	elseif(MODULE_SOURCES)
 		add_library(${NAME} STATIC ${MODULE_SOURCES})
+		set(SCOPE PUBLIC)
+	else()
+		add_library(${NAME} INTERFACE)
+		set(SCOPE INTERFACE)
 	endif()
 
-	target_link_libraries(${NAME} PUBLIC BuildFlags ${MODULE_DEPENDS})
+	target_link_libraries(${NAME} ${SCOPE} BuildFlags ${MODULE_DEPENDS})
 
 	set_property(GLOBAL APPEND PROPERTY GYRO_MODULES ${NAME})
 	set_property(GLOBAL PROPERTY GYRO_MODULE_DEPENDS_${NAME} "${MODULE_DEPENDS}")
