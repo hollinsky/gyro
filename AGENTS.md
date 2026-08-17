@@ -24,6 +24,13 @@ Codebase Structure:
 		Core/                 - Portable tier. Time.h is the timebase (Instant, Duration, the
 		                        ingest conversions); Clock.h is IClock, MonotonicClock, and the
 		                        ManualClock the headless backend and tests drive
+		Geometry/             - Portable tier. Scale.h is the exact rational output scale; Space.h is
+		                        the coordinate spaces and the values that live in them, with the
+		                        integer grid kept off the world
+		Animation/            - Portable tier, split by direction rather than by purity. Solve/ holds
+		                        the closed-form spring the frame thread evaluates; Author/ produces
+		                        coefficients and is dispatch-side. A frame-side include of Author/ is
+		                        a violation; see decisions 11 and 12
 		Testing/              - The hand-rolled test harness and every test binary's main().
 		                        GYRO_TEST / GYRO_CHECK / GYRO_REQUIRE; see decision 9
 
@@ -48,7 +55,7 @@ Codebase Structure:
 		                  it hangs off, which thread each piece runs on, the composition root, and
 		                  what the build checks enforce
 		Decisions.md    - Cross-cutting. Decision log with rejected alternatives and rationale
-		                  (66 decisions), plus the open-question list
+		                  (68 decisions), plus the open-question list
 
 	Docs are tiered: Experience (what the user perceives) → Architecture and Animation (mechanism
 	and invariants) → Structure (where the mechanism lives). Citations point up; dependencies

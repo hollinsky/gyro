@@ -318,6 +318,15 @@ hardest to attribute to its cause. In the log map rotation stays one channel wit
 is what [decision 17](Decisions.md#17-transforms-are-decomposed-into-trs-with-per-channel-springs)
 meant by per-channel and what three Euler springs would quietly undo.
 
+**The log map is full-angle**, so the channel is an axis times the rotation angle in radians and its
+magnitude *is* that angle. This has to be said rather than left to be inferred, because roughly half
+the literature means the other one — the textbook quaternion logarithm carries the half-angle — and
+the two differ by a factor of two everywhere they meet. Two things here already depend silently on
+the full-angle reading: the settling note below, where a residual of ε displaces a corner by ε·r
+with no factor to remember, and any threshold in the catalog expressed in degrees. Canonicalizing
+the double cover bounds the channel at π, which is what makes the shortest path structural rather
+than a comparison somebody has to remember to write.
+
 **One spring, not three, is a claim about settling rather than about the path.** *(Written against
 the implementation, 2026-08-16.)* Three scalar springs sharing one motion produce an identical
 trajectory, because the equation is decoupled and a shared `(ω, ζ, t₀)` gives every component the

@@ -14,6 +14,14 @@ opacity (60), revising 55; then the frame thread's scheduling policy (61), annot
 annotating 9, 33, and 34; then interactive transitions (65) last, revising 19 a second time and
 annotating 13, 14, 46, and 51. All of it before implementation.
 
+Then the geometry module was written, and two questions decision 54 had left open were settled
+against it: the unconditional snap (67) and subsurface placement (68), annotating 54. They are the
+first entries here decided *during* implementation rather than ahead of it, and neither was decided
+by the code — 67 comes from a promise in [Experience.md](Experience.md#the-picture-is-correct) that
+the narrower rule could not keep, and 68 from working the arithmetic of what a client has already
+rasterized by the time it declares a subsurface position. What implementation supplied was the
+occasion to ask.
+
 Two exceptions to that last sentence, and they are the point of having written any of this down.
 Decision 2's decisive argument was read against libwayland's source on 2026-08-16 and did not
 survive, which reversed that decision's conclusion and revised 3, 22, 36, 40, 45, 49, and 51 behind
@@ -526,6 +534,22 @@ makes settling time analytic, which is what lets the compositor drop to idle cle
 no timer armed and the frame thread blocked indefinitely when nothing is animating — which is only
 answerable exactly because settling time is analytic. An integrated spring cannot say when it is
 finished without being advanced, so it must be woken to discover it has nothing to do.
+
+**Reproducibility is per toolchain rather than absolute.** *(Annotated 2026-08-16, while writing the
+solver.)* The rejection above leans on closed form being reproducible where integration is not, and
+that is true of the algorithm and not quite true of the arithmetic. `exp`, `sin`, and `sqrt` are not
+correctly rounded by any mandate, and libm implementations differ in the last place between versions
+and across platforms — so two golden images produced from identical coefficients on different
+machines may disagree in their final bits.
+
+The conclusion survives, because the difference between the two is one of kind rather than degree:
+an integrated spring's divergence is stateful, accumulates with whatever frame pattern the machine
+happened to produce, and is unbounded, while this is a last-place difference in a stateless function
+of time. What narrows is the scope of the claim. **A golden image is an artefact of a stated
+toolchain**, comparing them wants a tolerance or a pinned one, and asserting bit equality across a
+glibc update is asserting something nobody ever promised. Worth recording because the untightened
+form of this sentence is the kind that gets believed for a year and then fails a CI image rebuild
+with no apparent cause.
 
 ### 12. Springs are parameterized as (response, dampingRatio)
 
@@ -3617,6 +3641,12 @@ all of the time. The entire point is that the common case is crisp; a compositor
 unconditionally has implemented fractional scaling in the sense that the number is respected and in
 no other sense.
 
+**Whether this reaches a node that is not sampling one-to-one was left open here and is settled by
+[decision 67](#67-the-settled-snap-is-unconditional).** *(Annotated 2026-08-16.)* It does, and the
+reason is that most of what the snap buys — the node's edge, its decorations, and its abutment with
+its neighbours — is one-to-one even where its content is not. The wording above reads as though the
+snap were for the sampled interior alone, which is what made the question look open.
+
 ### 55. Transforms are 3D; the scene is a painter's algorithm
 
 *(Revises [decision 17](#17-transforms-are-decomposed-into-trs-with-per-channel-springs).)*
@@ -3651,10 +3681,28 @@ change shape across the seam — on precisely the configuration
 
 **Rotation is a quaternion sprung in the log map.** Decision 17's per-channel intent survives and
 gets more honest with it: rotation is one channel with one spring, not three axes pretending to be
-independent. Two guards come along — the perspective distance is clamped so the near plane never
-crosses the quad, and back faces cull by default, because a window flipped past ninety degrees
-showing mirrored text reads as a bug. A card flip is two nodes and a catalog transition, which is
-where it belonged anyway.
+independent. Two guards come along — perspective is bounded so the near plane never crosses the
+quad, and back faces cull, because a window flipped past ninety degrees showing mirrored text reads
+as a bug. A card flip is two nodes and a catalog transition, which is where it belonged anyway.
+
+**Both guards were stated wrongly here and are corrected against the implementation.**
+*(2026-08-16.)* The first read "the perspective distance is clamped", which is not something a
+transform can do: a distance and a quad extent are independent, and scale is an animatable channel,
+so a node growing while its stored distance stayed put walks its own far corner through the near
+plane mid-transition — the frame that divides by zero and makes the damage bound a NaN. Perspective
+is therefore held as a dimensionless strength in the node's own bounding radii, where the guarantee
+is unconditional at every scale, and which is additionally the only form [decision
+13](#13-a-closed-motion-vocabulary-with-runtime-configuration-exposing-only-that-vocabulary)'s
+catalog can author — a distance in pixels is a different amount of perspective on a thumbnail than
+on a full window. The second read "cull *by default*", implying an override whose only use is the
+double-sided quad this same paragraph refuses; culling is unconditional, and a node that must be
+visible from behind is asking for a material rather than for a geometry flag.
+
+**"A full 3D affine" also overstates what is stored.** A decomposed TRS with an anchor cannot
+express a shear, and non-uniform scale composes only in the node's own frame. That is the right
+restriction rather than a shortfall — a shear has no meaningful spring, and decomposition is what
+[decision 17](#17-transforms-are-decomposed-into-trs-with-per-channel-springs) is about — but
+"affine" names a larger set than anything here can build.
 
 **Anchor point becomes explicit**, and it was under-specified in decision 17 even in two dimensions.
 Scaling from a corner rather than from the centre is most of what makes a transition read as

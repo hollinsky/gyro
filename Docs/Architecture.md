@@ -1079,7 +1079,7 @@ rejected alternatives in [decisions 52–56](Decisions.md#geometry).
 | Space | Extent | Type | Determined by |
 | ----- | ------ | ---- | ------------- |
 | Buffer | one per attached buffer | integer texels | the client |
-| *surface adapter* | one per surface | exact rational | `buffer_transform`, `buffer_scale`, viewport `src` and `dst` |
+| *surface adapter* | one per surface | exact rational **per axis** | `buffer_transform`, `buffer_scale`, viewport `src` and `dst` |
 | Global | exactly one, continuous | real, Y-down | gyro's model |
 | *output adapter* | one per output | exact rational plus an integer rotation | output configuration |
 | Output device | one per output | integer at the boundary only | the composite target |
@@ -1151,11 +1151,23 @@ Answering the second question with the first forecloses promotion on every fract
 output, which [decision 56](Decisions.md#56-clients-render-at-the-ceiling-and-gyro-downscales) makes
 the common case rather than the exception.
 
-So the classification returns a **rung** rather than a boolean — identity, integer translation,
-ninety-degree rotation and flip, positive scale, general affine — and each consumer tests against
-the rung it can afford. That is one function with three readers rather than three predicates that
-agree until they do not, and it still argues for a restricted transform type representing the first
-four rungs exactly, widening to a general affine only where an animation demands it.
+So the classification returns a **set of independent facts** rather than a boolean, and each
+consumer takes the conjunction it can afford: *is it axis-aligned, is it upright, is the scale
+exactly one, does the translation land on the destination's integer grid?* That is one function with
+three readers rather than three predicates that agree until they do not.
+
+*(Corrected 2026-08-16, against the implementation.)* This paragraph previously described a **rung**
+— identity, integer translation, ninety-degree rotation and flip, positive scale, general affine —
+with each consumer testing against the rung it could afford. A total order over five rungs cannot
+carry four independent facts, and it fails twice. A quarter turn at unit scale on the grid is
+resample-free, since it permutes texels and filters nothing, and yet it sits *below* scale on that
+ladder — so a sharpness reader testing "identity or integer translation" rejects a transform that is
+exactly sharp. Worse, a sub-pixel translation has no rung at all: it is not identity, not integer
+translation, not a rotation, not a scale. That is the case this section cares about most, because
+removing it is precisely what [the settled snap](#quantization-belongs-to-the-output) is for.
+
+It still argues for a restricted transform type representing rotation, flip, per-axis scale, and
+translation exactly, widening to a general affine only where an animation demands it.
 
 A scaling plane does not break this section's rule. It is still one resample, executed in fixed
 function instead of in the composite pass — though *which* resample it is turns out to matter, and
@@ -1201,9 +1213,20 @@ area for [admission control](#admission-control) to key on.
 on each output and change its shape across the seam. Perspective is a property of a node's own
 transform, applied in its parent's space.
 
-Two guards: the perspective distance is clamped so the near plane never crosses the quad, and back
-faces cull by default. A card flip is two nodes and a catalog transition rather than a double-sided
-quad.
+Two guards. **Perspective is held as a strength relative to the node's own extent, not as a distance
+in local units**, which is what makes "the near plane never crosses the quad" an invariant rather
+than a hope: scale is an animatable channel, so a node that grows while a stored distance stayed put
+would walk its own far corner through the near plane mid-transition — the frame that divides by zero
+and turns the damage bound into a NaN. Expressed in bounding radii the guarantee holds at every
+scale, and the strength is additionally the only form [the motion
+catalog](Animation.md#the-motion-catalog) can author, since a distance in pixels reads as different
+amounts of perspective on a thumbnail and on a full window. *(Corrected 2026-08-16: this previously
+read "the perspective distance is clamped", which a transform cannot do, because it does not know
+the quad.)*
+
+**Back faces cull, always** — not by default, since the only thing an override would buy is the
+double-sided quad the next sentence refuses. A card flip is two nodes and a catalog transition. If a
+node ever needs to be visible from behind, that belongs to its material rather than to its geometry.
 
 ### What clients are asked for
 
@@ -1212,6 +1235,14 @@ correct and second-class; it cannot be required, so legacy is deprecated by bein
 rather than by being refused. The structural gain is that the buffer-to-surface adapter is
 *declared* — `src` in `wl_fixed`, `dst` in integers, an exact rational — so no logical size is ever
 derived from buffer dimensions and a float.
+
+**That rational is per axis, and the protocol means it.** `src` and `dst` may disagree in aspect
+ratio, which is how anamorphic video reaches a compositor at all, so the buffer-to-surface adapter
+carries two scale factors rather than one. The restricted transform stays exactly closed under that
+widening — a quarter turn merely exchanges the two factors — which is what lets one type serve this
+adapter, the output adapter, and the panel adapter instead of the surface adapter needing an algebra
+of its own that would have to agree with theirs. *(Corrected 2026-08-16; this sentence and the table
+above both said "an exact rational" as though it were one number.)*
 
 **Preferred scale is the maximum over the outputs a surface intersects**, and clients that speak
 only integer scale get the ceiling of that. Minification degrades gracefully and magnification does
@@ -1360,8 +1391,21 @@ and on plane assignment, and it is why it appears in
 [what to build before it is needed](#what-to-build-before-it-is-needed).
 
 [Geometry](#resample-once-and-know-when-it-is-zero) asks the identical question about the *spatial*
-transform and answers it with the same rung classification, which damage mapping and the sharpness
-path also consume. Promotion is admissible only where both halves say yes.
+transform and answers it with the same classification, which damage mapping and the sharpness path
+also consume. Promotion is admissible only where both halves say yes.
+
+**The spatial half is a predicate plus a per-plane intersection, and not a predicate alone.**
+*(Clarified 2026-08-16.)* What the transform can answer on its own is that it is axis-aligned and
+that the destination offset is integral — a layer at a half-pixel offset cannot be handed to a plane
+without moving it, and moving it is the visible flash this section refuses. Everything remaining
+needs what the transform does not have: whether *this* plane has a rotation property, whether it has
+a scaler, and the source extent, since `CRTC_W`/`CRTC_H` are integers and a 1.1× scale of a
+101-pixel source has no whole destination. So the classification hands the plane assigner the
+separate facts — upright, unit scale — and the assigner intersects them with the plane's own
+capabilities. Note what is deliberately *not* required: a fractional scale is promotable, because
+[decision 56](Decisions.md#56-clients-render-at-the-ceiling-and-gyro-downscales) makes minification
+the common case, and answering this with the sharpness reading would foreclose promotion on every
+fractionally scaled output.
 
 **Promotion is a partition, not a fullscreen special case.** The arrangement worth having is not one
 client filling the screen — it is several layers on several planes with the GPU never waking at all,
@@ -2350,10 +2394,11 @@ afterwards if it is chosen wrongly:
 - **Nothing stores a rounded coordinate.** Rounding is a function of `(node, output, frame)` and the
   result is never written back. A discipline rather than a feature, free now, and the retrofit is
   finding every place a logical integer was cached.
-- **The transform classification exists before it has a second caller, and it returns a rung rather
-  than a boolean.** Plane promotion, damage mapping, and the sharpness path ask *related* questions
-  and not identical ones — the first asks what a given plane can express, the other two ask whether
-  the transform is a no-op — and three independently derived answers is how they drift apart. See
+- **The transform classification exists before it has a second caller, and it returns independent
+  facts rather than a boolean or a rung.** Plane promotion, damage mapping, and the sharpness path
+  ask *related* questions and not identical ones — the first asks what a given plane can express, the
+  other two ask whether the transform is a no-op — and three independently derived answers is how
+  they drift apart. The properties do not order, so no ladder expresses them; see
   [resample once](#resample-once-and-know-when-it-is-zero).
 - **Transforms are 3D from the first node**, with an explicit anchor point and rotation carried as a
   quaternion. Widening a 2D transform afterwards means revisiting every spring, every hit test, and
