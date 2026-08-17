@@ -842,22 +842,41 @@ So when admission control finds a configuration infeasible, a VRR output's perio
 adjusted — lengthening `P` for that output changes the test's inputs, and it is the only input that
 can be changed without giving anything up.
 
-**But `P` is gyro's to change only while gyro decides when frames are demanded.** A fullscreen
-client driving the refresh rate for its own reasons takes that decision away, and the conflict is
-resolved in the client's favour: **content-driven VRR wins over scheduling-driven VRR.** gyro does
-not servo against it, and admission control falls through to the next rung. What follows is then not
-a matter of policy, because `P` is the shortest interval in which an output may demand a frame:
+**But `P` is gyro's to change only while gyro decides when frames are demanded.** A client whose
+arrivals gyro cannot predict takes that decision away, and the conflict is resolved in the client's
+favour: **content-driven VRR wins over scheduling-driven VRR.** gyro does not servo against it, and
+admission control falls through to the next rung.
+
+**What takes it is unpredictability, not foreground.** An output is client-paced when it carries an
+active producer whose next arrival gyro cannot predict — one that commits and never says when it
+will commit next. A client that posts a `wp_commit_timing_v1` timestamp has named the instant, and a
+client pairing `wp_fifo_v1` barriers has asked to be paced at the refresh cycle; in both cases gyro
+keeps authority and servoes *to* the stated cadence rather than against it. Being fullscreen grants
+nothing. It remains a real fact about *cost*, since it is what makes direct scanout available and
+therefore what makes a high rate affordable, and cost is [admission control](#admission-control)'s
+subject rather than this one's. See
+[decision 76](Decisions.md#76-cadence-authority-follows-predictability-not-foreground).
+
+What follows is then not a matter of policy, because `P` is the shortest interval in which an output
+may demand a frame:
 
 | Who controls arrivals | `P` |
 | --- | --- |
 | Fixed-refresh output | its measured period |
 | VRR, gyro's | the commanded period — and the servo may not command shorter than was admitted |
-| VRR, a client's | the panel's minimum period, whatever the client happens to be doing |
+| VRR, a client's stated cadence | the commanded period, servoed to what the client asked for |
+| VRR, a client free-running | the panel's minimum period, whatever the client happens to be doing |
 
 The last row is the one that costs something. A client presenting at 60 Hz on a 144 Hz panel is
 budgeted at 6.944 ms all the same, because nothing stops it presenting faster on the very next frame
 and the guarantee is over every interval rather than over the observed one. That is pessimistic, and
 it is not negotiable without giving up the property that makes the test worth having.
+
+The row above it is the one that used to be folded into it, and separating them is most of what
+[decision 76](Decisions.md#76-cadence-authority-follows-predictability-not-foreground) buys. A client
+that has stated its cadence is budgeted at the period it stated, because gyro is the one commanding
+that period and can hold it. Video is the overwhelming majority of what plays fullscreen, so the
+common case moves from the bottom row to this one and stops costing a second output anything at all.
 
 **Control changing hands is a configuration change.** This is the price of using VRR as a lever at
 all, and it is worth putting as a failure rather than as a rule, because the rule reads like
@@ -880,8 +899,10 @@ client-controlled — the pessimistic direction, and the one that cannot produce
 **Detection is deliberately asymmetric.** Reading a client as in control when it is not costs a
 rung; reading it as not in control when it is costs missed deadlines on another output. So the
 client-controlled reading is entered readily and left only on hysteresis — the same shape [client
-cadence](#client-cadence-on-multiple-outputs) needs, for the same reason. The signal itself is
-[open](Open.md); what is settled here is which way it errs.
+cadence](#client-cadence-on-multiple-outputs) needs, for the same reason. That asymmetry is also why
+silence reads as control: a client that has stated no cadence is assumed to have taken the rate. The
+hysteresis applies to that inference and not to a client that has spoken, since a protocol binding is
+stable where an observed rate flickers frame to frame.
 
 The adjustment is constrained three ways, all pushing the same direction:
 
@@ -983,9 +1004,14 @@ integrated spring would have to be woken to discover it had nothing to do, which
 the seam between two monitors.
 
 **The invariant is a fold, and what it folds is a `Wake` rather than a boolean.** *(Written against
-the implementation, 2026-08-16.)* Every animating channel, every pending timeout, and every retiring
-entity contributes one; `Sooner` reduces them to the schedule, with *settled* as the identity, so a
-scene in which nothing contributes arms nothing. Stating it that way strengthens the invariant rather
+the implementation, 2026-08-16; client contributions added 2026-08-17.)* Every animating channel,
+every pending timeout, every retiring entity, and every surface holding an outstanding commitment
+contributes one; `Sooner` reduces them to the schedule, with *settled* as the identity, so a scene in
+which nothing contributes arms nothing. The last of those is a client's own statement about when it
+will next produce — a `wp_commit_timing_v1` timestamp is `Timed`, a standing `wp_fifo_v1` pairing is
+`Continuous` at the refresh period — and without it an output showing nothing but a video folds to
+*settled* between frames. See
+[decision 76](Decisions.md#76-cadence-authority-follows-predictability-not-foreground). Stating it that way strengthens the invariant rather
 than restating it: *no timer armed* becomes **at most one timer armed per output, and its instant is
 the fold** — which absorbs the dim and blank timeouts below, the gesture-stop republish in
 [Animation.md](Animation.md#it-crosses-the-boundary-as-coefficients-like-everything-else), and
@@ -1892,13 +1918,22 @@ structural commitment — a small amount of code before the server half exists, 
 global's bind path afterwards. The tiers it enforces are policy and can move:
 
 - **Shared** — `wl_compositor`, `wl_shm`, dmabuf, `xdg_wm_base`, viewporter, fractional-scale,
-  presentation-time.
+  presentation-time, `wp_fifo_v1`, `wp_commit_timing_v1`.
 - **Session-scoped** — data device and primary selection, `xdg_activation`, `xdg_foreign`,
   text-input and input-method, idle-inhibit.
 - **System tier** — screencopy and screencast, [virtual output
   registration](#virtual-outputs-and-why-remote-desktop-is-one), foreign-toplevel management,
   layer-shell, output configuration, the lock protocol below, and [the shell's](#the-shell) own
   scene, policy, and background protocols.
+
+The last two in the shared tier are there for a reason worth recording, because it is not the usual
+one. `wp_fifo_v1` and `wp_commit_timing_v1` are not advertised to give clients a throttling
+primitive; they are advertised because what a client says through them is what lets gyro keep
+scheduling authority over a variable-refresh output and keep its promises to every other output
+attached — see
+[decision 76](Decisions.md#76-cadence-authority-follows-predictability-not-foreground). Neither is a
+prerequisite: a client that states nothing is read pessimistically and gyro still works. They are the
+path by which a well-behaved client costs its neighbours nothing.
 
 Connections carry a trust level of `User` or `System`. The enum is what is expensive to add later;
 its membership is not.

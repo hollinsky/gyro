@@ -5,20 +5,31 @@ of these produces an entry in [Decisions.md](Decisions.md), which is where the r
 file holds only what has not been settled yet, so an item leaves it by being decided rather than by
 being crossed off.
 
-Two entries have left this list by being answered rather than deferred, and both left the same way —
-by someone reading the source the entry rested on. *libwayland's abort reachability* stood first
-here because decision 2's decisive argument rested on it; it was read on 2026-08-16, the argument did
-not survive, and the outcome is in
+Three entries have left this list by being answered rather than deferred, and all three left the same
+way — by someone reading the source the entry rested on. *libwayland's abort reachability* stood
+first here because decision 2's decisive argument rested on it; it was read on 2026-08-16, the
+argument did not survive, and the outcome is in
 [decision 2](Decisions.md#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec).
 *`IPresenter` has no mode-setting path* was read against the kernel's DRM core on 2026-08-17 and is
 now [decision 73](Decisions.md#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it);
 the constrained answer this file had carried since 2026-08-16 was confirmed in shape and broken in
-one premise, and the entry had named the wrong thing as what would overturn it.
+one premise, and the entry had named the wrong thing as what would overturn it. *What signal says a
+client controls the refresh rate* was read against wayland-protocols on 2026-08-17 and is now
+[decision 76](Decisions.md#76-cadence-authority-follows-predictability-not-foreground).
 
-Noted because the list is otherwise a record of things not yet done, and what it has retired is
-twice the same lesson: **an entry that names the source its argument rests on is one that can be
+Noted because the list is otherwise a record of things not yet done, and what it has retired is three
+times the same lesson: **an entry that names the source its argument rests on is one that can be
 retired by an afternoon of reading.** The entries below that name no such source are the ones that
 will need a frame loop, a panel, or a user in front of them.
+
+The third adds a lesson the first two do not teach, and it is worth keeping in front of whoever works
+this list next. That entry was well-formed, named its source, and was **unanswerable as posed** — the
+signal it asked for does not exist, because rate information in Wayland flows compositor to client
+and never back. Reading that sent the question back one step, to the rule in Architecture.md that had
+generated it, which turned out to be circular: it defined a client as controlling the rate when the
+client was driving the rate. So **an entry that resists an afternoon of reading may be malformed
+rather than merely hard, and the thing to suspect is the rule upstream of it.** Two decisions had
+been waiting on a question that could not be answered until the rule behind it was.
 
 - **The two client-reachable `wl_abort` sites**, which
   [decision 2](Decisions.md#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)
@@ -308,19 +319,6 @@ will need a frame loop, a panel, or a user in front of them.
   cursor-plane commit disturbs the refresh timer — which matters more than it sounds, because
   decision 29 exempts the cursor plane from the budget on the grounds that it updates independently
   of the composite, and that is a weaker claim on a VRR panel than on a fixed one.
-- **What signal says a client controls the refresh rate.** Decision 66 rests on the distinction and
-  settles only which way it must err. The candidates are a fullscreen surface committing above the
-  servo's target rate, `wp_tearing_control_v1`'s hint, and `wp_fifo_v1` or `wp_commit_timing_v1`
-  letting a client state what it intends rather than leaving gyro to infer it from what it did. None
-  of the three appears in the protocol set Architecture currently names, so this is a protocol
-  question wearing a scheduling question's clothes. It is also the entry on this list with the most
-  weight already resting on it, which is why it sits here rather than further down: decision 66 needs
-  it to know when a client has taken the rate, and
-  [decision 73](Decisions.md#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it)
-  needs it for a different reason that happens to want the same signal. Its deferral predicate reads
-  decision 69's wake fold, which covers gyro-authored motion and not a client committing steadily —
-  so without this, the predicate can read *settled* between two video frames and reconfigure into the
-  hitch it exists to avoid. Two decisions, one signal, and neither can be finished without it.
 - **Chunk granularity and GPU preemption.** Chunking assumes a submission boundary is a scheduling
   opportunity for the GPU. It is not a guaranteed preemption point and the behaviour is
   hardware-dependent. Decision 30 now gates chunking on this being measured, so the question is no
@@ -346,9 +344,11 @@ will need a frame loop, a panel, or a user in front of them.
   approximate.
 - **Scheduling policy constants** — the VRR servo's per-frame bound, the clearance it holds above
   the bottom of the panel's range so that low-framerate compensation never engages underneath it,
-  decision 66's hysteresis before an output is read as no longer client-controlled, how recently a
-  surface must have committed to disqualify its output from early rendering, and decision 56's
-  debounce before a surface's preferred scale is lowered.
+  decision 66's hysteresis before an output is read as no longer client-controlled — which
+  [decision 76](Decisions.md#76-cadence-authority-follows-predictability-not-foreground) confines to
+  the case where a client has stated no cadence, so it is now a fallback's constant rather than the
+  mechanism's — how recently a surface must have committed to disqualify its output from early
+  rendering, and decision 56's debounce before a surface's preferred scale is lowered.
 - **The imperative escape hatch** for event-driven one-shots — shape and boundary.
 - **Colour interpolation space for animation** — Oklab proposed over sRGB. Distinct from
   [decision 47](Decisions.md#47-compositing-happens-in-linear-light-at-wide-primaries)'s composite

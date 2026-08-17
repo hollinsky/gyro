@@ -11,9 +11,16 @@
 //
 // Docs/Architecture.md#doing-nothing-must-cost-nothing states the invariant: when nothing is
 // animating and nothing has committed, no timer is armed and the frame thread blocks indefinitely.
-// That is a *fold*. Every animating channel, every pending timeout, every retiring entity
-// contributes an answer, and the schedule is what they reduce to. This is the type of the
-// contribution; Sooner is the reduction.
+// That is a *fold*. Every animating channel, every pending timeout, every retiring entity, and every
+// surface holding an outstanding commitment contributes an answer, and the schedule is what they
+// reduce to. This is the type of the contribution; Sooner is the reduction.
+//
+// That last contributor is a client rather than something gyro authored, and it is why the fold is
+// not only a power question. A wp_commit_timing_v1 timestamp arrives here as At(); a standing
+// wp_fifo_v1 pairing as AtRate() at the refresh period. Without them an output showing nothing but a
+// video folds to settled between frames, which is a wrong answer that costs a modeset hitch rather
+// than a wasted wake — see Docs/Decisions.md decision 76, which also makes *absence* from this fold
+// the predicate for whether a client has taken the output's refresh rate.
 //
 // **A boolean cannot be the contribution.** An IsSettled(t) per channel makes the fold an OR, and an
 // OR can express only two of the three things a channel has to be able to say. It forecloses every

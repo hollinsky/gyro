@@ -50,6 +50,15 @@ had even named what would overturn it, and named the wrong thing: it expected bl
 be decisive and the synchronous validation phase was. Worth noting because the reading cost an
 afternoon and the alternative was discovering it from a frame loop already built around the premise.
 
+Decision 76 is a fourth reading and the first where the source's answer was an **absence**.
+wayland-protocols was read for the signal by which a client states that it controls the refresh rate,
+and there is no such request in any of the three candidates or anywhere else in the tree: rate
+information flows compositor to client and never back. An absence is a weaker thing to find than a
+broken premise, and it turned out to be worth more, because it sent the question back to the rule
+that had generated it — which was circular, defining client control as the client controlling. The
+lesson is not the one the other three teach. **A question that cannot be answered from a source is
+sometimes malformed rather than merely open**, and the way to tell is to go read.
+
 Detail lives in [Architecture.md](Architecture.md) and [Animation.md](Animation.md); this file is
 the short answer to "why didn't we do X".
 
@@ -2492,11 +2501,22 @@ presents when ready, and re-seeds it.
 **Rejected: VRR as a latency feature only**, present-when-ready and nothing else. That is what
 everyone does and it leaves the one available scheduling lever unused.
 
-**Rejected: servoing against content-driven VRR.** If a fullscreen client is driving the refresh
-rate for its own reasons it wins, and admission control falls through to the next rung. The
-consequence for the test is not a matter of policy and is worked out in
+**Rejected: servoing against content-driven VRR.** If a client is driving the refresh rate for its
+own reasons it wins, and admission control falls through to the next rung. The consequence for the
+test is not a matter of policy and is worked out in
 [decision 66](#66-arrival-control-is-an-input-to-admission-control), which is the price of this
 decision rather than a separate subject.
+
+*(Narrowed 2026-08-17.)* This rejection stands and its scope does not. It reads *content-driven* as
+one thing, and [decision 76](#76-cadence-authority-follows-predictability-not-foreground) divides it:
+a client whose next arrival gyro cannot predict cannot be servoed against, which is the case argued
+here and is unchanged, while a client that has **stated** its cadence can be servoed *to*. Matching a
+declared period is not fighting a producer for the rate; it is the servo doing what it already does
+against a setpoint it was handed rather than one it chose. So what is rejected here is servoing
+against *unpredictably* content-driven VRR, and the predictable case — a video player naming its
+timestamps, which is the commonest fullscreen content there is — never reaches this alternative at
+all. The original wording said "a fullscreen client" and that word was doing no work; it is dropped
+above rather than kept, since decision 76 removes fullscreen from the predicate entirely.
 
 Written from specification; panel ranges, flicker thresholds, and whether a cursor-plane commit
 disturbs the refresh timer are marked `// SPEC:` where they land in code. The servo's own logic is
@@ -2534,8 +2554,15 @@ miss.
 **Detection errs toward client control.** Reading a client as in control when it is not costs a
 rung; reading it as not in control when it is costs another output its deadlines. The readings are
 not symmetric, so the policy is not either: the client-controlled state is entered readily and left
-only on hysteresis, the same shape decision 32 needs for cadence and for the same reason. What
-signal establishes it is open.
+only on hysteresis, the same shape decision 32 needs for cadence and for the same reason.
+
+*(Completed 2026-08-17.)* What establishes it was carried as an open question about a signal until
+[decision 76](#76-cadence-authority-follows-predictability-not-foreground) found there is no such
+signal and that the condition itself had never been stated. The predicate is that the output carries
+an active producer whose next arrival gyro cannot predict — a client that commits and never says when
+it will commit next. The asymmetry above is what makes that the right way to read silence: a client
+that has stated nothing is assumed to have taken the rate. The hysteresis survives, and applies to
+the inference fallback rather than to a client that has spoken.
 
 **Rejected: budgeting every VRR output at its minimum period, always.** One plan, no detection, no
 hysteresis, no swap — and it is the honest conservative answer, which is what makes it worth stating
@@ -2565,6 +2592,134 @@ worse — it would take the cost from the panel under someone's hands, which tha
 unconditionally. What remains unwritten there is narrower than it looks: not what happens to the
 rest of the machine, which follows from focus, but what a full-screen application is promised
 *directly* rather than as a consequence of being the focused one.
+
+### 76. Cadence authority follows predictability, not foreground
+
+*(Decided 2026-08-17, against wayland-protocols. Settles the client-cadence entry in
+[Open.md](Open.md), supplies the predicate
+[decision 66](#66-arrival-control-is-an-input-to-admission-control) left open, and narrows
+[decision 31](#31-vrr-is-a-scheduling-degree-of-freedom-not-only-a-latency-feature)'s rejection of
+servoing against content-driven VRR.)*
+
+An output is **client-paced when it carries an active producer whose next arrival gyro cannot
+predict**, and gyro-paced otherwise. Being fullscreen grants nothing.
+
+**The rule this replaces was circular.** Architecture.md had it that a fullscreen client *driving the
+refresh rate for its own reasons* takes the decision away, and resolved the conflict in the client's
+favour. That resolution is sound and is kept. But it never says *when* the client has the rate — it
+defines client control as the client controlling — so the term Open.md had been carrying as a
+question about a signal could not be answered in that form. It was asking what evidence establishes a
+condition that had never been stated. The missing piece is a predicate, and a predicate is not a
+signal.
+
+**No client can state a rate, and the protocol set is not going to grow one.** Read at
+`wayland-protocols` afb614d5, where all three candidates are still `version="1"`:
+
+- **`wp_fifo_v1`** is a readiness constraint, not a rate. `set_barrier` arms a condition at a latching
+  deadline and `wait_barrier` holds the next update until it clears, so a client pairing them is
+  throttled to one update per refresh cycle. It reads *backwards* from what decision 66 wanted: a
+  client using fifo has handed cadence to the compositor. It is also advisory twice — the compositor
+  may clear the barrier early for forward progress, and may ignore it entirely when the surface is
+  occluded — and the protocol tells clients not to rely on it for throttling.
+- **`wp_commit_timing_v1`** is a deadline for one frame: present as closely as possible to, but not
+  before, an instant in the compositor's presentation clock. No interval and no repetition, and at
+  most one outstanding, since a second raises `timestamp_exists`. Exactly one frame of horizon.
+- **`wp_tearing_control_v1`** is `vsync` or `async`, and the protocol says outright that the
+  compositor may respect or ignore it dynamically. It is about tearing against latency and says
+  nothing about a rate — neither necessary, since a variable-refresh client typically asks for
+  `vsync` and takes its latency from the variable period, nor sufficient.
+
+**Rate information in Wayland flows compositor to client and never back.** Grepping the whole
+protocol tree for a refresh rate returns two hits, both in `presentation-time`'s `presented` event,
+both describing what the compositor tells the client. A client never asks for the rate because it has
+no request with which to ask: it commits, and a variable-refresh flip presents when it commits. The
+transfer of control is gyro's own act. **There was never a signal to find, and the search was for
+evidence of something gyro already knew.**
+
+**So the predicate is predictability — which is the one thing a client can state.** The three
+protocols answer a question adjacent to the one they were consulted for, and answer it well:
+
+| What the client does | What gyro can do | Authority |
+| --- | --- | --- |
+| Posts a `wp_commit_timing_v1` timestamp | Hit the named instant | gyro's |
+| Pairs `wp_fifo_v1` barriers | Pace it at the refresh cycle it asked for | gyro's |
+| Commits freely, states nothing | Nothing but react | the client's |
+
+**The fold already holds this: a free-running client is an active producer contributing no `Wake`.**
+It commits, and it never says when it will commit next. That is checkable rather than inferred, it is
+naturally sticky in a way a timing heuristic is not — a protocol binding is stable across a client's
+life where an observed rate flickers frame to frame — and it errs the way decision 66 requires,
+because a client that says nothing is read as having taken the rate.
+
+**One question at two timescales, which is why decision 73 wanted the same thing.** Open.md recorded
+*two decisions, one signal* and was right, though not for the reason it gave. Occupancy is *when is
+the next arrival*, read per instant, and it is what decision 73's deferral predicate needs. Authority
+is *can the next arrival be predicted at all*, read as a standing property of a surface, and it is
+what decision 66 needs. Both are the same information at different timescales, and both reduce
+through [decision 69](#69-settling-answers-with-a-wake-idleness-folds-a-monoid-not-an-or)'s fold —
+which gains a contributor class it did not have, since it covered gyro-authored motion and not a
+client committing steadily. A timestamped commit is `Timed`; a standing fifo pairing is `Continuous`
+at the refresh period. Without this the predicate reads *settled* between two video frames and
+reconfigures into the hitch it exists to prevent.
+
+**What it changes for a person.** The blast radius of the old rule was every fullscreen surface. A
+fullscreen video player, a slide deck, a terminal — all of them took the rate on a state that says
+nothing about timing, and each one cost a second display a quality tier under decision 66. Under this
+predicate a video player that states its cadence never takes the rate at all and the projector pays
+nothing; a slide deck and a terminal are not continuous producers and never entered the question; and
+an actual free-running game takes the rate and the projector spends a tier, which is decision 66
+working as written. The worked example in that decision is a laptop beside a **projector**, where the
+likeliest content on either display is video — the exact case the old rule got wrong.
+
+**It also sets the incentive the right way round.** The more a client states about its cadence, the
+more scheduling authority gyro keeps, and the better gyro's promises to *other* outputs hold. A
+client that says nothing is treated pessimistically and costs someone a tier. That gradient improves
+as the ecosystem improves without requiring it to, which is the opposite of a rule where declaring
+fullscreen seizes the panel.
+
+**The claim is bounded: strictly better where the protocols are used, no worse where they are not.**
+Almost nothing uses fifo or commit-timing yet, so inference from observed commits carries the load
+initially, and that is where decision 66's hysteresis constant still lives. This decision does not
+retire that constant. It confines it to the case where nothing better is available, and makes the
+answer exact wherever a client has spoken.
+
+**Rejected: fullscreen as the trigger** — the position this replaces. Fullscreen is a
+window-management state standing in for a timing declaration, and it is wrong in both directions: a
+fullscreen video player gets authority it does not want, and a windowed game gets none though its
+situation is identical. Fullscreen does carry a real fact — it is what makes direct scanout available,
+and therefore what makes a high rate affordable — but that is a *cost* argument, and
+[admission control](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget) already
+owns cost. Conflating cost with authority is most of why the rule read as arbitrary. Removing
+fullscreen from the predicate does not lose the fact; it relocates it to where it was handled anyway.
+
+**Rejected: hunting for a positive *I have the rate* signal.** The shape Open.md's entry assumed, and
+an afternoon of reading says it does not exist and cannot, because the direction of the protocol is
+wrong. Kept because the entry was well-formed and still unanswerable: it named its source, which is
+what let it be retired, and what the source said was *no*.
+
+**Rejected: `wp_content_type_v1` as the classifier.** `video` and `game` are the populations this
+decision sorts, and it is the only one of the four that describes a standing property rather than
+per-frame state. It is also explicitly a hint the compositor may ignore, so it can never carry a
+scheduling guarantee. It has one real use — classifying a fullscreen game before it has committed
+anything, which is a latency argument on the handover rather than a correctness one — and that is a
+refinement this decision does not need to take a position on.
+
+**Rejected: two independent mechanisms, one per decision.** Reached first, and abandoned when the
+circularity above came out: with authority defined as a policy fact gyro asserts, the two questions
+look unrelated, and the reasoning that they need opposite biases is sound as far as it goes.
+Splitting them costs the observation that makes both cheap — that they read one fold at two
+timescales — and would have built a second detection path for a question already answered by the
+first.
+
+**Left open: a game that pairs fifo barriers.** Under this predicate it keeps gyro in control, which
+follows from the protocol's own semantics and differs from what other compositors do and possibly
+from what such a client expects. Recorded as unsettled rather than resolved by the general rule,
+because it is the one case where the predicate and the client's likely intent disagree.
+
+**Advertising fifo and commit-timing is a consequence and not a prerequisite.** The inference
+fallback is adequate for the budget decision 73 sets, so the protocols improve the answer without
+gating it. They are named in [Architecture.md](Architecture.md#filtered-globals) so the reason to
+advertise them is on record, and the scope of protocol support is settled elsewhere and later.
 
 ### 32. A surface's frame cadence follows its fastest output
 
@@ -2648,6 +2803,16 @@ a clock. `Settled` reconfigures immediately. `Timed(when)` inside the budget def
 instant already known. `Continuous`, or `Timed` beyond the budget, reconfigures now and takes the
 hitch. **gyro never waits speculatively**: it defers only where quiet is known to arrive and known
 when, which is exactly the distinction `Wake` was given a third case to express.
+
+*(Completed 2026-08-17.)* The fold this reads had a hole when this decision was written: it covered
+gyro-authored motion and not a client committing steadily, so an output showing nothing but a video
+folded to *settled* in the 41 ms between frames and this predicate fired a modeset into the middle of
+it — the deferral causing the hitch it exists to prevent.
+[Decision 76](#76-cadence-authority-follows-predictability-not-foreground) closes it by making a
+client's stated cadence a contributor to the same fold, so the predicate is unchanged and what it
+reads is now complete. A client that states nothing falls back to inference from observed commits,
+which is the right place for a heuristic: being wrong costs one budget's worth of hitch, bounded by
+the tight budget below, rather than another output's deadlines.
 
 The budget is tight — tens of milliseconds, not an animation length. Experience.md's *latency, not
 judder* is a statement about how the system **degrades**, not a licence to add delay to a deliberate
@@ -3588,6 +3753,18 @@ lives in `Core`. Architecture.md's invariant is restated from *no timer armed* t
 armed per output, and its instant is the fold**, which is a stronger claim and a more testable one:
 the dim and blank timeouts, the gesture-stop republish of decision 65, and retirement expiry become
 contributions to one reduction rather than three separate arms.
+
+*(Extended 2026-08-17.)* Clients contribute too, which this decision did not anticipate and the shape
+absorbs without change.
+[Decision 76](#76-cadence-authority-follows-predictability-not-foreground) reads a
+`wp_commit_timing_v1` timestamp as `Timed` and a standing `wp_fifo_v1` pairing as `Continuous` at the
+refresh period, so a surface with an outstanding commitment joins the animating channels, the pending
+timeouts, and the retiring entities as a term in the same reduction. Worth marking here because the
+contributor list above reads as complete and was not: it covered gyro-authored motion only, and an
+output showing nothing but a video folded to *settled* between frames. That every case a client can
+state maps onto an existing constructor, and that the one-frame horizon of a timestamp is honestly a
+`Timed` rather than a defective `Continuous`, is the argument in this decision holding up against a
+contributor it was not designed for.
 
 **Rejected: `bool IsSettled(Instant)`** — the position this decision replaces. It is the ergonomic
 signature, it costs the same as the alternative today, and its defect never presents as a bug. It
