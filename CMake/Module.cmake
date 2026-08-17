@@ -11,7 +11,7 @@
 # convenient — the same standing CheckClockDiscipline.cmake gives the timebase.
 
 function(gyro_add_module NAME)
-	cmake_parse_arguments(PARSE_ARGV 1 MODULE "PORTABLE" "" "SOURCES;TESTS;DEPENDS")
+	cmake_parse_arguments(PARSE_ARGV 1 MODULE "PORTABLE;OBJECT" "" "SOURCES;TESTS;DEPENDS")
 
 	if(MODULE_UNPARSED_ARGUMENTS)
 		message(FATAL_ERROR "gyro_add_module(${NAME}): unexpected argument ${MODULE_UNPARSED_ARGUMENTS}")
@@ -24,7 +24,14 @@ function(gyro_add_module NAME)
 	# a layering mistake worth having to spell out.
 	list(TRANSFORM MODULE_SOURCES PREPEND "${GYRO_SOURCE_DIR}/${NAME}/")
 
-	add_library(${NAME} STATIC ${MODULE_SOURCES})
+	# OBJECT is for a module something links but nothing references by symbol — the test harness,
+	# whose main() a static archive would leave on the shelf.
+	if(MODULE_OBJECT)
+		add_library(${NAME} OBJECT ${MODULE_SOURCES})
+	else()
+		add_library(${NAME} STATIC ${MODULE_SOURCES})
+	endif()
+
 	target_link_libraries(${NAME} PUBLIC BuildFlags ${MODULE_DEPENDS})
 
 	if(MODULE_PORTABLE)

@@ -17,8 +17,11 @@ if(NOT DEFINED SOURCE_DIR)
 	message(FATAL_ERROR "CheckPortability requires -D SOURCE_DIR=<path>")
 endif()
 if(NOT DEFINED MODULES)
-	message(FATAL_ERROR "CheckPortability requires -D MODULES=<list>")
+	message(FATAL_ERROR "CheckPortability requires -D MODULES=<comma separated>")
 endif()
+
+# Comma rather than semicolon: a list handed to a custom command is split into arguments.
+string(REPLACE "," ";" MODULES "${MODULES}")
 
 # Matched against the text between the angle brackets.
 set(FORBIDDEN
