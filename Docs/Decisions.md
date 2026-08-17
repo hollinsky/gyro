@@ -443,8 +443,10 @@ inexpressible. libwayland's server loop is epoll-based and needs shimming. And t
 essentially no Wayland clients on macOS — GTK's macOS backend is Quartz, and QtWayland on macOS is
 unsupported — so the compositor would have nothing to display.
 
-`Core/`, `Scene/`, and `Anim/` stay free of Linux headers regardless, so portable unit tests build
-anywhere. That is free and worth doing on its own merits.
+`Core/`, `Scene/`, and `Animation/` stay free of Linux headers regardless, so portable unit tests
+build anywhere. That is free and worth doing on its own merits, and it is mechanical rather than
+aspirational: a module declares `PORTABLE` to `gyro_add_module`, which enrols it in
+`CMake/CheckPortability.cmake`.
 
 ### 7. Session claiming is deferred; basu rejected
 
