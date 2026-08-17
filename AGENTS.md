@@ -57,7 +57,12 @@ Codebase Structure:
 		                  it hangs off, which thread each piece runs on, the composition root, and
 		                  what the build checks enforce
 		Decisions.md    - Cross-cutting. Decision log with rejected alternatives and rationale
-		                  (69 decisions), plus the open-question list
+		                  (69 decisions). Append-mostly: a revised decision keeps its superseded
+		                  position as a rejected alternative, and carries its revision history
+		                  inline and dated rather than in any global ledger
+		Open.md         - Cross-cutting. The questions not yet settled, roughly in the order they
+		                  will bite. Answering one produces a decision; this is the churning half
+		                  of what used to be Decisions.md's tail
 
 	Docs are tiered: Experience (what the user perceives) → Architecture and Animation (mechanism
 	and invariants) → Structure (where the mechanism lives). Citations point up; dependencies

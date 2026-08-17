@@ -841,7 +841,7 @@ client-controlled — the pessimistic direction, and the one that cannot produce
 rung; reading it as not in control when it is costs missed deadlines on another output. So the
 client-controlled reading is entered readily and left only on hysteresis — the same shape [client
 cadence](#client-cadence-on-multiple-outputs) needs, for the same reason. The signal itself is
-[open](Decisions.md#open); what is settled here is which way it errs.
+[open](Open.md); what is settled here is which way it errs.
 
 The adjustment is constrained three ways, all pushing the same direction:
 
@@ -1193,7 +1193,7 @@ translation exactly, widening to a general affine only where an animation demand
 
 A scaling plane does not break this section's rule. It is still one resample, executed in fixed
 function instead of in the composite pass — though *which* resample it is turns out to matter, and
-that is [an open question](Decisions.md#open) rather than a settled one.
+that is [an open question](Open.md) rather than a settled one.
 
 **Minification needs mip levels, and they are built in linear light.** [Colour](#colour)'s one rule
 already names mipmapping among the weighted sums of light, and gyro already holds a linearised copy
@@ -1298,7 +1298,7 @@ everywhere else.
 - **`wl_subsurface.set_position`** is integer surface-local, so a subsurface cannot be
   device-aligned on a fractional output at all. That one belongs to the protocol and is not gyro's
   to fix; what gyro controls is whether it compounds it by rounding a second time.
-  [Open](Decisions.md#open).
+  [Open](Open.md).
 
 ## Effects and quality
 
@@ -1463,7 +1463,7 @@ Collected, because it is otherwise four conditions spread over five paragraphs, 
 only where **the KMS pipeline expresses its colour transform**, **the plane expresses its spatial
 rung**, **it is opaque and overlaps nothing**, and **its client can spare the held buffer**. The
 last of those is in [what to build](#what-to-build-before-it-is-needed) with the reason; the
-sharpness question the second one raises where the rung is a scale is [open](Decisions.md#open).
+sharpness question the second one raises where the rung is a scale is [open](Open.md).
 
 ### Deferred
 
@@ -1856,7 +1856,7 @@ its membership is not.
 Trust is a property of the *listener*, since that is where connection identity comes from — so a
 `System` connection cannot arrive on the ordinary per-user socket, and the shell needs a second
 listener with different permissions. Who creates it and how a process is judged worthy of it is
-[open](Decisions.md#open), and the shell is what makes it urgent rather than theoretical.
+[open](Open.md), and the shell is what makes it urgent rather than theoretical.
 
 ### Locking
 
@@ -2002,7 +2002,7 @@ of a scene whose top belongs to gyro.
 A shell reaches all of this through the `System` tier of [filtered globals](#filtered-globals), and
 trust is a property of the listener rather than of the connection — so being the shell is something
 a process is granted at the socket it connects to, not something it claims. Which listener that is,
-and who decides who may use it, is [open](Decisions.md#open).
+and who decides who may use it, is [open](Open.md).
 
 ### Declare, do not drive
 
@@ -2091,7 +2091,7 @@ That last rule is what lets [locking](#locking) show a user's own wallpaper at a
 the image and the greeter never receives it, so the isolation is not weakened to get it.
 
 Whether a background is one image per session or one per output is deliberately
-[open](Decisions.md#open). The cache is written and read at moments when no per-output intent has
+[open](Open.md). The cache is written and read at moments when no per-output intent has
 been expressed — before the shell exists, and at the greeter — so the live case and the cached case
 may not want the same answer, and nothing here depends on which way it goes.
 
@@ -2253,7 +2253,7 @@ no real-time budget, and trips nothing. On a machine
 has deliberately left with no VT, that leaves the keyboard as the only way in. The other half is
 `SysRq-V`, which the DRM core registers for every device and which forces the in-kernel client to
 restore — the only key that puts a picture back rather than ending the process holding one. What it
-restores under `fbcon=off` is [open](Decisions.md#open).
+restores under `fbcon=off` is [open](Open.md).
 
 ## What nested can and cannot prove
 
@@ -2487,7 +2487,7 @@ widened afterwards and the policy is the half that can wait:
   the [composite target](#the-composite-space) never written — and both of those are precisely the
   costs [colour](#colour)'s import path pays for every surface unconditionally. So the import is a
   property of *how a surface is being used this frame* rather than of the surface. What a refused
-  promotion then costs is [open](Decisions.md#open).
+  promotion then costs is [open](Open.md).
 - **A client is not promoted until it can afford the hold.** A buffer on a plane is held until the
   next flip retires it, so promotion costs a double-buffered client one buffer and halves its rate.
   A promotion that makes a client visibly worse is the temporal form of the defect [direct
