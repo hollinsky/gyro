@@ -2,7 +2,9 @@
 
 Design decisions with their rationale and, more usefully, the alternatives that were rejected and
 why. Questions not yet settled are in [Open.md](Open.md); answering one of them produces an entry
-here.
+here. Constraints gyro did not choose and cannot answer alone are in
+[KernelWishlist.md](KernelWishlist.md), which several decisions here cite for the readings behind
+them.
 
 Sections are thematic and numbering is chronological, so a later section is not a lower-level one —
 it is simply where the argument had reached. Cross-references are the structure that matters.
@@ -30,14 +32,23 @@ which becomes a fade-in needs a channel that is neither animated nor untouched, 
 reduced forms from finding that the obvious five collapse. Neither is a fact about C++ — each is a
 question the prose had passed over because nothing had yet been obliged to answer it.
 
-Twice, reasoning on record has failed against the source it rested on, and those two are the point
-of having written any of this down. Decision 2's decisive argument was read against libwayland and
-did not survive, reversing that decision's conclusion. Decision 49's `// SPEC:` question was read
+Three times, reasoning on record has failed against the source it rested on, and those three are the
+point of having written any of this down. Decision 2's decisive argument was read against libwayland
+and did not survive, reversing that decision's conclusion. Decision 49's `// SPEC:` question was read
 against the kernel's DRM core and inverted: the framebuffer does *not* survive `drm_file` teardown,
 so the file descriptor store that decision had recorded as insurance is in fact the entire
 mechanism. Only the first changed a conclusion — which is exactly why the second was worth reading,
 because a right answer resting on a wrong argument is the kind that survives review and fails in the
 field. An afternoon each.
+
+Decision 73 is the third and differs from both in *when* it happened. Open.md had carried a
+presumptive answer for the mode-setting path since 2026-08-16, explicitly marked as awaiting
+confirmation against a frame loop that does not exist yet. Reading the kernel first confirmed the
+shape and broke one premise inside it — `DRM_MODE_ATOMIC_NONBLOCK` defers commitment and not
+validation — which moved the frame thread from performing the transition to initiating it. The entry
+had even named what would overturn it, and named the wrong thing: it expected blocking *duration* to
+be decisive and the synchronous validation phase was. Worth noting because the reading cost an
+afternoon and the alternative was discovering it from a frame loop already built around the premise.
 
 Detail lives in [Architecture.md](Architecture.md) and [Animation.md](Animation.md); this file is
 the short answer to "why didn't we do X".
@@ -2024,6 +2035,19 @@ still does not make it a rung.
 's chunking enters here and only here: it reduces `B`, never `h`. That is the precise statement of
 why chunking helps and why it cannot help a set that fails on `U`.
 
+**`B` is sized to composite cost, and nothing that is not a composite may enter it.** *(Added
+2026-08-17.)* Stated because it was an assumption rather than a rule for as long as nothing else
+asked. Every `qₖ` above is a composite, so `B` is bounded by what
+[decision 34](#34-effect-quality-is-a-tier-gyro-chooses-and-the-floor-tier-is-the-recovery-path)'s
+tier already bounds — but nothing in the test notices a term arriving from somewhere else, and
+several want to: a mode set, a connector probe holding a device-wide lock across an EDID read, a
+DPMS transition, a buffer import during migration. Any one of them inline is a `B` an order of
+magnitude past the 2.9 ms this test quotes a 60 Hz projector, and it is charged to every output at
+once rather than to the one being serviced.
+[Decision 73](#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it) settles the first
+of them and states the rule generally: such work is *initiated* by the frame thread and performed
+elsewhere, so it never becomes a `qₖ`.
+
 `𝓛` is every multiple of every `Pᵢ` up to the synchronous busy period `L* = Σ Cᵢ / (1 − U)`, capped
 by the hyperperiod. `L*` diverges as `U → 1`, so sets above `U = 0.95` are rejected before the loop
 runs — a set with no headroom for estimation error is not one to admit anyway. Time is integer
@@ -2321,8 +2345,32 @@ that for a request no backend can honestly validate, since panels misreport thei
 the loop on an observation instead is both smaller and the right shape for a controller whose plant
 lies. What would reopen it is tearing control, which maps to `DRM_MODE_PAGE_FLIP_ASYNC` and is
 genuinely per-present rather than a property of the clock. Enabling variable refresh on the CRTC at
-all is not this: it is set with a mode, and belongs to the mode-setting path `IPresenter` does not
-yet have.
+all is not this: it is set with a mode, and belongs to
+[decision 73](#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it)'s reconfiguration
+path.
+
+**The lever is flip cadence; the property is configuration.** *(Added 2026-08-17, from the kernel
+reading behind decision 73.)* This decision was written as though *enabling* variable refresh were
+the act with scheduling consequence. It is not. Once VRR is active the effective refresh interval is
+controlled entirely by **when a flip is submitted** — on i915 by the `TRANS_PUSH` write that
+terminates the stretched vblank, issued for every ordinary commit, and on amdgpu by a vmin/vmax
+adjustment reached from the per-flip surface-address path. No property is set and no modeset occurs.
+The servo's period command therefore reaches the panel through the clock and the flip timing it
+already shapes, exactly as the paragraph above claims, and the claim is stronger than it knew: the
+mechanism it describes is the *only* one, not a convenient one.
+
+Toggling `VRR_ENABLED` is the opposite. i915 forces a full modeset on every toggle and routes it to
+an ordered device-wide workqueue; amdgpu handles it cheaply. Since the lever does not need the
+toggle, **variable refresh is enabled at configuration time and modulated by cadence thereafter**,
+which costs nothing on either driver and is not a rung the servo reaches for.
+
+**The range is discovered, not negotiated**, and this is a real input the test did not have.
+`[vmin, vmax]` is derived from the current mode's timings together with the connector's EDID-reported
+range, with no userspace-settable property for it on i915 at all. The window is fixed when the mode
+is set, so the servo's authority is bounded by a number gyro does not choose and learns only after
+choosing a mode. That makes it an input to admission control rather than a footnote to the servo —
+and it is one of the things [KernelWishlist.md](KernelWishlist.md) records gyro would rather
+negotiate.
 
 **Rejected: a keepalive commit to hold an idle panel's rate.** It would arm a timer on a static
 screen, which [decision 58](#58-idle-is-a-ladder-gyro-executes-and-does-not-choose) forbids outright
@@ -2426,6 +2474,133 @@ because settling time is analytic — another consequence of decision 11.
 **Rejected: the output holding most of the surface's area.** Sounds principled and oscillates during
 a drag across the seam. The visible artefact is the *switch*, not the rate, so a policy that
 switches more often is worse even when each individual choice is better justified.
+
+### 73. The frame thread initiates reconfiguration and never performs it
+
+*(Decided 2026-08-17, against the kernel's DRM core. Settles the `IPresenter` mode-setting entry in
+[Open.md](Open.md), and revises the presumptive answer recorded there on 2026-08-16.)*
+
+`IPresenter` gains a second verb. `Reconfigure()` is invoked from the frame thread when a per-output
+generation carried in the snapshot moves, it **returns before the hardware is programmed**, and
+completion arrives as an event the loop already polls for. `Present()` may never block: no
+device-wide lock, no wait on another output's commit. An output between the two is not presenting,
+and the loop tolerates that.
+
+**Five callers want a mode set, and none of them is the frame thread deciding.** Adopting the
+firmware mode at boot; [device migration](#41-device-migration-is-exercised-on-every-boot) when the
+real driver displaces `simpledrm`;
+[resume](#59-suspend-is-a-handshake-on-the-control-connection-resume-is-a-modeset); a user or
+configuration changing an output's mode; and
+[decision 31](#31-vrr-is-a-scheduling-degree-of-freedom-not-only-a-latency-feature)'s variable-refresh
+enable. The first three are composition-root sequences already; the fourth is dispatch-side policy;
+the fifth is a property of the mode. The frame thread only ever *observes* the result, which is what
+`TargetsInvalidated` already is.
+
+**Which is why the obvious placement is closed off.** Putting mode setting on a dispatch-side
+interface makes `TargetsInvalidated` a signal across the publication boundary, and
+[Structure.md](Structure.md#orchestration) has signals intra-thread. So the operation is on the seam
+not because the seam wanted it but because the *observation* is already there and cannot move. The
+snapshot carries a per-output generation; the loop transitions when the generation moves; two
+channels stay two; and the ordering of a mode change against the scene change that assumes it is
+defined by construction rather than arranged separately.
+
+**The frame thread initiates and does not execute, and this is the half the kernel decided.**
+`drm_atomic_nonblocking_commit()` runs the full check — including the driver's `atomic_check` hook —
+synchronously on the calling thread before queueing anything, so `DRM_MODE_ATOMIC_NONBLOCK` defers
+commitment and not validation. amdgpu uses that latitude to take every modeset lock on the device
+and wait on every CRTC's outstanding commit, on the caller's thread. Inline, that is a `B(L)` term of
+a frame period against a test that quotes a 60 Hz projector 2.9 ms. See
+[KernelWishlist.md](KernelWishlist.md) for the readings and their line citations.
+
+**The general rule, of which this is the first instance.**
+[Decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)'s `B(L)` is
+the longest non-preemptible chunk on the frame thread, and it is sized to composite cost because
+until now nothing else asked to enter it. **Nothing that is not a composite may.** Mode setting is
+one member of a class with others already visible: a connector probe holds `connection_mutex` across
+an EDID transaction for tens to hundreds of milliseconds, DPMS is ~100 ms by
+[Architecture.md's own table](Architecture.md#idle-and-power), and buffer import during migration is
+unbounded. Each would otherwise arrive as its own local puzzle and be answered inconsistently.
+
+**Adoption is an argument, and the kernel performs the check.** *Adopt the existing mode rather than
+modeset unconditionally* is load-bearing for re-exec, for the `simpledrm` handoff, and for crash
+recovery. It does not need a query path: the kernel demands `ALLOW_MODESET` only when the committed
+state actually differs, so **committing without the flag is the assertion that this is an adoption,
+and `-EINVAL` is the kernel answering that it is not.** Try bare, escalate on rejection. The check
+belongs to the party that knows, and gyro never reads back hardware state to make it.
+
+The flag is therefore **never a constant**. On AMD silicon below `IP_VERSION(3, 2, 0)` any commit
+carrying it resets every plane on the CRTC regardless of what changed, turning an ordinary flip into
+the device-wide stall above. Setting it defensively is the natural reading of the fast path and it is
+the expensive mistake.
+
+**Reconfiguration waits for quiet, within a tight budget.** The stall is invisible when nothing is
+moving, so the policy is to reconfigure when nothing is — and the predicate is a read of
+[decision 69](#69-settling-answers-with-a-wake-idleness-folds-a-monoid-not-an-or)'s fold rather than
+a clock. `Settled` reconfigures immediately. `Timed(when)` inside the budget defers to `when`, an
+instant already known. `Continuous`, or `Timed` beyond the budget, reconfigures now and takes the
+hitch. **gyro never waits speculatively**: it defers only where quiet is known to arrive and known
+when, which is exactly the distinction `Wake` was given a third case to express.
+
+The budget is tight — tens of milliseconds, not an animation length. Experience.md's *latency, not
+judder* is a statement about how the system **degrades**, not a licence to add delay to a deliberate
+act, and the user who changed a display setting is watching. A tight budget also bounds the
+mechanism's own failure: a wrong prediction costs the budget and nothing else.
+
+Not every caller may defer. Resume and migration cannot wait for anything, and hotplug should not,
+since the EDID probe alone can exceed any budget worth setting.
+
+**What is promised.** An output mid-reconfiguration holds its last frame — decision 41's admitted
+multi-frame stall, extended to one more caller with the same guarantee that the last frame stays on
+glass. On a driver that serializes device-wide, unrelated outputs hold with it.
+
+**Rejected: the frame thread performing the transition itself.** *(The presumptive answer recorded in
+Open.md on 2026-08-16, superseded 2026-08-17.)* It was reached correctly from everything then on
+record — two channels stay two, the transition happens on the thread owning the presenter, ordering
+is defined by construction — and it did not survive reading the kernel. Its unexamined premise was
+that `DRM_MODE_ATOMIC_NONBLOCK` meant what its name says. Everything else in that argument survives;
+only *performs* became *initiates*. Kept because the entry recorded blocking cost as the thing that
+would overturn it, and blocking cost is not in fact what did: the duration was never the problem, the
+synchronous validation phase was.
+
+**Rejected: mode setting on a dispatch-side interface.** The straightforward placement, given that
+every caller is dispatch-side or composition-root. It makes `TargetsInvalidated` cross the
+publication boundary, and a signal that crosses is not a signal.
+
+**Rejected: stop-the-world — the root quiesces the frame thread, sets the mode, resumes it.** It
+matches migration and resume exactly and costs nothing there, because both hold a static picture
+anyway. It is rejected on the fourth caller: stalling every output for a user changing one display's
+resolution is the routine case paying the emergency case's price. Note that a device-wide driver
+still produces this outcome — the difference is that gyro no longer *imposes* it where the hardware
+does not.
+
+**Rejected: a control request the loop drains per iteration.** Keeps the other outputs running and is
+a third crossing of a boundary [decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) is built
+on there being exactly two of.
+
+**Rejected: adapting the policy per driver.** i915 decouples modesets from flips and would let a
+live mode change proceed without holding unrelated outputs. Taking that means carrying a quirk model
+that is not one axis — the two vendors are expensive in opposite places, i915 forcing a full modeset
+on every VRR toggle where amdgpu does not, amdgpu trapping on `ALLOW_MODESET` where i915 does not —
+covering only the drivers that were read, on behaviour that is an acknowledged `TODO` upstream. What
+it buys is a latency, in a case where the user is already waiting on something they asked for. The
+single path is *not* levelling down: gyro declines to block and holds only what the hardware makes
+it hold, so a decoupling driver is simply faster at the same code.
+
+**Rejected: a wall-clock deferral timeout.** The shape reached before `Wake` was consulted. It
+spends its whole budget for nothing in precisely the case that most needs the deferral — continuous
+motion, where quiet never arrives — and decision 69's third case already names that case distinctly.
+A timeout would have made the answer depend on a number; the fold makes it depend on a fact.
+
+**A second consumer for a signal that is not yet chosen.** The fold covers gyro-authored motion. A
+client committing video frames may not contribute to it, so the predicate could read `Settled`
+between two video frames and reconfigure into the hitch it exists to avoid. That wants the same
+signal [Open.md](Open.md) is already trying to identify for
+[decision 66](#66-arrival-control-is-an-input-to-admission-control) — *what says a client controls
+the refresh rate* — which now has two decisions resting on it rather than one.
+
+Read against `linux-next` at `4477a78374a5`. Every kernel claim above is cited to file and line in
+[KernelWishlist.md](KernelWishlist.md), which also records what gyro would want instead and what
+would let this decision's workarounds be deleted.
 
 ---
 

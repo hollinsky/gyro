@@ -87,6 +87,7 @@ gyro_add_module(Core PORTABLE OBJECT
 		Clock.Test.cpp
 		FrameSection.Test.cpp
 		Handle.Test.cpp
+		Quiet.Test.cpp
 		SlotAllocator.Test.cpp
 		Time.Test.cpp
 		Wake.Test.cpp

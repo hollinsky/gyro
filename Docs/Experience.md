@@ -69,11 +69,18 @@ What isolation *does* decide alone is **absence**. A locked screen shows nothing
 until something is designed that can show it safely. An absence is bounded, stated, and revisited;
 it is not a degradation, and it is never an excuse for one.
 
-**Continuity and pacing never compete for the same pixel.** Continuity is about the gap between two
-distinct images; pacing is about the rate within motion. Every case of continuity — a graphics
-device being replaced, a machine resuming, an output waiting for a session to be ready — holds a
-*static* picture, and holding a static picture is imperceptible because there is nothing moving to
-judder. A held image is not a dropped frame, and no promise here trades one for the other.
+**Continuity and pacing almost never compete for the same pixel.** Continuity is about the gap
+between two distinct images; pacing is about the rate within motion. Nearly every case of continuity
+— a graphics device being replaced, a machine resuming, an output waiting for a session to be ready —
+holds a *static* picture, and holding a static picture is imperceptible because there is nothing
+moving to judder. A held image is not a dropped frame, and no promise here trades one for the other.
+
+**Changing the display configuration is the exception, and it is handled by removing the conflict
+rather than by ranking the two.** It is the one case that happens while the machine is live, so the
+picture being held may be one that was moving. The answer is to make the change when nothing is
+moving, which is available far more often than it sounds — and where it is not available, to take
+the hold, because a hold is still not a flash. What is given up is a small delay on an action the
+person deliberately took, which is the cheapest thing in this document to spend.
 
 **Pacing outranks cohesion and image quality**, in that order: spend effect quality first, spend
 frames last. A transition rendered with a cheaper blur is better than a transition that stutters,
@@ -113,6 +120,13 @@ the panel lighting up already showing the correct final image.
 unplugged, the last frame stays on the glass until the new one is ready. The screen holds; it does
 not go black. At boot the held image is a static logo, so nothing is perceptible at all.
 
+**Changing how the displays are set up.** Plugging in a monitor, unplugging one, or changing a
+display's resolution or refresh rate does not blank anything and does not flash. The display being
+changed holds its last picture until the new one is ready, and on some hardware the others hold with
+it for a moment — a held picture is not a dropped frame. Where such a change would interrupt
+something already in motion, the system waits for the motion to end before making it, but only when
+the end is a moment away. It never becomes an indefinite delay to something you asked for.
+
 **The compositor itself failing.** If gyro dies and restarts, the last frame holds and a greeter
 fades in over it. The machine does not go dark. Everything that was open is lost, which is the
 subject of [what is deliberately not promised](#what-is-deliberately-not-promised).
@@ -128,7 +142,8 @@ mystery.
 [Suspend and resume](Architecture.md#suspend-and-resume), [Device
 migration](Architecture.md#device-migration), [decision
 37](Decisions.md#37-gyro-owns-the-display-from-firmware-handoff-onward-there-are-no-vts), [decision
-49](Decisions.md#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot).*
+49](Decisions.md#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot),
+[decision 73](Decisions.md#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it).*
 
 ## Every frame
 

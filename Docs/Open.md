@@ -5,12 +5,20 @@ of these produces an entry in [Decisions.md](Decisions.md), which is where the r
 file holds only what has not been settled yet, so an item leaves it by being decided rather than by
 being crossed off.
 
-One entry has left this list by being answered rather than deferred: *libwayland's abort
-reachability*, which stood first here because decision 2's decisive argument rested on it. It was
-read on 2026-08-16, the argument did not survive, and the outcome is recorded in
+Two entries have left this list by being answered rather than deferred, and both left the same way —
+by someone reading the source the entry rested on. *libwayland's abort reachability* stood first
+here because decision 2's decisive argument rested on it; it was read on 2026-08-16, the argument did
+not survive, and the outcome is in
 [decision 2](Decisions.md#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec).
-Two smaller items below replace it. Noted because the list is otherwise a record of things not yet
-done, and the one thing it has retired is the one that changed a decision.
+*`IPresenter` has no mode-setting path* was read against the kernel's DRM core on 2026-08-17 and is
+now [decision 73](Decisions.md#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it);
+the constrained answer this file had carried since 2026-08-16 was confirmed in shape and broken in
+one premise, and the entry had named the wrong thing as what would overturn it.
+
+Noted because the list is otherwise a record of things not yet done, and what it has retired is
+twice the same lesson: **an entry that names the source its argument rests on is one that can be
+retired by an afternoon of reading.** The entries below that name no such source are the ones that
+will need a frame loop, a panel, or a user in front of them.
 
 - **The two client-reachable `wl_abort` sites**, which
   [decision 2](Decisions.md#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)
@@ -290,56 +298,6 @@ done, and the one thing it has retired is the one that changed a decision.
   looks right and is left here rather than written into a decision because it has not been measured
   against a real driver's refusal rate — a controller that refuses often turns it from a rarity into
   a stutter, and that number is not knowable from the specification.
-- **`IPresenter` has no mode-setting path.** Targets, acquire, present, and two signals — while
-  "mode set" runs through Architecture as the event that invalidates a `FrameClock`, rebuilds
-  targets, and re-runs admission control, and decision 31's variable-refresh enable is a CRTC
-  property set with a mode rather than per frame. Something owns mode setting and nothing says what,
-  which also leaves *adopt an existing mode rather than modeset unconditionally* — load-bearing for
-  re-exec, for `simpledrm` → real driver, and for crash recovery — with no interface to be a
-  property of. Surfaced by the VRR reading and independent of it; the seam was over-provisioned for
-  plane assignment and fencing and not for this.
-
-  *(Constrained 2026-08-16, and deliberately not answered.)* The interface belongs to its caller, and
-  the caller is the frame loop, which does not exist yet. What can be settled ahead of it is the
-  shape of the answer, so that the loop confirms a design rather than inventing one.
-
-  **Five callers want a mode set, and none of them is the frame thread deciding.** Adopting the
-  firmware mode at boot; [device migration](Architecture.md#device-migration) when the real driver
-  displaces `simpledrm`; [resume](Architecture.md#suspend-and-resume); a user or configuration
-  changing an output's mode; and decision 31's variable-refresh enable, which is a CRTC property set
-  with a mode rather than per frame. The first three are composition-root sequences already, by
-  [Structure.md](Structure.md#the-three-cases-that-decide-ownership); the fourth is dispatch-side
-  policy; the fifth is a property of the mode. The frame thread only ever *observes* the result,
-  which is what `TargetsInvalidated` already is. So the operation is not missing from the seam
-  because the seam was under-specified — it is on the other side of the publication boundary, which
-  is also why the interface that was over-provisioned for planes has nothing here. Planes are
-  frame-side; modes are not.
-
-  **The obvious fix is closed off.** Putting mode setting on a dispatch-side interface makes
-  `TargetsInvalidated` a signal across the boundary, which
-  [Structure.md](Structure.md#orchestration) forbids: signals are intra-thread. So the real question
-  is how the frame thread *learns* it must transition, and there are three shapes. Stop-the-world —
-  the root quiesces the frame thread, sets the mode, resumes it — matches migration and resume
-  exactly and costs nothing, but stalls every output for the most routine of the five callers. A
-  control request the loop drains per iteration keeps the other outputs running and is a third
-  crossing, which decision 45's boundary is built on there not being. Or the mode rides in the
-  snapshot as a per-output generation, and the loop performs the transition itself when the
-  generation moves.
-
-  **The third is the presumptive answer**, to be confirmed against the loop rather than assumed by
-  it. Two channels stay two, the transition happens on the thread that owns the presenter, and the
-  ordering against scene content is defined by construction — a mode change and the scene change that
-  assumes it must not reorder, which the other two shapes each have to arrange separately. It also
-  inverts the original question: `IPresenter` does get a mode-setting call, invoked from the frame
-  thread under snapshot control rather than from dispatch, and *adopt the existing mode* becomes an
-  argument to it rather than a separate path — which is the form re-exec, the `simpledrm` handoff,
-  and crash recovery all need.
-
-  What would overturn it is blocking cost. A KMS modeset runs to tens of milliseconds, so servicing
-  one inline has to be survivable. That does not by itself kill the third shape, since an output
-  mid-transition is one that is not presenting and the loop must already tolerate that — but it makes
-  the loop's tolerance for a non-rendering output a prerequisite of the mode path rather than a
-  detail beside it.
 - **Presentation timing needs hardware validation.** Decisions 28–32 and 66 are designed rather than
   measured. The scheduling half is testable headless with fake clocks at arbitrary mixed rates, and
   should be the first thing that harness is pointed at. *(Revised 2026-08-16: the VRR half divides
@@ -355,8 +313,14 @@ done, and the one thing it has retired is the one that changed a decision.
   servo's target rate, `wp_tearing_control_v1`'s hint, and `wp_fifo_v1` or `wp_commit_timing_v1`
   letting a client state what it intends rather than leaving gyro to infer it from what it did. None
   of the three appears in the protocol set Architecture currently names, so this is a protocol
-  question wearing a scheduling question's clothes. It is also the one entry on this list with a
-  decision already resting its weight on it, which is why it sits here rather than further down.
+  question wearing a scheduling question's clothes. It is also the entry on this list with the most
+  weight already resting on it, which is why it sits here rather than further down: decision 66 needs
+  it to know when a client has taken the rate, and
+  [decision 73](Decisions.md#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it)
+  needs it for a different reason that happens to want the same signal. Its deferral predicate reads
+  decision 69's wake fold, which covers gyro-authored motion and not a client committing steadily —
+  so without this, the predicate can read *settled* between two video frames and reconfigure into the
+  hitch it exists to avoid. Two decisions, one signal, and neither can be finished without it.
 - **Chunk granularity and GPU preemption.** Chunking assumes a submission boundary is a scheduling
   opportunity for the GPU. It is not a guaranteed preemption point and the behaviour is
   hardware-dependent. Decision 30 now gates chunking on this being measured, so the question is no

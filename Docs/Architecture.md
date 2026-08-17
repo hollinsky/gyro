@@ -58,12 +58,29 @@ public:
 	virtual std::span<const RenderTarget> Targets() const = 0;
 	virtual std::optional<uint32_t>       AcquireTarget()  = 0;
 
+	// May never block: no device-wide lock, no wait on another output's commit. Its cost is
+	// bounded by the composite, because it is decision 29's B(L).
 	virtual void Present(uint32_t target, SyncPoint renderFinished, const Region& damage) = 0;
 
+	// Initiated on the frame thread, performed elsewhere. Returns before the hardware is
+	// programmed; completion arrives as Reconfigured. Unbounded by contract even where a
+	// given driver is fast. Adoption is not a second entry point — Reconfigure() to the
+	// mode already set is an adoption, and the backend commits without ALLOW_MODESET first
+	// so that the kernel is the one deciding whether it was. See decision 73.
+	virtual void Reconfigure(const OutputConfiguration& wanted) = 0;
+
 	Signal<const PresentationInfo&> Presented;           // frame reached glass
+	Signal<>                        Reconfigured;        // transition complete; targets valid again
 	Signal<>                        TargetsInvalidated;  // resize, mode set, modifier renegotiation
 };
 ```
+
+**The two verbs carry opposite contracts, and that is the point of their being two.** The kernel's
+atomic API has one entry point for both, distinguished by a flag, which is why its real-time
+behaviour is set by the slower of the two workloads — the reasoning is in
+[KernelWishlist.md](KernelWishlist.md). Splitting them here is what lets an output be
+mid-reconfiguration while every other output keeps presenting, and it is what keeps a mode set from
+becoming a term in [admission control](#admission-control)'s blocking bound.
 
 The consequence that matters: **the renderer never sees a `VkSwapchainKHR`.** It renders into
 dmabuf-backed `VkImage`s and produces a `SyncPoint`. That is exactly what KMS needs, and it is
@@ -75,9 +92,14 @@ Damage is in the interface from the start because both paths want it — `FB_DAM
 `wl_surface.damage_buffer` nested.
 
 > Written from specification rather than from a hardware prototype. The interface is deliberately
-> over-provisioned — plane assignment, per-plane fencing, mode-set versus page-flip — so that the
-> DRM backend has room to fit without a redesign. Expect these spots to need revisiting when the
-> DRM backend lands; they are marked `// SPEC:` in the headers.
+> over-provisioned — plane assignment, per-plane fencing — so that the DRM backend has room to fit
+> without a redesign. Expect these spots to need revisiting when the DRM backend lands; they are
+> marked `// SPEC:` in the headers.
+>
+> The mode-set-versus-page-flip split was in that list until 2026-08-17, when it stopped being a
+> provision and became [decision 73](Decisions.md#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it).
+> It is the one place the over-provisioning turned out to be aimed at the wrong thing: the seam had
+> room for planes and fencing, which are frame-side, and none for mode setting, which is not.
 
 ### The frame clock
 
@@ -858,9 +880,17 @@ a phase relationship, per [admission control](#admission-control) above.
 [`FrameClock`](#the-frame-clock) and the existing machinery carries it from there: `NextDeadline()`
 moves, the frame loop arms its timer against the new value, and on KMS with variable refresh enabled
 a flip presents at or after the commit — so shaping the clock is shaping presentation, and nothing
-is added to `IPresenter`. The one thing that does reach the backend is enabling variable refresh on
-the CRTC at all, which is set when a mode is set rather than per frame, and which therefore belongs
-to the mode-setting path `IPresenter` does not yet have and owes for reasons unrelated to VRR.
+is added to `IPresenter` for the servo. The one thing that does reach the backend is enabling
+variable refresh on the CRTC at all, which is set when a mode is set rather than per frame, and which
+therefore belongs to [`Reconfigure()`](#presentation) rather than to the servo.
+
+That division is sharper than it first looked. Once variable refresh is active the effective interval
+is carried entirely by *when the flip is submitted* — there is no per-frame property to set, on
+either of the drivers read — so the servo's period command reaching the panel through the clock is
+not one mechanism among several but the only one there is. Enabling is configuration; cadence is the
+lever. The cost is that `[vmin, vmax]` is derived from the mode and the panel's reported range and
+cannot be asked for, so the servo's authority is bounded by a number gyro learns only after setting a
+mode. See [decision 31](Decisions.md#31-vrr-is-a-scheduling-degree-of-freedom-not-only-a-latency-feature).
 
 Putting it on the clock also keeps the servo honest about what it knows. It closes on an observation
 rather than on an acknowledgement: it commands a period and learns from the next `Observe()` what
