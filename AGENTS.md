@@ -32,9 +32,19 @@ Codebase Structure:
 		                        the coordinate spaces and the values that live in them, with the
 		                        integer grid kept off the world
 		Animation/            - Portable tier, split by direction rather than by purity. Solve/ holds
-		                        the closed-form spring the frame thread evaluates; Author/ produces
-		                        coefficients and is dispatch-side. A frame-side include of Author/ is
-		                        a violation; see decisions 11 and 12
+		                        the two closed forms the frame thread evaluates — the spring, and the
+		                        driven ramp of decision 72; Author/ produces coefficients and is
+		                        dispatch-side. A frame-side include of Author/ is a violation; see
+		                        decisions 11 and 12
+		Publication/          - Portable tier, the data waist, split by direction like Animation.
+		                        Snapshot.h is the offset-addressed layout both halves bind to; Ring.h is
+		                        the newest-wins forward channel and Return.h the per-frame report that
+		                        carries the watermark back; Reader/ is the wait-free frame half and
+		                        Publisher/ the dispatch half that serialises, owns, and reclaims. See
+		                        decisions 45, 50, 74, and 75
+		Integration/          - The tests that name both Publication and Animation, which no module may:
+		                        the coefficient round trip, and the two-thread soak that proves the
+		                        crossing's memory ordering under GYRO_SANITIZE=thread
 		Testing/              - The hand-rolled test harness and every test binary's main().
 		                        GYRO_TEST / GYRO_CHECK / GYRO_REQUIRE; see decision 9
 
@@ -59,12 +69,16 @@ Codebase Structure:
 		                  it hangs off, which thread each piece runs on, the composition root, and
 		                  what the build checks enforce
 		Decisions.md    - Cross-cutting. Decision log with rejected alternatives and rationale
-		                  (71 decisions). Append-mostly: a revised decision keeps its superseded
+		                  (75 decisions). Append-mostly: a revised decision keeps its superseded
 		                  position as a rejected alternative, and carries its revision history
 		                  inline and dated rather than in any global ledger
 		Open.md         - Cross-cutting. The questions not yet settled, roughly in the order they
 		                  will bite. Answering one produces a decision; this is the churning half
 		                  of what used to be Decisions.md's tail
+		KernelWishlist.md - Cross-cutting. What gyro wants from the kernel and cannot have yet,
+		                  each entry a reading of a named tree at a named commit with file:line
+		                  citations, plus the workaround gyro runs instead and what would let it
+		                  be deleted. Leaves by the kernel changing, not by gyro deciding
 
 	Docs are tiered: Experience (what the user perceives) → Architecture and Animation (mechanism
 	and invariants) → Structure (where the mechanism lives). Citations point up; dependencies

@@ -42,7 +42,7 @@ struct Narrow
 
 GYRO_TEST(SnapshotPublisher, EmptyPublishIsAValidEmptySnapshot)
 {
-	const SnapshotBuffer buffer = SnapshotPublisher{}.Build();
+	const SnapshotBuffer buffer = SnapshotPublisher{}.Build(1);
 	const SnapshotReader reader{ buffer.Bytes() };
 
 	GYRO_CHECK(reader.IsValid());
@@ -54,7 +54,7 @@ GYRO_TEST(SnapshotPublisher, EmptyPublishIsAValidEmptySnapshot)
 
 GYRO_TEST(SnapshotPublisher, TheSequenceCrosses)
 {
-	const SnapshotBuffer buffer = SnapshotPublisher{}.Sequence(1234).Build();
+	const SnapshotBuffer buffer = SnapshotPublisher{}.Build(1234);
 
 	GYRO_CHECK_EQ(SnapshotReader{ buffer.Bytes() }.Sequence(), std::uint64_t{ 1234 });
 }
@@ -70,11 +70,10 @@ GYRO_TEST(SnapshotPublisher, HeterogeneousRunsRoundTrip)
 		                             Wake::At(Monotonic::FromNanoseconds(700)) };
 
 	const SnapshotBuffer buffer = SnapshotPublisher{}
-	                                  .Sequence(9)
 	                                  .Put<Wide>(SnapshotRun::Positions, positions)
 	                                  .Put<Narrow>(SnapshotRun::Channels, channels)
 	                                  .PutWakes(wakes)
-	                                  .Build();
+	                                  .Build(9);
 
 	const SnapshotReader reader{ buffer.Bytes() };
 	GYRO_REQUIRE(reader.IsValid());
@@ -108,7 +107,7 @@ GYRO_TEST(SnapshotPublisher, EachRunLandsAtAnAlignedAddress)
 	const SnapshotBuffer buffer = SnapshotPublisher{}
 	                                  .Put<Wide>(SnapshotRun::Positions, positions)
 	                                  .Put<Narrow>(SnapshotRun::Channels, channels)
-	                                  .Build();
+	                                  .Build(1);
 
 	const SnapshotReader reader{ buffer.Bytes() };
 	GYRO_REQUIRE(reader.IsValid());

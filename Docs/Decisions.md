@@ -436,6 +436,114 @@ emit cost is proportional to the dirty set that
 fine. Start with eager full re-emit and measure; the representation is offset-addressed either way,
 so the arena strategy is contained.
 
+### 74. The forward ring recycles only below the watermark, and a full ring defers
+
+*(Settles the flow control [decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) left implicit,
+surfaced 2026-08-17 building `Publication/Ring.h`.)*
+
+The frame thread takes the **newest** published snapshot and skips whatever it passed. A snapshot is
+complete scene state rather than a delta, so one nobody read costs nothing. The invariant that buys
+this is worth stating because it is what a later addition would break: **nothing may be owed once per
+published snapshot — only once per rendered frame.** Frame callbacks, presentation feedback, and
+buffer releases are all owed per frame, so they survive skipping; a per-snapshot obligation would
+not, and would fail silently.
+
+A snapshot's slot is derived from its sequence, and the writer never touches a slot at or above the
+watermark. That is what makes the reader wait-free without a re-check, and the argument is short
+enough to record. The slot a sequence *S* lands in was last occupied by *S − depth*, so rewriting the
+slot the reader is reading means publishing *S + depth*, which requires *S* to be strictly below the
+watermark. But the watermark is a sequence the frame thread itself reported, so it is at most the
+sequence the frame thread holds, which is strictly below *S* — the snapshot it is reaching for is one
+it has not held yet. *S <* watermark *≤* held *< S* is a contradiction.
+
+**Rejected: scanning the slots for the newest.** It reads fields the writer may be writing, which is
+a data race whatever the sequence numbers say.
+
+**Rejected: a seqlock re-check on the reader.** Read the slot, re-read its sequence stamp, retry if it
+moved. This is the conventional answer and it is lock-free rather than wait-free — bounded retries in
+practice, unbounded on paper — on the one thread decision 45 makes wait-free a *requirement* for. The
+cost of being wrong about "bounded in practice" is a frame thread paused inside a composite.
+
+**Rejected: a reader-side intent flag**, which is a handshake, which is a lock wearing a flag's
+clothes across exactly the priority ordering the thread split exists to prevent.
+
+**Rejected: dropping the snapshot when the ring is full.** Nearly harmless, and the exception is what
+kills it: if the dropped publish is the last one before the scene quiesces, nothing republishes it and
+the frame thread renders stale state until something unrelated moves. Rare, silent, and reads to a
+user as *the window sometimes ends up in the wrong place*.
+
+**Rejected: backpressure on dispatch.** No deadlock — the frame thread never waits on dispatch, so
+the wait is in the permitted direction — but it makes dispatch's latency a function of the frame
+thread, and a frame thread blocked on a modeset would stop dispatch draining clients, pushing the
+stall out into client sockets.
+
+So a refused publish is **deferred**: the dispatch side retains the bytes it already built and retries
+at the top of its next iteration, and a newer serialisation *supersedes* the pending one rather than
+queueing behind it — queueing would deliver a scene the world has already moved past at the cost of
+the one the frame thread wants. Memory is bounded at depth + 1 snapshots and dispatch never blocks.
+
+The depth is four. Three is the floor — one held by the frame thread, one newest, one for the writer
+to build into — and the fourth is a frame of slack, so an ordinary late frame never reaches the
+deferral path at all.
+
+**Cost accepted:** the dispatch loop grows a flush step distinct from its publish step, and one
+snapshot's worth of memory sits idle in the common case where nothing was ever deferred.
+
+### 75. The return channel is one report per frame; per-surface facts are derived, not sent
+
+*(Settles the "stated policy for what happens when it fills" that
+[Architecture.md](Architecture.md#the-publication-boundary) names and leaves open, surfaced 2026-08-17
+building `Publication/Return.h`.)*
+
+The return channel is wait-free on the **writer**, so it is bounded, so something has to happen when
+it fills. Dropping is the obvious answer and it is wrong: a lost `wl_surface.frame` callback is not a
+hitch but a **hang**, because a client waiting on it never draws again.
+
+The way out is to notice what the frame thread knows that dispatch does not, which is less than it
+looks. Dispatch *authored* the snapshot, so it already knows which surfaces sequence *S* contained; a
+report saying *S was presented at T* lets it derive the frame callbacks and the buffer releases
+itself. That is decision 50's publish-coefficients-and-evaluate-per-output run backwards, and it
+collapses the channel from outputs × surfaces to **one fixed-size report per frame**. What is left
+irreducible is the per-buffer hold, which Architecture.md already names as the one thing the watermark
+cannot express.
+
+And then the sizing problem dissolves against something that is already true: **the frame thread
+cannot allocate, so every set it holds is fixed-capacity.** The number of holds that can release in
+one frame has a ceiling whether this decision states one or not. Size the record from that ceiling and
+the queue from a generous number of frames of dispatch latency, and there is no drop policy left to
+write. Two paths remain and neither loses anything — a full queue is merged into the writer's own
+staged report, which is legal because it is the only writer, and releases that do not fit are
+*refused*, so the frame thread keeps holding those buffers for another frame.
+
+**The watermark therefore rides the channel literally**, as Architecture.md says, rather than as a
+monotone atomic beside it. The atomic was the right answer while the queue could drop — a lost
+watermark stalls reclamation — and became unnecessary the moment nothing could be lost. Recorded as
+rejected because it is the shape this reaches for first and the reason it is not needed is not
+obvious from the queue alone.
+
+**Rejected: a queue templated on its payload.** Architecture.md's claim that *a third channel would be
+a design error rather than an addition* has to be enforceable by something, and a concrete record is
+what enforces it: a template is an invitation to instantiate a second queue for the next kind of
+frame-thread knowledge somebody needs. The friction of extending one record is the feature. It also
+keeps [decision 49](#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot)'s
+process option alive, since a templated queue is a POD obligation thrown away for nothing.
+
+**Rejected: fixing the full field set now.** The presented sequence and its timestamp, the per-output
+measured costs that feed budgets, the VRR servo's observations — all of them belong in this record and
+none has a producer until the frame loop exists. The *shape* is what is being fixed, because the shape
+decides the sizing and the loss policy and cannot be changed later; a field costs a recompile of two
+halves that are always built together.
+
+The hold names its buffer with a [generational handle](#15-identity-is-a-generational-handle), so a
+stale release compares unequal rather than naming whatever occupies the slot now. That is decision 15
+doing its work at the one place in the design where cross-thread lifetime is admitted to be genuinely
+new, and retrofitting identity into a record after the fact is where that bug lives.
+
+**Cost accepted:** dispatch must be able to derive per-surface consequences from a presented sequence,
+which means keeping the authoring side of a snapshot addressable until that sequence is reported. It
+is the same retention the watermark already implies, so it is a constraint made explicit rather than a
+new one.
+
 ### 4. All three backends are in scope: nested, headless, DRM
 
 Nested is the daily driver and unlocks RenderDoc, validation layers, ASan, and gdb. Headless is what

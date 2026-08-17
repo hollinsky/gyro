@@ -3,10 +3,13 @@
 #include <span>
 
 #include "Animation/Author/Animatable.h"
+#include "Animation/Author/Drive.h"
+#include "Animation/Solve/Ramp.h"
 #include "Animation/Solve/Spring.h"
 #include "Core/FrameSection.h"
 #include "Core/Time.h"
 #include "Core/Wake.h"
+#include "Geometry/Space.h"
 #include "Publication/Publisher/Publisher.h"
 #include "Publication/Reader/Reader.h"
 #include "Testing/Test.h"
@@ -52,10 +55,9 @@ GYRO_TEST(PublicationRoundTrip, SpringsEvaluateIdenticallyAcrossTheBoundary)
 	const Spring<float> opacityCoefficients = opacity.Coefficients();
 
 	const SnapshotBuffer buffer = SnapshotPublisher{}
-	                                  .Sequence(1)
 	                                  .Put<Spring<double>>(SnapshotRun::Positions, { &positionCoefficients, 1 })
 	                                  .Put<Spring<float>>(SnapshotRun::Channels, { &opacityCoefficients, 1 })
-	                                  .Build();
+	                                  .Build(1);
 
 	const SnapshotReader reader{ buffer.Bytes() };
 	GYRO_REQUIRE(reader.IsValid());
@@ -97,7 +99,7 @@ GYRO_TEST(PublicationRoundTrip, AnAtRestSpringCrossesAndStaysAtRest)
 	const Spring<double> coefficients = resting.Coefficients();
 
 	const SnapshotBuffer buffer =
-		SnapshotPublisher{}.Put<Spring<double>>(SnapshotRun::Positions, { &coefficients, 1 }).Build();
+		SnapshotPublisher{}.Put<Spring<double>>(SnapshotRun::Positions, { &coefficients, 1 }).Build(1);
 
 	const SnapshotReader reader{ buffer.Bytes() };
 	GYRO_REQUIRE(reader.IsValid());
@@ -108,4 +110,63 @@ GYRO_TEST(PublicationRoundTrip, AnAtRestSpringCrossesAndStaysAtRest)
 	const SpringState<double> state = positions[0].Evaluate(Monotonic::FromNanoseconds(1'000'000'000));
 	GYRO_CHECK_EQ(state.Position, 7.5);
 	GYRO_CHECK_EQ(state.Velocity, 0.0);
+}
+
+GYRO_TEST(PublicationRoundTrip, ADrivenProgressCrossesInItsOwnRunAndKeepsItsWake)
+{
+	// The second closed form, taking the third run. Docs/Decisions.md decision 72 keeps it beside the
+	// springs rather than inside them, so what is proven here is that the frame thread walks two
+	// fixed-stride arrays with a fixed evaluation kind each — a ramp resolved as a spring, or a spring
+	// resolved as a ramp, must be nothing rather than a reinterpretation.
+	//
+	// Authored through the real ingest: a gesture displacement in global space, projected onto the
+	// travel the catalog would carry. A travel of 1024 with a quarter of it consumed is a progress of
+	// exactly one quarter, which is the property Animation/Author/Drive.h exists to have.
+	constexpr DriveMapping swipe{ .Travel = { 1024.0, 0.0 }, .RubberBand = 0.0 };
+	const double progress = Progress(swipe, Offset<GlobalSpace>{ 256.0, 0.0 });
+	GYRO_REQUIRE_EQ(progress, 0.25);
+
+	// An eighth of a second of lead at three progress per second — a stand-in for decision 65's one
+	// output period, whose value is still open and is not this test's to fix.
+	const Ramp driven{
+		.Origin = Monotonic::FromNanoseconds(0),
+		.Horizon = Duration{ 125'000'000 },
+		.Progress = static_cast<float>(progress),
+		.Rate = 3.0f,
+	};
+
+	const SnapshotBuffer buffer = SnapshotPublisher{}.Put<Ramp>(SnapshotRun::DrivenProgress, { &driven, 1 }).Build(1);
+
+	const SnapshotReader reader{ buffer.Bytes() };
+	GYRO_REQUIRE(reader.IsValid());
+
+	const std::span<const Ramp> ramps = reader.Run<Ramp>(SnapshotRun::DrivenProgress);
+	GYRO_REQUIRE_EQ(ramps.size(), std::size_t{ 1 });
+
+	// The runs do not bleed into one another: a driven record is in the driven run and nowhere else,
+	// and the spring runs are absent rather than empty-looking.
+	GYRO_CHECK(reader.Run<Spring<float>>(SnapshotRun::DrivenProgress).empty());
+	GYRO_CHECK(reader.Run<Ramp>(SnapshotRun::Channels).empty());
+
+	for (const Instant probe : kProbes)
+	{
+		RampState fromSnapshot{};
+		Wake wake{};
+		{
+			const FrameSection guard;
+			fromSnapshot = ramps[0].Evaluate(probe);
+			wake = ramps[0].WakeAt(probe);
+		}
+
+		const RampState fromModel = driven.Evaluate(probe);
+		GYRO_CHECK_EQ(fromSnapshot.Position, fromModel.Position);
+		GYRO_CHECK_EQ(fromSnapshot.Velocity, fromModel.Velocity);
+		GYRO_CHECK(wake == driven.WakeAt(probe));
+	}
+
+	// The concrete values, so that a change of sign or of units in the ingest is caught here rather
+	// than agreeing with itself on both sides of the boundary.
+	GYRO_CHECK_EQ(ramps[0].Evaluate(Monotonic::FromNanoseconds(0)).Position, 0.25f);
+	GYRO_CHECK_EQ(ramps[0].Evaluate(Monotonic::FromNanoseconds(125'000'000)).Position, 0.625f);
+	GYRO_CHECK(ramps[0].WakeAt(Monotonic::FromNanoseconds(125'000'000)) == Wake::Never());
 }

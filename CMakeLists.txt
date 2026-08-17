@@ -129,6 +129,7 @@ gyro_add_module(Animation PORTABLE
 	FRAME_DEPENDS
 		Core
 	TESTS
+		Solve/Ramp.Test.cpp
 		Solve/Spring.Test.cpp
 		Author/Animatable.Test.cpp
 		Author/Bundle.Test.cpp
@@ -138,10 +139,11 @@ gyro_add_module(Animation PORTABLE
 		Author/Retarget.Test.cpp
 )
 
-# The data waist: what crosses between the two threads. This cut is the snapshot representation and
-# its wait-free reader; the SPSC ring, the return channel, the watermark, and the per-buffer hold are
-# later parts of the same module. Split by direction like Animation is: Reader is the frame half and
-# is the default, Publisher is the dispatch half that serialises and allocates.
+# The data waist: what crosses between the two threads — the snapshot representation and its wait-free
+# reader, the newest-wins forward ring, the return channel carrying the consumed-sequence watermark
+# and the per-buffer hold, and the deferred reclamation that hangs off it. Split by direction like
+# Animation is: Reader is the frame half and is the default, Publisher is the dispatch half that
+# serialises, owns the buffers, and allocates.
 #
 # FRAME_DEPENDS Core narrows the frame half to Core alone. The waist rests on Core and Geometry
 # (Docs/Structure.md), but Geometry is authoring-side content — the coordinate spaces a position is
@@ -157,8 +159,11 @@ gyro_add_module(Publication PORTABLE
 	FRAME_DEPENDS
 		Core
 	TESTS
+		Return.Test.cpp
+		Ring.Test.cpp
 		Snapshot.Test.cpp
 		Reader/Reader.Test.cpp
+		Publisher/Outbox.Test.cpp
 		Publisher/Publisher.Test.cpp
 )
 
@@ -238,15 +243,24 @@ add_executable(UringProbe
 	Tools/UringProbe.cpp
 )
 
-# The one test that stands on both sides of the publication waist: it publishes real spring
-# coefficients through Publication and reconstitutes them through Animation/Solve, which no single
-# module may do — Publication does not depend on Animation, by the graph. So it is a bespoke
-# executable rather than a gyro_add_module, outside the per-module layering the crossing is the whole
-# point of, and it is a temporary home for the round trip until Scene and Frame own their ends of it.
+# The tests that stand on both sides of the publication waist: they publish real spring coefficients
+# through Publication and reconstitute them through Animation/Solve, which no single module may do —
+# Publication does not depend on Animation, by the graph. So this is a bespoke executable rather than
+# a gyro_add_module, outside the per-module layering the crossing is the whole point of, and it is a
+# temporary home for the round trip until Scene and Frame own their ends of it.
+#
+# It is also the only target that runs two threads, and for the same reason: the crossing is the only
+# thing in the codebase that has two, so the soak that proves its memory ordering has nowhere else to
+# live. That is what Threads is here for, and what makes this the target to point GYRO_SANITIZE=thread
+# at.
+#
 # Core and Testing are named directly for the reason gyro_add_module names them: they are OBJECT
 # libraries, and an object library's members reach only the targets that name it.
+find_package(Threads REQUIRED)
+
 add_executable(IntegrationTests
 	Source/Integration/PublicationRoundTrip.Test.cpp
+	Source/Integration/PublicationSoak.Test.cpp
 )
 target_link_libraries(IntegrationTests
 	PRIVATE
@@ -255,5 +269,6 @@ target_link_libraries(IntegrationTests
 		Geometry
 		Core
 		Testing
+		Threads::Threads
 )
 add_test(NAME Integration COMMAND IntegrationTests)

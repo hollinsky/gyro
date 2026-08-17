@@ -494,6 +494,15 @@ optimizations:
   the dispatch thread frees below that. Shared ownership across the boundary puts `free` on the
   frame path wearing a destructor's clothes, where the debug allocator will not catch it.
 
+**The reader takes the newest and skips the rest, and a full ring defers rather than drops.** A
+snapshot is complete scene state, so one nobody read costs nothing — which makes skipping free and
+makes one thing forbidden: *nothing may be owed once per published snapshot, only once per rendered
+frame.* On the writer's side, the slot a snapshot lands in is never reused until the watermark has
+passed it, which is what keeps the reader's acquire a single indexed read with no retry; and when
+every slot is still live, dispatch retains the snapshot and retries rather than discarding it, because
+a discarded *last* publish before the scene quiesces is never re-sent. See
+[decision 74](Decisions.md#74-the-forward-ring-recycles-only-below-the-watermark-and-a-full-ring-defers).
+
 Publishing coefficients is only available because animation is [closed
 form](Animation.md#closed-form-not-integrated). An integrated spring must be *advanced* by whoever
 evaluates it, so the frame thread would write to what it reads and the boundary would need to be
@@ -525,10 +534,19 @@ keeps the forward channel's exclusivity meaningful — but it is real traffic, a
 undescribed only scatters it across a handful of ad-hoc mechanisms with a handful of lifetimes.
 
 So: a second SPSC queue, frame → dispatch, carrying small POD records. It is wait-free on the
-**writer** this time, which means bounded, with a stated policy for what happens when it fills. The
-bound is easy — records per frame cannot exceed outputs × surfaces — and the failure mode to design
-against is a stall on the frame thread, not a dropped callback. The consumed-sequence watermark
-rides the same channel.
+**writer** this time, which means bounded, and the failure mode to design against is a stall on the
+frame thread, not a dropped callback. The consumed-sequence watermark rides the same channel.
+
+**The record is a per-frame summary, and that is what removes the drop policy.** Dropping looked
+acceptable until the cost was named: a lost `wl_surface.frame` callback is a hang rather than a
+hitch, because a client waiting on it never draws again. But dispatch *authored* the snapshot, so a
+report saying which sequence was presented lets it derive the callbacks and the buffer releases
+itself — the forward channel's publish-and-derive run backwards — which collapses the traffic from
+outputs × surfaces to one fixed-size record per frame. The bound then follows from something already
+true: the frame thread cannot allocate, so every set it holds is fixed-capacity, and a record sized
+from those ceilings has nothing left to drop. A full queue is merged into the writer's own staged
+report, and a hold that does not fit is simply not released this frame. See
+[decision 75](Decisions.md#75-the-return-channel-is-one-report-per-frame-per-surface-facts-are-derived-not-sent).
 
 **Cross-thread lifetime is the cost.** A client may destroy a surface while the frame thread holds
 it. [Generational handles](Decisions.md#15-identity-is-a-generational-handle) supply the detection

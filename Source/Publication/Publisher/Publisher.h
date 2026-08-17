@@ -6,6 +6,7 @@
 #include <cstring>
 #include <span>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "Core/Wake.h"
@@ -22,25 +23,81 @@
 // **Naive by construction, and Docs/Open.md says to keep it that way for now.** "Publication pacing"
 // leaves the arena strategy — eager per commit, paced to an output period, copy-on-write — to be
 // settled by measurement, and asks that the first cut be the naive one. So this builder stages each
-// run into its own owned buffer and assembles a fresh region at Build. The eventual publisher will
+// run into its own owned buffer and assembles a region at Build. The eventual publisher will
 // serialise straight from the live scene into a reused arena; this one is the naive baseline that
 // makes the boundary testable before that arena exists.
+//
+// **Who owns the assembled bytes, and until when, is Publication/Publisher/Outbox.h's.** This file
+// only lays them out. The distinction matters because the answer is not "until Build returns": a
+// published snapshot belongs to the dispatch side until the frame thread's watermark passes it, which
+// is decision 45's deferred reclamation and is the reason the buffer below can be handed back and
+// filled again rather than being a fresh allocation each time.
 
 // A published snapshot's backing storage, owned until reclamation.
 //
 // It carries its bytes over-aligned to SnapshotBaseAlignment so that every run placed at an
 // element-aligned offset yields an address the reader can hand back as a typed span. The storage is
-// value-initialised, which is what makes the header's reserved bytes and any inter-run padding zero
-// rather than whatever the allocator last held — the value-initialisation obligation Core/Wake.h and
-// Animation/Solve/Spring.h record for their tail padding, discharged for the whole region at once.
+// zeroed on every reset, which is what makes the header's reserved bytes and any inter-run padding
+// zero rather than whatever the allocator or the last snapshot left there — the value-initialisation
+// obligation Core/Wake.h and Animation/Solve/Spring.h record for their tail padding, discharged for
+// the whole region at once, and discharged again each time the region is reused.
 class SnapshotBuffer
 {
 public:
 	SnapshotBuffer() = default;
 
-	explicit SnapshotBuffer(std::size_t byteSize)
-		: m_Store((byteSize + sizeof(Unit) - 1) / sizeof(Unit)), m_ByteSize{ byteSize }
+	explicit SnapshotBuffer(std::size_t byteSize) { Reset(byteSize); }
+
+	// **Moved from means empty, and the size is the half that has to be said out loud.** The implicit
+	// move would take the vector and *copy* the byte size beside it, leaving a buffer that reports a
+	// snapshot's worth of bytes over storage it no longer owns. That is the precise shape of the defect
+	// the two-thread soak found in an earlier Outbox — a correctly-sized span over a freed pointer — so
+	// the invariant is enforced by the type rather than by every caller remembering not to ask.
+	//
+	// The self-assignment guard is there for the same reason and not for tidiness: a std::vector
+	// self-move is valid-but-unspecified, and unspecified here means the storage goes and the size
+	// stays.
+	SnapshotBuffer(SnapshotBuffer&& other) noexcept
+		: m_Store{ std::move(other.m_Store) }, m_ByteSize{ std::exchange(other.m_ByteSize, 0) }
 	{}
+
+	SnapshotBuffer& operator=(SnapshotBuffer&& other) noexcept
+	{
+		if (this != &other)
+		{
+			m_Store = std::move(other.m_Store);
+			m_ByteSize = std::exchange(other.m_ByteSize, 0);
+		}
+
+		return *this;
+	}
+
+	// Deep-copying a published snapshot is never what is wanted: the dispatch side hands ownership
+	// along, and the frame side reads bytes it does not own at all.
+	SnapshotBuffer(const SnapshotBuffer&) = delete;
+	SnapshotBuffer& operator=(const SnapshotBuffer&) = delete;
+
+	~SnapshotBuffer() = default;
+
+	// Make the buffer hold a snapshot of the given size, reusing the allocation whenever it is already
+	// large enough. Never shrinks, because the whole point of handing a reclaimed buffer back to the
+	// publisher is that the next snapshot of about the same size costs no allocator traffic at all.
+	//
+	// The zeroing is not an optimisation to skip once the publisher writes every byte it declares,
+	// because it does not: inter-run alignment padding belongs to no run, and decision 49's shared
+	// mapping would make an uninitialised gap somebody else's business.
+	void Reset(std::size_t byteSize)
+	{
+		const std::size_t units = (byteSize + sizeof(Unit) - 1) / sizeof(Unit);
+
+		if (m_Store.size() < units)
+		{
+			m_Store.resize(units);
+		}
+
+		std::memset(m_Store.data(), 0, m_Store.size() * sizeof(Unit));
+		m_ByteSize = byteSize;
+	}
 
 	[[nodiscard]] std::span<const std::byte> Bytes() const noexcept
 	{
@@ -54,10 +111,13 @@ public:
 
 	[[nodiscard]] std::size_t Size() const noexcept { return m_ByteSize; }
 
+	// What the allocation could hold without touching the allocator. Nothing in the design reads this
+	// — it is here so a test can prove a reclaimed buffer was reused rather than infer it.
+	[[nodiscard]] std::size_t Capacity() const noexcept { return m_Store.size() * sizeof(Unit); }
+
 private:
 	// The widest fundamental alignment, so std::vector's allocation meets SnapshotBaseAlignment
-	// without an over-aligned allocator. A value-initialised vector zeroes its elements, so the region
-	// starts clean.
+	// without an over-aligned allocator.
 	using Unit = std::max_align_t;
 
 	std::vector<Unit> m_Store;
@@ -67,14 +127,6 @@ private:
 class SnapshotPublisher
 {
 public:
-	// The sequence number the snapshot carries, for the reclamation watermark this module will grow.
-	// It is the caller's monotonic publish counter; the builder only records it.
-	SnapshotPublisher& Sequence(std::uint64_t sequence) noexcept
-	{
-		m_Sequence = sequence;
-		return *this;
-	}
-
 	// Stage one run's coefficients. The bytes are copied now, so the caller's storage need not outlive
 	// Build — a safety the eventual serialise-in-place publisher will not want, but the right default
 	// for a builder assembled from scattered sources in a test or a first cut.
@@ -92,11 +144,18 @@ public:
 		return *this;
 	}
 
-	// Assemble the staged runs into one contiguous offset-addressed snapshot. The header goes first,
-	// then each non-empty run at an offset aligned for its element, then the wake schedule; the
-	// directory records where each landed. The result is self-describing: its own ByteSize, the magic,
-	// and the version are what the reader validates before trusting a byte of it.
-	[[nodiscard]] SnapshotBuffer Build() const
+	// Assemble the staged runs into one contiguous offset-addressed snapshot, in a buffer the caller
+	// owns. The header goes first, then each non-empty run at an offset aligned for its element, then
+	// the wake schedule; the directory records where each landed. The result is self-describing: its
+	// own ByteSize, the magic, and the version are what the reader validates before trusting a byte of
+	// it.
+	//
+	// **The sequence is an argument rather than a staged field, and that is the point.** It is both the
+	// snapshot's identity and the forward ring's ordering, so those must be one number and it must come
+	// from the ring — see Publication/Ring.h's NextSequence. A builder that carried its own would make
+	// monotonicity a caller obligation, which is the kind of invariant nobody notices breaking until
+	// reclamation stops.
+	void Build(SnapshotBuffer& into, std::uint64_t sequence) const
 	{
 		std::array<std::uint32_t, SnapshotRunCount> offsets{};
 
@@ -112,7 +171,7 @@ public:
 		const std::size_t byteSize = cursor;
 
 		SnapshotHeader header{};
-		header.Sequence = m_Sequence;
+		header.Sequence = sequence;
 		header.ByteSize = static_cast<std::uint32_t>(byteSize);
 		for (std::size_t index = 0; index < SnapshotRunCount; ++index)
 		{
@@ -120,8 +179,8 @@ public:
 		}
 		header.Wakes = Entry(m_Wakes, wakeOffset);
 
-		SnapshotBuffer buffer{ byteSize };
-		const std::span<std::byte> bytes = buffer.Bytes();
+		into.Reset(byteSize);
+		const std::span<std::byte> bytes = into.Bytes();
 
 		std::memcpy(bytes.data(), &header, sizeof(SnapshotHeader));
 		for (std::size_t index = 0; index < SnapshotRunCount; ++index)
@@ -129,6 +188,15 @@ public:
 			CopyInto(bytes, offsets[index], m_Runs[index]);
 		}
 		CopyInto(bytes, wakeOffset, m_Wakes);
+	}
+
+	// The same assembly into a buffer nobody had yet. The outbox never takes this path — it always has
+	// a reclaimed buffer or a pending one to fill — so it exists for call sites that want one snapshot
+	// and no ownership question, which in practice means tests.
+	[[nodiscard]] SnapshotBuffer Build(std::uint64_t sequence) const
+	{
+		SnapshotBuffer buffer;
+		Build(buffer, sequence);
 
 		return buffer;
 	}
@@ -195,5 +263,4 @@ private:
 
 	std::array<Staged, SnapshotRunCount> m_Runs;
 	Staged m_Wakes;
-	std::uint64_t m_Sequence = 0;
 };
