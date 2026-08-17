@@ -86,6 +86,8 @@ gyro_add_module(Geometry PORTABLE
 	DEPENDS
 		Core
 	TESTS
+		AxisTransform.Test.cpp
+		NodeTransform.Test.cpp
 		Scale.Test.cpp
 		Space.Test.cpp
 )
