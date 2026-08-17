@@ -14,15 +14,26 @@
 # CheckLayering.cmake holds every #include in the module to it — because CMake enforces a link
 # dependency and this codebase is mostly headers, where there is no symbol to link and therefore
 # nothing for CMake to notice.
+#
+# DISPATCH and DISPATCH_HALF are the second partition, and they exist because the graph cannot see
+# it. Docs/Structure.md#threads-are-a-second-partition names four modules that straddle the
+# publication boundary, and for those the dangerous include is one the graph calls legal: Frame
+# depends on Animation, so Frame reaching Animation::Author crosses the boundary without crossing an
+# edge. DISPATCH_HALF names the subdirectories that are dispatch-side, DISPATCH says the whole module
+# is, and everything else is denied — the frame side is the default because it is the side being
+# protected, and a new module has to say it is dispatch-side rather than say it is not.
 
 function(gyro_add_module NAME)
-	cmake_parse_arguments(PARSE_ARGV 1 MODULE "PORTABLE;OBJECT" "" "SOURCES;TESTS;DEPENDS")
+	cmake_parse_arguments(PARSE_ARGV 1 MODULE "PORTABLE;OBJECT;DISPATCH" "" "SOURCES;TESTS;DEPENDS;DISPATCH_HALF")
 
 	if(MODULE_UNPARSED_ARGUMENTS)
 		message(FATAL_ERROR "gyro_add_module(${NAME}): unexpected argument ${MODULE_UNPARSED_ARGUMENTS}")
 	endif()
 	if(MODULE_OBJECT AND NOT MODULE_SOURCES)
 		message(FATAL_ERROR "gyro_add_module(${NAME}): OBJECT needs SOURCES to hold the objects")
+	endif()
+	if(MODULE_DISPATCH AND MODULE_DISPATCH_HALF)
+		message(FATAL_ERROR "gyro_add_module(${NAME}): DISPATCH is the whole module; it has no half to name")
 	endif()
 
 	# A module with no translation unit of its own is header-only, and it is an INTERFACE library
@@ -61,6 +72,21 @@ function(gyro_add_module NAME)
 	if(MODULE_PORTABLE)
 		set_property(GLOBAL APPEND PROPERTY GYRO_PORTABLE_MODULES ${NAME})
 	endif()
+
+	if(MODULE_DISPATCH)
+		set_property(GLOBAL APPEND PROPERTY GYRO_DISPATCH_MODULES ${NAME})
+	endif()
+
+	# Halves are recorded module-relative, since that is the form an #include is written in and the
+	# check should not have to reconstruct it. A misspelled half is the failure worth catching here:
+	# it names no directory, matches no include, and silently turns the rule off for the one module
+	# that asked for it.
+	foreach(HALF IN LISTS MODULE_DISPATCH_HALF)
+		if(NOT IS_DIRECTORY "${GYRO_SOURCE_DIR}/${NAME}/${HALF}")
+			message(FATAL_ERROR "gyro_add_module(${NAME}): DISPATCH_HALF ${HALF} is not a directory")
+		endif()
+		set_property(GLOBAL APPEND PROPERTY GYRO_DISPATCH_HALVES "${NAME}/${HALF}")
+	endforeach()
 
 	# One test binary per module, so a Core change relinks Core's tests and nothing else, and so the
 	# portable tier's tests stay runnable on their own.

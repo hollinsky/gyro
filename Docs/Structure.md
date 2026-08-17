@@ -177,8 +177,22 @@ them unfused buys the thread separation for nothing.
 What the module graph enforces is the negative form, and that is the half that matters: the frame
 side cannot reach the world, because the edge does not exist. What it cannot express is that `Frame`
 must not reach `Animation::Author` — both are modules `Frame` legitimately depends on. For the four
-straddlers, that check has to run at header granularity, which is a small extension to
-`CheckLayering.cmake` and is deliberately not built until the modules exist.
+straddlers that check runs at directory granularity, and `gyro_add_module` is where a module declares
+its halves: `DISPATCH_HALF` names the subdirectories that are dispatch-side, `DISPATCH` says the
+whole module is, and everything else is denied.
+
+**Only the dispatch half is named, and the asymmetry is the point.** The frame side is what is being
+protected, so it is the default and the exception is what gets declared — a module that has said
+nothing cannot reach authoring. The opposite polarity would put the burden on whoever adds the next
+module to notice that they had a duty, and they will not. What makes it a directory test rather than
+a reading of the contents is
+[decision 50](Decisions.md#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients):
+producing spring coefficients is dispatch-side and consuming them is not, so the halves split by
+*direction* and the split is a path prefix.
+
+A file is dispatch-side by where it sits, tests included. A test for something in a dispatch half
+belongs in that half; one written at the module root fails the check rather than quietly
+establishing that the root may reach authoring.
 
 The rest of thread discipline is runtime instrumentation rather than structure — the debug allocator
 of [decision 36](Decisions.md#36-frame-path-discipline-is-enforced-mechanically-not-by-review),
@@ -240,7 +254,7 @@ establishes for the frame path and this file extends to the module graph.
 | --- | --- | --- |
 | `CheckClockDiscipline.cmake` | one reader of the timebase | [decision 57](Decisions.md#57-one-timebase-clock_monotonic-converted-at-ingest-and-nowhere-else) |
 | `CheckPortability.cmake` | no platform headers in a `PORTABLE` module | [decision 6](Decisions.md#6-no-macos-port-development-continues-over-ssh) |
-| `CheckLayering.cmake` | every `#include` lies on a declared edge; the graph is a DAG | this document |
+| `CheckLayering.cmake` | every `#include` lies on a declared edge; the graph is a DAG; nothing outside a dispatch half includes one | this document |
 
 The fourth is not a build check and belongs in the table anyway, because it is the one decision 36
 actually names: `Core/DebugAllocator.cpp` replaces the global `operator new` and `operator delete`
@@ -275,18 +289,6 @@ is.
 
 ## Open
 
-- **Header-granularity layering for the four straddling modules.** `Frame` reaching
-  `Animation::Author` is a real violation the module-level check cannot see. Deferred until those
-  modules exist, since the rule needs the halves to be named before it can name them.
-
-  *(Annotated 2026-08-16.)* `Animation` now has its halves, as `Solve/` and `Author/`
-  subdirectories, and they are split by direction rather than by purity: `Solve` consumes spring
-  coefficients, `Author` produces them. That is what makes the rule mechanical — producing
-  coefficients is dispatch-side by [decision
-  50](Decisions.md#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients),
-  so the check needs only the second path component and never the contents. `CheckLayering.cmake`
-  already globs recursively and already attributes an include to its first component, so the
-  extension is a second component test rather than a new walk.
 - **Generated sources.** `gyro_add_module` prepends the module directory to every source, so the
   protocol bindings — generated into the build tree by a host tool — cannot yet be expressed.
 - **Where the differ lives.** Placed in `Scene` here, so that `Animation` stays a pure library of

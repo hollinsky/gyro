@@ -13,6 +13,19 @@
 # Dependencies are transitive, matching PUBLIC linkage: a module may include from anything its
 # declared dependencies reach. Declaring Core in every module would be noise, and the edge above is
 # caught either way, because nothing on the frame side's closure leads to the world.
+#
+# The second half of the file guards the same edge where the graph cannot see it. Four modules
+# straddle the publication boundary (Docs/Structure.md#threads-are-a-second-partition), and inside
+# one of those the crossing include is one the graph calls legal — Frame depends on Animation, so
+# Frame reaching Animation::Author is a boundary crossing along a declared edge. What makes that
+# mechanical rather than a matter of reading the contents is decision 50: producing spring
+# coefficients is dispatch-side and consuming them is not, so the halves split by *direction*, the
+# split is a directory, and the rule is a path prefix.
+#
+# Deny by default, and only the dispatch half is named. The frame side is what is being protected,
+# so it is the default and the exception is what gets declared — a module that has said nothing
+# cannot reach authoring, which is the polarity that survives someone adding a module and not
+# reading this file.
 
 if(NOT DEFINED SOURCE_DIR)
 	message(FATAL_ERROR "CheckLayering requires -D SOURCE_DIR=<path>")
@@ -20,6 +33,15 @@ endif()
 if(NOT DEFINED GRAPH)
 	message(FATAL_ERROR "CheckLayering requires -D GRAPH=<Name=Dep,Dep|Name=Dep,Dep>")
 endif()
+
+# Both are empty until a straddler declares itself, which is the ordinary state of this file until
+# Publication and Render exist.
+foreach(OPTIONAL IN ITEMS DISPATCH_MODULES DISPATCH_HALVES)
+	if(NOT DEFINED ${OPTIONAL})
+		set(${OPTIONAL} "")
+	endif()
+	string(REPLACE "," ";" ${OPTIONAL} "${${OPTIONAL}}")
+endforeach()
 
 # "Name=Dep,Dep|Name=Dep,Dep" because a -P script takes no maps, and because a semicolon list handed
 # to a custom command is split into separate arguments before the script ever sees it.
@@ -81,12 +103,27 @@ foreach(MODULE IN LISTS MODULES)
 		string(REGEX REPLACE "//[^\n]*" "" CONTENT "${CONTENT}")
 		string(REGEX MATCHALL "#[ \t]*include[ \t]*\"[^\"]+\"" INCLUDES "${CONTENT}")
 
+		file(RELATIVE_PATH RELATIVE "${SOURCE_DIR}" "${SOURCE}")
+
 		# A test is not part of its module's public shape, so it may reach the harness that runs it
 		# without every module declaring a dependency on Testing that only its tests have.
 		set(ALLOWED "${MODULE}" ${CLOSURE_${MODULE}})
 		if(SOURCE MATCHES "\\.Test\\.cpp$")
 			list(APPEND ALLOWED "Testing")
 		endif()
+
+		# A file is dispatch-side by where it sits, tests included. That is deliberate: a test for
+		# something in a dispatch half belongs in that half, and one written at the module root
+		# fails here rather than quietly establishing that the root may reach authoring.
+		set(DISPATCH_SIDE FALSE)
+		if(MODULE IN_LIST DISPATCH_MODULES)
+			set(DISPATCH_SIDE TRUE)
+		endif()
+		foreach(HALF IN LISTS DISPATCH_HALVES)
+			if(RELATIVE MATCHES "^${HALF}/")
+				set(DISPATCH_SIDE TRUE)
+			endif()
+		endforeach()
 
 		foreach(INCLUDE IN LISTS INCLUDES)
 			string(REGEX REPLACE "^.*\"([^\"]+)\"$" "\\1" HEADER "${INCLUDE}")
@@ -97,12 +134,20 @@ foreach(MODULE IN LISTS MODULES)
 				continue()
 			endif()
 
+			if(NOT DISPATCH_SIDE)
+				foreach(HALF IN LISTS DISPATCH_HALVES)
+					if(HEADER MATCHES "^${HALF}/")
+						list(APPEND VIOLATIONS
+							"${RELATIVE}: \"${HEADER}\" — ${HALF} is dispatch-side and this is not")
+					endif()
+				endforeach()
+			endif()
+
 			string(REGEX REPLACE "/.*$" "" OWNER "${HEADER}")
 			if(NOT OWNER IN_LIST MODULES OR OWNER IN_LIST ALLOWED)
 				continue()
 			endif()
 
-			file(RELATIVE_PATH RELATIVE "${SOURCE_DIR}" "${SOURCE}")
 			list(APPEND VIOLATIONS "${RELATIVE}: \"${HEADER}\" — ${MODULE} does not depend on ${OWNER}")
 		endforeach()
 	endforeach()
@@ -112,7 +157,8 @@ if(VIOLATIONS)
 	list(REMOVE_DUPLICATES VIOLATIONS)
 	list(JOIN VIOLATIONS "\n    " REPORT)
 	message(FATAL_ERROR
-		"An include crosses an edge the module graph does not have:\n    ${REPORT}\n\n"
-		"Either the include is wrong, or gyro_add_module's DEPENDS is. Docs/Structure.md is the graph.\n"
+		"An include crosses a line the module graph draws:\n    ${REPORT}\n\n"
+		"Either the include is wrong, or gyro_add_module's DEPENDS, DISPATCH, or DISPATCH_HALF is.\n"
+		"Docs/Structure.md is the graph, and its thread table is the second partition.\n"
 	)
 endif()

@@ -110,6 +110,8 @@ gyro_add_module(Geometry PORTABLE
 # as arguments precisely so that neither the geometric ones nor the unresolved non-geometric ones
 # have to be known here. The edge lands when the catalog does.
 gyro_add_module(Animation PORTABLE
+	DISPATCH_HALF
+		Author
 	DEPENDS
 		Core
 	TESTS
@@ -143,10 +145,19 @@ foreach(MODULE IN LISTS GYRO_MODULES)
 endforeach()
 list(JOIN GYRO_MODULE_GRAPH "|" GYRO_MODULE_GRAPH)
 
+# The second partition, which the graph cannot express: the halves of a straddling module, and the
+# modules that are dispatch-side entire. Both are empty until a module says otherwise.
+get_property(GYRO_DISPATCH_MODULES GLOBAL PROPERTY GYRO_DISPATCH_MODULES)
+get_property(GYRO_DISPATCH_HALVES GLOBAL PROPERTY GYRO_DISPATCH_HALVES)
+list(JOIN GYRO_DISPATCH_MODULES "," GYRO_DISPATCH_MODULES)
+list(JOIN GYRO_DISPATCH_HALVES "," GYRO_DISPATCH_HALVES)
+
 add_custom_target(Layering ALL
 	COMMAND ${CMAKE_COMMAND}
 		-D SOURCE_DIR=${GYRO_SOURCE_DIR}
 		-D GRAPH=${GYRO_MODULE_GRAPH}
+		-D DISPATCH_MODULES=${GYRO_DISPATCH_MODULES}
+		-D DISPATCH_HALVES=${GYRO_DISPATCH_HALVES}
 		-P ${CMAKE_CURRENT_SOURCE_DIR}/CMake/CheckLayering.cmake
 	VERBATIM
 )
