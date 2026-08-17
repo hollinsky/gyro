@@ -70,11 +70,22 @@ gyro_add_module(Testing PORTABLE OBJECT
 		Test.cpp
 )
 
-gyro_add_module(Core PORTABLE
+# OBJECT for Testing's reason, one step less obvious. DebugAllocator.cpp defines the replaceable
+# operator new/delete set and nothing references a symbol in it, so as a static archive member it
+# would never be extracted and the check would be silently absent from every binary that links Core.
+# An object library has no shelf to leave it on.
+#
+# The consequence to know about: CMake adds an object library's files only to the targets that name
+# it directly, so reaching Core through another module's INTERFACE library drops them. That is why
+# gyro_add_module names Core on every test executable rather than relying on the graph, and why the
+# gyro target below already names it.
+gyro_add_module(Core PORTABLE OBJECT
 	SOURCES
 		Clock.cpp
+		DebugAllocator.cpp
 	TESTS
 		Clock.Test.cpp
+		FrameSection.Test.cpp
 		Handle.Test.cpp
 		SlotAllocator.Test.cpp
 		Time.Test.cpp

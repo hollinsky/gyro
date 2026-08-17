@@ -61,6 +61,20 @@ target_compile_definitions(BuildFlags INTERFACE
 	$<$<CONFIG:Release,RelWithDebInfo>:_FORTIFY_SOURCE=3>
 )
 
+# Decision 36's runtime check: Core/DebugAllocator.cpp replaces the global allocator and aborts on
+# an allocation made inside a FrameSection. The three checks in this directory are build-time and
+# this is its counterpart, so it is configured beside them rather than inside a module.
+#
+# The same two configurations as the assertions above, for the same reason — Release is where a
+# diagnostic must never become an argument about the frame budget — and RelWithDebInfo is the half
+# that matters. The value is concentrated in the headless tests, which is what CI runs; on in local
+# debug only would be on nowhere that counts. The option is here to turn it off, not on, since the
+# only build entitled to skip it already does.
+option(GYRO_FRAME_PATH_CHECK "Abort on a heap allocation inside a FrameSection" ON)
+if(GYRO_FRAME_PATH_CHECK)
+	target_compile_definitions(BuildFlags INTERFACE $<$<CONFIG:Debug,RelWithDebInfo>:GYRO_FRAME_PATH_CHECK>)
+endif()
+
 # Macro definitions in the debug info, so the test macros can be stepped into.
 target_compile_options(BuildFlags INTERFACE $<$<CONFIG:Debug>:-ggdb3>)
 

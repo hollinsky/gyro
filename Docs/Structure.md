@@ -225,6 +225,20 @@ establishes for the frame path and this file extends to the module graph.
 | `CheckPortability.cmake` | no platform headers in a `PORTABLE` module | [decision 6](Decisions.md#6-no-macos-port-development-continues-over-ssh) |
 | `CheckLayering.cmake` | every `#include` lies on a declared edge; the graph is a DAG | this document |
 
+The fourth is not a build check and belongs in the table anyway, because it is the one decision 36
+actually names: `Core/DebugAllocator.cpp` replaces the global `operator new` and `operator delete`
+set and aborts on a call made inside a `Core/FrameSection.h` guard. It is thread-local by
+construction — the dispatch thread allocates freely, which
+[decision 45](Decisions.md#45-protocol-dispatch-is-a-thread-not-a-task) requires — so it is a
+property of the frame thread's frame section and never of the process. Compiled in wherever
+`_GLIBCXX_ASSERTIONS` is, which is `Debug` and `RelWithDebInfo`; the second is the one that matters,
+since the assertion this exists to serve is a headless test and headless tests are what CI runs.
+
+`Core` is an `OBJECT` library for it. A replacement operator that no symbol references is never
+extracted from a static archive, and CMake adds an object library's files only to the targets that
+name it directly — which is why `gyro_add_module` names `Core` on every test executable rather than
+letting the module graph carry it.
+
 `gyro_add_module` is where a module declares itself to all three. `PORTABLE` enrols it in the
 second; `DEPENDS` is the graph the third holds it to. Dependencies are transitive, matching
 `PUBLIC` linkage, so `Core` does not have to be named by everything — the frame-side edge is caught

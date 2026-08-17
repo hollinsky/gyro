@@ -68,7 +68,14 @@ function(gyro_add_module NAME)
 		list(TRANSFORM MODULE_TESTS PREPEND "${GYRO_SOURCE_DIR}/${NAME}/")
 
 		add_executable(${NAME}Tests ${MODULE_TESTS})
-		target_link_libraries(${NAME}Tests PRIVATE ${NAME} Testing)
+		# Core is named even though every module already depends on it, and the redundancy is
+		# load-bearing. Core is an OBJECT library so that Core/DebugAllocator.cpp's replacement of
+		# the global allocator reaches the binaries that link it, and CMake adds an object
+		# library's files only to the targets that name it *directly* — reached through the
+		# INTERFACE library a header-only module becomes, the objects are dropped and decision 36's
+		# check is silently absent from that test binary. Naming Core here makes it uniform across
+		# every test executable rather than an accident of which modules happen to have sources.
+		target_link_libraries(${NAME}Tests PRIVATE ${NAME} Core Testing)
 
 		# CTest sees one entry per module rather than one per case. The runner prints and filters
 		# per case, which is what a human wants; splitting it for CI means teaching CMake to
