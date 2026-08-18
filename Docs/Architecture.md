@@ -241,7 +241,7 @@ nothing, including on rate combinations nobody has on a desk.
 ### DRM / KMS
 
 Atomic modesetting, plane assignment, hardware cursor, explicit fencing, VRR, and the
-[colour](#colour) pipeline — which plane assignment depends on, since direct scanout is conditional
+[color](#color) pipeline — which plane assignment depends on, since direct scanout is conditional
 on the hardware expressing the transform the composite would have applied. Built third, designed for
 from the start.
 
@@ -1058,9 +1058,9 @@ same shape as the [effect quality](#quality-tiers) ladder and closed for the sam
 | Suspend | **not gyro's** — see [Suspend and resume](#suspend-and-resume) | seconds |
 
 **Dimming is the backlight, not an overlay.** An alpha overlay cannot go below the panel's black and
-changes colour rendition on the way down. So gyro drives `/sys/class/backlight`, which adds a udev
+changes color rendition on the way down. So gyro drives `/sys/class/backlight`, which adds a udev
 rule to the table under [Privilege](#privilege) alongside the DRM and input ones. It also means the
-idle dim and the user's brightness key are **one mechanism**: [Colour](#the-composite-space) makes
+idle dim and the user's brightness key are **one mechanism**: [Color](#the-composite-space) makes
 brightness change available HDR headroom rather than scaling pixels, so a dim that overwrote the
 user's setting instead of composing with it would silently change headroom, and one that failed to
 restore it exactly would leave the display wrong after a keypress.
@@ -1249,7 +1249,7 @@ This wants a first-class classification of the composed transform, and the thing
 that its three consumers are not asking quite the same question. Damage rectangle mapping and
 sharpness ask *is this a no-op* — axis-aligned, unit-scale, and at an integer device offset. [Plane
 promotion](#direct-scanout-is-conditional) asks *can this particular hardware plane express it*, and
-a plane with a scaler and a colour-space converter expresses a great deal more than a no-op.
+a plane with a scaler and a color-space converter expresses a great deal more than a no-op.
 Answering the second question with the first forecloses promotion on every fractionally scaled
 output, which [decision 56](Decisions.md#56-clients-render-at-the-ceiling-and-gyro-downscales) makes
 the common case rather than the exception.
@@ -1276,7 +1276,7 @@ A scaling plane does not break this section's rule. It is still one resample, ex
 function instead of in the composite pass — though *which* resample it is turns out to matter, and
 that is [an open question](Open.md) rather than a settled one.
 
-**Minification needs mip levels, and they are built in linear light.** [Colour](#colour)'s one rule
+**Minification needs mip levels, and they are built in linear light.** [Color](#color)'s one rule
 already names mipmapping among the weighted sums of light, and gyro already holds a linearised copy
 of every surface from import, so the chain has a correct source — building it from the encoded
 buffer would darken every level and compound down the chain.
@@ -1433,17 +1433,17 @@ absorb: an overrun is recoverable in one frame only if `t_done + C_min ≤ deadl
 composite is what buys the promise in
 [decision 35](Decisions.md#35-a-miss-costs-one-frame-bounded-by-the-floor-composite).
 
-## Colour
+## Color
 
 Blending, scaling, mipmapping, and blur are weighted sums of light, and are correct only in a space
-proportional to light. That single rule fixes most of what follows; the rest of colour management is
+proportional to light. That single rule fixes most of what follows; the rest of color management is
 appearance matching, which is policy. Rationale and rejected alternatives in
-[decisions 47 and 48](Decisions.md#colour).
+[decisions 47 and 48](Decisions.md#color).
 
 ### The composite space
 
 **Linear, Rec.2020 primaries, brightness-relative** — 1.0 is SDR reference white and HDR headroom
-lives above it as a multiple that varies with display brightness. Every surface carries a colour
+lives above it as a multiple that varies with display brightness. Every surface carries a color
 state: primaries, transfer function, alpha mode, reference luminance. Untagged content is sRGB by
 rule and never by inspection.
 
@@ -1488,7 +1488,7 @@ answer is server-side decorations, which is where the closed-vocabulary argument
 ### Direct scanout is conditional
 
 A client buffer flipped straight to a plane bypasses the composite pass, so every transform the
-composite would have applied must be expressible in the KMS colour pipeline — per-plane degamma,
+composite would have applied must be expressible in the KMS color pipeline — per-plane degamma,
 CTM, gamma, or the newer pipeline properties. Where it is not expressible, gyro composites instead.
 Otherwise the picture changes at the moment a client is promoted to a plane, which is a visible
 flash and a correctness bug wearing an optimization's clothes. This is a constraint on `IPresenter`
@@ -1543,14 +1543,14 @@ assignments, which is machinery sized for hardware gyro is unlikely to meet and 
 deadline time to find it.
 
 Collected, because it is otherwise four conditions spread over five paragraphs, a layer is promoted
-only where **the KMS pipeline expresses its colour transform**, **the plane expresses its spatial
+only where **the KMS pipeline expresses its color transform**, **the plane expresses its spatial
 rung**, **it is opaque and overlaps nothing**, and **its client can spare the held buffer**. The
 last of those is in [what to build](#what-to-build-before-it-is-needed) with the reason; the
 sharpness question the second one raises where the rung is a scale is [open](Open.md).
 
 ### Deferred
 
-Tone mapping, gamut mapping, per-output characterisation and ICC profiles, and the colour-management
+Tone mapping, gamut mapping, per-output characterisation and ICC profiles, and the color-management
 protocol itself are all additive on the structure above and are carried in decision 47's open items.
 The structure is not additive, which is the whole reason it is here this early.
 
@@ -2173,7 +2173,7 @@ The shell supplies it as a **buffer**, never a path, and gyro persists a copy so
 before any shell is running:
 
 - **A raw dump plus a header**, not an encoded image — the whole point is that gyro contains no
-  decoder. The header carries the surface's [colour state](#colour), stored as delivered so that
+  decoder. The header carries the surface's [color state](#color), stored as delivered so that
   loading it reuses the client-buffer import path rather than adding a second one.
 - **Written by the [helper thread](#threads)**, debounced so a rotating-wallpaper slideshow does not
   write to disk every thirty seconds, and kept in gyro's own state directory keyed by uid.
@@ -2365,7 +2365,7 @@ the straddle case, and the resample-once rule, and golden images make the crispn
 falsifiable rather than felt · **the session model** — nested can fake several sessions and hand
 each a listener, which makes session switching, per-session registry filtering, lock state, and
 output reassignment testable without a second user or a second machine · **the composite half of
-[colour](#colour)** — linear
+[color](#color)** — linear
 blending, premultiplied-alpha handling, blur in linear light, and the client-shadow question in
 [decision 48](Decisions.md#48-linear-blending-is-a-visible-ecosystem-change-and-gyro-takes-it) are
 all pixels in a buffer and need no display to settle · **[the shell split](#the-shell)** — a shell
@@ -2378,8 +2378,8 @@ Not testable nested:
 
 Real vblank pacing and latency budgets · `SCHED_FIFO` behaviour under contention · atomic
 modesetting, plane assignment, hardware cursor · **direct scanout of client buffers**, and with it
-whether the KMS colour pipeline can express what the composite would have done · VRR panel
-response · **the display half of colour** — HDR output modes, gamma LUTs, EDID and panel characterisation · tearing control ·
+whether the KMS color pipeline can express what the composite would have done · VRR panel
+response · **the display half of color** — HDR output modes, gamma LUTs, EDID and panel characterisation · tearing control ·
 multi-GPU · DRM master loss, device pause/resume · real hotplug and DPMS · **the boot path** — BGRT
 reproduction, the firmware-mode handoff, and `simpledrm` → real-driver
 [migration](#device-migration), none of which have a nested equivalent.
@@ -2487,13 +2487,13 @@ implementation for a long time:
 - **The background is gyro's from line zero**, because the effect path, the boot path, and every
   fallback screen assume something is behind them.
 
-For [colour](#colour), which is structural in the same way and for the same reason — it is chosen
+For [color](#color), which is structural in the same way and for the same reason — it is chosen
 the day the renderer is written, and everything authored against the wrong answer is re-authored:
 
 - **The composite space is linear, wide, and brightness-relative**, and it is not the output space.
   The moment it is the output space, two monitors with different gamuts force two composites and a
   surface's appearance depends on which one it is on.
-- **A colour state on every surface from line zero**, defaulting to sRGB by rule. It is a field on
+- **A color state on every surface from line zero**, defaulting to sRGB by rule. It is a field on
   the shadow object model, which [the publication boundary](#the-publication-boundary) requires
   building regardless.
 - **Alpha is un-premultiplied before linearisation, once, at import.** Retrofitting this means
@@ -2560,7 +2560,7 @@ For [plane offload](#direct-scanout-is-conditional), where the interface is the 
 widened afterwards and the policy is the half that can wait:
 
 - **`Present()` takes a layer list, not a target index.** Each layer carries a buffer, an acquire
-  point, damage, a source crop, a destination rect, a blend mode, a colour state, and a z position,
+  point, damage, a source crop, a destination rect, a blend mode, a color state, and a z position,
   and the GPU-composited remainder is one more layer in that list rather than a separate concept.
   This is the `IPresenter` bullet above about imported targets, seen from another side:
   `AcquireTarget()` supplies the composited layer and a client's dmabuf supplies an offloaded one.
@@ -2582,7 +2582,7 @@ widened afterwards and the policy is the half that can wait:
 - **A surface may exist with no linearised copy and no mip chain.** The largest single offload win
   is video — NV12 or P010 straight to a plane with fixed-function conversion, the GPU untouched and
   the [composite target](#the-composite-space) never written — and both of those are precisely the
-  costs [colour](#colour)'s import path pays for every surface unconditionally. So the import is a
+  costs [color](#color)'s import path pays for every surface unconditionally. So the import is a
   property of *how a surface is being used this frame* rather than of the surface. What a refused
   promotion then costs is [open](Open.md).
 - **A client is not promoted until it can afford the hold.** A buffer on a plane is held until the

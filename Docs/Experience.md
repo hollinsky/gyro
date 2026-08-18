@@ -41,7 +41,7 @@ does not quietly become aspirational.
 3. **[One hand made all of it](#one-hand-made-all-of-it)** — everything moves as one system, and
    the movement carries information rather than decoration.
 4. **[The picture is correct](#the-picture-is-correct)** — sharp where it should be sharp, the
-   right colour, the right size, and it does not change when the machine changes how it is drawing
+   right color, the right size, and it does not change when the machine changes how it is drawing
    it.
 5. **[The machine holds several people](#the-machine-holds-several-people)** — and none of them
    can see, reach, or impersonate another.
@@ -259,7 +259,7 @@ re-sharpens for the display it is on without the application having to rebuild i
 the boundary.
 
 **Light behaves like light.** Translucency, blur, shadows, and scaled-down images are all computed
-the way light actually combines, so a blurred backdrop is the colour it should be and a soft edge is
+the way light actually combines, so a blurred backdrop is the color it should be and a soft edge is
 not subtly wrong. Half of what people recognise as "looks cheap" is this arithmetic being done in
 the wrong space.
 
@@ -269,10 +269,10 @@ ever missed, so the level is chosen once and held.
 
 **The image does not change when the machine changes how it draws it.** Promoting a full-screen
 application to a more efficient path, changing displays, or falling back to a slower renderer must
-not produce a visible shift in colour or a flash. There is no moment where the picture jumps because
+not produce a visible shift in color or a flash. There is no moment where the picture jumps because
 something under it got faster.
 
-*Mechanism: [Geometry](Architecture.md#geometry), [Colour](Architecture.md#colour),
+*Mechanism: [Geometry](Architecture.md#geometry), [Color](Architecture.md#color),
 [Effects and quality](Architecture.md#effects-and-quality), [decision
 54](Decisions.md#54-settled-geometry-snaps-to-the-outputs-device-grid), [decision
 47](Decisions.md#47-compositing-happens-in-linear-light-at-wide-primaries), [decision
@@ -331,7 +331,7 @@ produced at all — not cheap frames, not occasional frames. Nothing.
 local cost. Moving the pointer across a still screen does not redraw the screen.
 
 **Dimming is a real dim.** The screen gets darker the way a screen gets darker, not by having a grey
-sheet drawn over it — so blacks stay black and colours stay right on the way down. It fades rather
+sheet drawn over it — so blacks stay black and colors stay right on the way down. It fades rather
 than steps, and it is probably the most frequently seen animation in the whole system.
 
 **Touching anything undims instantly and smoothly**, from wherever the dim had got to, with no jump
@@ -412,10 +412,10 @@ The gathering exposed these. Each is a place where the system currently has a me
 no product opinion, or no opinion at all — and the second tier cannot be written correctly against a
 promise that does not exist.
 
-- **Accessibility beyond reduced motion.** Magnification, colour filters and high contrast, cursor
+- **Accessibility beyond reduced motion.** Magnification, color filters and high contrast, cursor
   size and visibility, focus visibility, on-screen keyboard, screen reader behaviour, and the input
   accommodations. Two of these are not additive — magnification is a scaling and resampling promise
-  and belongs beside *the picture is correct*, and colour filters are a colour promise — so their
+  and belongs beside *the picture is correct*, and color filters are a color promise — so their
   absence here is not neutral.
 - **What the system actually feels like to operate.** The catalogue of transitions, the materials,
   and the gestures are all declared closed and none is enumerated. Section [One hand made all of

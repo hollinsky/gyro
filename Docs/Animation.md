@@ -964,7 +964,7 @@ retargeting.
 
 ## Open questions
 
-- **Colour interpolation space.** Oklab is proposed over sRGB; it matters most when cross-fading
+- **Color interpolation space.** Oklab is proposed over sRGB; it matters most when cross-fading
   blurred backdrops, which gyro does constantly. Not yet decided.
 - **The imperative escape hatch** for event-driven one-shots — shape and boundary undecided, in
   process and over the protocol both.

@@ -1956,7 +1956,7 @@ The shell supplies it as a **buffer**, not a path, and gyro persists a copy:
   needs no decoder; accepting a path or a PNG would put an image parser back inside the process with
   the expensive restart, which
   [decision 27](#27-resource-accounting-is-attribution-not-per-user-fairness) states precisely.
-- **The header carries the colour state**, since every surface has one under
+- **The header carries the color state**, since every surface has one under
   [decision 47](#47-compositing-happens-in-linear-light-at-wide-primaries) and a background reloaded
   next boot without it renders in the wrong space. Stored as delivered rather than pre-converted, so
   it reuses the client-buffer import path instead of adding a second one.
@@ -3664,7 +3664,7 @@ quality ladder and wants the same closure for the same reason:
 rule granting it joins the DRM and input rules already in
 [decision 22](#22-gyro-runs-as-a-dedicated-unprivileged-uid-with-cap_sys_nice-and-nothing-else)'s
 table. An alpha overlay is the obvious alternative and it is wrong twice: it cannot go below the
-panel's black, and it changes colour rendition on the way down. It also collides productively with
+panel's black, and it changes color rendition on the way down. It also collides productively with
 [decision 47](#47-compositing-happens-in-linear-light-at-wide-primaries) — brightness changes
 available headroom rather than scaling pixels, so **the idle dim and the user's brightness key are
 one mechanism.** The dim composes with the user's setting rather than overwriting it, and restores
@@ -4173,10 +4173,10 @@ one.
 
 ---
 
-## Colour
+## Color
 
 Recorded 2026-08-16, last of the pre-implementation decisions and the only section prompted by an
-absence rather than by a question. Colour appeared nowhere in this log until it was noticed that
+absence rather than by a question. Color appeared nowhere in this log until it was noticed that
 three decisions already recorded — 13, 18, and 34 — depend on an answer it had never given. It
 belongs with device migration and the publication boundary in the class of things that are free at
 line zero and a rewrite afterwards.
@@ -4184,11 +4184,11 @@ line zero and a rewrite afterwards.
 ### 47. Compositing happens in linear light at wide primaries
 
 The composite space is **linear, Rec.2020 primaries, brightness-relative with 1.0 as SDR reference
-white.** Every surface carries a colour state — primaries, transfer function, alpha mode, reference
+white.** Every surface carries a color state — primaries, transfer function, alpha mode, reference
 luminance — from line zero. Untagged content is sRGB *by rule*, never by inspection.
 
 **One rule forces the rest.** Blending, scaling, mipmapping, and blur are all weighted sums of
-light, so they are correct only in a space proportional to light. Everything else in colour
+light, so they are correct only in a space proportional to light. Everything else in color
 management is appearance matching, which is negotiable and taste-laden; this part is arithmetic.
 gyro does all four constantly and blur is the feature, so there is no version of this project in
 which the rule is ignored cheaply.
@@ -4197,7 +4197,7 @@ which the rule is ignored cheaply.
 premultiplied and the client computed `S = encode(C)·α`, so a hardware sRGB sampler returns
 `EOTF(C·α)` where the wanted value is `EOTF(C)·α`. The error factor is `α^1.2` — about 13% too dark
 at `α = 0.5` — and it lands on every soft edge in the system. This is the one place where doing
-colour half-way is worse than not doing it: a compositor blending in encoded space is wrong but
+color half-way is worse than not doing it: a compositor blending in encoded space is wrong but
 self-consistent, whereas one that linearises without un-premultiplying is wrong at every partially
 transparent pixel, by an amount that varies with alpha.
 
@@ -4221,7 +4221,7 @@ architectural consequence rather than a UI choice.
 
 **Direct scanout requires transform equivalence.** A client buffer flipped straight to a plane
 bypasses the composite pass, so every transform the composite would have applied must be expressible
-in the KMS colour pipeline — per-plane degamma, CTM, gamma, or the newer pipeline properties — or
+in the KMS color pipeline — per-plane degamma, CTM, gamma, or the newer pipeline properties — or
 the picture changes when the fast path is taken, which is a visible flash at the moment a fullscreen
 client is promoted. Scanout is therefore conditional on the hardware expressing the identical
 transform and composites otherwise. That is a constraint on `IPresenter` and on plane assignment,
@@ -4255,16 +4255,16 @@ rather than to a definitional reference white is the origin of "HDR makes everyt
 out", and years of policy have gone into partly repairing what the relative model gets right by
 construction.
 
-**Rejected: deciding colour when HDR arrives.** The tempting position, since HDR output is out of
+**Rejected: deciding color when HDR arrives.** The tempting position, since HDR output is out of
 scope initially and nothing here is needed to light a pixel. It fails the same test as
 [decision 41](#41-device-migration-is-exercised-on-every-boot)'s "no GPU resource is the only copy
-of anything": composite space, target formats, and per-surface colour state are structural, they are
+of anything": composite space, target formats, and per-surface color state are structural, they are
 chosen the day the renderer is written, and every effect and animation authored against the wrong
 one is re-authored. The *features* — tone mapping, gamut mapping, output characterisation, the
-colour-management protocol itself — are additive on top and genuinely deferrable, and are left in
+color-management protocol itself — are additive on top and genuinely deferrable, and are left in
 the open list as such.
 
-**Cost accepted:** one 16-bit-float composite target per output; colour becomes a dimension of every
+**Cost accepted:** one 16-bit-float composite target per output; color becomes a dimension of every
 golden image, so [decision 4](#4-all-three-backends-are-in-scope-nested-headless-drm)'s headless
 comparisons must pin the whole pipeline or they are brittle in a way that is miserable to diagnose;
 and the material vocabulary in
@@ -4309,16 +4309,16 @@ gyro's, tuned in linear, and right. That reduces the exposure to clients insisti
 than eliminating it, GTK being the stubborn case, and that residue is what this decision accepts.
 
 **Rejected: the legacy alpha remap.** Apply `α' = 1 − (1−α)^2.2` at import to any surface that has
-not declared a colour state, on the reading that untagged means authored against encoded-space
+not declared a color state, on the reading that untagged means authored against encoded-space
 blending. Genuinely tempting: for a pure black source the correction is *exact* and independent of
 the background, which is precisely what a drop shadow is, so it fixes the dominant case perfectly —
-and it self-retires, since a client adopting the colour-management protocol gets straight linear.
+and it self-retires, since a client adopting the color-management protocol gets straight linear.
 
 Rejected because it delivers compatibility with other compositors, which is not the goal, in place
 of cohesion, which is. A remapped GTK shadow beside gyro's correctly blended one looks different
 from it — the same two-blending-models-in-one-frame problem, relocated rather than solved, and
 [Animation.md](Animation.md#priorities) puts cohesion first. It is also exact only for black:
-coloured translucency, which is most of a transparent terminal, degrades. And a compatibility remap
+colored translucency, which is most of a transparent terminal, degrades. And a compatibility remap
 in the composite path is permanent once shipped, because the content it compensates for never stops
 arriving.
 
@@ -4343,7 +4343,7 @@ the direction does not depend on the result — only the urgency of the mitigati
 
 ## Geometry
 
-Recorded 2026-08-16, immediately after colour and prompted the same way: the word "coordinate"
+Recorded 2026-08-16, immediately after color and prompted the same way: the word "coordinate"
 appeared nowhere in this log, and three decisions already recorded — 17, 18, and 28 — turn out to
 rest on an answer it had never given. Scaling is where compositors are most visibly bad, and the
 reason the bugs are so hard to attribute afterwards is that almost every one of them is a value that

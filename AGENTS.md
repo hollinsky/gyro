@@ -70,7 +70,7 @@ Codebase Structure:
 		                  promises, how the system degrades, what is deliberately not promised
 		Architecture.md - Tier 2. Platform seam, backends, boot and display lifetime, rendering
 		                  devices, threads and the publication boundary, presentation timing,
-		                  geometry and coordinate spaces, effects and quality, colour, sessions and
+		                  geometry and coordinate spaces, effects and quality, color, sessions and
 		                  users, the shell, login agent, event loop, protocol layer
 		Animation.md    - Tier 2. Animation system: springs, motion catalog, commits, transforms,
 		                  interactive transitions, identity, lifetime, exit pixels

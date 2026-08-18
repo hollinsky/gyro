@@ -51,8 +51,8 @@ been waiting on a question that could not be answered until the rule behind it w
 - **Blur order against tone mapping.** Blurring in linear and tone mapping the result is correct and
   costs a full-resolution map after the chain; tone mapping first and blurring afterwards is cheaper
   and temporally steadier and is wrong. A real number attached to a real artefact, so it wants
-  measuring rather than arguing — the same standing as the virtual-output colour question below.
-- **Blur across colour-state boundaries.** `Material::Glass` samples a backdrop that may hold an HDR
+  measuring rather than arguing — the same standing as the virtual-output color question below.
+- **Blur across color-state boundaries.** `Material::Glass` samples a backdrop that may hold an HDR
   video window beside an SDR text editor, and physically correct linear blur bleeds a 1000-nit
   highlight through the glass into the region over the SDR window. Correct, and startling. There is
   no obviously right answer, which is what makes it a decision rather than an implementation detail.
@@ -125,7 +125,7 @@ been waiting on a question that could not be answered until the rule behind it w
   vocabulary itself — which gestures exist, and what each binds to — belongs with the scene and
   material vocabularies above and for the same reason: a gesture, the transition it drives, and the
   nodes it moves are one design problem seen three ways.
-- **Colour format for virtual outputs.** Encoders want NV12 or P010, not RGBA. The agent can convert
+- **Color format for virtual outputs.** Encoders want NV12 or P010, not RGBA. The agent can convert
   (an extra full-frame pass and its bandwidth), or gyro can fold RGB→YUV into its final composite
   pass (much cheaper, but the renderer grows a YUV output path it otherwise would not have), or both
   can be offered. HDR sharpens it — P010 and transfer functions. This is the one part of decision 26
@@ -350,11 +350,11 @@ been waiting on a question that could not be answered until the rule behind it w
   mechanism's — how recently a surface must have committed to disqualify its output from early
   rendering, and decision 56's debounce before a surface's preferred scale is lowered.
 - **The imperative escape hatch** for event-driven one-shots — shape and boundary.
-- **Colour interpolation space for animation** — Oklab proposed over sRGB. Distinct from
+- **Color interpolation space for animation** — Oklab proposed over sRGB. Distinct from
   [decision 47](Decisions.md#47-compositing-happens-in-linear-light-at-wide-primaries)'s composite
   space and easily conflated with it, so worth stating apart: 47 governs the space pixels are
   *combined* in and is
-  settled by physics; this governs the path a single colour takes while *animating* between two
+  settled by physics; this governs the path a single color takes while *animating* between two
   values, and is settled by perception. Linear light is right for the first and visibly wrong for
   the second, where it crushes the middle of a hue transition.
 - **Configuration format** — a hand-rolled flat key-value parser is proposed, consistent with the
