@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 
 #include "Core/Time.h"
@@ -119,4 +120,35 @@ GYRO_TEST(SnapshotPublisher, EachRunLandsAtAnAlignedAddress)
 
 	GYRO_CHECK(reinterpret_cast<std::uintptr_t>(wide.data()) % alignof(Wide) == 0);
 	GYRO_CHECK(reinterpret_cast<std::uintptr_t>(narrow.data()) % alignof(Narrow) == 0);
+}
+
+GYRO_TEST(SnapshotBuffer, AResetThatCannotAllocateLeavesTheBufferAsItWas)
+{
+	// The guarantee Publication/Publisher/Outbox.h's Publish is built on. It serialises a superseding
+	// snapshot straight into the buffer holding a deferred one, because a buffer moved out for the build
+	// is a buffer nothing owns if the build throws — so out of memory has to leave the older snapshot
+	// intact rather than taking both. A size no allocator could ever satisfy stands in for the
+	// out-of-memory the real path would hit.
+	SnapshotBuffer buffer;
+	SnapshotPublisher{}.Build(buffer, 9);
+
+	const std::size_t size = buffer.Size();
+	const std::size_t capacity = buffer.Capacity();
+	const void* const address = buffer.Bytes().data();
+
+	bool threw = false;
+	try
+	{
+		buffer.Reset(std::numeric_limits<std::size_t>::max() / 2);
+	}
+	catch (...)
+	{
+		threw = true;
+	}
+
+	GYRO_REQUIRE(threw);
+	GYRO_CHECK_EQ(buffer.Size(), size);
+	GYRO_CHECK_EQ(buffer.Capacity(), capacity);
+	GYRO_CHECK(buffer.Bytes().data() == address);
+	GYRO_CHECK_EQ(SnapshotReader{ buffer.Bytes() }.Sequence(), std::uint64_t{ 9 });
 }

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -36,7 +37,29 @@
 class SnapshotOutbox
 {
 public:
-	SnapshotOutbox(SnapshotRing& ring, ReturnChannel& reports) noexcept : m_Ring{ ring }, m_Reports{ reports } {}
+	// The retained set and the pool are sized to their bounds here, so that neither reaches the allocator
+	// again for the life of the session. The bounds are the ring's: a publish of sequence S is refused
+	// unless S - Depth is below the watermark, and everything below the watermark has been reclaimed, so
+	// the retained set spans at most Depth sequences and at most Depth + 1 buffers exist at once — Depth
+	// retained plus the one being built into. Startup is where this object is allowed to allocate.
+	SnapshotOutbox(SnapshotRing& ring, ReturnChannel& reports) : m_Ring{ ring }, m_Reports{ reports }
+	{
+		m_Retained.reserve(SnapshotRingDepth);
+		m_Pool.reserve(SnapshotRingDepth + 1);
+	}
+
+	// Neither copied nor moved, and for a stronger reason than the two channels it holds. They refuse
+	// because a thread would silently get an end nobody is on the other side of; this object refuses
+	// because the ring's writer *is* the bookkeeping beside it — what is still out, what is free, and
+	// how far the frame thread has got. A second outbox on one ring would keep a second answer to all
+	// three and reclaim buffers the first still has published. A move is worse than a copy here rather
+	// than better: the buffers would follow, but the flags beside them are primitives that would be
+	// copied, leaving the source certain it still had a pending snapshot over storage it had handed
+	// away. A ring with two writers has to be spelled out; it must not be arrived at by an assignment.
+	SnapshotOutbox(const SnapshotOutbox&) = delete;
+	SnapshotOutbox& operator=(const SnapshotOutbox&) = delete;
+	SnapshotOutbox(SnapshotOutbox&&) = delete;
+	SnapshotOutbox& operator=(SnapshotOutbox&&) = delete;
 
 	// Take one report from the frame thread, advance the watermark, and reclaim everything that falls
 	// below it. False when the channel is empty; the caller loops to drain it.
@@ -71,14 +94,27 @@ public:
 	// into the same buffer and carries the same sequence, because a sequence the ring refused was never
 	// consumed. Queueing would deliver a scene the world has already moved past, at the cost of the one
 	// the frame thread actually wants.
+	//
+	// **The serialisation happens in the pending slot itself, and never in a local moved out of it.** A
+	// shape that took the buffer out, built into it, and moved it back had a window between those two
+	// moves in which the deferred snapshot's only owner was a local and m_HasPending already said there
+	// was nothing pending — so an out-of-memory Build unwound through it and the deferral this whole
+	// path exists to provide became a silent loss of the last publish before a quiescing scene. That is
+	// the same failure Publication/Ring.h refuses to accept from a full ring, arriving by another route.
+	// Building in place has no such window: Build's only failure point is the buffer's own growth, which
+	// leaves the buffer exactly as it was (see SnapshotBuffer::Reset), so a throw here leaves the
+	// pending snapshot and its flag untouched and the ring's sequence unconsumed — the next attempt
+	// carries the same snapshot under the same number.
 	bool Publish(const SnapshotPublisher& publisher)
 	{
-		SnapshotBuffer buffer = TakeBuffer();
+		AdoptBuffer();
 
-		m_PendingSequence = m_Ring.NextSequence();
-		publisher.Build(buffer, m_PendingSequence);
+		// The sequence is the ring's and is not kept here. A refused publish does not consume it, so
+		// asking again — on a retry, or for the newer serialisation that supersedes a deferred one —
+		// yields the same number, which is Publication/Ring.h's NextSequence contract rather than an
+		// agreement this object has to maintain beside it.
+		publisher.Build(m_Pending, m_Ring.NextSequence());
 
-		m_Pending = std::move(buffer);
 		m_HasPending = true;
 
 		return Flush();
@@ -102,6 +138,15 @@ public:
 			return true;
 		}
 
+		// **Capacity before the publish, and the order is the correctness argument rather than a
+		// micro-optimisation.** Growing the retained set is the only allocation on this path, and an
+		// allocation that throws *after* the ring is holding a span into m_Pending's storage unwinds
+		// through a temporary Held that has already taken that storage — freeing, on the way out, the
+		// bytes the frame thread is about to read. Asking for the capacity here cannot cost anything,
+		// because nothing has been published yet and the pending snapshot is still exactly where it was;
+		// in steady state it is a comparison, because the constructor sized the set to its bound.
+		m_Retained.reserve(m_Retained.size() + 1);
+
 		if (!m_Ring.Publish(m_Pending.Bytes(), m_Watermark))
 		{
 			return false;
@@ -111,7 +156,15 @@ public:
 		// rather than lucky: moving a std::vector transfers the allocation itself, so the address the
 		// ring is holding does not move with the object that owns it. The same is true when the
 		// retained set reallocates around it.
-		m_Retained.push_back({ m_PendingSequence, std::move(m_Pending) });
+		//
+		// And this push_back cannot throw: the capacity is reserved above, and Held's move is noexcept,
+		// which the static_assert below the type holds it to.
+		//
+		// The sequence is read back from the ring rather than remembered from the build, so what the
+		// retained set is keyed on is by construction the number the ring just assigned to these bytes.
+		// Ring.h makes that the authoritative one — reclamation must work for a snapshot whose header
+		// nobody could parse — and reading it here means the two cannot drift apart.
+		m_Retained.push_back({ m_Ring.Published(), std::move(m_Pending) });
 		m_HasPending = false;
 
 		return true;
@@ -136,27 +189,30 @@ private:
 		SnapshotBuffer Buffer;
 	};
 
-	// Where the next snapshot is built. The pending buffer first, because superseding it is what keeps
-	// a deferred publish from becoming a queue; then a reclaimed one; and only then the allocator,
-	// which after the first few frames of a session it never reaches again.
-	[[nodiscard]] SnapshotBuffer TakeBuffer()
+	static_assert(
+		std::is_nothrow_move_constructible_v<Held>,
+		"Flush publishes before it retains, so the retain step must not be able to throw"
+	);
+
+	// Make sure the pending slot holds storage to build into, without disturbing storage that is already
+	// there. The pending buffer stays, because superseding it in place is what keeps a deferred publish
+	// from becoming a queue; so does a buffer left in the slot by an earlier build that ran out of
+	// memory, which is storage the pool has already given up and would otherwise be dropped. Only an
+	// empty slot draws on the pool, and only an empty pool reaches the allocator — which after the first
+	// few frames of a session it never does again.
+	//
+	// Nothing here can throw, which is what lets Publish call it before the build rather than after: the
+	// slot is never left empty by a failure, and the invariant that m_HasPending implies real content in
+	// m_Pending holds on every path out of this object.
+	void AdoptBuffer() noexcept
 	{
-		if (m_HasPending)
+		if (m_HasPending || m_Pending.Capacity() != 0 || m_Pool.empty())
 		{
-			m_HasPending = false;
-
-			return std::move(m_Pending);
+			return;
 		}
 
-		if (!m_Pool.empty())
-		{
-			SnapshotBuffer buffer = std::move(m_Pool.back());
-			m_Pool.pop_back();
-
-			return buffer;
-		}
-
-		return {};
+		m_Pending = std::move(m_Pool.back());
+		m_Pool.pop_back();
 	}
 
 	// Everything the frame thread has moved past goes back to the pool. The retained set is in
@@ -183,7 +239,6 @@ private:
 	std::vector<SnapshotBuffer> m_Pool;
 
 	SnapshotBuffer m_Pending;
-	std::uint64_t m_PendingSequence = 0;
 	bool m_HasPending = false;
 
 	std::uint64_t m_Watermark = 0;

@@ -284,6 +284,35 @@ GYRO_TEST(SnapshotOutbox, AWatermarkThatWentBackwardsReclaimsNothing)
 	GYRO_CHECK_EQ(outbox.Pooled(), std::size_t{ 2 });
 }
 
+GYRO_TEST(SnapshotOutbox, TheRetainedSetStaysInsideTheBoundItWasSizedFor)
+{
+	// The constructor reserves the retained set and the pool to the ring's bounds, so that Flush's
+	// push_back never has to grow — a growth that threw *after* the ring had been told about the bytes
+	// would unwind through the buffer it had just taken and free it under the frame thread. Flush asks
+	// for the capacity before it publishes, so the safety does not rest on this bound; what rests on it
+	// is the promise that a running session never reaches the allocator for either set. This is the
+	// worst case that bound is claimed to cover: the frame thread lagging a whole ring, then catching up
+	// one frame at a time, with a deferred snapshot in hand throughout.
+	SnapshotRing ring;
+	ReturnChannel reports;
+	SnapshotOutbox outbox{ ring, reports };
+	FrameSide frame{ ring, reports };
+
+	for (std::uint64_t iteration = 0; iteration < 64; ++iteration)
+	{
+		static_cast<void>(outbox.Publish(Marked(iteration)));
+
+		if (iteration % SnapshotRingDepth == 0)
+		{
+			static_cast<void>(frame.Advance());
+			CollectAll(outbox);
+		}
+
+		GYRO_REQUIRE(outbox.Retained() <= SnapshotRingDepth);
+		GYRO_REQUIRE(outbox.Retained() + outbox.Pooled() + (outbox.HasPending() ? 1u : 0u) <= SnapshotRingDepth + 1);
+	}
+}
+
 GYRO_TEST(SnapshotOutbox, SteadyStateNeitherGrowsNorReachesTheAllocator)
 {
 	// The shape of a session: a commit, a frame, a report, forever. Nothing accumulates, the deferral

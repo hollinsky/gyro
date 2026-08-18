@@ -86,6 +86,13 @@ public:
 	// The zeroing is not an optimisation to skip once the publisher writes every byte it declares,
 	// because it does not: inter-run alignment padding belongs to no run, and decision 49's shared
 	// mapping would make an uninitialised gap somebody else's business.
+	//
+	// **It also never half-succeeds, and that is relied upon.** The growth is the only step here that
+	// can fail, and a std::vector resize that throws leaves the vector as it was — so a buffer whose
+	// Reset ran out of memory still holds the snapshot it held before, at the size it reported before.
+	// Publication/Publisher/Outbox.h's Publish builds a superseding snapshot straight into the deferred
+	// one for exactly that reason: out of memory has to mean the older snapshot is still there, not that
+	// both are gone. Anything added below the resize must not be able to throw.
 	void Reset(std::size_t byteSize)
 	{
 		const std::size_t units = (byteSize + sizeof(Unit) - 1) / sizeof(Unit);
@@ -155,6 +162,11 @@ public:
 	// from the ring — see Publication/Ring.h's NextSequence. A builder that carried its own would make
 	// monotonicity a caller obligation, which is the kind of invariant nobody notices breaking until
 	// reclamation stops.
+	//
+	// **`into` is either rebuilt or untouched, never partly either.** Reset's growth is this function's
+	// only failure point and it leaves the buffer as it was; everything after it is memcpy into storage
+	// that already exists. Outbox's Publish builds into the buffer holding a deferred snapshot, so a
+	// weaker guarantee here would lose that snapshot on an allocation failure rather than defer it.
 	void Build(SnapshotBuffer& into, std::uint64_t sequence) const
 	{
 		std::array<std::uint32_t, SnapshotRunCount> offsets{};
