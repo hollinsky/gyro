@@ -1,5 +1,6 @@
 #include "Animation/Solve/Ramp.h"
 
+#include <cmath>
 #include <limits>
 
 #include "Core/Time.h"
@@ -131,7 +132,23 @@ GYRO_TEST(Ramp, AnUnreachableHorizonSaturatesRatherThanWrapping)
 	// read as settled, which is an animation freezing mid-gesture.
 	constexpr Ramp unbounded{ .Origin = At(1'000), .Horizon = Duration::max(), .Progress = 0.0f, .Rate = 1.0f };
 
+	constexpr Instant justShort = Monotonic::FromNanoseconds(std::numeric_limits<std::int64_t>::max() - 1);
+
 	GYRO_CHECK_EQ(unbounded.SettlesAt(), Instant{ Duration::max() });
-	GYRO_CHECK(!unbounded.IsSettled(Monotonic::FromNanoseconds(std::numeric_limits<std::int64_t>::max() - 1)));
+	GYRO_CHECK(!unbounded.IsSettled(justShort));
 	GYRO_CHECK(unbounded.WakeAt(At(2'000)) == Wake::EveryFrame(At(2'000)));
+
+	// Evaluating is asserted here and not left to the cases above, because a saturated horizon is
+	// exactly where the clamp inside Evaluate could be inverted without any of them noticing. The
+	// minimum has to pick the evaluation instant rather than the horizon: taken the wrong way round this
+	// reads a second of lead as nine billion, and SettlesAt, IsSettled and WakeAt all still agree.
+	GYRO_CHECK_EQ(unbounded.Evaluate(At(2'000)).Position, 1.0f);
+	GYRO_CHECK_EQ(unbounded.Evaluate(At(2'000)).Velocity, 1.0f);
+
+	// And the widest elapsed the clamp can hand the seconds conversion stays finite and still inside
+	// the horizon, which is the arithmetic Spring's own extreme-elapsed test covers from the other side.
+	const RampState atTheEnd = unbounded.Evaluate(justShort);
+
+	GYRO_CHECK(std::isfinite(atTheEnd.Position) && atTheEnd.Position > 0.0f);
+	GYRO_CHECK_EQ(atTheEnd.Velocity, 1.0f);
 }

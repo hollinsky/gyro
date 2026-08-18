@@ -77,10 +77,11 @@ struct Ramp
 	float Rate{};       // v0, in progress per second
 
 	// The instant the ramp stops moving, which for this form is exact rather than conservative — the
-	// horizon is authored, so there is nothing to bound. Saturating for the same reason
-	// Spring::SettlesAt saturates: an instant in the deep past reads as settled, and the arithmetic
-	// that would produce one is an addition nobody checked.
-	[[nodiscard]] Instant SettlesAt() const noexcept { return Detail::Saturated(Origin, Horizon); }
+	// horizon is authored, so there is nothing to bound. Core/Time.h's Advanced for the same reason
+	// Spring::SettlesAt uses it: an instant in the deep past reads as settled, and the arithmetic that
+	// would produce one is an addition nobody checked. An authored horizon is exactly the untrusted
+	// operand that function exists for.
+	[[nodiscard]] Instant SettlesAt() const noexcept { return Advanced(Origin, Horizon); }
 
 	// O(1), exact, and stateless, which is the property the whole boundary is built on: evaluating at
 	// t1 and then at t2 gives the same answer as evaluating at t2 alone, so a missed frame costs

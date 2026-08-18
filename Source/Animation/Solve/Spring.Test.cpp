@@ -412,6 +412,35 @@ GYRO_TEST(Spring, DoesNotRunBackwards)
 	GYRO_CHECK_EQ(before.Velocity, spring.Velocity);
 }
 
+// The arithmetic ingress is total over the instant type, not merely over the instants a monotonic
+// clock produces. Detail::SecondsSince clamps below the origin, and it takes its difference through
+// Core/Time.h's Elapsed so that a pair this far apart saturates rather than being undefined on the way
+// to being rejected — a bare subtraction would overflow before the clamp could see it, which is the
+// clamp resting on the case it exists to handle.
+//
+// The origin here is before the timebase's epoch, which is boot, so nothing in gyro can construct
+// this pair: the claim is that a corrupted or foreign timestamp reaching Solve is a wrong picture
+// rather than undefined behaviour. Under GYRO_SANITIZE=undefined this test is what says so, and
+// Time.Test.cpp asserts the same property of the arithmetic itself.
+//
+// The answer is exact rather than merely finite. Every damping in the sweep above is positive, so at
+// nine billion seconds the envelope has decayed to zero in every regime, and the spring is at its
+// target at rest — whatever the transcendentals did with an argument that size.
+GYRO_TEST(Spring, TheWidestElapsedTheTimebaseCanExpressDoesNotOverflowIt)
+{
+	const Instant origin = Monotonic::FromNanoseconds(-1'000'000'000);
+	const Instant far = Monotonic::FromNanoseconds(std::numeric_limits<std::int64_t>::max());
+
+	for (const double damping : { 0.15, 1.0, 12.0 })
+	{
+		const Spring<double> spring{ origin, { 6.283, damping }, Target, 60.0, -900.0 };
+		const SpringState<double> state = spring.Evaluate(far);
+
+		GYRO_CHECK_EQ(state.Position, Target);
+		GYRO_CHECK_EQ(state.Velocity, 0.0);
+	}
+}
+
 // The envelope SettlesAt divides by has to actually bound the trajectory. Checking it directly is
 // what separates "the bound is conservative" from "the bound happened to be conservative for the
 // cases in the sweep".

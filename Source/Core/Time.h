@@ -114,6 +114,84 @@ struct Monotonic
 	return static_cast<double>(duration.count()) / 1'000'000.0;
 }
 
+// The timebase's own arithmetic, for the pairs whose separation the caller does not bound.
+//
+// std::chrono's operators are the half of this domain that is not total: Instant - Instant and
+// Instant + Duration are undefined on overflow, and an alias cannot replace an operator. So the total
+// forms are named here, in the file that owns the domain, rather than hand-rolled beside whichever
+// caller needed one first.
+//
+// This is the same split the conversions above already draw, one level down. ToSeconds is egress and
+// trusts what it is handed; DurationFromSeconds is ingress and is total. The bare operators are the
+// egress half of the arithmetic and stay the ordinary spelling — a frame loop subtracting a deadline
+// from a now it produced microseconds ago is bounded by construction, and Time.Test.cpp's
+// DeadlineArithmeticGoesNegative is that case. These two are the ingress half, for a pair that
+// arrived from somewhere: an event timestamp against a predicted presentation time, or an authored
+// duration added to either.
+//
+// Neither bound is reachable in this process. An Instant counts nanoseconds from boot and a Duration
+// spans some 292 years, so every pair gyro constructs sits far inside — which is exactly the argument
+// DurationFromSeconds declines to rest on, for the reason it gives: callers still validate, and these
+// decide what happens when they do not. A saturated answer is one the caller can compare and clamp;
+// an overflowed one is a value the optimizer is entitled to assume cannot exist.
+[[nodiscard]] constexpr Duration Elapsed(Instant origin, Instant now) noexcept
+{
+	const std::int64_t from = origin.time_since_epoch().count();
+	const std::int64_t to = now.time_since_epoch().count();
+
+	// Unsigned, so the difference of any two counts is exact before it is clamped rather than
+	// undefined on the way to being rejected. The ordering test is what picks the branch, which is why
+	// it comes first and why neither branch can wrap: each subtracts the smaller from the larger.
+	if (to >= from)
+	{
+		const std::uint64_t forward = static_cast<std::uint64_t>(to) - static_cast<std::uint64_t>(from);
+
+		if (forward > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+		{
+			return Duration::max();
+		}
+
+		return Duration{ static_cast<std::int64_t>(forward) };
+	}
+
+	const std::uint64_t backward = static_cast<std::uint64_t>(from) - static_cast<std::uint64_t>(to);
+
+	// The negative range holds one more value than the positive one, and Duration::min() is that
+	// value — so the boundary is the magnitude itself rather than one past it, and negating anything
+	// smaller stays in range.
+	if (backward >= std::uint64_t{ 1 } << 63)
+	{
+		return Duration::min();
+	}
+
+	return Duration{ -static_cast<std::int64_t>(backward) };
+}
+
+// Instants saturate rather than wrapping. A spring that never settles reports an instant no frame
+// will reach, and the alternative is a settle time in the deep past — the same failure the frame
+// clock's Invalidate() exists to prevent, arriving from the animation side instead.
+//
+// Both directions, because a horizon or a response time is authored and an authored number has no
+// sign discipline. Guarding only the direction the first caller happened to need is how the other one
+// becomes somebody's afternoon.
+[[nodiscard]] constexpr Instant Advanced(Instant origin, Duration after) noexcept
+{
+	const std::int64_t base = origin.time_since_epoch().count();
+	const std::int64_t offset = after.count();
+
+	if (offset > 0 && base > std::numeric_limits<std::int64_t>::max() - offset)
+	{
+		return Instant{ Duration::max() };
+	}
+
+	if (offset < 0 && base < std::numeric_limits<std::int64_t>::min() - offset)
+	{
+		return Instant{ Duration::min() };
+	}
+
+	return origin + after;
+}
+
 // The standard supplies formatters only for the calendar clocks, and a time_point over a private
 // tag is not one of them. Prints time since the timebase's epoch, which is boot, and which is the
 // only reading of an Instant that means anything on its own.
@@ -162,3 +240,29 @@ static_assert(DurationFromSeconds(-std::numeric_limits<double>::infinity()) == D
 static_assert(PeriodFromHertz(2.0) == std::chrono::milliseconds{ 500 });
 static_assert(PeriodFromHertz(0.0) == Duration::max());
 static_assert(PeriodFromHertz(std::numeric_limits<double>::quiet_NaN()) == Duration::max());
+
+static_assert(Elapsed(Monotonic::FromNanoseconds(100), Monotonic::FromNanoseconds(400)) == Duration{ 300 });
+static_assert(Elapsed(Monotonic::FromNanoseconds(400), Monotonic::FromNanoseconds(100)) == Duration{ -300 });
+static_assert(
+	Elapsed(Monotonic::FromNanoseconds(std::numeric_limits<std::int64_t>::min()), Instant{ Duration::max() }) ==
+		Duration::max(),
+	"The widest pair the type can hold saturates rather than overflowing"
+);
+static_assert(
+	Elapsed(Instant{ Duration::max() }, Monotonic::FromNanoseconds(std::numeric_limits<std::int64_t>::min())) ==
+		Duration::min(),
+	"and does so in both directions"
+);
+static_assert(Elapsed(Instant{ Duration::max() }, Instant{ Duration::max() }) == Duration::zero());
+
+static_assert(Advanced(Monotonic::FromNanoseconds(100), Duration{ 300 }) == Monotonic::FromNanoseconds(400));
+static_assert(Advanced(Monotonic::FromNanoseconds(400), Duration{ -300 }) == Monotonic::FromNanoseconds(100));
+static_assert(
+	Advanced(Monotonic::FromNanoseconds(1'000), Duration::max()) == Instant{ Duration::max() },
+	"An unreachable offset lands on an unreachable instant, not in the deep past"
+);
+static_assert(
+	Advanced(Monotonic::FromNanoseconds(-1'000), Duration::min()) == Instant{ Duration::min() },
+	"and the sign the first caller did not need is guarded too"
+);
+static_assert(Advanced(Instant{}, Duration::zero()) == Instant{});

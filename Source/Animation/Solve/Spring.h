@@ -139,10 +139,16 @@ template<std::floating_point T>
 // event's timestamp and evaluation happens at predicted presentation time, so the ordering holds by
 // construction — and a negative elapsed would run the exponential backwards into an overflow. It
 // yields the initial state instead.
+//
+// Core/Time.h's Elapsed rather than the subtraction operator, because this is the arithmetic ingress
+// and the pair is not one this file bounds: t0 arrives on an input event and the evaluation instant
+// arrives from presentation timing. A signed difference of two instants far enough apart is undefined
+// before the clamp below can reject it, which would make the clamp conditional on the thing it exists
+// to guard against.
 template<std::floating_point T>
 [[nodiscard]] inline T SecondsSince(Instant origin, Instant now) noexcept
 {
-	const Duration elapsed = now - origin;
+	const Duration elapsed = Elapsed(origin, now);
 
 	if (elapsed <= Duration::zero())
 	{
@@ -150,22 +156,6 @@ template<std::floating_point T>
 	}
 
 	return static_cast<T>(static_cast<double>(elapsed.count()) / 1'000'000'000.0);
-}
-
-// Instants saturate rather than wrapping. A spring that never settles reports an instant no frame
-// will reach, and the alternative is a settle time in the deep past — the same failure the frame
-// clock's Invalidate() exists to prevent, arriving from the animation side instead.
-[[nodiscard]] inline Instant Saturated(Instant origin, Duration after) noexcept
-{
-	const std::int64_t base = origin.time_since_epoch().count();
-	const std::int64_t offset = after.count();
-
-	if (offset > 0 && base > std::numeric_limits<std::int64_t>::max() - offset)
-	{
-		return Instant{ Duration::max() };
-	}
-
-	return origin + after;
 }
 
 // How long an envelope of the given amplitude takes to decay below the threshold. The single shape
@@ -435,7 +425,7 @@ struct Spring
 			}
 		}
 
-		return Detail::Saturated(Origin, DurationFromSeconds(static_cast<double>(seconds)));
+		return Advanced(Origin, DurationFromSeconds(static_cast<double>(seconds)));
 	}
 
 	// Defined in terms of SettlesAt rather than by evaluating and comparing, so the two cannot

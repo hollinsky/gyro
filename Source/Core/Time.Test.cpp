@@ -91,6 +91,32 @@ GYRO_TEST(Time, DeadlineArithmeticGoesNegative)
 	GYRO_CHECK(deadline - now < Duration::zero());
 }
 
+GYRO_TEST(Time, ArithmeticSaturatesRatherThanWrapping)
+{
+	// The compile-time half is the static_assert block in Time.h, and for this property a constant
+	// expression is the stronger instrument: signed overflow is not merely undefined there but
+	// ill-formed, so those assertions cannot pass while the arithmetic they cover is undefined. What is
+	// left for a test is the runtime path, which is the one GYRO_SANITIZE=undefined can see.
+	const Instant early = Monotonic::FromNanoseconds(std::numeric_limits<std::int64_t>::min());
+	const Instant late = Monotonic::FromNanoseconds(std::numeric_limits<std::int64_t>::max());
+
+	GYRO_CHECK_EQ(Elapsed(early, late), Duration::max());
+	GYRO_CHECK_EQ(Elapsed(late, early), Duration::min());
+	GYRO_CHECK_EQ(Advanced(late, 1ns), Instant{ Duration::max() });
+	GYRO_CHECK_EQ(Advanced(early, -1ns), Instant{ Duration::min() });
+
+	// Saturating is the behaviour at the bounds and nowhere else: everywhere the operators are defined
+	// these agree with them exactly, which is what lets a caller reach for the total form without
+	// having to think about whether it costs anything.
+	const Instant deadline = Monotonic::FromNanoseconds(1'000);
+	const Instant now = Monotonic::FromNanoseconds(1'500);
+
+	GYRO_CHECK_EQ(Elapsed(deadline, now), now - deadline);
+	GYRO_CHECK_EQ(Elapsed(now, deadline), deadline - now);
+	GYRO_CHECK_EQ(Advanced(deadline, 500ns), deadline + 500ns);
+	GYRO_CHECK_EQ(Advanced(now, -500ns), deadline);
+}
+
 GYRO_TEST(Time, InstantFormatsAsTimeSinceEpoch)
 {
 	// The formatter in Time.h exists because the standard supplies none for a time_point over a
