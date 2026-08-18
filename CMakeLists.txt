@@ -192,6 +192,7 @@ gyro_add_module(Seam PORTABLE
 		Geometry
 	TESTS
 		ColorState.Test.cpp
+		EventSource.Test.cpp
 		OutputConfiguration.Test.cpp
 		PresentationInfo.Test.cpp
 		Presenter.Test.cpp

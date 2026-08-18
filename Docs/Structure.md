@@ -18,8 +18,8 @@ splitting, or being renamed changes this file and nothing else. If a change here
 [Architecture.md](Architecture.md), the change was not structural.
 
 > **Most of this does not exist yet.** `Core`, `Geometry`, `Animation`, `Publication`, `Seam`, and
-> `Testing` are built — `Seam` in its presentation half only, which is `IPresenter` and the data its
-> two verbs take and report. The rest is a
+> `Testing` are built — `Seam` in its presentation half only, which is `IPresenter`, the data its
+> two verbs take and report, and the source its completions arrive on. The rest is a
 > declaration of
 > where code goes when it is written. What is worth writing down this early is the *graph* rather
 > than the file list, because the graph is enforced from the first module and the edge that must not
@@ -37,9 +37,10 @@ per-buffer hold. It is
 given somewhere to live.
 
 **`Seam` is the control waist** — every interface with more than one implementation, and the plain
-data that crosses them: `IPresenter`, `IRenderer`, `ISession`, `IInput`, alongside `RenderTarget`,
-`SyncPoint`, and `PresentationInfo`. It is [the seam](Architecture.md#the-seam) plus the
-one interface that is not platform at all, for the reason under [Frame is portable](#frame-is-portable).
+data that crosses them: `IPresenter`, `IEventSource`, `IRenderer`, `ISession`, `IInput`, alongside
+`RenderTarget`, `SyncPoint`, and `PresentationInfo`. It is [the seam](Architecture.md#the-seam) plus
+the one interface that is not platform at all, for the reason under
+[Frame is portable](#frame-is-portable).
 
 The presentation half is built, and it added `OutputConfiguration` to that list — what `Reconfigure`
 asks for and what `Reconfigured` reports was achieved, which is one type because the interesting
@@ -50,6 +51,13 @@ That is what lets the frame loop's schedulability sweep run against a fake prese
 with no GPU. It also declares no dispatch half — both threads name these types and neither owns
 them, since the frame thread calls both verbs and dispatch authors the configuration one of them
 takes.
+
+It added `IEventSource` on the same grounds and at a different granularity, which is the part worth
+noticing. A presenter is one output's; the descriptor its completions arrive on is one *device's* —
+one DRM file for every CRTC, one host connection for every window. So the drain that turns a
+readable file into `Presented` is the backend's rather than the presenter's, and hanging it off
+`IPresenter` would have had the loop register the same file once per output. See
+[decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait).
 
 Both are portable, both depend only on `Core` and `Geometry`, and **the composition root is the only
 thing that knows both sides of either.**
@@ -142,6 +150,16 @@ becomes falsifiable rather than argued.
 
 If those interfaces lived in `Render` instead, `Frame` would be platform code and the sweep would be
 testing a reimplementation of the loop — which is the thing that rots.
+
+**Which is also why `Frame` does not wait.** It exposes one iteration, returning the
+[`Wake`](../Source/Core/Wake.h) the next one is owed at; the `while` above it and the `io_uring`
+timeout under it are the composition root's, because the root already constructs the threads. The
+shim's whole contract is *wake at or after this instant, or earlier when a registered descriptor is
+readable* — it may wake spuriously, it is handed no say in ordering, and the loop the sweep runs is
+therefore the loop that ships.
+[Decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait) has why
+the alternatives — a wait interface in `Seam`, a readiness set passed into the step — both put a
+correctness ordering in the one place nothing exercises it.
 
 ### Geometry is not part of Core
 

@@ -90,6 +90,32 @@ return channel — are not written on the assumption that a frame is one image. 
 which also records the one thing the list cannot yet express: a layer whose source is a client's
 buffer rather than one of the output's own targets.
 
+**The completions arrive on a source, and the source is the device's rather than the output's.**
+Every one of those three signals begins as a readable file: page-flip events on the DRM device,
+`wp_presentation_feedback` on the host connection. A presenter is one output's, and that descriptor
+is not — one DRM file serves every CRTC on the device, one connection every window nested opened. So
+the drain sits beside `IPresenter` rather than on it, and the presenters are what it emits into.
+
+```cpp
+class IEventSource
+{
+public:
+	// What the loop waits on, or an invalid descriptor where there is nothing to wait on —
+	// headless, whose flips are a function of the fake clock and make no file readable.
+	virtual RawFd Descriptor() const noexcept = 0;
+
+	// Read what has arrived and emit it, until nothing is left. Drained every iteration
+	// whatever woke the loop, so finding nothing is the ordinary result and is success.
+	// Present()'s failure vocabulary, because it is the same file failing the same ways.
+	virtual Result<void> Drain() = 0;
+};
+```
+
+Exactly one thread pumps a source for the whole of its life, which is what lets `Drain()` hold no
+lock — and which is why nested opens two connections to the host rather than partitioning one by
+event queue. See [decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait)
+and [decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-two-connections).
+
 **The completion carries what was achieved rather than merely that it finished.** The
 variable-refresh range is derived from the mode and cannot be asked for, so a bare signal would need
 a query path beside it; carrying the configuration answers that and makes a request the hardware
@@ -121,6 +147,13 @@ Damage is in the interface from the start because both paths want it — `FB_DAM
 > It is the one place the over-provisioning turned out to be aimed at the wrong thing: the seam had
 > room for planes and fencing, which are frame-side, and none for mode setting, which is not. The
 > layer list left the same day, by being taken.
+>
+> The drain those signals arrive on is a plainer failure than either, and it is recorded beside them
+> because the three are easy to conflate. It was not provisioning aimed at the wrong thing; it was
+> an omission. This interface promised that `Reconfigured` is emitted "from the loop's own drain"
+> and described no drain, while a fake presenter with a `Flip()` a test calls stood in for one.
+> `IEventSource` closed it on 2026-08-17, and the lesson is about the double rather than about the
+> interface: **a fake that supplies a missing half will not report it missing.**
 >
 > The hole that lesson predicts is still open, and it is the cursor.
 > [Admission control](#admission-control) exempts the cursor plane from the budget *because it
@@ -248,6 +281,11 @@ Two features to build deliberately rather than let emerge:
   [Geometry](#geometry) is hardest — become testable without owning three monitors.
 - **Dynamic modes** — a window resize *is* a mode change. Handling that from day one means real
   hotplug and mode-setting work when the DRM backend arrives instead of being a rewrite.
+- **Two connections to the host**, not one. Presentation feedback is frame-side and `wl_seat` input
+  is dispatch-side, so a single connection is one socket read by two threads — and partitioning it
+  by event queue, which is what libwayland-client does, costs a lock that the frame thread meets and
+  the dispatch thread holds. Each connection binds only its own half's globals and is pumped by
+  exactly one thread. See [decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-two-connections).
 
 Safety rules, enforced by the backend rather than by convention. Nested and headless force off
 `SCHED_FIFO`, `mlockall`, session claiming, and DRM master unless explicitly overridden. A real-time
@@ -1592,14 +1630,22 @@ ring each.
 **Timer-first, not event-first**, and it now has no client traffic to fit around: the only fds on
 this ring are timers and KMS.
 
-```
-	due    = outputs owing a frame, earliest deadline first
-	wakeup = earliest NextWakeup() among them
+**`Frame` is one iteration of it, and the `while` is the composition root's.** The step below
+returns the [`Wake`](#doing-nothing-must-cost-nothing) the next one is owed at; a shim in
+`Compositor` arms the timer and does the waiting, because
+[the root already constructs the threads](Structure.md#orchestration) and because a portable module
+cannot call `io_uring_enter`. The shim decides nothing — its whole contract is *wake at or after
+this instant, or earlier when a registered descriptor is readable*, and it is permitted to wake
+spuriously. See [decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait).
 
-	submit an absolute IORING_OP_TIMEOUT for wakeup
-	wait for completions
+```
+	// the shim: arm an absolute IORING_OP_TIMEOUT for the returned Wake, wait, call Step
+
+	drain every event source                     // whatever woke us; see below
 
 	acquire the newest published client state    // wait-free, once per iteration
+
+	due = outputs owing a frame, earliest deadline first
 
 	for each output in due:                    // earliest deadline first
 		if previous frame still in flight or now + C_planned > deadline:
@@ -1613,7 +1659,16 @@ this ring are timers and KMS.
 		record and submit, holding the target until its flip
 
 	publish the consumed snapshot sequence      // releases the dispatch thread to reclaim
+
+	return Sooner over every output's Wake       // Wake::Never() arms nothing
 ```
+
+**The drain is first, and it is first for correctness rather than tidiness.** A `Presented` is the
+sole input to every deadline, so one that lands after `FrameClock` was read leaves the whole
+iteration scheduled against a prediction one frame stale. Every source is drained on every iteration
+and the loop never asks which was ready — putting that question in the shim would put the ordering
+in the one part of this that the [schedulability sweep](#outputs-are-independent-periodic-tasks)
+does not run.
 
 Acquisition is once per iteration rather than once per output. Per-output acquisition would be
 fresher and is expressible — the boundary is wait-free, so a second acquire costs nothing — but a

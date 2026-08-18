@@ -867,6 +867,129 @@ precisely when the GPU driver is not up, so the floor path would depend on an ex
 exactly the configuration the floor exists to serve — and the fallback for that failure is the mapped
 path this would have deleted.
 
+### 80. The frame loop is a step; the composition root owns the wait
+
+*(Decided 2026-08-17, while asking what `Frame` may call to wait when
+[Structure.md](Structure.md#frame-is-portable) says it is portable and
+[Architecture.md](Architecture.md#the-frame-loop) says it waits on `io_uring`.)*
+
+**`Frame` exposes one iteration and returns; the `while` above it belongs to the composition root.**
+The loop's body — acquire the snapshot, drain what has arrived, evaluate, record, present, publish
+the watermark — is portable and is the whole of the timing policy. The waiting is a platform shim in
+`Compositor` whose entire contract is *wake at or after this instant, or earlier when a registered
+descriptor is readable*.
+
+**This is a consequence rather than a new choice**, and that is the argument for it.
+[Structure.md](Structure.md#orchestration) already has the composition root construct "the clock, the
+backend, the rendering device, the publication channel, the scene, the protocol, **and the
+threads**." A thread's loop belongs to whoever constructs the thread. Anything else prises the
+threads back out of the root one interface at a time.
+
+**The step returns a `Wake`**, which is [decision 69](#69-settling-answers-with-a-wake-idleness-folds-a-monoid-not-an-or)'s
+type doing a second job it was already shaped for. The shim arms nothing on `Settled`, one absolute
+timeout on `Timed`, and re-arms on `Continuous` without asking the fold again — and
+[doing nothing must cost nothing](Architecture.md#doing-nothing-must-cost-nothing) becomes a headless
+assertion on a return value rather than an inspection of a real ring. It takes no `now`, because
+[Core/Clock.h](../Source/Core/Clock.h) already says the loop reads the clock once per iteration and
+`IClock` is handed to it.
+
+**The step is handed no readiness set, and that is the load-bearing half.** Draining a backend's
+completions before evaluating is a *correctness* ordering: a `Presented` that lands after
+`FrameClock` was read yields a deadline one iteration stale, which surfaces as jitter with no cause.
+Put that ordering in the shim and it lives in the one part of the loop the
+[schedulability sweep](Architecture.md#outputs-are-independent-periodic-tasks) never executes, which
+is precisely the rot [Structure.md](Structure.md#frame-is-portable) makes `Frame` portable to avoid.
+So the step drains every source every iteration and the shim is permitted to wake spuriously. It
+decides nothing, so it can get nothing wrong.
+
+What that costs is one read returning `EAGAIN` per source per wakeup that some other source caused —
+and a source is per *device*, so an ordinary machine has one. Against the tens of microseconds
+[Why io_uring](Architecture.md#why-io_uring) already accepts against a 16.6 ms budget, it is not
+measurable. If a multi-GPU machine ever makes it so, readiness can be threaded in on the usual gate.
+
+**Which makes the drain a seam member of its own rather than a member of `IPresenter`.** A presenter
+is one output's — [decision 78](#78-present-takes-a-layer-list-and-the-composite-is-one-member-of-it)'s
+`PresentationInfo` carries no output identity because the presenter already *is* that answer. A
+backend's event descriptor is not one output's: KMS has one DRM file per device carrying page-flip
+events for every CRTC on it, and the nested backend has one connection carrying feedback for every
+window it opened. One descriptor and N presenters, both times. Hung off `IPresenter`, the shim
+registers the same file N times and each presenter's drain reads its siblings' events. So
+`Seam/EventSource.h` is the backend's, at whatever granularity its descriptor actually has, and the
+presenters are what it emits into.
+
+`Descriptor()` may be invalid, and that case is the second argument against a readiness set. A
+headless backend's flips are a function of the `ManualClock` a test drives and no file becomes
+readable when one falls due; it is drained like anything else and reports what the clock says. A
+source with no descriptor could never appear in a readiness set, so headless would present nothing —
+on the configuration every scheduling test runs.
+
+**Rejected: a wait interface in `Seam`.** `IWaiter`: arm at an `Instant`, wait, report which sources
+fired, with `io_uring` and a test double behind it. It passes
+[the fake test](Structure.md#orchestration) and buys no coverage the step does not, since the double
+is not `io_uring` either way. What sinks it is that it inverts control: `Frame` would then own the
+`while`, and therefore thread lifetime, shutdown, and `SCHED_FIFO` — every one of them platform, and
+each needing a further seam to keep the module portable. It also has to re-declare `io_uring`'s
+surface in portable terms and widen every time a source kind is added.
+
+**Rejected: a POSIX wait in `Frame`, with `io_uring` as an optimization above it.** `ppoll` is
+reachable from the portable tier, so this compiles. It ships two implementations of the wait where
+only one ever runs, which is [the floor tier](Architecture.md#the-floor-tier)'s argument inverted —
+a path nobody exercises is a path that is broken when it is reached.
+
+**Rejected: the shim drains and then steps.** The smallest version of the readiness set, and it
+fails the same way: the ordering that matters is in the untested half.
+
+### 81. A source is pumped by one thread; nested opens two connections
+
+*(Decided 2026-08-17, as the case that decides whether
+[decision 80](#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait)'s "exactly one thread
+pumps a source" is a rule or a preference.)*
+
+**Every `IEventSource` is pumped by exactly one thread for the whole of its life**, which is what
+lets `Drain()` hold no lock at all. Nested is the one backend where that is not free: gyro is a
+client of a host compositor, and one connection carries `wp_presentation_feedback`, which is
+frame-side, beside `wl_seat` input, which is dispatch-side.
+[Structure.md](Structure.md#threads-are-a-second-partition) splits presentation from input by thread,
+so one connection means two threads on one socket. **So the nested backend opens two connections to
+the host** — one pumped by the frame thread, one by the dispatch thread — and each binds only the
+globals its own half needs.
+
+**Rejected: one connection partitioned by event queue.** The known answer, and libwayland-client
+implements exactly it, so the price is readable rather than arguable. Against
+`1.26.0-9-ged0b9f1`, the same tree [decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)
+was read on: `wl_display_prepare_read_queue` takes `display->mutex`
+(`src/wayland-client.c:1978`), and a thread that is not the one reading blocks in
+`pthread_cond_wait(&display->reader_cond, &display->mutex)` inside `read_events`
+(`src/wayland-client.c:1786`) until the reader finishes; `wl_display_dispatch_queue_pending` takes
+the same mutex (`src/wayland-client.c:2256`). Per-queue dispatch partitions *delivery* and does not
+partition the *connection* — there is one socket, so there is one reader, so there is a lock every
+thread meets.
+
+That lock spans the publication boundary and it makes the frame thread wait on the dispatch thread,
+which are the two things [Structure.md](Structure.md#orchestration) forbids by name and the priority
+inversion [decision 61](#61-the-frame-thread-is-sched_fifo-the-earliest-deadline-first-schedule-is-gyros-not-the-kernels)'s
+ordering exists to prevent. gyro writes its own client codec under
+[decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec), so this is not a
+constraint inherited from a library — it is a design gyro would have to reproduce deliberately, and
+libwayland is the evidence for what reproducing it costs. Two sockets and a second registry bind are
+cheaper than one lock on that edge.
+
+**Rejected: one connection read by the dispatch thread, feedback forwarded to the frame thread.**
+Tempting because a channel between the threads already exists, and wrong in direction: the return
+channel runs frame → dispatch, so this is a third channel where
+[the design turns on there being two](Architecture.md#the-publication-boundary). Nor can it ride the
+forward one — the reader takes the newest snapshot and skips the rest, so feedback crossing there
+would be *dropped*, and a `FrameClock` that misses observations is the thing `Invalidate()` exists
+to represent rather than something to build. It also puts the clock's sole input behind the
+scheduling latency of the thread that owes no deadline, which would make `IsPrecise()` a claim gyro
+could not keep.
+
+**Rejected: one connection read by the frame thread, input forwarded to dispatch.** Symmetric, and
+worse in the direction that matters: it puts wire decoding for a client-facing connection on the
+frame thread, which is the whole of what
+[decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) removed, and it makes input latency a
+function of the frame thread's timer cadence.
+
 ---
 
 ## Animation
