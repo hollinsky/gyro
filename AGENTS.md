@@ -44,7 +44,11 @@ Codebase Structure:
 		                        decisions 45, 50, 74, and 75
 		Integration/          - The tests that name both Publication and Animation, which no module may:
 		                        the coefficient round trip, and the two-thread soak that proves the
-		                        crossing's memory ordering under GYRO_SANITIZE=thread
+		                        crossing's memory ordering under GYRO_SANITIZE=thread. The soak runs
+		                        twice: flat out, and again with the frame thread parked by a handshake,
+		                        so that the full ring, the second refusal, the supersede and the
+		                        repeated watermark are walked on purpose rather than when the scheduler
+		                        happens to allow it
 		Testing/              - The hand-rolled test harness and every test binary's main().
 		                        GYRO_TEST / GYRO_CHECK / GYRO_REQUIRE; see decision 9
 
