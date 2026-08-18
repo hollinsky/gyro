@@ -184,11 +184,18 @@ public:
 	virtual Result<Fd> OpenDevice(std::string_view path) = 0;
 	virtual void       CloseDevice(Fd fd)                = 0;
 
-	Signal<Fd>   DevicePaused;
-	Signal<Fd>   DeviceResumed;
-	Signal<bool> ActiveChanged;
+	Signal<RawFd> DevicePaused;
+	Signal<RawFd> DeviceResumed;
+	Signal<bool>  ActiveChanged;
 };
 ```
+
+**The signals carry a borrowed descriptor and the calls carry an owning one, and the asymmetry is
+forced.** `Fd` owns and is move-only, which is what `OpenDevice` returning one and `CloseDevice`
+consuming one mean. A broadcast cannot transfer ownership to anyone — with N observers at most one
+could take the descriptor and nothing in the signature says which — so what a signal delivers is the
+descriptor's *identity*, which the receiver matches against the `Fd` it already holds. See
+[decision 77](Decisions.md#77-a-signals-observers-are-links-the-observers-own).
 
 Nested and headless implement this as three functions that always succeed. The real implementation
 is deferred until the DRM backend needs it — see

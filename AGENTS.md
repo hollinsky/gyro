@@ -27,7 +27,12 @@ Codebase Structure:
 		                        ingest conversions); Clock.h is IClock, MonotonicClock, and the
 		                        ManualClock the headless backend and tests drive; Wake.h is the
 		                        contribution the idle fold reduces, and is in Core rather than
-		                        Animation because Console contributes to it too (decision 69)
+		                        Animation because Console contributes to it too (decision 69);
+		                        Signal.h is the seam's observer callback, whose links the observers
+		                        own so that connect, emit and disconnect never allocate and either
+		                        side may die first (decision 77); Result.h is expected<T, Error>
+		                        over an errno plus the operation that failed, and Fd.h is the
+		                        owning descriptor beside the borrowed RawFd a signal can carry
 		Geometry/             - Portable tier. Scale.h is the exact rational output scale; Space.h is
 		                        the coordinate spaces and the values that live in them, with the
 		                        integer grid kept off the world
@@ -73,7 +78,7 @@ Codebase Structure:
 		                  it hangs off, which thread each piece runs on, the composition root, and
 		                  what the build checks enforce
 		Decisions.md    - Cross-cutting. Decision log with rejected alternatives and rationale
-		                  (76 decisions). Append-mostly: a revised decision keeps its superseded
+		                  (77 decisions). Append-mostly: a revised decision keeps its superseded
 		                  position as a rejected alternative, and carries its revision history
 		                  inline and dated rather than in any global ledger
 		Open.md         - Cross-cutting. The questions not yet settled, roughly in the order they

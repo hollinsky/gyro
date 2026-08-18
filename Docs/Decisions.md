@@ -638,6 +638,94 @@ is drawn unfused, so the facility taken here for development convenience is what
 uses to fill its variant cache. The constraint that arrives with it is that compilation must never
 be on the frame thread, which decision 62 states.
 
+### 77. A signal's observers are links the observers own
+
+*(Decided 2026-08-17, when `Signal<>` was built as the first of `Seam`'s three prerequisites in
+`Core`.)*
+
+`Signal<>` stores its observer list as an intrusive doubly-linked list whose nodes are `Connection`
+members of the observing objects. Connect, emit, and disconnect allocate nothing. A `Connection` is
+neither copyable nor movable.
+
+**The constraint that forces it is bidirectional lifetime, and both directions run on every boot.**
+[Decision 41](#41-device-migration-is-exercised-on-every-boot) has `simpledrm` replaced by the real
+driver while `Frame` keeps running and the last frame stays on glass, so `Render` tears down whole
+underneath a live frame thread. In that window a signal outlives its observer — an output is
+unplugged and `Frame`'s per-output state dies while the session serves other outputs — and an
+observer outlives its signal, because the old presenter's `Presented` dies while the `FrameClock`
+observing it survives to be `Invalidate()`d and re-seeded. Neither is exotic and neither can be
+ordered away.
+
+**`Handle` and `SlotAllocator` do not already answer it**, which is worth stating because they answer
+the question that sounds the same. [Decision 15](#15-identity-is-a-generational-handle)'s
+generation works because a stale id is resolved *through a live owner*; `IsValid` is answerable
+because the allocator is there to be asked. A signal has no third party. The presenter and the
+frame's per-output state are peers, the only thing outliving both is the composition root, and
+consulting the root on every emit would put the root on the frame path. So the two parties must know
+about each other directly. That much is forced; the decision is only about where the knowledge sits.
+
+**Putting it in the observer is what makes the frame-path property structural rather than
+remembered.** `Presented` fires inside the frame section, so
+[decision 36](#36-frame-path-discipline-is-enforced-mechanically-not-by-review) applies to emit. The
+part that is easy to get wrong is *where* it applies: invoking a `std::function` does not allocate,
+and constructing one happens at connect time, which is off the frame path and free. What allocates is
+the defensive copy of the observer list that nearly every signal implementation makes so that a
+disconnect from inside a handler cannot invalidate the iterator. Removing the copy is the whole
+design problem, and it is answered by fixing up the live iteration cursors as part of the unlink.
+
+**Immovability is load-bearing and is not an omission.** A move constructor could relink the list; it
+could not move the context pointer, which names the observing object. A movable `Connection` would
+relink correctly and then call the corpse. The consequence to design around is that observers have
+stable addresses — per-output state lives in storage reserved to capacity or indexed by a slot, which
+is what [`SlotAllocator`](Structure.md#geometry-is-not-part-of-core) already asks for on its own grounds.
+
+**The reentrancy contract.** A handler may disconnect itself, disconnect another observer, or destroy
+the signal. A handler may connect a new observer, and that observer does not fire for the emission in
+flight — spelled with a per-connection serial rather than a remembered tail, because a remembered
+tail is itself something a disconnect would have to fix up. A handler may re-emit the signal;
+emissions nest on the stack. Emission order is connect order.
+
+**Rejected: `std::vector<std::function<>>`.** The default, and it fails on the copy above rather than
+on the storage. Everything else it would cost — type-erased indirection, a `std::function` whose
+capture crossed the small-object threshold becoming an allocation at a connect nobody was watching —
+is secondary to that.
+
+**Rejected: a signal-owned heap node with a movable `Connection` handle.** Admits a bare capturing
+lambda as an observer, which reads better at the composition root, and emit still never allocates.
+Rejected because disconnect then frees, so an observer destroyed inside the frame section aborts. That
+is not reachable today — hotplug is a dispatch-thread udev event and the root sequences migration —
+but *currently unreachable* is the weaker kind of guarantee, and decision 36's argument is precisely
+about converting that kind into the other. Every observer the design names is a long-lived object that
+already exists: `FrameClock`, the frame loop's target cache, `Render`'s device. Not one is naturally a
+lambda.
+
+**Rejected: a fixed inline array of `{context, thunk}` pairs.** Gives emit contiguous memory and is
+dominated: *the signal dies first* still requires the signal to reach every observer, so the
+back-pointers remain, and it adds a capacity nobody can size.
+
+**Rejected: `wl_listener` as-is.** [Decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)
+records destroy-listener use-after-free as the best-known bug family in compositors built this way,
+and that argument survived as the strongest reason for gyro owning its own object model. The shape
+here is the same graph; what differs is that both unlink paths are destructors rather than a call
+someone has to remember.
+
+**A signal is claimed by the first thread to emit it, and wiring is deliberately unchecked.**
+[Structure.md](Structure.md#orchestration) has signals intra-thread only, and the emit claim makes
+that mechanical: a second thread emitting aborts. The obvious companion check — requiring connect and
+disconnect on the claimed thread — was written, and it is wrong. It aborts on teardown, because
+migration has the composition root destroy the presenter off the frame thread, so `~Signal`
+disconnects every observer from there. That is correct code running on every boot, and nothing in the
+object distinguishes it from the bug the check was aimed at, since what separates them is whether the
+root has quiesced the emitter. Recorded because the check is cheap to re-add and looks like an
+oversight until the counterexample is stated.
+
+**What this does not cover.** A signal never crosses the publication boundary; that is
+[decision 45](#45-protocol-dispatch-is-a-thread-not-a-task)'s two channels and
+[decision 73](#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it) turns on it. And
+a signal broadcasts a fact, never a resource: with N observers at most one could take an owned value
+and nothing in the signature says which, which is why `ISession`'s device signals carry a borrowed
+descriptor rather than an owning one.
+
 ---
 
 ## Animation

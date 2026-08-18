@@ -83,11 +83,16 @@ gyro_add_module(Core PORTABLE OBJECT
 	SOURCES
 		Clock.cpp
 		DebugAllocator.cpp
+		Fd.cpp
+		Signal.cpp
 	TESTS
 		Clock.Test.cpp
+		Fd.Test.cpp
 		FrameSection.Test.cpp
 		Handle.Test.cpp
 		Quiet.Test.cpp
+		Result.Test.cpp
+		Signal.Test.cpp
 		SlotAllocator.Test.cpp
 		Time.Test.cpp
 		Wake.Test.cpp

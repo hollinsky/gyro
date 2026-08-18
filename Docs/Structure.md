@@ -130,7 +130,8 @@ testing a reimplementation of the loop — which is the thing that rots.
 
 ### Geometry is not part of Core
 
-`Core` is dependency-free primitives: the timebase, the wake, handles, the slot allocator, logging.
+`Core` is dependency-free primitives: the timebase, the wake, handles, the slot allocator, the
+observer signal, the result and descriptor types, logging.
 `Geometry` is domain content: the exact rational scale, the restricted transform and its
 classification predicate, the 3D TRS with anchor and quaternion, the coordinate spaces.
 
@@ -265,7 +266,13 @@ with no buyer.
 
 **`Signal<>` is intra-thread only.** [The seam](Architecture.md#the-seam) puts signals on
 `IPresenter` and `ISession`, and they are ordinary observer callbacks within one thread. A signal
-crossing the boundary would be a third channel, and the design turns on there being two.
+crossing the boundary would be a third channel, and the design turns on there being two. The rule is
+mechanical in the one direction where it is unambiguous: a signal is claimed by the first thread to
+emit it and aborts on a second. Connect and disconnect are not checked, because teardown legitimately
+crosses threads — migration destroys the presenter from the composition root — and nothing in the
+object separates that from the bug.
+[Decision 77](Decisions.md#77-a-signals-observers-are-links-the-observers-own) has the rest,
+including why the observer owns the link and why a `Connection` cannot move.
 
 **Nothing crosses the boundary by ownership.** No `shared_ptr`, no mutex spanning it. Shared
 ownership puts `free` on the frame path wearing a destructor's clothes, where the debug allocator
