@@ -41,7 +41,7 @@
 // refused publish is retained by the dispatch side and retried, and a newer serialisation supersedes
 // the pending one rather than queueing behind it. Memory is bounded at Depth + 1 snapshots and
 // dispatch never blocks on a thread it outranks. See Publication/Publisher/Outbox.h, which owns that
-// pending slot, and Docs/Decisions.md decision 73.
+// pending slot, and Docs/Decisions.md decision 74.
 //
 // **Where the watermark comes from is part of this file's contract.** It arrives over the return
 // channel (Publication/Return.h), and the acquire on that channel's queue is what orders the frame

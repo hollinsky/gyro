@@ -38,7 +38,7 @@
 // generous number of frames of dispatch latency, leaves no drop policy to write. Two paths remain, and
 // neither loses anything: a full queue is merged into the writer's own staged report — legal because
 // it is the only writer — and releases that do not fit are simply *not accepted*, so the frame thread
-// keeps holding those buffers for another frame. See Docs/Decisions.md decision 74.
+// keeps holding those buffers for another frame. See Docs/Decisions.md decision 75.
 //
 // **What is deliberately not here yet.** The presented sequence and its timestamp, the per-output
 // measured costs, the VRR servo's observations: all of them are this record's, and none of them has a
@@ -166,8 +166,13 @@ public:
 		return true;
 	}
 
-	// Whether the writer is holding a report the queue had no room for. Nothing in the design reads
-	// this — it is here so a test can prove the merge happened rather than infer it from what came out.
+	// The frame side, like Post, and that is not a formality. This reads the staged report, which is
+	// unsynchronised precisely because it has exactly one writer, so a dispatch-side caller — a
+	// diagnostic, an assertion, a log line — would not get a stale answer, it would be a data race. The
+	// const is ownership of the report, not permission to cross the boundary.
+	//
+	// Nothing in the design reads it at all; it is here so a test can prove the merge happened rather
+	// than infer it from what came out.
 	[[nodiscard]] bool HasStagedReport() const noexcept
 	{
 		return m_Staged.Watermark != 0 || m_Staged.ReleaseCount != 0;
