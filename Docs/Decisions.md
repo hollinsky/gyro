@@ -728,6 +728,147 @@ descriptor rather than an owning one.
 
 ---
 
+### 78. `Present()` takes a layer list, and the composite is one member of it
+
+*(Decided 2026-08-17, when `Seam` was written. Resolves a contradiction inside
+[Architecture.md](Architecture.md): its `IPresenter` block took a target index and its
+[what to build before it is needed](Architecture.md#what-to-build-before-it-is-needed) list said a
+layer list, and the two had coexisted since the seam was first written down.)*
+
+`Present()` takes `std::span<const PresentLayer>`, ordered bottom first, and returns `Result<void>`.
+A layer carries a source, an acquire point, damage, a source crop, a destination rectangle, a blend
+mode, and a color state. The GPU-composited remainder is one more layer in that list rather than a
+separate concept, and z is the list order rather than a field.
+
+**What a person gets out of it, since that is what decides whether it is worth the shape.** Plane
+offload pays in three places and all three are already promised. It is
+[promise 6](Experience.md#doing-nothing-costs-nothing) in its near-idle form — an idle machine
+drawing nothing is the easy case, and the hard one is a machine awake at 60 Hz that need not
+composite: fullscreen video to a scaling pipe with the GPU powered down, which is hours of battery on
+a tablet. It is headroom for [admission control](Architecture.md#admission-control), since a layer
+that was offloaded is not in `C`, and *effects give way before frames do* needs something left to
+give. And it is most of the reachable win on a weak machine, where the GPU is the thermal budget.
+Against that, every promotion is an opportunity to break
+[promise 4](Experience.md#the-picture-is-correct) — the picture changing when the machine changes how
+it is drawing it — which is why promotion is already conditional on the color pipeline expressing
+the same transform, on opacity, and on non-overlap.
+
+**The signature is the cheap half, and it is not the argument.** Widening `Present(index, …)` across
+three backends is mechanical. What is not mechanical is the vocabulary underneath it, and every item
+leaks into a module that does not exist yet: damage accumulates per *plane* rather than per output,
+because `FB_DAMAGE_CLIPS` is a plane property; the composite is *one layer* rather than *the frame*,
+or else the remainder-layer framing is a retrofit into code where the composite target is privileged;
+a promoted client buffer is held to the next flip and crosses the return channel as a scanout hold,
+which nothing accounts for today; and `C` is the cost of what was *not* offloaded. Hand the frame
+loop a target index and every one of those will be written on the assumption that a frame is one
+image. **That assumption is the thing being prevented, and the signature is only where it is
+spelled.**
+
+**Which fields, decided against the rule that argues the other way.**
+[Publication/Return.h](../Source/Publication/Return.h) records that a field nobody writes is wrong in
+detail by the time somebody writes it, and that rule is right — it argues against speculative fields
+and not against the list. So a layer carries what has a writer or a settled rule today. Blend is
+there because the **cursor** forces it: it is the one thing gyro promotes that is neither opaque nor
+non-overlapping, so *opaque only* is a rule about client content and not a property of the interface.
+Color state is there because a promoted layer is what programs a plane's degamma, CTM, and gamma,
+and because [decision 47](#47-compositing-happens-in-linear-light-at-wide-primaries) already fixes it
+completely — transcription rather than invention. Plane capability descriptors, `TEST_ONLY`
+negotiation, and per-plane refusal reporting are not there, because the assigner that would produce
+them does not exist and a descriptor rich enough to be an oracle is a descriptor that lies.
+
+**The honest limit, stated rather than papered over.** The only source a layer can name today is an
+index into `Targets()`. Naming a promoted *client* buffer is not answerable yet: turning a dmabuf
+into a scanout framebuffer is a kernel allocation that must not happen inside the frame section,
+while the presenter is frame-side, so the import has no home until plane assignment says where it
+lives. That is in [Open.md](Open.md). What it does not cost is this shape — a cursor image and a
+virtual output's imported buffers are both targets, so the multi-layer path has callers before a
+client is ever promoted.
+
+**The commit reports at the call site, and that is the same decision seen from the other end.** A
+commit can fail without blocking: the device was removed, master was revoked, the layer set is not
+expressible. `Present()` therefore returns `Result<void>` rather than nothing, so the frame loop
+learns where it can still act — fall to the floor tier, skip the output — and so a permanently
+failing output cannot masquerade as one that is merely slow. Success means the commit was accepted
+and never that anything reached the glass; that arrives as `Presented`, or does not arrive.
+
+**Rejected: a target index now, a layer list when plane assignment lands.** The straightforward
+reading of the existing code block, and the one that costs nothing today. It is rejected on the
+vocabulary above rather than on the refactor: the modules that would be written in the meantime are
+`Frame`, `Render`, and the backends, which is every module that would have to change.
+
+**Rejected: the full field set including plane capabilities and a negotiated refusal.** The other
+end of the same axis. It invents the storage for a decision — what a plane can express — that
+[Architecture.md](Architecture.md#what-to-build-before-it-is-needed) already says is settled by
+`TEST_ONLY` rather than by a descriptor, and it would be a schema written against no assigner.
+
+**Rejected: a separate cursor verb, added now.** [Decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)
+exempts the cursor plane from the budget *because it updates independently of the composite*, which
+means there is a commit that is not a frame and this interface has no room for it. That is
+[decision 73](#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it)'s lesson arriving
+a second time — the seam was over-provisioned for the frame-side things and had no room for the one
+that is not — and it is recorded in [Open.md](Open.md) rather than answered here, because the answer
+depends on input latency measurements nobody has taken and on whether the cursor is a plane at all on
+the floor tier.
+
+---
+
+### 79. The console is a renderer, not a presenter
+
+*(Decided 2026-08-17. Settles the *whether `Console` shares `Seam`'s presenter* entry in
+[Structure.md](Structure.md), which had asked whether the pre-Vulkan console is a third
+implementation of `IPresenter` or a path beside the seam entirely.)*
+
+Neither. **The axis is who writes the pixels, not who owns the images.** `RenderTarget` exists so
+that a writer can bind memory the presenter allocated, and the console's writer is a CPU blitter — so
+the console is an `IRenderer` named `Blit`, paired with the same presenter everything else uses.
+
+**The lifetime is what makes this the natural cut rather than a clever one.** The DRM presenter
+allocates dumb buffers before Vulkan is up, because that is all it can do without a GPU driver, and
+allocates through GBM once it is. That is *the same output* across the transition: the same frame
+clock, the same damage accumulation, the same page-flip events feeding the same prediction. What
+changes is the writer. A second presentation path would have to grow its own clock, its own damage,
+and its own presentation feedback, and would then have to hand all three over at the moment gyro can
+least afford a discontinuity — [the firmware handoff](Architecture.md#from-firmware-to-gyro), where
+[promise 1](Experience.md#one-continuous-image) says the screen never flashes.
+
+**It is [decision 40](#40-software-rendering-is-a-device-not-a-backend-and-it-is-the-floor-tier)'s shape reused.**
+Software rendering is a device rather than a backend for the same reason: the thing that varies is
+how pixels are produced, and making it vary along the *presentation* axis instead would fork the
+part that is identical. `Blit` is the floor beneath that floor — no Vulkan at all, not even lavapipe
+— and it is reached on every boot rather than in an emergency.
+
+**What it costs the seam, and it is the right cost.** `RenderTarget` carries discriminated memory:
+dmabuf, or a CPU mapping. A renderer handed the kind it cannot use refuses rather than assumes, which
+makes a composition-root miswiring a branch somebody wrote instead of a cast that happens to work.
+One field and one check, against a parallel path.
+
+**One consequence to sequence rather than to discover.** [Structure.md](Structure.md) puts `Console`
+on its own thread, and [decision 77](#77-a-signals-observers-are-links-the-observers-own) has a
+signal claimed by the first thread to emit it. A presenter emitting `Presented` to the console thread
+and later to the frame thread would abort on the claim. So the console's presenter instance is
+destroyed and rebuilt at the handoff — which is what
+[decision 41](#41-device-migration-is-exercised-on-every-boot) already does on every boot, sequenced
+by the composition root, and not a new mechanism.
+
+**Rejected: `Console` as a third `IPresenter`.** The reading the open item proposed. It duplicates
+the clock, the damage path, and the feedback plumbing, and it puts a handover at the one moment the
+picture must not change.
+
+**Rejected: `RenderTarget` opaque, with the writer matched to the presenter by the composition
+root.** Tempting, because it keeps the seam narrow: if only the matched pair understands the payload,
+the seam does not have to describe two kinds of memory. It is rejected because a seam whose data only
+its own pair can read is not a seam — the whole point of the type is that a *substitutable* writer
+can bind it, and an opaque handle makes the substitution a convention the root has to get right
+silently.
+
+**Rejected: exporting dumb buffers as dmabuf so that one memory kind suffices.** Works on many
+drivers and would collapse the variant. It is rejected on where it fails: the console exists
+precisely when the GPU driver is not up, so the floor path would depend on an export that can fail on
+exactly the configuration the floor exists to serve — and the fallback for that failure is the mapped
+path this would have deleted.
+
+---
+
 ## Animation
 
 ### 10. The animation system is built first
@@ -2909,6 +3050,22 @@ mechanism's own failure: a wrong prediction costs the budget and nothing else.
 
 Not every caller may defer. Resume and migration cannot wait for anything, and hotplug should not,
 since the EDID probe alone can exceed any budget worth setting.
+
+*(Revised 2026-08-17, when `Seam` was written.)* **The completion carries the achieved
+configuration rather than being bare.** `Reconfigured` was written above as `Signal<>` — a fact, on
+the reading that the frame loop re-reads whatever it needs afterwards. That does not survive contact
+with the one thing it must report. `[vmin, vmax]` is derived from the mode and the panel's reported
+range and **cannot be asked for**: the servo learns its own authority only after a mode is set, which
+this decision's own text already says. A bare completion would therefore need a query path beside it,
+for a value the kernel does not answer cleanly and that this decision refuses to read hardware state
+back for. Carrying `const OutputConfiguration&` answers it and answers a second question for free —
+a request the hardware could not honour reports itself by the achieved configuration differing from
+the wanted one, so there is no failure signal to add and no ambiguity about which of two outstanding
+requests completed, because the generation is echoed in the same record.
+
+**Rejected: a bare completion plus a separate failure signal.** The shape that keeps `Signal<>` and
+answers the refusal case. It adds a fourth signal, splits *what happened* across two of them, and
+still leaves the variable-refresh range with nowhere to arrive.
 
 **What is promised.** An output mid-reconfiguration holds its last frame — decision 41's admitted
 multi-frame stall, extended to one more caller with the same guarantee that the last frame stays on

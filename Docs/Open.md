@@ -296,6 +296,32 @@ been waiting on a question that could not be answered until the rule behind it w
   that device's client list. `fbcon=off` disables the console's binding rather than fbdev emulation
   itself, so the client is most likely still there; that is a configuration observation on the
   target rather than an argument, and it rides free on the first boot the DRM backend completes.
+- **How a promoted client buffer is named at the seam.** [Decision 78](Decisions.md#78-present-takes-a-layer-list-and-the-composite-is-one-member-of-it)
+  takes the layer list and can express every layer whose source is one of the output's own targets —
+  the composite, a cursor image, a virtual output's imported ring. It cannot yet express the one that
+  matters most, a client's buffer flipped straight to a plane, and the obstacle is a placement rather
+  than a spelling. Turning a dmabuf into a scanout framebuffer is a kernel allocation, so it must not
+  happen inside the frame section; the natural fix is an import verb whose result the layer names,
+  and the presenter is frame-side, so dispatch cannot call it without a second thread touching the
+  presenter. Three shapes are visible and none has been argued through: the import happens at
+  configuration time for a bounded set of promotable surfaces, which bounds what may be promoted by
+  something other than the assigner; the layer carries the dmabuf description inline and the backend
+  caches framebuffers against it, which puts the cache's eviction policy on the frame path; or the
+  composition root owns the import as it owns migration, which is a third party in a per-frame
+  decision. This blocks nothing today and blocks plane assignment entirely, so it wants answering
+  before that is written rather than during.
+- **The cursor is a commit that is not a frame.** [Decision 29](Decisions.md#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)
+  exempts the cursor plane from the budget on the grounds that it updates independently of the
+  composite. That is a claim about the *rate* — the pointer moves at the input device's rate and not
+  the output's — and it implies a commit path with no frame behind it, which `IPresenter` has no room
+  for: `Present()` is a whole frame's layer list, and calling it to move a cursor would recomposite
+  nothing at the cost of a full atomic commit's worth of state. This is the shape
+  [decision 73](Decisions.md#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it)
+  caught once already — the seam provisioned for what is frame-side and had no room for what is not —
+  and it is recorded rather than provisioned for because the answer depends on two things nobody has
+  measured: how much of input-to-photon a coalesced cursor commit actually saves, and whether a
+  cursor-plane commit disturbs the refresh timer on a VRR panel, which the presentation-timing entry
+  below already wants a panel for.
 - **What a refused promotion costs.** A surface bound for a plane can skip the linearised copy and
   the mip chain entirely, which is most of the win for video. If the atomic test then refuses the
   partition, gyro must composite that surface on the frame it had planned not to — and the import it

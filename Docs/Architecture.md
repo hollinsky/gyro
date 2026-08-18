@@ -59,8 +59,10 @@ public:
 	virtual std::optional<uint32_t>       AcquireTarget()  = 0;
 
 	// May never block: no device-wide lock, no wait on another output's commit. Its cost is
-	// bounded by the composite, because it is decision 29's B(L).
-	virtual void Present(uint32_t target, SyncPoint renderFinished, const Region& damage) = 0;
+	// bounded by the composite, because it is decision 29's B(L). Layers are ordered bottom
+	// first and the composited remainder is one of them; the Result is how a commit that
+	// failed without blocking reaches a caller that can still act. See decision 78.
+	virtual Result<void> Present(std::span<const PresentLayer> layers) = 0;
 
 	// Initiated on the frame thread, performed elsewhere. Returns before the hardware is
 	// programmed; completion arrives as Reconfigured. Unbounded by contract even where a
@@ -69,11 +71,29 @@ public:
 	// so that the kernel is the one deciding whether it was. See decision 73.
 	virtual void Reconfigure(const OutputConfiguration& wanted) = 0;
 
-	Signal<const PresentationInfo&> Presented;           // frame reached glass
-	Signal<>                        Reconfigured;        // transition complete; targets valid again
-	Signal<>                        TargetsInvalidated;  // resize, mode set, modifier renegotiation
+	Signal<const PresentationInfo&>    Presented;           // frame reached glass
+	Signal<const OutputConfiguration&> Reconfigured;        // what was achieved; targets valid again
+	Signal<>                           TargetsInvalidated;  // resize, mode set, modifier renegotiation
 };
 ```
+
+**A frame is a list of layers, not an image.** The arrangement worth having is not one client filling
+the screen — it is several layers on several planes with the GPU never waking, which is what a tablet
+spends most of its life able to do. So the composited remainder is one entry in the list rather than
+a privileged concept, and promotion is a partition rather than a fullscreen special case. A layer
+carries a source, an acquire point, damage, a source crop, a destination rectangle, a blend mode and a
+color state; z is the list order. One element is what nested and headless present today, so nothing
+is given up by saying it this way, and what is bought is that the modules written next — damage
+accumulating per *plane*, `C` as the cost of what was not offloaded, a scanout hold crossing the
+return channel — are not written on the assumption that a frame is one image. See
+[decision 78](Decisions.md#78-present-takes-a-layer-list-and-the-composite-is-one-member-of-it),
+which also records the one thing the list cannot yet express: a layer whose source is a client's
+buffer rather than one of the output's own targets.
+
+**The completion carries what was achieved rather than merely that it finished.** The
+variable-refresh range is derived from the mode and cannot be asked for, so a bare signal would need
+a query path beside it; carrying the configuration answers that and makes a request the hardware
+could not honour report itself by disagreeing with what was asked.
 
 **The two verbs carry opposite contracts, and that is the point of their being two.** The kernel's
 atomic API has one entry point for both, distinguished by a flag, which is why its real-time
@@ -99,7 +119,14 @@ Damage is in the interface from the start because both paths want it — `FB_DAM
 > The mode-set-versus-page-flip split was in that list until 2026-08-17, when it stopped being a
 > provision and became [decision 73](Decisions.md#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it).
 > It is the one place the over-provisioning turned out to be aimed at the wrong thing: the seam had
-> room for planes and fencing, which are frame-side, and none for mode setting, which is not.
+> room for planes and fencing, which are frame-side, and none for mode setting, which is not. The
+> layer list left the same day, by being taken.
+>
+> The hole that lesson predicts is still open, and it is the cursor.
+> [Admission control](#admission-control) exempts the cursor plane from the budget *because it
+> updates independently of the composite*, which says there is a commit that is not a frame — and
+> this interface has no room for one. Recorded in [Open.md](Open.md) rather than provisioned for,
+> since the shape depends on measurements nobody has taken.
 
 ### The frame clock
 
@@ -2559,14 +2586,16 @@ frame still in flight" query needs nothing new.
 For [plane offload](#direct-scanout-is-conditional), where the interface is the half that cannot be
 widened afterwards and the policy is the half that can wait:
 
-- **`Present()` takes a layer list, not a target index.** Each layer carries a buffer, an acquire
-  point, damage, a source crop, a destination rect, a blend mode, a color state, and a z position,
-  and the GPU-composited remainder is one more layer in that list rather than a separate concept.
-  This is the `IPresenter` bullet above about imported targets, seen from another side:
-  `AcquireTarget()` supplies the composited layer and a client's dmabuf supplies an offloaded one.
-  A one-element list is what nested and headless present today, so nothing is given up to say it
-  this way — and widening a target index into a layer list afterwards touches every backend and the
-  frame loop at once.
+- **`Present()` takes a layer list, not a target index.** *(Taken 2026-08-17;
+  [decision 78](Decisions.md#78-present-takes-a-layer-list-and-the-composite-is-one-member-of-it).)*
+  Each layer carries a source, an acquire point, damage, a source crop, a destination rect, a blend
+  mode, and a color state, with z as the list order, and the GPU-composited remainder is one more
+  layer in that list rather than a separate concept. This is the `IPresenter` bullet above about
+  imported targets, seen from another side: `AcquireTarget()` supplies the composited layer and a
+  client's dmabuf supplies an offloaded one — and the second of those is the half still open, since
+  turning a client dmabuf into a scanout framebuffer is a kernel allocation that cannot happen in
+  the frame section while the presenter is frame-side. A one-element list is what nested and
+  headless present today, so nothing was given up to say it this way.
 - **Headless carries a synthetic plane catalog.** N pipes with declared capabilities and a scripted
   refusal policy. It is a few dozen lines, and it is the only way the assignment path, the fallback
   to compositing, and a refusal arriving *after* the frame's budget was planned are exercised before

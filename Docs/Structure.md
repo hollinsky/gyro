@@ -17,7 +17,9 @@ volatile of the three tiers and that is the arrangement working correctly — a 
 splitting, or being renamed changes this file and nothing else. If a change here forces a change in
 [Architecture.md](Architecture.md), the change was not structural.
 
-> **Most of this does not exist yet.** `Core`, `Geometry`, `Animation`, `Publication`, and `Testing` are built; the rest is a
+> **Most of this does not exist yet.** `Core`, `Geometry`, `Animation`, `Publication`, `Seam`, and
+> `Testing` are built — `Seam` in its presentation half only, which is `IPresenter` and the data its
+> two verbs take and report. The rest is a
 > declaration of
 > where code goes when it is written. What is worth writing down this early is the *graph* rather
 > than the file list, because the graph is enforced from the first module and the edge that must not
@@ -39,8 +41,21 @@ data that crosses them: `IPresenter`, `IRenderer`, `ISession`, `IInput`, alongsi
 `SyncPoint`, and `PresentationInfo`. It is [the seam](Architecture.md#the-seam) plus the
 one interface that is not platform at all, for the reason under [Frame is portable](#frame-is-portable).
 
+The presentation half is built, and it added `OutputConfiguration` to that list — what `Reconfigure`
+asks for and what `Reconfigured` reports was achieved, which is one type because the interesting
+comparison is between the two. It is portable in a way worth stating, because an interface to KMS
+reads as though it could not be. Nothing in it names a Linux header: a format is a four-character code and a modifier is a number,
+both **reproduced** from stable kernel ABI rather than included, and a descriptor is `Core/Fd.h`'s.
+That is what lets the frame loop's schedulability sweep run against a fake presenter on a machine
+with no GPU. It also declares no dispatch half — both threads name these types and neither owns
+them, since the frame thread calls both verbs and dispatch authors the configuration one of them
+takes.
+
 Both are portable, both depend only on `Core` and `Geometry`, and **the composition root is the only
 thing that knows both sides of either.**
+
+The two waists are reachable from different places, and that decides which one a piece of crossing
+data belongs to — see [Region is in Geometry](#region-is-in-geometry-and-reachability-is-why).
 
 ## The runtime
 
@@ -54,9 +69,6 @@ flowchart TB
     subgraph boundary["Publication boundary — the only two channels"]
         direction LR
         Return["Return channel"]
-The two waists are reachable from different places, and that decides which one a piece of crossing
-data belongs to — see [Region is in Geometry](#region-is-in-geometry-and-reachability-is-why).
-
         Snapshot
     end
 
@@ -201,18 +213,6 @@ It is a `Core` primitive on its own terms too, by the test the paragraph above u
 statement about the timebase, it names nothing in any domain, and it has more than one caller before
 it has two implementations.
 
-## Threads are a second partition
-
-The module graph is a dependency graph. Thread affinity is a different partition over the same code,
-and the two are not the same shape. Four modules straddle the boundary, and each splits in half:
-
-| Module | Frame half | Dispatch half |
-| --- | --- | --- |
-| `Animation` | `Solve` — closed form over published coefficients | `Author` — `Animatable`, catalog, retargeting |
-| `Publication` | `Reader` — wait-free, const | `Publisher` — serializes, allocates, reclaims |
-| `Render` | `Record` — passes, submission | `Import` — dmabuf, shm upload, resource creation |
-| `Platform` | presentation | input, session |
-
 ### Region is in Geometry, and reachability is why
 
 `Region` reads as `Seam` data. It appears in `IPresenter::Present`, it becomes `FB_DAMAGE_CLIPS` on
@@ -265,6 +265,18 @@ what crosses backwards is the report. `Protocol` sends `wp_presentation_feedback
 [decision 75](Decisions.md#75-the-return-channel-is-one-report-per-frame-per-surface-facts-are-derived-not-sent)'s
 record, and `PresentationInfo` stays in `Seam` as what a presenter signals to `FrameClock`. The two
 are near enough to fuse and the table says not to.
+
+## Threads are a second partition
+
+The module graph is a dependency graph. Thread affinity is a different partition over the same code,
+and the two are not the same shape. Four modules straddle the boundary, and each splits in half:
+
+| Module | Frame half | Dispatch half |
+| --- | --- | --- |
+| `Animation` | `Solve` — closed form over published coefficients | `Author` — `Animatable`, catalog, retargeting |
+| `Publication` | `Reader` — wait-free, const | `Publisher` — serializes, allocates, reclaims |
+| `Render` | `Record` — passes, submission | `Import` — dmabuf, shm upload, resource creation |
+| `Platform` | presentation | input, session |
 
 That last row is worth noticing rather than arranging: [the seam](Architecture.md#the-seam) keeps
 session, presentation, input, and outputs independent on testability grounds, and **they turn out to
@@ -410,7 +422,10 @@ is.
   [decision 10](Decisions.md#10-the-animation-system-is-built-first).
   [Animation.md](Animation.md#declarative-commits) reads the other way, and the two should be
   reconciled before either is written.
-- **Whether `Console` shares `Seam`'s presenter.** The pre-Vulkan console writes dumb buffers with
-  CPU blits and needs no renderer, no device, and no scene. Whether that is a third implementation
-  of `IPresenter` or a path beside the seam entirely is unresolved, and it decides whether `Seam`
-  has to express a target nobody renders into.
+- ~~**Whether `Console` shares `Seam`'s presenter.**~~ *Answered 2026-08-17 by
+  [decision 79](Decisions.md#79-the-console-is-a-renderer-not-a-presenter): neither of the two
+  readings this entry offered. The axis is who writes the pixels rather than who owns the images, so
+  the console's blitter is an `IRenderer` named `Blit` and the presenter beneath it is the ordinary
+  one — which is what keeps the frame clock, the damage path, and the presentation feedback from
+  being built twice and handed over at the firmware handoff. `RenderTarget` carries discriminated
+  memory as the price.*

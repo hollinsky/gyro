@@ -173,6 +173,32 @@ gyro_add_module(Publication PORTABLE
 		Publisher/Publisher.Test.cpp
 )
 
+# The control waist: every interface with more than one implementation, and the plain data that
+# crosses them. This is the presentation half — IPresenter and what its two verbs take and report.
+# IRenderer, ISession and IInput join it where they are written.
+#
+# Portable, and it is worth saying why an interface to KMS can be. Nothing here names a Linux header:
+# a format is a four-character code and a modifier is a number, both reproduced from stable kernel ABI
+# rather than included, and a descriptor is Core/Fd.h's. That is what lets the frame loop's
+# schedulability sweep run against a fake presenter on a machine with no GPU, which is the first point
+# at which decision 29 becomes falsifiable rather than argued.
+#
+# No DISPATCH_HALF. Both threads touch these types and neither owns them — the frame thread calls both
+# verbs, dispatch authors the configuration one of them takes — so there is no half to name and the
+# module is deliberately the same on both sides of the boundary.
+gyro_add_module(Seam PORTABLE
+	DEPENDS
+		Core
+		Geometry
+	TESTS
+		ColorState.Test.cpp
+		OutputConfiguration.Test.cpp
+		PresentationInfo.Test.cpp
+		Presenter.Test.cpp
+		RenderTarget.Test.cpp
+		SyncPoint.Test.cpp
+)
+
 # Declared after the modules, because the module list is what they check. ALL for the same reason as
 # the clock check above.
 #

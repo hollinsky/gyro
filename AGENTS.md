@@ -49,6 +49,21 @@ Codebase Structure:
 		                        carries the watermark back; Reader/ is the wait-free frame half and
 		                        Publisher/ the dispatch half that serialises, owns, and reclaims. See
 		                        decisions 45, 50, 74, and 75
+		Seam/                 - Portable tier, the control waist: every interface with more than one
+		                        implementation and the plain data that crosses them. The presentation
+		                        half is built — Presenter.h is IPresenter and its two verbs with
+		                        opposite contracts (decisions 73 and 78), Present taking a layer list
+		                        and returning a Result, Reconfigure initiating a transition it never
+		                        performs; RenderTarget.h describes an image the backend owns, dmabuf
+		                        or CPU-mapped, which is what lets the console be a renderer rather
+		                        than a second presenter (decision 79); SyncPoint.h is a timeline
+		                        point rather than a fence, so a present is issued against work the
+		                        GPU has not reached; PresentationInfo.h is what a flip reports and
+		                        the sole input to every deadline; OutputConfiguration.h is what
+		                        Reconfigure asks for and Reconfigured achieved, including the
+		                        variable-refresh range that can only be learned. IRenderer, ISession
+		                        and IInput join it where they are written
+
 		Integration/          - The tests that name both Publication and Animation, which no module may:
 		                        the coefficient round trip, and the two-thread soak that proves the
 		                        crossing's memory ordering under GYRO_SANITIZE=thread. The soak runs
@@ -80,7 +95,7 @@ Codebase Structure:
 		                  it hangs off, which thread each piece runs on, the composition root, and
 		                  what the build checks enforce
 		Decisions.md    - Cross-cutting. Decision log with rejected alternatives and rationale
-		                  (77 decisions). Append-mostly: a revised decision keeps its superseded
+		                  (79 decisions). Append-mostly: a revised decision keeps its superseded
 		                  position as a rejected alternative, and carries its revision history
 		                  inline and dated rather than in any global ledger
 		Open.md         - Cross-cutting. The questions not yet settled, roughly in the order they
