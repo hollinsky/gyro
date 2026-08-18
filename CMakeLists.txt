@@ -106,6 +106,7 @@ gyro_add_module(Geometry PORTABLE
 	TESTS
 		AxisTransform.Test.cpp
 		NodeTransform.Test.cpp
+		Region.Test.cpp
 		Scale.Test.cpp
 		Space.Test.cpp
 )

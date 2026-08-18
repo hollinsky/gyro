@@ -36,7 +36,7 @@ given somewhere to live.
 
 **`Seam` is the control waist** — every interface with more than one implementation, and the plain
 data that crosses them: `IPresenter`, `IRenderer`, `ISession`, `IInput`, alongside `RenderTarget`,
-`SyncPoint`, `PresentationInfo`, and `Region`. It is [the seam](Architecture.md#the-seam) plus the
+`SyncPoint`, and `PresentationInfo`. It is [the seam](Architecture.md#the-seam) plus the
 one interface that is not platform at all, for the reason under [Frame is portable](#frame-is-portable).
 
 Both are portable, both depend only on `Core` and `Geometry`, and **the composition root is the only
@@ -54,6 +54,9 @@ flowchart TB
     subgraph boundary["Publication boundary — the only two channels"]
         direction LR
         Return["Return channel"]
+The two waists are reachable from different places, and that decides which one a piece of crossing
+data belongs to — see [Region is in Geometry](#region-is-in-geometry-and-reachability-is-why).
+
         Snapshot
     end
 
@@ -209,6 +212,59 @@ and the two are not the same shape. Four modules straddle the boundary, and each
 | `Publication` | `Reader` — wait-free, const | `Publisher` — serializes, allocates, reclaims |
 | `Render` | `Record` — passes, submission | `Import` — dmabuf, shm upload, resource creation |
 | `Platform` | presentation | input, session |
+
+### Region is in Geometry, and reachability is why
+
+`Region` reads as `Seam` data. It appears in `IPresenter::Present`, it becomes `FB_DAMAGE_CLIPS` on
+KMS and `wl_surface.damage_buffer` nested, and the two backends are the reason
+[Architecture.md](Architecture.md#presentation) says damage is in the interface from the start. That
+is three arguments for the control waist and all of them are about the consumer.
+
+The table settles it against them, the same way it settled the wake. **A type that a dispatch-side
+module and a frame-side module must both name lives in `Core`, `Geometry`, or a waist both can reach
+— never in `Seam`.** `Seam` is on the frame side's edge set and not on the world's: `Scene` depends
+on `Core`, `Geometry`, `Animation`, and `Publication`, and `Protocol` on `Core`, `Geometry`, and
+`Scene`. Neither can say `Seam`, and neither should — the composition root being the only thing that
+knows both sides of a waist is what would be given up.
+
+Damage has producers on that side. A client's `wl_surface.damage_buffer` rectangles are wire
+knowledge and nothing else in the process can hold them, so `Protocol` receives them, `Scene` stores
+them, and the publisher serialises them, in `BufferSpace`, before any of it reaches a presenter. With
+`Region` in `Seam` the first of those three fails `CheckLayering.cmake` the day surface damage is
+written, and the report would name an edge rather than this paragraph.
+
+`Geometry` is where it lands rather than `Core` by [the split above](#geometry-is-not-part-of-core):
+it is rect arithmetic over the coordinate spaces, `Rect<S, T>` is already there, and
+[decision 52](Decisions.md#52-coordinate-spaces-are-three-and-quantization-belongs-to-the-output)
+already writes damage into `Geometry`'s vocabulary by making a damage rectangle the enclosing integer
+rectangle *plus the resampling filter's support radius*. Mapping damage between spaces is then
+`AxisTransform`'s `Map`, which exists, rather than a second traversal written beside it.
+`Seam` loses nothing by the move, because it depends on `Geometry` and `Present`'s signature does
+not change. `Scale` is the settled precedent — it crosses in `OutputConfiguration` and has always
+lived here.
+
+Two things this does *not* rest on, because both are wrong and each would generalize badly.
+
+**Not that `Region` has no implementations.** Neither do `RenderTarget`, `SyncPoint`, or
+`PresentationInfo`; the waist is interfaces *and the plain data that crosses them*, and the data
+half was never expected to have a second implementation.
+
+**Not that `Publication` would have to name it.** The waist is type-blind on purpose —
+`Publication/Snapshot.h` carries a payload as an offset, a count, and a stride, never as a type,
+which is how it carries `Spring<double>` without an `Animation` edge and how it would carry a rect
+run without a `Geometry` one. `Publication` is therefore exempt from the rule above rather than an
+instance of it, and a crossing type is never placed by asking what the snapshot must include.
+
+The rule earns itself once more, on the channel running the other way. Most of a frame's damage is
+not published at all: animation crosses as coefficients and is evaluated per output at that output's
+own presentation time, so where a moving node *is* on frame N is frame-side knowledge, and
+[decision 63](Decisions.md#63-effects-declare-their-kind-and-their-damage-the-verifier-keeps-them-honest)'s
+expansion and accumulation are frame-side with it. What crosses forwards is the client's rectangles;
+what crosses backwards is the report. `Protocol` sends `wp_presentation_feedback` and cannot say
+`Seam` either, so the presented timestamp reaches it as `Core` types in
+[decision 75](Decisions.md#75-the-return-channel-is-one-report-per-frame-per-surface-facts-are-derived-not-sent)'s
+record, and `PresentationInfo` stays in `Seam` as what a presenter signals to `FrameClock`. The two
+are near enough to fuse and the table says not to.
 
 That last row is worth noticing rather than arranging: [the seam](Architecture.md#the-seam) keeps
 session, presentation, input, and outputs independent on testability grounds, and **they turn out to

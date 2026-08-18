@@ -35,7 +35,9 @@ Codebase Structure:
 		                        owning descriptor beside the borrowed RawFd a signal can carry
 		Geometry/             - Portable tier. Scale.h is the exact rational output scale; Space.h is
 		                        the coordinate spaces and the values that live in them, with the
-		                        integer grid kept off the world
+		                        integer grid kept off the world; Region.h is damage as a bounded set
+		                        of rectangles, here rather than in Seam because Protocol and Scene
+		                        produce it and neither may name Seam
 		Animation/            - Portable tier, split by direction rather than by purity. Solve/ holds
 		                        the two closed forms the frame thread evaluates — the spring, and the
 		                        driven ramp of decision 72; Author/ produces coefficients and is
