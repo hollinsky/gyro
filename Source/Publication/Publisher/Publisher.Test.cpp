@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <span>
 
@@ -151,4 +152,45 @@ GYRO_TEST(SnapshotBuffer, AResetThatCannotAllocateLeavesTheBufferAsItWas)
 	GYRO_CHECK_EQ(buffer.Capacity(), capacity);
 	GYRO_CHECK(buffer.Bytes().data() == address);
 	GYRO_CHECK_EQ(SnapshotReader{ buffer.Bytes() }.Sequence(), std::uint64_t{ 9 });
+}
+
+GYRO_TEST(SnapshotBuffer, AReusedBufferZeroesTheSnapshotAndNotThePeak)
+{
+	// The reuse the pool exists for, and the two halves of what reset owes it. A buffer that once held a
+	// burst's worth of runs keeps that capacity, so zeroing it whole would charge every later publish
+	// for the peak; zeroing only the snapshot leaves the tail dirty, so the reset that grows back over
+	// it has to clear it then. Both are checked here because either alone is a defect.
+	SnapshotBuffer buffer;
+	buffer.Reset(4096);
+
+	const std::size_t capacity = buffer.Capacity();
+	std::memset(buffer.Bytes().data(), 0xFF, buffer.Bytes().size());
+
+	buffer.Reset(64);
+	GYRO_REQUIRE_EQ(buffer.Size(), std::size_t{ 64 });
+	GYRO_CHECK_EQ(buffer.Capacity(), capacity);
+	for (const std::byte value : buffer.Bytes())
+	{
+		GYRO_REQUIRE(value == std::byte{ 0 });
+	}
+
+	buffer.Reset(4096);
+	GYRO_CHECK_EQ(buffer.Capacity(), capacity);
+	for (const std::byte value : buffer.Bytes())
+	{
+		GYRO_REQUIRE(value == std::byte{ 0 });
+	}
+}
+
+GYRO_TEST(SnapshotBuffer, AnEmptyResetTouchesNothing)
+{
+	// Nothing wired today asks for a zero-byte snapshot — every Build writes a header at least — but
+	// reset's own contract has to answer for one, because the storage behind an unallocated buffer is a
+	// null pointer and memset may not be handed one at any length.
+	SnapshotBuffer buffer;
+	buffer.Reset(0);
+
+	GYRO_CHECK_EQ(buffer.Size(), std::size_t{ 0 });
+	GYRO_CHECK_EQ(buffer.Capacity(), std::size_t{ 0 });
+	GYRO_CHECK(buffer.Bytes().empty());
 }

@@ -36,11 +36,13 @@
 // A published snapshot's backing storage, owned until reclamation.
 //
 // It carries its bytes over-aligned to SnapshotBaseAlignment so that every run placed at an
-// element-aligned offset yields an address the reader can hand back as a typed span. The storage is
-// zeroed on every reset, which is what makes the header's reserved bytes and any inter-run padding
-// zero rather than whatever the allocator or the last snapshot left there — the value-initialisation
-// obligation Core/Wake.h and Animation/Solve/Spring.h record for their tail padding, discharged for
-// the whole region at once, and discharged again each time the region is reused.
+// element-aligned offset yields an address the reader can hand back as a typed span. Every byte a
+// snapshot occupies is zeroed on reset, which is what makes the header's reserved bytes and any
+// inter-run padding zero rather than whatever the allocator or the last snapshot left there — the
+// value-initialisation obligation Core/Wake.h and Animation/Solve/Spring.h record for their tail
+// padding, discharged for the whole region at once, and discharged again each time the region is
+// reused. Retained capacity past the current snapshot is not part of the region and is not cleared
+// until a later snapshot reaches it.
 class SnapshotBuffer
 {
 public:
@@ -87,6 +89,13 @@ public:
 	// because it does not: inter-run alignment padding belongs to no run, and decision 49's shared
 	// mapping would make an uninitialised gap somebody else's business.
 	//
+	// **It zeroes the snapshot, not the allocation.** Only the units this snapshot occupies are cleared,
+	// because those are the only bytes Bytes() ever hands out — the retained tail beyond them is
+	// unreachable until a later Reset grows the snapshot back over it, and that Reset clears it then. A
+	// buffer that once held a burst's worth of runs would otherwise pay for that peak on every publish
+	// forever after, on the dispatch thread's serialise-every-commit path, which is exactly the cost the
+	// pooling above exists to avoid.
+	//
 	// **It also never half-succeeds, and that is relied upon.** The growth is the only step here that
 	// can fail, and a std::vector resize that throws leaves the vector as it was — so a buffer whose
 	// Reset ran out of memory still holds the snapshot it held before, at the size it reported before.
@@ -102,7 +111,13 @@ public:
 			m_Store.resize(units);
 		}
 
-		std::memset(m_Store.data(), 0, m_Store.size() * sizeof(Unit));
+		// Guarded rather than left to memset: a zero-length snapshot over a vector that never allocated
+		// would pass data()'s null pointer, which the standard makes undefined for any length at all.
+		if (units != 0)
+		{
+			std::memset(m_Store.data(), 0, units * sizeof(Unit));
+		}
+
 		m_ByteSize = byteSize;
 	}
 
