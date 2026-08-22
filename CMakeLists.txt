@@ -247,6 +247,7 @@ gyro_add_module(Headless PORTABLE
 		Device.Test.cpp
 		Output.Test.cpp
 		Planes.Test.cpp
+		Renderer.Test.cpp
 		Vblank.Test.cpp
 )
 

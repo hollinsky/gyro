@@ -109,6 +109,20 @@ Codebase Structure:
 		                        inside the module rather than at either waist and NullEvaluator is the
 		                        floor case rather than a stub. Admission control joins it here
 
+		Headless/             - Portable tier, and the tier is the point (decision 85). The instrument the
+		                        schedulability sweep runs against, so it has to keep working on a machine
+		                        with no GPU: Vblank.h is the simulated display timeline — a phase, a
+		                        period, and which vblank a commit at a given instant makes — Output.h the
+		                        IPresenter over it, whose target ring holds a buffer until the *next*
+		                        flip retires it and whose Reconfigure records and returns; Device.h is
+		                        the one IEventSource for all of them, reporting an invalid descriptor
+		                        because a headless flip is a function of the clock and no file becomes
+		                        readable; Planes.h is the synthetic plane catalog whose descriptor
+		                        filters and whose Test decides, with the scripted refusal that arrives
+		                        after a budget was planned; Renderer.h is the renderer that draws
+		                        nothing and charges a simulated C, here rather than in Render because
+		                        Render is platform and would take the tier with it
+
 		Integration/          - The tests that name both Publication and Animation, which no module may:
 		                        the coefficient round trip, and the two-thread soak that proves the
 		                        crossing's memory ordering under GYRO_SANITIZE=thread. The soak runs
@@ -140,7 +154,7 @@ Codebase Structure:
 		                  it hangs off, which thread each piece runs on, the composition root, and
 		                  what the build checks enforce
 		Decisions.md    - Cross-cutting. Decision log with rejected alternatives and rationale
-		                  (84 decisions). Append-mostly: a revised decision keeps its superseded
+		                  (85 decisions). Append-mostly: a revised decision keeps its superseded
 		                  position as a rejected alternative, and carries its revision history
 		                  inline and dated rather than in any global ledger
 		Open.md         - Cross-cutting. The questions not yet settled, roughly in the order they
