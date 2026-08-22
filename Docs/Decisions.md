@@ -6146,3 +6146,102 @@ promotion path — turning one into a target-owning instance under load — woul
 in something being watched, which
 [quality does not visibly fluctuate](Experience.md#the-picture-is-correct) is close enough to forbid.
 Nothing in the design wants it today, and it is the load-bearing assumption rather than a detail.
+
+### 92. The transform chain composes into one matrix; the perspective clamp was the artefact it guarded against
+
+*(Decided 2026-08-22, on trying to produce a `Quad`.
+[Decision 86](#86-the-published-scene-is-a-preorder-tree-model-values-inline-coefficients-by-reference)
+says the frame side's walk carries "an explicit transform stack" and nothing said what was in it.
+Corrects a claim this log made in [decision 55](#55-transforms-are-3d-the-scene-is-a-painters-algorithm)'s
+implementation and a citation of [decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget).)*
+
+**The stack holds one composed 4x4 per level, and the accumulated weight is its W component.** Not the
+ancestors' `NodeTransform`s with each node's corners pushed up through all of them — that reading was
+the obvious one and it is four walks of the ancestor chain per node, on the arithmetic that runs for
+every node of every frame. One matrix multiply on push, four matrix-vector products per node, constant
+in nesting depth. [Seam/Renderer.h](../Source/Seam/Renderer.h)'s "accumulated divisor for that corner,
+the product along the chain" needs no accumulating: it falls out of the bottom row.
+
+**Why the chain folds at all is not obvious, and the reason it was missed is worth keeping.**
+`NodeTransform::Apply` divides by the perspective weight *before* handing the point to the parent, so
+the parent rotates an already-divided point and this is not matrix composition on its face. It works
+because each node's weight is affine in the point that node is handed — the projection is the ordinary
+homogeneous one with `1/d` in the bottom row — so the divides telescope. Checked numerically over a
+four-deep chain projecting at three levels before it was built on: composed and hand-walked agree to
+6e-8 on position and 1.3e-8 on weight, which is float rounding.
+
+**The one thing that could have broken it was the clamp, and the clamp was also the bug.**
+`Perspective::Weight` saturated the depth against the node's bounding radius, on a stated contract
+that `|depth| <= boundingRadius` and that a caller breaking it "has handed over a radius belonging to
+some other node." The walk breaks it as ordinary business: an ancestor's radius is computed from the
+ancestor's own extent and anchor, and a descendant's corner lands where it lands. **A piecewise weight
+is not a matrix at any depth**, so removing the clamp is what makes the walk constant per node — the
+correctness fix and the cost fix are one edit.
+
+Two things it did on screen, and the second is the artefact the weights exist to remove:
+
+- **A window pulled out of a workspace stopped growing partway through.** Past the *workspace's*
+  radius — a number with nothing to do with the window — the weight froze while the translation kept
+  running. It reads as the window hitting a pane of glass with the animation still visibly in flight.
+- **A quad with some corners saturated and some not stopped being a projective image of a rectangle**,
+  so its content swam across it as it turned. Measured at 7% relative against 3e-7 unclamped. That is
+  precisely the warp `Quad::Weights` was introduced to prevent, reintroduced by the guard next to it.
+
+Neither is an edge case, because **with no camera a container is the only thing that can give its
+children a shared vanishing point.** Nine workspace cards each carrying their own node-local
+perspective each recede about their own centre, which reads as a collage rather than as a space. So
+the overview — the reason decision 55 wanted three dimensions — puts the projection on an ancestor and
+makes every window in it a descendant, and the descendant case was the one that did not work.
+
+**The eye is resolved once per node rather than per point.** `Perspective::InverseEyeDistance(radius)`
+is `strength / radius`, computed where the radius is unambiguously the node's own, and every point
+above it costs a multiply-add instead of a divide. It also makes the mismatch unspellable: after the
+push there is no radius left to pair with the wrong depth.
+
+**The only cull is the geometric one.** A weight at or below zero means the point has passed through
+the eye of some node above it and is behind the viewer. That is unrenderable in the same way a back
+face is, and decision 55 already culls those unconditionally with no per-node override, so this joins
+them rather than inventing a policy. The floor sits at a magnification of 1024 — four orders of
+magnitude past anything the motion catalog could author — and exists so the *shape* of a mistake is a
+disappearance rather than a NaN in a damage bound, which spreads to everything the output composites.
+
+**Rejected: a magnification budget as the cull threshold**, on the reasoning that removing the clamp
+removed the bound `MinimumRadii` claimed to provide. That claim cited decision 29 in the form decision
+29 rejects. `C` is a budget gyro *enforces*, not a cost it observes — the 2026-08-15 revision — so
+nothing consumes a per-node projected-area bound and nothing ever did; `grep -r Area Source/` returns
+nothing. The bound was also already false, since per-node weights in `[0.5, 1.5]` multiply along a
+chain. Four times magnification was the value under discussion and is the worst available: a tilted
+deck holding a flipping card reaches it legitimately, so it would fire on real content, which is the
+same character as the clamp it replaced. It is also out of key with
+[decision 30](#30-budget-shortfalls-are-answered-by-spending-less-chunking-and-early-rendering-are-contingencies)
+— a shortfall is answered by spending less, and `Admit()` returns a degraded plan and never a refusal.
+A window vanishing because it grew is a refusal.
+
+**Rejected: a subtree bounding radius**, so every descendant lies inside the radius its ancestor's
+projection is stated against. It is the exact fix and it makes a parent's foreshortening a function of
+its children: dragging a window inside an overview would visibly change the overview's shape.
+
+**Rejected: near-plane clipping**, which is what a general 3D pipeline does with this. It turns a quad
+into a three-to-five-gon and costs
+[decision 82](#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene)'s flat draw list its four
+corners, to rescue geometry the viewer is standing behind.
+
+**Rejected: storing the matrix on the node.** Unchanged from
+[decision 17](#17-transforms-are-decomposed-into-trs-with-per-channel-springs) — a stored matrix is one
+somebody eventually interpolates, and lerping two of them shears the result through configurations
+that are not rotations. `ComposedTransform` is composed on the render path and holds nothing between
+frames, which is what `Apply`'s own comment always asked for.
+
+**A correction to something claimed while reaching this.** The four-corners-times-depth reading was
+offered as a second reason for
+[decision 90](#90-the-snapshots-runs-are-one-per-channel-and-the-frame-side-validates-the-tree-it-walks)'s
+depth cap, one that was not "don't hang the machine." It does not survive: the walk is constant per
+node, so the cap gains nothing here. What it bounds instead is the stack itself, at 128 bytes per
+level inside a section that may not allocate.
+
+**What the tests had to be taught.** The first versions of all three passed against the clamp,
+because a window at rest sits inside its workspace's own extent and never reaches the saturation —
+the defect exists only during the gesture, which is exactly when someone is looking at the window
+closely. They now sweep a lifted window and assert through the walk rather than through the matrix,
+since the walk is what the transforms *mean* and a matrix built over a projection that was not
+projective would satisfy a test of its own internal consistency while the screen disagreed.

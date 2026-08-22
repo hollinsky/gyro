@@ -466,10 +466,18 @@ inline Quaternion Quaternion::FromAxisAngle(Vector3<float> axis, float radians) 
 class Perspective
 {
 public:
-	// Two radii is the closest the eye may come. At exactly one radius the near corner sits in the
-	// eye and its projection is unbounded; two halves the worst-case weight instead, which bounds the
-	// projected area of any node at four times its unprojected area — a number the effect-cost
-	// admission test of decision 29 can key on, since it keys on area.
+	// Two radii is the closest the eye may come, and what it buys is that **a node's own quad can
+	// never reach its own eye**. Every point of the quad is within one radius of the anchor and the
+	// eye is at least two away, so the weight over the node's own extent stays in [0.5, 1.5] with
+	// nothing to check. At exactly one radius the near corner sits in the eye and its projection is
+	// unbounded.
+	//
+	// It previously also claimed to bound the projected area of any node at four times its
+	// unprojected area, "a number the effect-cost admission test of decision 29 can key on".
+	// *(Corrected 2026-08-22.)* That cited decision 29 in the form decision 29 rejects: `C` is a
+	// budget gyro enforces rather than a cost it predicts, so nothing consumes a per-node area bound
+	// and nothing ever did. The clamp that claimed to provide it is gone with the claim; see
+	// ComposedTransform below for what replaced it and why the trade was free.
 	static constexpr float MinimumRadii = 2.0F;
 
 	// Orthographic, because a transform that was never given a perspective has none. There is no
@@ -499,25 +507,43 @@ public:
 
 	[[nodiscard]] constexpr bool IsNone() const noexcept { return m_Strength == 0.0F; }
 
+	// The eye, resolved against the node's own radius: the reciprocal of its distance, so a weight is
+	// `1 + depth * this` and orthographic is exactly zero. **This is the form the projection has to
+	// take to compose**, and the reason is the whole of ComposedTransform below — a weight that is
+	// affine in the depth is the ordinary homogeneous projection and folds into a matrix, and one
+	// that is not is not a matrix at any depth.
+	//
+	// Resolved once per node rather than once per point, which is also the cheaper direction: the
+	// divide happens where the radius is known and every point above it costs a multiply-add.
+	//
+	// A radius of zero, or none at all, reads as orthographic. A node with no extent has no depth to
+	// project, and this is the one place the answer could otherwise be a division by zero.
+	[[nodiscard]] constexpr float InverseEyeDistance(float boundingRadius) const noexcept
+	{
+		return boundingRadius > 0.0F ? m_Strength / boundingRadius : 0.0F;
+	}
+
 	// The homogeneous weight a point at local depth `depth` is divided by. Exactly 1 when there is no
 	// perspective, so the orthographic path stays bit-exact.
 	//
-	// The depth is saturated against the radius rather than trusted. |depth| <= boundingRadius is the
-	// caller's contract and a caller that breaks it has handed over a radius belonging to some other
-	// node; saturating keeps the result in [0.5, 1.5] unconditionally, which is Scale.h's Saturate
-	// argument in a different unit — bounded wrongness is recoverable and a NaN on the frame path is
-	// not, because it spreads through the damage bound to everything the output composites.
+	// **The depth is not clamped**, and the history is worth keeping because the clamp read as a
+	// safety guard and was the opposite. *(Revised 2026-08-22.)* It saturated `depth` against the
+	// radius, on the stated contract that |depth| <= boundingRadius and that a caller breaking it had
+	// handed over a radius belonging to some other node. The frame side's walk breaks it as ordinary
+	// business — an ancestor's radius is its own, and a descendant's corner lands where it lands — and
+	// two things came of it on screen. A window pulled out of a workspace stopped growing partway
+	// through while still visibly moving, because its weight had frozen; and a quad with some corners
+	// saturated and some not stopped being a projective image of a rectangle, so its texture swam
+	// across it, which is the exact artefact Seam/Renderer.h's weights exist to remove. A guard that
+	// fires on content anyone would author is not a guard.
+	//
+	// What the clamp was really protecting — no division by zero, nothing infinite reaching a damage
+	// bound — is protected at the composed weight instead, where it belongs: see `Projected` below.
+	// Over the node's own quad the two forms are identical, because MinimumRadii is what makes the
+	// saturation unreachable there.
 	[[nodiscard]] constexpr float Weight(float depth, float boundingRadius) const noexcept
 	{
-		if (!(boundingRadius > 0.0F))
-		{
-			return 1.0F;
-		}
-
-		const float ratio = depth / boundingRadius;
-
-		// Ordered so that a NaN, which compares false against everything, lands on the first branch.
-		return 1.0F + (!(ratio > -1.0F) ? -1.0F : (ratio > 1.0F ? 1.0F : ratio)) * m_Strength;
+		return 1.0F + depth * InverseEyeDistance(boundingRadius);
 	}
 
 private:
@@ -616,6 +642,178 @@ struct NodeTransform
 		const float z = std::abs(Anchor.Z) * std::abs(Scale.Z);
 
 		return std::sqrt(x * x + y * y + z * z);
+	}
+};
+
+// One corner, projected, with the divisor that produced it.
+//
+// The weight is what Seam/Renderer.h calls the accumulated divisor for that corner, and a renderer
+// divides by it to interpolate anything across the quad. Without it the interpolation is affine per
+// triangle, which is the warp every early 3D console is remembered for.
+struct Projected
+{
+	Vector3<double> Position{};
+
+	float Weight = 1.0F;
+
+	// **The one real singularity, and it is a visibility question rather than an arithmetic one.** A
+	// weight at or below zero means the point has passed through the eye of some node above it and is
+	// behind the viewer, which cannot be drawn at all — the same category as a back face, which
+	// decision 55 already culls unconditionally with no per-node override. The caller culls the node.
+	//
+	// The floor sits at a magnification of 1024 rather than at zero, and it is a degeneracy guard
+	// rather than a policy. A node's own quad cannot reach its own eye at all (see
+	// Perspective::MinimumRadii), and a chain would have to stack the strongest perspective the type
+	// can express through ten levels to come near this, so it is four orders of magnitude clear of
+	// anything the motion catalog could author. It exists so that the *shape* of the failure is a
+	// disappearance rather than a NaN.
+	//
+	// Deliberately **not** a magnification budget. A cull is a window vanishing, and decision 29 ends
+	// "`Admit()` returns a degraded plan, never a refusal" while decision 30 answers a shortfall by
+	// spending less; a geometric limit standing in for a cost limit would be neither, and would fire
+	// at around four times magnification, which a tilted deck holding a flipping card reaches
+	// legitimately.
+	static constexpr float MinimumWeight = 1.0F / 1024.0F;
+
+	[[nodiscard]] constexpr bool IsVisible() const noexcept { return Weight >= MinimumWeight; }
+};
+
+// The transform chain, composed. This is what decision 86's walk carries: the scan over the preorder
+// run pushes one of these per node and pops it on the way out, so a node's four corners cost four
+// multiplies rather than four walks of the ancestor chain — constant per node rather than growing
+// with nesting depth.
+//
+// **It is a matrix, and that does not contradict NodeTransform above.** That type refuses to *store*
+// one, because a stored decomposition is one somebody eventually lerps, and lerping two matrices
+// shears the result through configurations that are not rotations. This one is composed on the render
+// path and holds nothing between frames, which is exactly what `Apply` asks for: "a product composed
+// on the render path, where the layout and the precision at which translation folds against the
+// output origin are that path's to choose".
+//
+// **Why the chain folds at all**, which is not obvious and cost an afternoon to establish. `Apply`
+// divides before handing the point to its parent, so the parent rotates an already-divided point and
+// none of this is matrix composition on its face. It works because each node's weight is affine in
+// the point that node is handed — the projection is the ordinary homogeneous one, 1/d in the bottom
+// row — so the divides telescope, and the accumulated divisor is then literally the W component.
+// There is nothing to accumulate separately and no product to form.
+//
+// **The only thing that could break it is a nonlinear weight**, which is what this header carried
+// until 2026-08-22: saturating the depth against a radius made the weight piecewise, and a piecewise
+// weight is not a matrix at any depth. Removing the clamp is what makes the walk O(1) per node, so
+// the correctness fix and the cost fix are the same edit.
+//
+// Row-major, acting on column vectors, and double throughout — the translation column reaches global
+// space, where single precision runs out at exactly wl_fixed's resolution. The default is the
+// identity, for the reason the rest of this header defaults to identities: the root of a walk needs
+// no initialization pass.
+struct ComposedTransform
+{
+	double M[4][4]{ { 1.0, 0.0, 0.0, 0.0 }, { 0.0, 1.0, 0.0, 0.0 }, { 0.0, 0.0, 1.0, 0.0 }, { 0.0, 0.0, 0.0, 1.0 } };
+
+	// One node as a homogeneous matrix, which is `Apply`'s comment read literally: displace from the
+	// anchor, scale, rotate, project, restore the anchor, translate.
+	//
+	// Written out rather than multiplied up from six factors, because this runs once per node per
+	// frame. The derivation, so the next reader checks it rather than trusts it: with `basis` the
+	// columns below, a local point `u` goes to `basis * (u - Anchor)`, the weight is
+	// `1 + q * (basis * (u - Anchor)).z`, and the result is `Translation + Anchor + that / weight`.
+	// Clearing the divide gives the numerator and denominator rows directly. NodeTransform.Test.cpp
+	// checks it against `Apply` over a sweep rather than at a point.
+	[[nodiscard]] static constexpr ComposedTransform ForNode(const NodeTransform& node, float boundingRadius) noexcept
+	{
+		// The rotation and the scale together, as the images of the three axes. Rotate is linear, so
+		// its columns are what it does to each axis, and folding the scale in here is what keeps a
+		// negative scale mirroring rather than needing a case.
+		const Vector3<float> basisX = node.Rotation.Rotate({ node.Scale.X, 0.0F, 0.0F });
+		const Vector3<float> basisY = node.Rotation.Rotate({ 0.0F, node.Scale.Y, 0.0F });
+		const Vector3<float> basisZ = node.Rotation.Rotate({ 0.0F, 0.0F, node.Scale.Z });
+
+		const double basis[3][3]{ { basisX.X, basisY.X, basisZ.X },
+			                      { basisX.Y, basisY.Y, basisZ.Y },
+			                      { basisX.Z, basisY.Z, basisZ.Z } };
+
+		const double eye = node.Projection.InverseEyeDistance(boundingRadius);
+
+		// Where the anchor itself lands under the basis, and the constant term of the weight.
+		const double anchorX = node.Anchor.X;
+		const double anchorY = node.Anchor.Y;
+		const double anchorZ = node.Anchor.Z;
+
+		const double anchored[3]{ basis[0][0] * anchorX + basis[0][1] * anchorY + basis[0][2] * anchorZ,
+			                      basis[1][0] * anchorX + basis[1][1] * anchorY + basis[1][2] * anchorZ,
+			                      basis[2][0] * anchorX + basis[2][1] * anchorY + basis[2][2] * anchorZ };
+		const double constant = 1.0 - eye * anchored[2];
+
+		// The anchor is restored in the node's own space, before the translation crosses into the
+		// parent's — so the two add here rather than composing, and at the anchor itself the
+		// displacement is identically zero and this is exact rather than nearly so.
+		const double origin[3]{ node.Translation.X + anchorX,
+			                    node.Translation.Y + anchorY,
+			                    node.Translation.Z + anchorZ };
+
+		ComposedTransform composed{};
+
+		for (int row = 0; row < 3; ++row)
+		{
+			for (int column = 0; column < 3; ++column)
+			{
+				composed.M[row][column] = basis[row][column] + eye * origin[row] * basis[2][column];
+			}
+
+			composed.M[row][3] = constant * origin[row] - anchored[row];
+		}
+
+		composed.M[3][0] = eye * basis[2][0];
+		composed.M[3][1] = eye * basis[2][1];
+		composed.M[3][2] = eye * basis[2][2];
+		composed.M[3][3] = constant;
+
+		return composed;
+	}
+
+	// Descend into a child: the chain this transform stands for, followed by the child's own. The
+	// walk pushes the result and restores this one on the way back out, so the stack is one of these
+	// per level and is bounded by decision 90's depth cap.
+	[[nodiscard]] constexpr ComposedTransform Push(const NodeTransform& child, float childRadius) const noexcept
+	{
+		const ComposedTransform own = ForNode(child, childRadius);
+
+		ComposedTransform composed{};
+
+		for (int row = 0; row < 4; ++row)
+		{
+			for (int column = 0; column < 4; ++column)
+			{
+				composed.M[row][column] = M[row][0] * own.M[0][column] + M[row][1] * own.M[1][column] +
+				                          M[row][2] * own.M[2][column] + M[row][3] * own.M[3][column];
+			}
+		}
+
+		return composed;
+	}
+
+	// A point of the deepest node's own space, taken all the way out through every ancestor.
+	//
+	// The divisor is floored at `Projected::MinimumWeight`, and the floor is reachable only on points
+	// the caller is about to cull. That is the difference between this and the clamp it replaced:
+	// this one cannot touch geometry that gets drawn, so it bounds the wrongness of a mistake instead
+	// of introducing one. A caller that ignores `IsVisible()` draws a wrong quad; one that met an
+	// infinity would put a NaN in a damage bound and take every window on the output with it.
+	[[nodiscard]] constexpr Projected Project(Vector3<float> local) const noexcept
+	{
+		const double x = local.X;
+		const double y = local.Y;
+		const double z = local.Z;
+
+		const double weight = M[3][0] * x + M[3][1] * y + M[3][2] * z + M[3][3];
+		const double divisor = weight >= static_cast<double>(Projected::MinimumWeight) ?
+		                           weight :
+		                           static_cast<double>(Projected::MinimumWeight);
+
+		return { { (M[0][0] * x + M[0][1] * y + M[0][2] * z + M[0][3]) / divisor,
+			       (M[1][0] * x + M[1][1] * y + M[1][2] * z + M[1][3]) / divisor,
+			       (M[2][0] * x + M[2][1] * y + M[2][2] * z + M[2][3]) / divisor },
+			     static_cast<float>(weight) };
 	}
 };
 
@@ -767,20 +965,65 @@ static_assert(!NodeTransform{ .Scale = { -1.0F, 1.0F, 1.0F } }.FacesViewer(), "A
 static_assert(NodeTransform{ .Scale = { -1.0F, -1.0F, 1.0F } }.FacesViewer(), "Two mirrors are a half turn");
 static_assert(NodeTransform{ .Rotation = { 0.0F, 0.0F, 0.0F, 1.0F } }.FacesViewer(), "A turn in the plane faces front");
 
-// The perspective clamp, which is the guard decision 55 asks for. It bites below two radii, it reads
-// nothing as orthographic, and the weight it produces is bounded away from zero for *any* depth,
-// including one no point of the node could actually have.
+// The authored perspective. It clamps below two radii, it reads nothing as orthographic, and over
+// the node's own quad — the only extent it is stated against — the weight stays in [0.5, 1.5].
 static_assert(Perspective::FromRadii(4.0F).Strength() == 0.25F);
 static_assert(Perspective::FromRadii(1.0F).Strength() == Perspective::FromRadii(Perspective::MinimumRadii).Strength());
 static_assert(Perspective::FromRadii(0.0F).IsNone() && Perspective::FromRadii(-3.0F).IsNone());
 static_assert(Perspective::FromRadii(std::numeric_limits<float>::quiet_NaN()).IsNone());
 static_assert(Perspective::FromRadii(std::numeric_limits<float>::infinity()).IsNone(), "Infinitely far is flat");
 static_assert(Perspective::None().Weight(37.0F, 100.0F) == 1.0F, "Orthographic stays bit-exact");
+static_assert(Perspective::None().InverseEyeDistance(100.0F) == 0.0F);
 static_assert(Perspective::FromRadii(1.0F).Weight(-100.0F, 100.0F) == 0.5F, "The near plane never crosses the quad");
 static_assert(Perspective::FromRadii(1.0F).Weight(100.0F, 100.0F) == 1.5F);
-static_assert(Perspective::FromRadii(1.0F).Weight(-1.0e9F, 100.0F) == 0.5F, "A depth outside the radius saturates");
-static_assert(Perspective::FromRadii(2.0F).Weight(std::numeric_limits<float>::quiet_NaN(), 100.0F) > 0.0F);
 static_assert(Perspective::FromRadii(2.0F).Weight(5.0F, 0.0F) == 1.0F, "A node with no extent has no depth either");
+
+// The weight is affine in the depth and stays that way past the node's own radius, which is the one
+// property the chain folds on. It was previously saturated here, and the depth below is the case that
+// exposed it: a descendant an ancestor's radius away in depth used to read as exactly the boundary.
+static_assert(Perspective::FromRadii(2.0F).Weight(-200.0F, 100.0F) == 0.0F, "The eye itself, not clamped short of it");
+static_assert(Perspective::FromRadii(2.0F).Weight(-400.0F, 100.0F) == -1.0F, "And past it, which is behind the viewer");
+static_assert(
+	Perspective::FromRadii(4.0F).Weight(50.0F, 100.0F) - 1.0F ==
+		2.0F * (Perspective::FromRadii(4.0F).Weight(25.0F, 100.0F) - 1.0F),
+	"Affine in the depth, which is what lets a chain of these fold into one matrix"
+);
+
+// The composed chain. A default node composes to the identity exactly, so an unanimated subtree costs
+// nothing in precision as well as nothing in work.
+static_assert(ComposedTransform{}.Project({ 3.0F, 4.0F, 5.0F }).Position == Vector3<double>{ 3.0, 4.0, 5.0 });
+static_assert(ComposedTransform{}.Project({ 3.0F, 4.0F, 5.0F }).Weight == 1.0F);
+static_assert(
+	ComposedTransform::ForNode(NodeTransform{}, 10.0F).Project({ 3.0F, 4.0F, 5.0F }).Position ==
+	Vector3<double>{ 3.0, 4.0, 5.0 }
+);
+static_assert(
+	ComposedTransform{}.Push(NodeTransform{}, 10.0F).Project({ 3.0F, 4.0F, 5.0F }).Position ==
+	Vector3<double>{ 3.0, 4.0, 5.0 }
+);
+
+// The chain agrees with Apply on the single-node case that has no rounding in it at all: the anchor is
+// fixed, so the displacement is identically zero on both paths.
+static_assert(
+	ComposedTransform::ForNode(
+		NodeTransform{ .Translation = { 100.0, 200.0, 0.0 },
+                       .Rotation = { 0.0F, 0.0F, 0.0F, 1.0F },
+                       .Scale = { 3.0F, 7.0F, 1.0F },
+                       .Anchor = { 40.0F, 50.0F, 0.0F } },
+		100.0F
+	)
+		.Project({ 40.0F, 50.0F, 0.0F })
+		.Position == Vector3<double>{ 140.0, 250.0, 0.0 }
+);
+
+// Visibility is the composed weight's question and nothing else's. A NaN is not visible, which the
+// clamp this replaced could not say — it turned one into a plausible 1.0 and drew whatever followed.
+static_assert(Projected{}.IsVisible(), "The default is an orthographic point, which is always visible");
+static_assert(!Projected{ .Weight = 0.0F }.IsVisible(), "At the eye");
+static_assert(!Projected{ .Weight = -1.0F }.IsVisible(), "Behind the viewer");
+static_assert(!Projected{ .Weight = std::numeric_limits<float>::quiet_NaN() }.IsVisible());
+static_assert(Projected{ .Weight = Projected::MinimumWeight }.IsVisible(), "The floor itself is still drawn");
+static_assert(Projected::MinimumWeight * 1024.0F == 1.0F, "A magnification of 1024, exactly, so it never rounds");
 
 // The spring solver's contract, in the form the compiler can hold it to. The channel is a
 // three-vector and a quaternion is not one, so a solver that tried to spring the rotation directly

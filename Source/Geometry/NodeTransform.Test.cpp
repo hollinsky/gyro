@@ -1,7 +1,9 @@
 #include "Geometry/NodeTransform.h"
 
+#include <algorithm>
 #include <cmath>
 #include <format>
+#include <limits>
 #include <numbers>
 #include <source_location>
 #include <string>
@@ -503,10 +505,14 @@ GYRO_TEST(NodeTransform, PerspectiveForeshortens)
 
 GYRO_TEST(NodeTransform, TheNearPlaneNeverCrossesTheQuad)
 {
-	// The guard, swept rather than sampled at the one value it was designed for. Every authored
+	// The guarantee, swept rather than sampled at the one value it was designed for. Every authored
 	// perspective — including the ones nobody should write — has to leave the weight positive at
-	// every depth the quad can reach, because a single non-positive weight is a division that makes
-	// the node's damage bound infinite and takes the whole output's frame with it.
+	// every depth *the node's own quad* can reach, because a single non-positive weight is a division
+	// that makes the node's damage bound infinite and takes the whole output's frame with it.
+	//
+	// This holds by construction rather than by clamping: MinimumRadii puts the eye at least two
+	// radii out and every point of the quad is within one, so the bound below is arithmetic. A
+	// descendant is a different question and is ComposedTransform's — see the tests further down.
 	for (const float authored : { 0.001F, 0.5F, 1.0F, 1.999F, 2.0F, 8.0F, 1.0e9F, -4.0F, 0.0F })
 	{
 		const Perspective projection = Perspective::FromRadii(authored);
@@ -546,6 +552,216 @@ GYRO_TEST(NodeTransform, TheNearPlaneNeverCrossesTheQuad)
 
 		GYRO_CHECK(std::isfinite(projected.X) && std::isfinite(projected.Y) && std::isfinite(projected.Z));
 	}
+}
+
+// The overview, in the shape the frame thread walks it: a tilted deck holding a turned card holding a
+// window. Perspective at more than one level is the case that matters and the case that was broken —
+// with no camera, a container is the only thing that can give its children a shared vanishing point,
+// so a deck of workspaces that reads as a space rather than as a collage puts the projection on an
+// ancestor and every window in it is a descendant.
+struct Chain
+{
+	NodeTransform Nodes[3];
+	float Radii[3];
+
+	[[nodiscard]] ComposedTransform Composed() const
+	{
+		ComposedTransform composed{};
+
+		for (int level = 0; level < 3; ++level)
+		{
+			composed = composed.Push(Nodes[level], Radii[level]);
+		}
+
+		return composed;
+	}
+
+	// The same chain walked a point at a time, which is what the composition has to agree with.
+	[[nodiscard]] Vector3<double> Walk(Vector3<float> local) const
+	{
+		Vector3<double> point{ local.X, local.Y, local.Z };
+
+		for (int level = 2; level >= 0; --level)
+		{
+			point = Nodes[level].Apply(
+				{ static_cast<float>(point.X), static_cast<float>(point.Y), static_cast<float>(point.Z) }, Radii[level]
+			);
+		}
+
+		return point;
+	}
+};
+
+// `lift` is how far the window has been pulled toward the viewer, out of the plane of the workspace
+// holding it — the gesture that broke, and the one worth parameterising because the failure is a
+// function of exactly this number. Past the *workspace's* bounding radius, which is a quantity with
+// nothing to do with the window, the clamp this header used to carry stopped answering.
+[[nodiscard]] static Chain Overview(double lift = 0.0)
+{
+	Chain chain{ .Nodes = { { .Translation = { 500.0, 300.0, 0.0 },
+		                      .Rotation = Quaternion::FromAxisAngle({ 1.0F, 0.3F, 0.0F }, Radians(35.0F)),
+		                      .Scale = { 1.1F, 0.9F, 1.0F },
+		                      .Anchor = { 400.0F, 300.0F, 0.0F },
+		                      .Projection = Perspective::FromRadii(3.0F) },
+		                    { .Translation = { 40.0, 30.0, -25.0 },
+		                      .Rotation = Quaternion::FromAxisAngle({ 0.0F, 1.0F, 0.0F }, Radians(55.0F)),
+		                      .Scale = { 0.8F, 0.8F, 1.0F },
+		                      .Anchor = { 100.0F, 60.0F, 0.0F },
+		                      .Projection = Perspective::FromRadii(2.5F) },
+		                    { .Translation = { 12.0, 8.0, -10.0 - lift },
+		                      .Rotation = Quaternion::FromAxisAngle({ 0.2F, 1.0F, 0.1F }, Radians(20.0F)),
+		                      .Anchor = { 50.0F, 40.0F, 0.0F },
+		                      .Projection = Perspective::FromRadii(4.0F) } },
+		         .Radii = {} };
+
+	chain.Radii[0] = chain.Nodes[0].BoundingRadius(800.0F, 600.0F);
+	chain.Radii[1] = chain.Nodes[1].BoundingRadius(200.0F, 120.0F);
+	chain.Radii[2] = chain.Nodes[2].BoundingRadius(100.0F, 80.0F);
+
+	return chain;
+}
+
+GYRO_TEST(NodeTransform, TheComposedChainIsTheChainWalkedAPointAtATime)
+{
+	// The composition is not obvious and is worth pinning rather than trusting. Apply divides before
+	// handing the point up, so the parent rotates an already-divided point — this is not matrix
+	// composition on its face, and it works only because each node's weight is affine in the point it
+	// is handed. If that ever stops being true this is the test that says so.
+	// At rest and mid-gesture both. The lifted chain is the one that matters: a window inside its
+	// workspace stays within that workspace's own extent, so a chain at rest agrees under almost any
+	// projection, honest or not.
+	for (const double lift : { 0.0, 2.0 * static_cast<double>(Overview().Radii[1]) })
+	{
+		const Chain chain = Overview(lift);
+		const ComposedTransform composed = chain.Composed();
+
+		for (const Vector3<float> corner : { Vector3<float>{ 0.0F, 0.0F, 0.0F },
+		                                     Vector3<float>{ 100.0F, 0.0F, 0.0F },
+		                                     Vector3<float>{ 100.0F, 80.0F, 0.0F },
+		                                     Vector3<float>{ 0.0F, 80.0F, 0.0F },
+		                                     Vector3<float>{ 37.0F, 19.0F, -12.0F } })
+		{
+			CheckNear(
+				composed.Project(corner).Position, chain.Walk(corner), PositionTolerance, "composed equals walked"
+			);
+		}
+	}
+}
+
+GYRO_TEST(NodeTransform, ATextureStaysNailedToARotatedWindow)
+{
+	// The artefact this whole mechanism exists to prevent, stated as the property a renderer needs.
+	// Interpolating anything across a projected quad is correct exactly when the map from the node's
+	// own space to the screen is projective — a ratio of two affine functions — and the weight is its
+	// denominator. Where it is not, the interpolation is affine per triangle and the content slides
+	// across the window as it turns, which is the warp every early 3D console is remembered for.
+	//
+	// Checked as second differences along an edge: for a projective map both the weight and the
+	// position scaled by it are affine in the parameter, so both must vanish. This is the test that
+	// fails against the clamp that used to live in Perspective, and it fails by five orders of
+	// magnitude rather than marginally.
+	//
+	// The positions come from the *walk* rather than from the composed matrix, deliberately. The
+	// claim is about what the transforms mean, not about whether a matrix is a matrix — the walk is
+	// the definition, and a matrix built over a projection that was not projective would satisfy this
+	// while the thing on screen did not. The two agree by the test above; that is what makes it
+	// legal to take the weight from the fast path and the position from the slow one.
+	// Lifted two workspace-radii out, which is where the clamp used to start answering with a
+	// constant. An unlifted window sits inside its workspace's own extent and never reaches it, so a
+	// chain at rest passes this whether the projection is honest or not — the bug only exists during
+	// the gesture, which is exactly when someone is looking at the window closely.
+	const Chain chain = Overview(2.0 * static_cast<double>(Overview().Radii[1]));
+	const ComposedTransform composed = chain.Composed();
+
+	double worstWeight = 0.0;
+	double worstScaled = 0.0;
+
+	for (int step = 1; step < 32; ++step)
+	{
+		double weights[3]{};
+		double scaled[3]{};
+
+		for (int sample = 0; sample < 3; ++sample)
+		{
+			const float along = 100.0F * static_cast<float>(step + sample - 1) / 32.0F;
+			const double weight = composed.Project({ along, 0.0F, 0.0F }).Weight;
+
+			weights[sample] = weight;
+			scaled[sample] = chain.Walk({ along, 0.0F, 0.0F }).X * weight;
+		}
+
+		worstWeight = std::max(worstWeight, std::abs(weights[2] - 2.0 * weights[1] + weights[0]));
+		worstScaled = std::max(worstScaled, std::abs(scaled[2] - 2.0 * scaled[1] + scaled[0]));
+	}
+
+	// Loose enough to be about the claim rather than about float rounding: the residual is single
+	// precision on a coordinate of a few hundred units, and a map that is not projective misses this
+	// by whole pixels.
+	GYRO_CHECK(worstWeight < 1.0e-4);
+	GYRO_CHECK(worstScaled < 1.0e-1);
+}
+
+GYRO_TEST(NodeTransform, AWindowPulledOutOfAWorkspaceKeepsGrowing)
+{
+	// The regression, named for what it looked like. A window lifted toward the viewer out of a
+	// workspace that carries the perspective used to stop growing partway through — its weight froze
+	// once its depth passed the *workspace's* bounding radius, which is a number that has nothing to
+	// do with the window — while its translation kept running. On screen that reads as the window
+	// hitting a pane of glass, with the animation still visibly in flight behind it.
+	//
+	// So the claim is monotonicity, over a travel well past the ancestor's radius: every step nearer
+	// the viewer magnifies strictly more than the last.
+	// Measured as the window's diagonal on screen, through the walk rather than through the composed
+	// matrix. The claim is about what a person watches — the window is getting bigger — so the
+	// quantity has to be a length, and it has to come from the transforms' own meaning rather than
+	// from the fast path that was built to agree with them.
+	const float workspaceRadius = Overview().Radii[1];
+
+	GYRO_CHECK(workspaceRadius > 0.0F);
+
+	double previous = 0.0;
+
+	// Two and a half workspace-radii, which is past the radius the clamp keyed on by a factor of two
+	// and a half and still short of the workspace's eye — the window is being pulled out, not through.
+	// Every sample is checked to be in front of it, so a change that moved the eye turns this into a
+	// failure here rather than into a monotonicity that quietly stops meaning anything.
+	for (int step = 0; step <= 24; ++step)
+	{
+		const Chain lifted = Overview(2.5 * static_cast<double>(workspaceRadius) * step / 24.0);
+		const ComposedTransform composed = lifted.Composed();
+
+		const Vector3<double> nearCorner = lifted.Walk({ 0.0F, 0.0F, 0.0F });
+		const Vector3<double> farCorner = lifted.Walk({ 100.0F, 80.0F, 0.0F });
+		const double diagonal = Length(farCorner - nearCorner);
+
+		GYRO_CHECK(composed.Project({ 0.0F, 0.0F, 0.0F }).IsVisible());
+		GYRO_CHECK(composed.Project({ 100.0F, 80.0F, 0.0F }).IsVisible());
+		GYRO_CHECK(diagonal > previous);
+		previous = diagonal;
+	}
+}
+
+GYRO_TEST(NodeTransform, PassingThroughTheEyeIsCulledRatherThanDrawn)
+{
+	// The one real singularity, and the only thing the composed weight is guarded for. A node that
+	// has travelled through the eye of an ancestor is behind the viewer, and no division rescues
+	// that — it is unrenderable in the same way a back face is, and decision 55 already culls those
+	// unconditionally.
+	//
+	// Two claims, and the second is the one that keeps a bug from becoming an outage: it is not
+	// visible, and the position it reports is still finite. A caller that ignores the flag draws a
+	// wrong quad; an infinity here would put a NaN in a damage bound and take every window on the
+	// output with it.
+	const Projected projected = Overview(1.0e6).Composed().Project({ 50.0F, 40.0F, 0.0F });
+
+	GYRO_CHECK(!projected.IsVisible());
+	GYRO_CHECK(std::isfinite(projected.Position.X) && std::isfinite(projected.Position.Y));
+	GYRO_CHECK(std::isfinite(projected.Position.Z));
+
+	// A node in front of its ancestors' eyes is drawn, which is the other half of the claim and the
+	// reason the floor sits four orders of magnitude away from anything authorable rather than at a
+	// magnification anyone could reach.
+	GYRO_CHECK(Overview().Composed().Project({ 50.0F, 40.0F, 0.0F }).IsVisible());
 }
 
 GYRO_TEST(NodeTransform, TheBoundingRadiusCoversEveryCorner)

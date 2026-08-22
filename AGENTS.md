@@ -77,7 +77,7 @@ standard, say so and we will talk about it.
 | How does a mechanism work — seam, backends, timing, color, sessions, protocol? | [Docs/Architecture.md](Docs/Architecture.md) |
 | How does animation work — springs, catalog, commits, transforms, identity? | [Docs/Animation.md](Docs/Animation.md) |
 | Where does code live, what may depend on what, which thread runs it? | [Docs/Structure.md](Docs/Structure.md) |
-| Why not X? What was rejected? | [Docs/Decisions.md](Docs/Decisions.md), 91 entries, anchored `### N.` |
+| Why not X? What was rejected? | [Docs/Decisions.md](Docs/Decisions.md), 92 entries, anchored `### N.` |
 | What is still unsettled? | [Docs/Open.md](Docs/Open.md) |
 | What does gyro want from the kernel and cannot have? | [Docs/KernelWishlist.md](Docs/KernelWishlist.md) |
 
