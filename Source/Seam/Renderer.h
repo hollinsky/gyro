@@ -285,13 +285,20 @@ struct DrawItem
 	// item's quad. It is a field beside `Dress` rather than more enumerators inside it for
 	// World/Elevation.h's reason: a glass panel casts a shadow too.
 	//
-	// **It is the emitting node's own, and a node that emits nothing carries none.** A container and
-	// a reference draw no item, so a dressing on one of those reaches no renderer — which is
-	// Docs/Open.md's *what a dressing means on a reference node*, still open, and deliberately not
-	// answered by the walk emitting something extra. Answering it means a shadow around a *subtree's*
-	// screen-space bound, which is an item with no content and a second population in this list; both
-	// enums carry one enumerator today, so nothing can be dressed and there is nothing yet to check
-	// such an answer against.
+	// **It is the emitting node's own, and it emits on its own.** Decision 99 places a dressing on the
+	// node's own extent whatever the node's kind, and decision 95 puts both dressings in one slot
+	// because they are orthogonal — so a node lifted but dressed in nothing is a `DrawDressing` whose
+	// whole content is this field. That is the overview thumbnail: the tile's shadow, then the window
+	// on top of it from the expansion, in that order because preorder is the painter's order. The
+	// shadow is *not* placed around the referenced subtree's screen-space bound, which decision 99
+	// rejects as either a render target on every tile or one shadow per subsurface.
+	//
+	// **A group takes it along with the opacity**, since both belong to the flattened result, and the
+	// member it was taken from does not draw it again.
+	//
+	// Decision 104 is what the renderer derives from it: a height under one light, drawn as an
+	// analytic rounded rect rather than as a blurred silhouette, which is why this costs no pass of
+	// its own and stays off decision 34's quality ladder.
 	Elevation Lift = Elevation::None;
 
 	// What the item's texels or components mean as light. Per item rather than per request because a

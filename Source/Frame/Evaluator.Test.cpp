@@ -736,8 +736,9 @@ GYRO_TEST(Evaluator, ADressedContainerDrawsItsDressingAndNamesNoContent)
 	GYRO_CHECK_EQ(evaluator.Evaluate(Frame(snapshot)).Items.size(), std::size_t{ 0 });
 
 	// Dressed, the same container emits one item that names no content and draws its dressing over its
-	// own extent, which is decision 99's rule. World/Node.h states it as HasContent() || IsDressed(),
-	// so this is the second half of that predicate and the first is the check above.
+	// own extent, which is decision 99's rule. World/Node.h states it as HasContent() || IsDressed() ||
+	// IsLifted(); this is the material term, the check above is the first, and the lifted term is the
+	// two tests below.
 	nodes[0].Dress = Material::Glass;
 
 	Wire dressed;
@@ -756,6 +757,78 @@ GYRO_TEST(Evaluator, ADressedContainerDrawsItsDressingAndNamesNoContent)
 	// of decision 99 that a container cannot distinguish from the alternative on its own — it has no
 	// children here — but which the extent is the observable of.
 	GYRO_CHECK_EQ(list.Items[0].Extent, Size<SurfaceSpace>{ 200.0F, 100.0F });
+}
+
+GYRO_TEST(Evaluator, ALiftedReferenceDrawsTheTilesShadowUnderItsExpansion)
+{
+	Wire wire;
+	// Decision 99's overview thumbnail, and the case that says an elevation emits on its own: the tile
+	// is lifted and dressed in nothing, so its whole item is the shadow. Undressed and unlifted this
+	// reference draws only its expansion, which is the test above.
+	std::array nodes{ Container(1), Image(0, 0.0, 0.0), Leaf(NodeKind::Reference, 1, 500.0, 400.0, 200.0F, 100.0F) };
+	nodes[0].Flags = Node::Hidden;
+	nodes[2].Lift = Elevation::Resting;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 2 });
+
+	// The shadow first and the window on top of it, because preorder is the painter's order. Reversed,
+	// an overview would lay every tile's shadow over the tile beside it.
+	GYRO_CHECK(std::holds_alternative<DrawDressing>(list.Items[0].Content));
+	GYRO_CHECK_EQ(list.Items[0].Lift, Elevation::Resting);
+	GYRO_CHECK_EQ(list.Items[0].Dress, Material::None);
+
+	// On the tile's own extent rather than on the expansion's, which is the rest of decision 99: the
+	// dressing is the node's and is not inherited by what the reference brings in.
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds(), Rect<DeviceSpace>::FromEdges({ 500.0F, 400.0F }, { 700.0F, 500.0F }));
+	GYRO_CHECK_EQ(list.Items[1].Shape.Bounds(), Rect<DeviceSpace>::FromEdges({ 500.0F, 400.0F }, { 600.0F, 450.0F }));
+}
+
+GYRO_TEST(Evaluator, ALiftedGroupCastsOneShadowAndNotTwo)
+{
+	Wire wire;
+	std::array nodes{ Container(1), Image(0, 0.0, 0.0) };
+	nodes[0].Flags = Node::Group;
+	nodes[0].Lift = Elevation::Floating;
+
+	// A real extent on the group itself, without which `Draw` declines on the projection and the
+	// second shadow this test is looking for cannot appear whatever the emission test says.
+	nodes[0].Extent = { 400.0F, 300.0F };
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// Two items and not three. The group takes the lift along with the opacity, for decision 99's
+	// reason that both belong to the flattened result — and the emission test then reads the local
+	// the group just zeroed rather than the node's own field. Reading the node would put a second
+	// shadow inside the offscreen the first one was lifted out of, visible for the one moment a group
+	// exists for.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 2 });
+	GYRO_CHECK(AsGroup(list.Items[0]) != nullptr);
+	GYRO_CHECK_EQ(list.Items[0].Lift, Elevation::Floating);
+	GYRO_CHECK_EQ(list.Items[1].Lift, Elevation::None);
 }
 
 GYRO_TEST(Evaluator, AContentIndexPastItsRunDrawsNothing)

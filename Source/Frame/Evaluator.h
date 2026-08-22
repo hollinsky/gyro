@@ -455,10 +455,21 @@ private:
 
 		Drawn drawn{};
 
-		// **What emits an item is content or a dressing**, which is World/Node.h's own rule and not a
-		// reading of it: a container dressed `Glass` draws the blurred backdrop and names no content
-		// while doing it, which is the case decision 95 makes a material a field for.
-		if (node.HasContent() || dress != Material::None)
+		// **What emits an item is content or *either* dressing**, which is World/Node.h's own rule and
+		// not a reading of it: a container dressed `Glass` draws the blurred backdrop and names no
+		// content while doing it, which is the case decision 95 makes a material a field for.
+		//
+		// **The elevation is the second dressing and counts on its own.** Decision 95 puts both in one
+		// slot precisely because they are orthogonal — a glass panel casts a shadow too — so a node
+		// lifted but undressed is a shadow with nothing over it, which is decision 99's overview
+		// thumbnail: the tile's shadow, then the window on top of it from the expansion. Testing only
+		// the material would drop that silently, which is the failure decision 99 refuses when it
+		// declines to treat a dressed reference as malformed.
+		//
+		// **Both are the locals rather than the node's own predicates**, because a group above has
+		// already taken them and zeroed them here. Reading `node.IsLifted()` would draw the shadow a
+		// second time, inside the offscreen it was just lifted out of.
+		if (node.HasContent() || dress != Material::None || lift != Elevation::None)
 		{
 			drawn = Draw(node, chain, view, own, dress, lift, runs);
 

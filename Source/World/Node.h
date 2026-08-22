@@ -241,8 +241,12 @@ struct Node
 	// **It is not the emission test, and what separates the two is decision 95's effect layer.** A
 	// container dressed `Glass` draws the blurred backdrop and nothing else — that is what makes a
 	// material a field rather than a kind — so it emits a draw item while naming no content at all.
-	// The walk emits for `HasContent() || IsDressed()`; this predicate says where a node's pixels come
-	// from, not whether it has any.
+	// The walk emits for `HasContent() || IsDressed() || IsLifted()`; this predicate says where a
+	// node's pixels come from, not whether it has any.
+	//
+	// **Both dressings count, and separately.** Decision 95 keeps them in one slot because they are
+	// orthogonal, so a node lifted but undressed is decision 99's overview thumbnail — a shadow with
+	// the referenced window drawn over it — and testing only the material would drop it silently.
 	[[nodiscard]] constexpr bool HasContent() const noexcept
 	{
 		return Kind == NodeKind::Image || Kind == NodeKind::Solid;
