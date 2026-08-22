@@ -244,6 +244,7 @@ gyro_add_module(Headless PORTABLE
 		Geometry
 		Seam
 	TESTS
+		Planes.Test.cpp
 		Vblank.Test.cpp
 )
 
