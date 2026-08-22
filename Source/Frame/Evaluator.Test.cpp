@@ -735,11 +735,27 @@ GYRO_TEST(Evaluator, ADressedContainerDrawsItsDressingAndNamesNoContent)
 	// kind rather than making it a fully transparent solid.
 	GYRO_CHECK_EQ(evaluator.Evaluate(Frame(snapshot)).Items.size(), std::size_t{ 0 });
 
-	// The material set carries one enumerator today, so this is the shape of the rule rather than a
-	// picture: a dressed container emits an item that names no content and draws its dressing over its
-	// own extent. World/Node.h states it as HasContent() || IsDressed().
-	static_assert(std::is_same_v<decltype(Node{}.Dress), Material>);
-	static_assert(std::holds_alternative<DrawDressing>(DrawContent{}));
+	// Dressed, the same container emits one item that names no content and draws its dressing over its
+	// own extent, which is decision 99's rule. World/Node.h states it as HasContent() || IsDressed(),
+	// so this is the second half of that predicate and the first is the check above.
+	nodes[0].Dress = Material::Glass;
+
+	Wire dressed;
+	dressed.PutNodes(std::span<const Node>{ nodes });
+	dressed.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader second = dressed.Read();
+	SceneEvaluator other{ clock };
+	const DrawList list = other.Evaluate(Frame(second));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK(std::holds_alternative<DrawDressing>(list.Items[0].Content));
+	GYRO_CHECK_EQ(list.Items[0].Dress, Material::Glass);
+
+	// The dressing lands on the node's *own* extent rather than on a subtree bound, which is the half
+	// of decision 99 that a container cannot distinguish from the alternative on its own — it has no
+	// children here — but which the extent is the observable of.
+	GYRO_CHECK_EQ(list.Items[0].Extent, Size<SurfaceSpace>{ 200.0F, 100.0F });
 }
 
 GYRO_TEST(Evaluator, AContentIndexPastItsRunDrawsNothing)

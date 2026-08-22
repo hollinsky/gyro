@@ -3219,6 +3219,9 @@ What stays open is the *contents* of the two dressing enums rather than their sh
 exist and which of them are pointwise (decision 33), and where the elevation levels sit. Both ship
 with the one enumerator the design already names for itself and are filled in at a review with a
 screen, the way [Catalog.h](../Source/Animation/Author/Catalog.h) says its own entries will be.
+*(That review is [decisions 103 to 105](#103-a-dressing-is-named-by-what-it-does-to-light-the-material-set-is-glass-and-smoke),
+and it cost one more field than this entry expected: a shadow has to animate, so the record gains a
+scalar — which the reserved tail absorbs at 128 bytes unchanged — 2026-08-22.)*
 
 ### 96. The frame is the compositor's and the header is the app's
 
@@ -3380,6 +3383,13 @@ special case for a tooltip with a tail or a terminal at eighty percent opacity. 
 on shape change, which is
 [decision 46](#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)'s
 per-output atlas doing a second job.
+
+*(Revised 2026-08-22 by [decision 104](#104-an-elevation-is-a-height-under-one-light-and-the-shadow-is-analytic),
+which makes the analytic rounded-rect the default and keeps this as the second path for a genuinely
+irregular shape. A silhouette needs a blur chain per shape, which puts every shadow on screen onto
+decision 34's ladder — so the first thing a busy machine would spend is the depth of the whole
+picture. It is also undefined for two of the four node kinds, since a container and a reference have
+no alpha and decision 99 dresses both.)*
 
 #### Rejected: gyro drawing the title bar itself
 
@@ -4469,7 +4479,9 @@ Recorded 2026-08-15, alongside the revision of decisions 29 and 30; decisions 62
 ### 33. Effects are named materials, not parameterized filter calls
 
 A surface declares a material from a closed vocabulary — `Material::Glass`, `Material::Sidebar`,
-`Material::Hud` — and gyro decides what that means this frame. Shell code cannot name a blur radius,
+`Material::Hud` — and gyro decides what that means this frame. *(Those three names were a sketch. The
+set is `Glass` and `Smoke`, per [decision 103](#103-a-dressing-is-named-by-what-it-does-to-light-the-material-set-is-glass-and-smoke),
+which retires `Sidebar` as a role name and renames `Hud` for the same reason — 2026-08-22.)* Shell code cannot name a blur radius,
 a pass count, or a chain resolution, in exactly the way
 [decision 13](#13-a-closed-motion-vocabulary-with-runtime-configuration-exposing-only-that-vocabulary)
 forbids it naming spring parameters.
@@ -4729,6 +4741,329 @@ blinking cursor behind a translucent panel cost a full composite — the exact c
 
 **Cost accepted:** a table that must be kept honest as the vocabulary grows, defended mechanically
 rather than by review.
+
+### 103. A dressing is named by what it does to light; the material set is `Glass` and `Smoke`
+
+*(Decided 2026-08-22, settling [Open.md](Open.md)'s *the material vocabulary* and *which materials
+are pointwise*. Designed beside [decision 104](#104-an-elevation-is-a-height-under-one-light-and-the-shadow-is-analytic)
+because that file says the two are twins, and §4 of this pair is what came of taking it literally.)*
+
+**Both dressing vocabularies are named by what the thing does to light — never by the role it is
+usually put to, and never by degree.** The rule is one sentence and it decides most of the contents.
+
+*Role names* — `Sidebar`, `Titlebar`, `Menu` — are
+[decision 51](#51-the-shell-composes-gyro-animates)'s fisheye-dock failure arriving one field over
+from where [decision 95](#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind)
+already refused it. That entry rejects *a node kind that knows what a window is*, because the moment
+the scene knows what a window is, the arrangements that are not windows stop being expressible. A
+material called `Sidebar` knows what a sidebar is, and a shell that dresses a workspace switcher with
+it is not wrong so much as unsayable-about.
+
+*Degree names* — `Thin`, `Regular`, `Thick` — are
+[decision 33](#33-effects-are-named-materials-not-parameterized-filter-calls)'s rejected
+parameterized call with the number spelled in English. `UIBlurEffect.Style` is what that becomes: five
+thicknesses across three appearances, which is a slider with a vocabulary bolted on, and every site
+picks its own point on it. Decision 33 forbids a radius at the call site; a vocabulary ordered by
+radius hands it back.
+
+#### The set
+
+```
+None
+Glass    a blurred, tinted backdrop
+Smoke    dark, heavier, and legible over anything
+```
+
+**`Glass` sits over content the user arranged, so it can be thin.** Shell panels, the dock,
+popovers, notifications, the launcher, the overview's wallpaper. It is the workhorse and it is what
+almost everything on a desktop wants.
+
+**`Smoke` sits over content gyro did not choose**, and that is the whole of the difference. A volume
+overlay appears over a film, a white page, or a photograph, so **its opacity is set from a worst-case
+contrast floor rather than from taste** — an arithmetic difference rather than a stylistic one. It is
+not a heavier `Glass`; it has a different obligation, and a shell cannot substitute one for the other
+and get a legible result.
+
+**Two materials that differ by what they must survive is what stops a third and a fourth arriving.**
+A proposal for a new material has to name a backdrop the existing two fail against. *The designer
+wanted it lighter* is not one, and under a set ordered by weight it would have been.
+
+**Retires `Material::Sidebar`**, which this entry, [Architecture.md](Architecture.md#materials-not-filter-calls)
+and Open.md all named. It has no optics `Glass` does not: on macOS `.sidebar` differs from
+`.hudWindow` by being *within-window*, and gyro has no within-window blur.
+
+#### The cap is five, and it is tighter than the motion vocabulary's seven
+
+Two reasons at once, and the first inverts the usual intuition. **A blur difference is visible in a
+still screenshot; a spring difference needs motion to see.** The incohesion
+[decision 13](#13-a-closed-motion-vocabulary-with-runtime-configuration-exposing-only-that-vocabulary)
+describes — (0.42, 0.83) beside (0.45, 0.80), both defensible, the system subtly wrong forever after
+— is therefore *cheaper* to perceive here than on the axis it was written for. A dock and a top bar
+whose blurs differ by ten percent is a screen anyone can see is not one machine.
+
+Second, growth is not free the way a transition's is. Each gathering material is a pass boundary
+[decision 62](#62-effect-composition-is-an-optimization-and-the-unfused-path-is-the-reference) can
+never fuse away, plus a row in decision 34's cost table and a row in
+[decision 63](#63-effects-declare-their-kind-and-their-damage-the-verifier-keeps-them-honest)'s
+expansion table.
+
+#### The pointwise column ships empty, and that is the answer rather than an omission
+
+**Every material in the set is gathering.** What Open.md wanted from this question was a size for
+decision 62's variant lattice, and an empty pointwise column gives it a much better one than a
+populated column would have. What is worth keeping is the rule for the first entry that arrives:
+
+> A pointwise material must justify why it is not a `Solid` node or a field on the node, because
+> those already do every pointwise thing the scene can express.
+
+Exactly one justification survives it, and it is decision 95's own: the treatment must track the
+node's extent and radius *exactly*, so a second node carrying it is a second transform that agrees
+only while nothing moves. The two candidates that clear that bar are a backdrop **desaturation** and
+a **multiplicative tint** — neither expressible as a `Solid` under `over`, which decision 95 fixed as
+the only blend mode. Neither is needed by anything on a screen today.
+
+**The classification is fixed per material and does not vary with tier.** The cute answer is
+otherwise available — gather at high tiers, go pointwise at low ones — and it is foreclosed because
+fusibility depends on the classification, so a tier-dependent classification makes the *variant set*
+tier-dependent and couples the two axes decision 62 spends a paragraph holding apart.
+
+#### What the lattice actually costs, counted
+
+Per item, in order:
+
+- **Reads no input at all:** decision 104's analytic shadow. Cheaper than pointwise, and it segments
+  nothing.
+- **Pointwise, in one fixed order:** the colour-state conversion, the corner-radius mask, per-node
+  opacity, and decision 62's dim where an output has no backlight to dim. Four.
+- **Gathering:** the material, and there is at most one per item, because `Dress` is one field.
+
+Contiguous runs over four ordered elements is ten, and a gather splits a chain into at most two of
+them. **The lattice is tens of variants precompiled at startup rather than 2ⁿ over the vocabulary**,
+which is what decision 62 needed the vocabulary to be designed as a set in order to know.
+
+#### Rejected: within-window blur
+
+macOS's `.withinWindow`, where a sidebar blurs its own window's scrolled content rather than the
+desktop. It requires the parent's subtree to be materialised before the material samples it — a
+render target, which is [decision 60](#60-group-opacity-requires-flattening-per-node-alpha-is-not-a-group-fade)'s
+group, arriving silently from a field rather than from a declaration. And the case it buys is
+unreachable anyway: an application's sidebar is inside one client's one buffer, which gyro cannot see
+into.
+
+#### Rejected: a tint that adapts to backdrop luminance
+
+It is the thing that makes macOS's translucency work rather than look like a gimmick, and per frame
+it breathes — a panel over a playing film changing tone at every cut, which is
+[Experience.md](Experience.md#how-it-degrades)'s *quality does not visibly fluctuate* failing in the
+one place a user is looking. A hysteretic version is a time constant nobody has measured, so it is an
+Open.md number rather than a first-cut entry. `Smoke` exists partly because the case adaptivity was
+for is answered by committing instead.
+
+#### Rejected: keeping `Hud`
+
+The incumbent name in this entry and in Architecture.md, and it is a role name by the rule at the top
+of this one — an exception on the rule's first application, which is where a rule is either load
+bearing or decorative. `Smoke` says the optics, and smoked glass is literally *dark, blurred, and
+legible over whatever is behind it*.
+
+**Left open.** The tint values, the radii, and `Smoke`'s contrast floor are numbers and want a screen.
+What is settled here is which materials exist and what each is for.
+
+### 104. An elevation is a height under one light, and the shadow is analytic
+
+*(Decided 2026-08-22, settling [Open.md](Open.md)'s *the elevation set*, including the part of it
+that asks what a level does at the floor tier. Revises
+[decision 96](#96-the-frame-is-the-compositors-and-the-header-is-the-apps)'s shadow mechanism, below.)*
+
+```
+None       in the plane
+Resting    lifted off the desktop and left there
+Floating   lifted off everything; unattached and transient
+```
+
+Named by **what the node is lifted off**, which is neither a role nor a number, per
+[decision 103](#103-a-dressing-is-named-by-what-it-does-to-light-the-material-set-is-glass-and-smoke).
+`None` is the wallpaper, a tiled or fullscreen window, and decision 96's client-decorated window.
+`Resting` is an ordinary floating window. `Floating` is a menu, a tooltip, a notification, an overlay.
+
+#### A level is a height, and there is one light
+
+From a height gyro derives offset, softness, and opacity by **two constants held for the whole
+system**. The light is parallel and vertical rather than a point source somewhere on the screen, so
+two windows at one level cast identical shadows wherever they sit.
+
+That is `MotionTable` : `Motion` exactly, and the configuration rule arrives structurally rather than
+by discipline: configuration retunes the two constants, which moves every level together, and
+configuration cannot reach a level because a level has nowhere to put a radius. Same shape as
+[Motion.h](../Source/Animation/Author/Motion.h)'s argument that a bundle holds a `Motion` and a
+`Motion` has nowhere to put a damping ratio.
+
+**What a person sees.** A Linux desktop today is every toolkit's client-drawn shadow being its own
+light: a GTK menu's shadow falls one way over a Qt window's falling another, at a different softness
+and a different weight, and the screen reads as a collage of applications rather than as one surface
+with things on it. One light is the whole of the difference, and unlike a motion it is visible in a
+screenshot before anything moves.
+
+#### Three levels, and the cap is perceptual rather than economic
+
+Shadow ranks depth badly. Past about three lifted levels a person reads *floating* and stops
+counting, which is why Material Design's twenty-four dp steps resolve to roughly four distinguishable
+looks in practice. So the cap is not what a level costs — decision 104's shadow costs almost nothing —
+it is that a level nobody can see leaves a shell author choosing between two identical looks, and
+therefore choosing inconsistently.
+
+**Rejected: a middle level for a dialog on its window.** macOS distinguishes a sheet from a menu
+clearly and it is the obvious fourth. Two lifted levels is the safer read against the cap above, and
+the middle one is recoverable as a single enumerator that reaches no call site not already switching
+on the enum — which is the shape decision 95 fixed for exactly this.
+
+#### Focus is not a level, and neither is a drag
+
+macOS gives the focused window a much larger shadow and it is a good depth cue. It cannot be a level
+here: focus is state gyro owns (decision 96), so a focus level would have gyro tell window management
+the focus so that window management could tell gyro the elevation. It is
+[Catalog.h](../Source/Animation/Author/Catalog.h)'s `FocusChange` on opacity, which exists and already
+does the job. A drag lift is the same — decision 51 keeps drag inside gyro — so it is gyro's own
+modulation of a declared level rather than a level a shell declares.
+
+Both exclusions shrink the set, which is why they are here rather than in a footnote: the four-level
+sketch this started from spent two of its levels on states the shell was never going to be the one to
+know.
+
+#### The shadow is analytic, and that is what makes the floor tier's promise true
+
+*(This revises decision 96's stated mechanism. That entry answers "what gyro draws once a client
+stops" with `WindowServer`'s: derive the shadow from the window's own alpha silhouette, cached in
+decision 46's atlas and invalidated on shape change.)*
+
+**An alpha silhouette needs a blur chain per distinct silhouette, which puts every shadow on screen
+onto [decision 34](#34-effect-quality-is-a-tier-gyro-chooses-and-the-floor-tier-is-the-recovery-path)'s
+ladder — whose third rung is *the material is not rendered*.** So the first thing a machine under
+pressure would spend is the depth of the entire picture, all at once, and
+[Experience.md](Experience.md#how-it-degrades) promises the opposite: what is spent first is "a small
+amount of quality in something that was about to be blurred anyway."
+
+**A rounded-rect shadow has a closed form, and gyro already knows the rect.** Decision 96 rounds the
+window geometry rect to gyro's own floor radius, so the silhouette gyro *draws* is one gyro authored.
+[Decision 106](#106-an-x11-client-has-no-window-geometry-gyros-window-manager-computes-the-frame-rect)
+widens that to the population it would have been weakest on: an X11 client sends no geometry at all,
+so gyro's window manager computes the rect rather than receiving one, and there is no Xwayland
+surface whose true silhouette gyro would be approximating.
+Analytic, that shadow costs arithmetic over its own extent and nothing else: no render target, no pass
+chain, no cache, no invalidation on content change, and it reads no input, so it composites inside the
+item's own pass. **It is therefore not on decision 34's ladder at all** — a floored frame keeps every
+shadow and gives up the blur behind a panel, which is the degradation that was promised. That is
+Open.md's *what a level does at the floor tier*, and the answer is nothing.
+
+Two further consequences fall out. Decision 63's expansion becomes **a constant per level**, known
+when the level is, rather than a `(material, tier)` table computed when the tier is chosen. And the
+derivation had to differ by kind regardless: a container and a reference have no alpha, and
+[decision 99](#99-a-dressing-draws-over-the-nodes-own-extent-whatever-the-nodes-kind) dresses both, so
+an alpha silhouette is undefined for half the node kinds. **The rect path is not an optimisation of
+the silhouette path; it is the only path for two of the four.**
+
+**What it gives up, named rather than discovered.** A popover with a tail gets a rectangular shadow,
+and the tail then reads as stuck flat against the window while the body floats. Decision 96's
+silhouette mechanism stays available for exactly that, as a second path selected per node rather than
+as the default for all of them — which is the direction that keeps the common case free and pays only
+where the shape is genuinely irregular.
+
+#### A node's material must not sample its own shadow
+
+Both dressings land on one `DrawItem`. Within it the shadow is drawn around the quad while the
+material samples what is behind. If the material samples the target *after* the item's own shadow is
+composited, **a glass panel darkens itself at its own edges** — a dark halo inside every translucent
+panel, worst where the panel is thinnest and the backdrop reads through most.
+
+Decision 60's rule that a material samples the composite as of the group's base does not reach this,
+because a node's own shadow is not below it in tree order; it is the same item. So: **within one item,
+the material samples the target as of before the item began.** One sentence now, and otherwise a
+fringe nobody would attribute to elevation.
+
+#### Blur needs no animated channel, and the material design is what settles it
+
+[Snapshot.h](../Source/Publication/Snapshot.h) reserves the possibility — *blur and corner radius are
+absent because the material vocabulary they belong to is open*. Blur turns out not to want one. A
+panel appears by fading in at full blur strength, and the overview's wallpaper blurs by a `Glass`
+container's opacity going from zero to one over it.
+
+**The artefact, named:** a blurred backdrop at half opacity over the sharp one is a fifty-fifty mix,
+which reads as haze rather than as a half-radius blur. It is what macOS does when a sheet appears, it
+is fine, and a real radius ramp would be a per-frame chain re-parameterisation for a difference nobody
+has asked for.
+
+#### Consequences
+
+`World/Elevation.h` gains `Resting` and `Floating`. `DrawItem` carries the *derived* shadow rather
+than the level, because nothing in the renderer switches on a level — which removes `Seam`'s
+`World/Elevation.h` edge, the direction decision 82 wants a draw list to move in. The two light
+constants join `MotionTable` as a table configuration may overlay and individual levels may not.
+
+**Left open.** The heights and the two constants are numbers and want a screen, as does whether a
+rotated node's shadow shears with it or rides its quad — a card flip is the only case, and it is a
+transition nobody has written.
+
+### 105. Relief is one scalar: the corner radius and the shadow move together
+
+*(Decided 2026-08-22, answering [Open.md](Open.md)'s *the corner radius and the layout state that
+zeroes it have no carrier*. It is here rather than beside decision 96 because it was forced by the
+node record while sizing decision 104, and the record is what decides it.)*
+
+**A node carries one animated scalar — its relief — and both the corner radius and the shadow height
+are that scalar times a constant gyro owns.** At full relief a window has its floor radius and its
+level's shadow; at none it is square and flat. The shell holds the *fact* — this window is framed, or
+it is fullscreen — and gyro holds both numbers, which is exactly the split Open.md's own entry said
+the fullscreen case pointed at.
+
+#### The record is what decides it, and the arithmetic is worth stating
+
+Decision 95 landed `Node` on 128 bytes — two cache lines exactly, so the walk's indexing is a shift.
+The tail is three one-byte enumerations and five spelled reserved bytes. **One more `std::uint32_t`
+coefficient slot fits there; two takes the record to 136 and a third line.** Checked rather than
+reasoned: 128, 128, 136.
+
+So the radius and the shadow cannot both be independently animated channels without giving up what
+decision 95 bought, and something has to arbitrate. They turn out to want the same scalar anyway.
+
+**The shadow has to animate**, and both places a level changes on a node that stays on screen are
+watched ones: a **maximize**, where the shadow must be gone by the time the window fills the display
+and a cut at the end pops at the edge the eye is already on; and a **pick-up**, which is by definition
+the thing being touched.
+
+**The radius has to move at the same moments and no others.** Decision 96 takes the radius to zero
+when a window is fullscreen or tiled edge to edge, which is the same maximize. There is no transition
+in which one moves and the other holds.
+
+#### The case that would break it, and why it does not
+
+A tiled window that keeps a shadow after its radius is zeroed. It dissolves on decision 96's own
+wording: the radius goes to zero only *edge to edge*, and a shadow between two abutting windows is a
+dark seam rather than a depth cue. A layout with gaps is not edge to edge, so both survive together.
+
+#### Gyro's own modulations apply after, not to the scalar
+
+Decision 104 keeps the drag lift and the focus cue out of the level, and they stay out of relief for
+the same reason. Gyro scales the *derived* height; it does not push relief past one — which would
+round a window's corners harder for being picked up, a thing nobody asked for and which the shared
+scalar would otherwise deliver.
+
+#### Consequences
+
+`Node` gains `float Relief` and one `ReliefSpring` slot, landing in the reserved tail at 128 bytes
+unchanged. `Channel` goes from four to five and `SnapshotRun` gains a run, so every catalog entry's
+channel table and [Bundle.h](../Source/Animation/Author/Bundle.h)'s reduction theorem range over it —
+which is the reach into `Animation` Open.md predicted when it called the two vocabularies twins,
+arriving from the shadow rather than from the blur.
+
+**Rejected: two channels, and pay the third cache line.** Only worth it if the radius must move
+independently of the height, and the case above is the one candidate.
+
+**Rejected: leaving the radius uncarried.** It is the smaller change today and it costs the fifth
+`Channel` entry twice — once for the shadow now and once for the radius later, each looking like a
+small addition on its own, which is how a four-entry enum becomes an eleven-entry one.
+
+**Left open.** Where the floor radius sits is still a number and still wants a screen with GTK, Qt,
+and an Xwayland application on it at once. This entry decides the carrier, not the value.
 
 ---
 

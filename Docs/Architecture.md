@@ -1550,9 +1550,18 @@ been a scheduling problem for a decade; blur is, and blur is the feature.
 
 ### Materials, not filter calls
 
-A surface declares a **material** from a closed vocabulary — `Material::Glass`, `Material::Sidebar`,
-`Material::Hud` — and gyro decides what that means this frame. The shell names no radius, no pass
+A surface declares a **material** from a closed vocabulary — `Material::Glass` and
+`Material::Smoke` — and gyro decides what that means this frame. The shell names no radius, no pass
 count, no chain resolution, exactly as it names no spring parameters.
+
+The set is named by what each material does to light rather than by the role it is put to, which is
+what keeps `Sidebar` and `Titlebar` out of it: the moment the vocabulary knows what a sidebar is, the
+arrangements that are not sidebars stop being sayable about, and that is
+[decision 51](Decisions.md#51-the-shell-composes-gyro-animates)'s rule one field over from the node
+kinds. `Glass` sits over content the user arranged, so it can be thin. `Smoke` sits over content gyro
+did not choose — a film, a white page — so its opacity comes from a worst-case contrast floor rather
+than from taste. See
+[decision 103](Decisions.md#103-a-dressing-is-named-by-what-it-does-to-light-the-material-set-is-glass-and-smoke).
 
 This is forced twice over. Structurally, only the compositor has the backdrop: a client cannot blur
 what is behind its own window, because that content belongs to processes it cannot see. And for

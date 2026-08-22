@@ -117,10 +117,12 @@ nothing only proves the grep.
   thing. The test named in decision 51 is still the constraint: a shell must not be able to produce
   motion that does not match the catalog.
 
-  **What is left is the material set below, the elevation set, and the gesture vocabulary.** Each
-  ships today with the single enumerator its own design already names, which is enough to land the
-  structure and not enough to check anything, and each wants a review with a screen rather than an
-  argument.
+  **What is left is the gesture vocabulary.** *(Dressings answered 2026-08-22.)* The material set and
+  the elevation set were the review this entry asked for and are
+  [decisions 103 to 105](Decisions.md#103-a-dressing-is-named-by-what-it-does-to-light-the-material-set-is-glass-and-smoke);
+  designing them together is what produced the one rule both are named by, and what found that a
+  shadow has to animate. A gesture, the transition it drives, and the nodes it moves are still one
+  design problem seen three ways, and it still wants a screen rather than an argument.
 - **The scene vocabulary closes arrangement and not trajectory.**
   [Decision 89](Decisions.md#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete)
   makes setting a model value *be* a retarget, so a shell that republishes a node's position every
@@ -142,14 +144,14 @@ nothing only proves the grep.
   whether identity is a field on the node or a parallel run, and whether a node that gains one still
   costs 128 bytes. It is worth doing when there is a partial-composite path to feed; until then the
   coarse rule costs bandwidth on animating frames and nothing on still ones.
-- **The corner radius and the layout state that zeroes it have no carrier.**
-  [Decision 96](Decisions.md#96-the-frame-is-the-compositors-and-the-header-is-the-apps) rounds the
-  window geometry rect to a floor radius and takes the radius to zero for a window that is fullscreen
-  or tiled edge to edge. `ImageContent` carries the frame rect and nothing carries the radius or the
-  state that zeroes it, so the walk emits a radius of zero and the rect reaches no draw item. The
-  question is not where to put a float: it is whether the radius is authored per node by window
-  management or decided by the frame side from a rule, and the fullscreen case is the one that says
-  the *shell* holds the fact while *gyro* holds the number.
+- **The corner radius and the layout state that zeroes it.** *(Carrier answered 2026-08-22; the
+  number remains, below.)*
+  [Decision 105](Decisions.md#105-relief-is-one-scalar-the-corner-radius-and-the-shadow-move-together)
+  makes the radius and the shadow height one animated scalar — the shell holds the fact that a window
+  is framed, gyro holds both numbers — which is the split this entry said the fullscreen case pointed
+  at. It was forced by the node record rather than chosen: the reserved tail holds one more
+  coefficient slot at 128 bytes and two would take it to a third cache line, so the two could not both
+  be independent channels.
 - **The buffer-to-surface adapter is not published, so nothing can classify a resample.**
   [Seam/Renderer.h](../Source/Seam/Renderer.h) requires the producer to derive `DrawItem::Sampling`
   because a renderer cannot recover it from four floats, and deriving it means composing the surface
@@ -231,21 +233,19 @@ nothing only proves the grep.
 - **Virtual outputs for a session that does not exist yet.** Remote login goes through the
   privileged login agent, as the greeter does, but the ordering against decision 24's listener
   handover is not worked out.
-- **The material vocabulary.** Decision 33 commits to a closed set and does not say what is in it.
-  It needs designing before the first effect is written, the same way the motion catalog does, and
-  the two should be designed together — a material and the transitions that reveal it are one design
-  problem.
-- **Which materials are pointwise.** Decision 33 now carries a classification it does not populate,
-  and the answer sizes decision 62's variant lattice. It wants doing *with* the vocabulary rather
-  than after it: a set designed without the question in mind produces a gathering material where a
-  pointwise one would have done, and each of those is a pass boundary that can never be fused away.
-- **The elevation set.**
-  [Decision 96](Decisions.md#96-the-frame-is-the-compositors-and-the-header-is-the-apps) puts window
-  shadows on named levels rather than on a blur and an offset, which is decision 33's rule on a third
-  axis and inherits its cost: the set has to be designed before the first shadow is drawn. It is the
-  material vocabulary's twin and wants deciding beside it — how many levels, what each is for, and
-  what a level does at the floor tier, where decision 34 has to spend less without the picture
-  visibly changing.
+- **The dressing numbers, which are what the review with a screen is actually for.**
+  [Decisions 103 and 104](Decisions.md#103-a-dressing-is-named-by-what-it-does-to-light-the-material-set-is-glass-and-smoke)
+  fix which materials and which levels exist and what each is for, and deliberately fix no value:
+  `Glass`'s radius and tint, `Smoke`'s radius and the worst-case contrast floor its opacity is derived
+  from, the two heights, and the two constants the one light turns a height into. The contrast floor
+  is the only one of these that is not taste — it is a legibility threshold against a video frame,
+  and it wants measuring rather than choosing. The rest want GTK, Qt, and an Xwayland application on
+  a screen at once, which is the same sitting the entry below wants.
+- **Whether a rotated node's shadow shears or rides its quad.** One light and a node turned out of
+  the plane disagree: the physical answer shears the shadow, and the cheap one carries it on the
+  quad, where a card mid-flip lights itself from the side. A card flip is the only arrangement that
+  reaches it and it is a transition nobody has written, so this arrives with the first one that turns
+  a node rather than before it.
 - **Where the minimum corner radius sits.** Decision 96 rounds every window to at least a floor, and
   the floor is a number nobody has looked at. Too high and it cuts inside toolkits that already round
   generously, which costs an antialiased edge and produces the corner artefact that entry names; too
