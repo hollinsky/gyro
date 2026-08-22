@@ -1194,7 +1194,15 @@ battery.
 It is falsifiable, so it is a test rather than an aspiration: a static scene in the headless
 harness, N seconds, assert zero composites and no armed timer. That belongs beside the schedulability
 sweep, and it is the same argument [the floor tier](#the-floor-tier) makes — a property nobody
-exercises is a property nobody has.
+exercises is a property nobody has. *(Written, 2026-08-22, and in two places because the invariant has
+two halves.)* `Source/Integration/Schedulability.Test.cpp` holds the fold's: an idle scene arms nothing
+across sixty-six seconds of virtual time, damage settles back to idle in a fixed number of iterations
+that does not grow with how long the run has been going, and a settled output declines every one of the
+hundreds of iterations its animating neighbour wakes the loop for — which is the partition above,
+asserted rather than argued. `Source/Compositor/Uring.Test.cpp` holds the shim's, which needs a kernel
+rather than a `ManualClock`: `Wake::Never()` arms no timeout, and the wait ends only when a watched
+descriptor says so. Neither of them reads a context-switch count, deliberately — an OS-level symptom
+turns an invariant into a threshold, and the structural facts are available.
 
 ### The ladder
 

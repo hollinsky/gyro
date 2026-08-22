@@ -75,6 +75,12 @@ if(NOT liburing_FOUND)
 	)
 endif()
 
+# The frame thread is a thread, and the composition root is what starts it. Declared here with the rest
+# of the platform stack rather than beside the one target that used to want it, because it is now two:
+# Compositor spawns the frame thread and drives its ring from a second one under test, and Integration
+# runs the publication soak.
+find_package(Threads REQUIRED)
+
 # spdlog, on std::format rather than on its bundled fmt.
 #
 # This codebase writes std::formatter specializations — Wake, FrameDecision, OutputConfiguration,
@@ -308,6 +314,7 @@ gyro_add_module(Compositor
 	TESTS
 		Options.Test.cpp
 		Schedule.Test.cpp
+		Uring.Test.cpp
 )
 
 # PUBLIC so that both the gyro binary and this module's own tests inherit them. gyro_add_module names
@@ -318,6 +325,7 @@ target_link_libraries(Compositor
 	PUBLIC
 		PkgConfig::liburing
 		spdlog::spdlog
+		Threads::Threads
 )
 
 # Declared after the modules, because the module list is what they check. ALL for the same reason as
@@ -406,14 +414,12 @@ add_executable(UringProbe
 # a gyro_add_module, outside the per-module layering the crossing is the whole point of, and it is a
 # temporary home for the round trip until Scene and Frame own their ends of it.
 #
-# It is also the only target that runs two threads, and for the same reason: the crossing is the only
-# thing in the codebase that has two, so the soak that proves its memory ordering has nowhere else to
-# live. That is what Threads is here for, and what makes this the target to point GYRO_SANITIZE=thread
-# at.
+# It runs two threads, which is what makes it the target to point GYRO_SANITIZE=thread at: the
+# crossing is the thing whose memory ordering has to be proved, and the soak that proves it has
+# nowhere else to live.
 #
 # Core and Testing are named directly for the reason gyro_add_module names them: they are OBJECT
 # libraries, and an object library's members reach only the targets that name it.
-find_package(Threads REQUIRED)
 
 add_executable(IntegrationTests
 	Source/Integration/PublicationRoundTrip.Test.cpp

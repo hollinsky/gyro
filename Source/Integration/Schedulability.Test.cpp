@@ -244,25 +244,35 @@ public:
 	Machine(std::span<const PanelSpec> panels, std::span<const Allocation> allocations, Wake scene = Wake::EveryFrame())
 		: m_Count{ std::min({ panels.size(), allocations.size(), kMaxPanels }) }
 	{
-		for (std::size_t index = 0; index < m_Count; ++index)
-		{
-			Attach(index, panels[index], allocations[index]);
-		}
-
-		// Published once, since the ring holds what it was given and the frame side re-reads nothing it
-		// already holds.
 		std::array<Wake, kMaxPanels> wakes{};
 		wakes.fill(scene);
 
-		SnapshotPublisher publisher;
-		publisher.PutWakes({ wakes.data(), m_Count });
-		publisher.Build(m_Snapshot, 1);
-
-		GYRO_CHECK(m_Ring.Publish(m_Snapshot.Bytes(), 0));
-
-		m_Loop.Bind({ m_Outputs.data(), m_Count });
-		m_Loop.Listen({ m_Sources.data(), 1 });
+		Build(panels, allocations, { wakes.data(), m_Count });
 	}
+
+	// The same machine with the scene stated per output, which is what decision 69's associativity is
+	// for. The fold is partitioned by output precisely so that a blinking cursor on one panel does not
+	// wake the other, and a scene that says the same thing about every panel cannot tell whether it was.
+	//
+	// An empty span publishes nothing at all rather than publishing an empty scene. That is a different
+	// state and it is the one the frame thread is actually in first: dispatch has never built a
+	// snapshot, so the reader is invalid, `Wakes()` is empty, and decision 84's rule reads that as no
+	// information rather than as partial information. It has to fold to idle by the same route.
+	Machine(std::span<const PanelSpec> panels, std::span<const Allocation> allocations, std::span<const Wake> scene)
+		: m_Count{ std::min({ panels.size(), allocations.size(), kMaxPanels }) }
+	{
+		Build(panels, allocations, scene);
+	}
+
+	// What one turn of the shim did, which is the whole of what `Run` and `RunUntilIdle` disagree
+	// about. Both drive the same iteration; one stops at an instant and the other stops at `Idle`.
+	enum class Turn : std::uint8_t
+	{
+		Slept,   // the clock moved on to the next thing that can change anything
+		Ran,     // a job ran, but nothing is scheduled past the instant it finished at
+		Stalled, // nothing happened and nothing is scheduled past now
+		Idle,    // no timer to arm and no panel owing a flip: the composition root would block forever
+	};
 
 	// The shim of decision 80: wake at or after the instant the step asked for, or earlier when a
 	// source has something to say. The device's next event is that second condition — a headless flip
@@ -274,32 +284,9 @@ public:
 
 		while (m_Clock.Now() < until)
 		{
-			const Instant entered = m_Clock.Now();
-			const Wake wake = Step();
-			const Instant now = m_Clock.Now();
+			const Turn turn = Advance();
 
-			// A job ran, which is progress however the wake below lands.
-			stalled = now == entered ? stalled : 0;
-
-			Instant next = m_Device.NextEvent();
-
-			if (wake.Which != Wake::Kind::Settled)
-			{
-				next = std::min(next, wake.When);
-			}
-
-			if (next <= now)
-			{
-				// **The step asked for an instant the machine has already passed**, which happens on
-				// every iteration between a commit and its flip once the next frame's record point is
-				// behind: the output is owed a frame, so the fold prices one, and the flip it is
-				// waiting for has not landed. A shim that armed that timer would wake immediately, do
-				// nothing, and arm it again. Waking *at or after* the instant asked for is the whole of
-				// the contract, so this waits for the next thing that can change anything instead.
-				next = m_Device.NextEvent();
-			}
-
-			if (next == Instant{ Duration::max() })
+			if (turn == Turn::Idle)
 			{
 				// Nothing armed and no panel owing anything. Under a scene that wants every frame this
 				// is unreachable, and it is here so that a machine which does go idle ends rather than
@@ -307,25 +294,49 @@ public:
 				break;
 			}
 
-			if (next <= now)
-			{
-				// Even the panel has nothing further to say at an instant the machine has not reached,
-				// so another step can only repeat this one. Bounded rather than trusted: it is worth
-				// failing on rather than hanging a test run.
-				++stalled;
-				GYRO_REQUIRE(stalled < kStallLimit);
-
-				continue;
-			}
-
-			stalled = 0;
-			m_Clock.Set(next);
+			// Bounded rather than trusted: a machine that can no longer move is worth failing on rather
+			// than hanging a test run.
+			stalled = turn == Turn::Stalled ? stalled + 1 : 0;
+			GYRO_REQUIRE(stalled < kStallLimit);
 		}
 
 		// The last vblank inside the window may fall after the final step, and a frame that reached the
 		// glass unreported would read as a miss. Draining here is what makes `Vblanks` and the frames
 		// counted against it describe the same interval.
 		(void)m_Device.Drain();
+	}
+
+	// The same shim stopped at a *state* rather than at an instant: iterate until the composition root
+	// would block indefinitely, and answer how many iterations that took. Empty where it never got
+	// there, which is the interesting failure — a loop that keeps arming a timer with nothing to draw
+	// is Docs/Architecture.md#doing-nothing-must-cost-nothing violated, and it costs a wakeup per
+	// period forever rather than showing up as a wrong pixel.
+	//
+	// Idle is `Wake::Never()` *and* a quiet backend, and both halves are load-bearing. A fold of
+	// `Never()` while a flip is still outstanding is not idle — it is an iteration that has not
+	// happened yet — and the count would then depend on where in a frame the caller happened to start.
+	[[nodiscard]] std::optional<std::size_t> RunUntilIdle(std::size_t limit)
+	{
+		std::size_t stalled = 0;
+
+		for (std::size_t iterations = 1; iterations <= limit; ++iterations)
+		{
+			const Turn turn = Advance();
+
+			if (turn == Turn::Idle)
+			{
+				return m_Fold == Wake::Never() ? std::optional{ iterations } : std::nullopt;
+			}
+
+			stalled = turn == Turn::Stalled ? stalled + 1 : 0;
+
+			if (stalled >= kStallLimit)
+			{
+				return std::nullopt;
+			}
+		}
+
+		return std::nullopt;
 	}
 
 	// Begin measuring. Everything before this is the warm-up: unanchored clocks, unseeded budgets, and
@@ -346,12 +357,16 @@ public:
 	// decision calls it directly.
 	Wake Step()
 	{
-		const Wake wake = m_Loop.Step();
+		m_Fold = m_Loop.Step();
 
 		Sample();
 
-		return wake;
+		return m_Fold;
 	}
+
+	// What the last step folded to, so that a driver which consumed the answer can still be asked what
+	// it was.
+	[[nodiscard]] Wake Fold() const noexcept { return m_Fold; }
 
 	[[nodiscard]] Instant Now() const noexcept { return m_Clock.Now(); }
 
@@ -366,6 +381,11 @@ public:
 	[[nodiscard]] const FrameDecision& Decision(std::size_t index) const noexcept { return m_Outputs[index].Last(); }
 
 	[[nodiscard]] const Witness& Panel(std::size_t index) const noexcept { return m_Witnesses[index]; }
+
+	// Commits *issued*, which is the other side of what the witness counts. A frame that reached the
+	// glass is the measure everywhere else in this file; the idle invariant is about work gyro did at
+	// all, so what it asserts on is `Present` having been called and not the flip that followed.
+	[[nodiscard]] std::uint64_t Commits(std::size_t index) const noexcept { return m_Panels[index]->Commits; }
 
 	// How many vblanks this panel has had since the measurement was armed. `After` is the first vblank
 	// strictly past an instant, so the difference of two of them is the count of vblanks between, and
@@ -416,6 +436,75 @@ public:
 	void Overrun(std::size_t index, Duration by) noexcept { m_Renderers[index]->Inner().Overrun = by; }
 
 private:
+	void Build(std::span<const PanelSpec> panels, std::span<const Allocation> allocations, std::span<const Wake> scene)
+	{
+		for (std::size_t index = 0; index < m_Count; ++index)
+		{
+			Attach(index, panels[index], allocations[index]);
+		}
+
+		if (!scene.empty())
+		{
+			// Published once, since the ring holds what it was given and the frame side re-reads nothing
+			// it already holds. Exactly one wake per bound output: decision 84 has a schedule of the
+			// wrong length read as no information, so a short span would quietly test the unpublished
+			// case instead of the one it named.
+			GYRO_CHECK(scene.size() >= m_Count);
+
+			SnapshotPublisher publisher;
+			publisher.PutWakes(scene.first(std::min(scene.size(), m_Count)));
+			publisher.Build(m_Snapshot, 1);
+
+			GYRO_CHECK(m_Ring.Publish(m_Snapshot.Bytes(), 0));
+		}
+
+		m_Loop.Bind({ m_Outputs.data(), m_Count });
+		m_Loop.Listen({ m_Sources.data(), 1 });
+	}
+
+	// One turn of the shim: a step, and the sleep the composition root would have taken after it.
+	Turn Advance()
+	{
+		const Instant entered = m_Clock.Now();
+		const Wake wake = Step();
+		const Instant now = m_Clock.Now();
+
+		Instant next = m_Device.NextEvent();
+
+		if (wake.Which != Wake::Kind::Settled)
+		{
+			next = std::min(next, wake.When);
+		}
+
+		if (next <= now)
+		{
+			// **The step asked for an instant the machine has already passed**, which happens on every
+			// iteration between a commit and its flip once the next frame's record point is behind: the
+			// output is owed a frame, so the fold prices one, and the flip it is waiting for has not
+			// landed. A shim that armed that timer would wake immediately, do nothing, and arm it again.
+			// Waking *at or after* the instant asked for is the whole of the contract, so this waits for
+			// the next thing that can change anything instead.
+			next = m_Device.NextEvent();
+		}
+
+		if (next == Instant{ Duration::max() })
+		{
+			return Turn::Idle;
+		}
+
+		if (next > now)
+		{
+			m_Clock.Set(next);
+
+			return Turn::Slept;
+		}
+
+		// Even the panel has nothing further to say at an instant the machine has not reached, so
+		// another step can only repeat this one — unless the step itself consumed time, which is a job
+		// having run and is progress however this turn is scored.
+		return now == entered ? Turn::Stalled : Turn::Ran;
+	}
+
 	void Attach(std::size_t index, const PanelSpec& panel, const Allocation& allocation)
 	{
 		OutputConfiguration configuration;
@@ -493,6 +582,7 @@ private:
 	std::array<std::uint64_t, kMaxPanels> m_Assessed{};
 	std::array<std::uint64_t, kMaxPanels> m_Floors{};
 
+	Wake m_Fold = Wake::Never();
 	std::size_t m_Count = 0;
 	bool m_Armed = false;
 };
@@ -721,6 +811,214 @@ GYRO_TEST(Schedulability, AMissCostsOneFrameAndDoesNotCascade)
 	// the output can afford afterwards is the composite it is guaranteed. A deadline met on the lower
 	// rung is still a deadline met, which is why the count above is of vblanks and not of tiers.
 	GYRO_CHECK(machine.Floors(0) > 0);
+}
+
+// Docs/Architecture.md#doing-nothing-must-cost-nothing, in the harness that section names: *when
+// nothing is animating and nothing has committed, no timer is armed and the frame thread blocks
+// indefinitely.*
+//
+// Two things go wrong here and neither shows up as a wrong pixel, which is why they are asserted
+// rather than watched. A fold that answers `At` where it should answer `Never` costs a wakeup per
+// period forever, on the machine most likely to be running on a battery — the section's own worry
+// about the VRR keepalive is one instance of it. And a fold that is right but is reached only after a
+// number of iterations that grows with how long the loop has been running is the same defect deferred:
+// it settles in the test and spins on the desk.
+//
+// **What is asserted is `Step`'s answer and the commits the panel got, and never a symptom.** A
+// thread's voluntary context-switch count is the obvious instrument and it is the wrong one: it
+// measures the kernel's opinion of a scheduling decision this file does not make, it is perturbed by
+// everything else on the machine, and it turns an invariant into a threshold somebody eventually
+// raises. The invariant is structural, so the assertion is too. The shim's half — that a `Never()`
+// fold arms no timeout on a real ring — is asserted where the ring is, in Source/Compositor/Uring.Test.cpp,
+// because it is decision 80's other side and needs a kernel rather than a `ManualClock`.
+GYRO_TEST(Schedulability, AnIdleSceneArmsNothingHoweverLongTheClockRuns)
+{
+	constexpr std::array<OutputTask, 2> tasks{
+		OutputTask{ .Period = kFast, .Want = 3ms, .Floor = 1ms, .Focused = true },
+		OutputTask{ .Period = kSlow, .Want = 3ms, .Floor = 1ms },
+	};
+
+	const Plan plan = Admit(tasks);
+
+	GYRO_REQUIRE(plan.IsFeasible());
+
+	constexpr std::array<PanelSpec, 2> panels{
+		PanelSpec{ .Floor = 1ms },
+		PanelSpec{ .Floor = 1ms, .Phase = PhaseAt(kSlow, 5, kPhaseSteps) },
+	};
+
+	// The two routes to the same answer, asserted together because they are different states and only
+	// one of them is reachable at startup. `Never()` per output is a scene dispatch built and found
+	// nothing in; the empty span is dispatch not having built one yet, which decision 84 reads as no
+	// information. A fold that folded a missing schedule to anything but idle would have gyro composite
+	// its way through boot before a client exists.
+	constexpr std::array<Wake, 2> settled{ Wake::Never(), Wake::Never() };
+
+	Machine published{ panels, plan.Allocations(), std::span<const Wake>{ settled } };
+	Machine unpublished{ panels, plan.Allocations(), std::span<const Wake>{} };
+
+	GYRO_CHECK_EQ(published.Step(), Wake::Never());
+	GYRO_CHECK_EQ(unpublished.Step(), Wake::Never());
+
+	// **Idle is a state and not a moment**, which is the half a single assertion after a single step
+	// cannot see. Sixty-six seconds of virtual time, sampled once a slow period, with nothing to make
+	// the answer change: a fold that recomputed a deadline from `now` rather than from a contributor
+	// would come back with an instant on the very first iteration where the clock had moved past
+	// something, and a fold that woke on a period would come back with one on all of them.
+	for (std::size_t period = 0; period < 4'000; ++period)
+	{
+		published.Idle(kSlow);
+		unpublished.Idle(kSlow);
+
+		GYRO_REQUIRE(published.Step() == Wake::Never());
+		GYRO_REQUIRE(unpublished.Step() == Wake::Never());
+	}
+
+	// And nothing was presented in any of it. The fold is what the composition root arms; this is what
+	// the glass got, and an invariant about cost is about both.
+	for (std::size_t index = 0; index < 2; ++index)
+	{
+		GYRO_CHECK_EQ(published.Commits(index), std::uint64_t{ 0 });
+		GYRO_CHECK_EQ(unpublished.Commits(index), std::uint64_t{ 0 });
+	}
+}
+
+// The invariant's other half: idle is a state the loop *returns to*, in a bounded number of iterations
+// that does not grow.
+//
+// Damage is the only thing that asks a settled output for a frame, so a round here is the whole of
+// what a static desktop does — something dirties a region, one frame per output reaches the glass, and
+// the loop blocks again. What it costs is the number worth pinning: one iteration to render and
+// commit, and one per flip to observe it and fold back to `Never()`. A count that crept up round over
+// round would be state accumulating somewhere in the fold, which is exactly the shape of the defect
+// that is invisible until a machine has been up for a week.
+GYRO_TEST(Schedulability, DamageSettlesBackToIdleInABoundedNumberOfIterations)
+{
+	constexpr std::array<OutputTask, 2> tasks{
+		OutputTask{ .Period = kFast, .Want = 3ms, .Floor = 1ms, .Focused = true },
+		OutputTask{ .Period = kSlow, .Want = 3ms, .Floor = 1ms },
+	};
+
+	const Plan plan = Admit(tasks);
+
+	GYRO_REQUIRE(plan.IsFeasible());
+
+	constexpr std::array<PanelSpec, 2> panels{
+		PanelSpec{ .Floor = 1ms },
+		PanelSpec{ .Floor = 1ms, .Phase = PhaseAt(kSlow, 5, kPhaseSteps) },
+	};
+
+	Machine machine{ panels, plan.Allocations(), std::span<const Wake>{} };
+
+	// One frame per output plus its flip is the expected shape, and it costs three iterations: one that
+	// records and commits both outputs, one that observes the first flip, one that observes the second
+	// and folds to `Never()`. Six is that with room, and it is deliberately not a dozen — a bound loose
+	// enough to absorb a doubling is a bound that stops being an assertion.
+	constexpr std::size_t kBound = 6;
+	constexpr std::size_t kRounds = 24;
+
+	std::optional<std::size_t> steady;
+
+	for (std::size_t round = 0; round < kRounds; ++round)
+	{
+		machine.Damage(0);
+		machine.Damage(1);
+
+		const std::optional<std::size_t> iterations = machine.RunUntilIdle(kBound);
+
+		GYRO_REQUIRE(iterations.has_value());
+		GYRO_REQUIRE(machine.Fold() == Wake::Never());
+
+		// Exactly one frame per output per round. A second commit would mean the loop drew a frame
+		// nothing asked for, which is the same defect as an armed timer wearing different clothes.
+		GYRO_CHECK_EQ(machine.Commits(0), round + 1);
+		GYRO_CHECK_EQ(machine.Commits(1), round + 1);
+
+		// The cold start is allowed to differ from the rest — the first round has no anchor to predict
+		// against and decision 31 has an unanchored output render on demand — but every round after it
+		// is the same round, and that is the claim.
+		if (round == 1)
+		{
+			steady = iterations;
+		}
+
+		if (round > 1)
+		{
+			GYRO_CHECK_EQ(iterations, steady);
+		}
+
+		// Time passes between rounds, and deliberately not a whole number of either period: the anchor
+		// each output is judged against goes stale by an amount that is different every round, so a
+		// count that depended on how far behind the anchor had fallen would be visible as drift rather
+		// than as a single wrong number.
+		machine.Idle(37 * kSlow + 7ms);
+	}
+
+	GYRO_REQUIRE(steady.has_value());
+}
+
+// The fold is partitioned per output, which is decision 69's associativity spent rather than merely
+// stated: *a blinking cursor on one panel must not wake the other.*
+//
+// A global fold over the whole scene would pass every assertion above — nothing is animating there, so
+// there is nothing for a partition to get wrong. What separates the two is a scene where one output is
+// animating and the other is not, and the question is whether the settled one pays for its neighbour.
+// It is offered hundreds of iterations here, because the animating panel wakes the loop on every one
+// of its vblanks and the loop visits every bound output on every iteration. It must decline all of
+// them.
+GYRO_TEST(Schedulability, ASettledOutputIsNotWokenByTheOneAnimatingBesideIt)
+{
+	constexpr std::array<OutputTask, 2> tasks{
+		OutputTask{ .Period = kFast, .Want = 3ms, .Floor = 1ms, .Focused = true },
+		OutputTask{ .Period = kSlow, .Want = 3ms, .Floor = 1ms },
+	};
+
+	const Plan plan = Admit(tasks);
+
+	GYRO_REQUIRE(plan.IsFeasible());
+	GYRO_REQUIRE(plan.Deepest() == Rung::None);
+
+	constexpr std::array<PanelSpec, 2> panels{
+		PanelSpec{ .Floor = 1ms },
+		PanelSpec{ .Floor = 1ms, .Phase = PhaseAt(kSlow, 5, kPhaseSteps) },
+	};
+
+	// The fast panel is settled and the slow one wants every frame it can have. Which is which matters:
+	// the settled output is the one whose deadlines come round most often, so it is the one a fold that
+	// leaked across outputs would wake most.
+	constexpr std::array<Wake, 2> scene{ Wake::Never(), Wake::EveryFrame() };
+
+	Machine machine{ panels, plan.Allocations(), std::span<const Wake>{ scene } };
+
+	// Damaged once, so that it is settled rather than merely never started: it has an anchor, a frame
+	// behind it, and a clock predicting deadlines it could be woken for.
+	machine.Damage(0);
+	machine.Run(kWarmup);
+	machine.Arm();
+	machine.Run(kMeasured);
+
+	// Its one frame, drawn during the warm-up, and nothing since.
+	GYRO_CHECK_EQ(machine.Commits(0), std::uint64_t{ 1 });
+	GYRO_CHECK_EQ(machine.Panel(0).Frames(), std::uint64_t{ 0 });
+
+	// While its vblanks went by in the hundreds and its neighbour met every one of its own. Both halves
+	// are needed: a machine that stopped iterating would also have presented nothing on output 0.
+	GYRO_CHECK(machine.Vblanks(0) > 100);
+	GYRO_CHECK(machine.Panel(1).Frames() > 0);
+	GYRO_CHECK_EQ(machine.Missed(1), std::uint64_t{ 0 });
+
+	// And the mirror, which is what makes the count above a statement about the partition rather than
+	// about output 0 having run out of damage: the same panel, the same contribution, alone, folds to
+	// `Never()` and blocks. The scene answer is identical; only the neighbour is gone.
+	Machine alone{ std::span{ panels }.first(1), plan.Allocations().first(1), std::span{ scene }.first(1) };
+
+	alone.Damage(0);
+
+	const std::optional<std::size_t> iterations = alone.RunUntilIdle(12);
+
+	GYRO_REQUIRE(iterations.has_value());
+	GYRO_CHECK_EQ(alone.Fold(), Wake::Never());
+	GYRO_CHECK_EQ(alone.Commits(0), std::uint64_t{ 1 });
 }
 
 // The same recovery with no contention in it at all, which is the route every output takes before the
