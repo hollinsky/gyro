@@ -23,7 +23,10 @@ splitting, or being renamed changes this file and nothing else. If a change here
 > `Frame` now holds the step those interfaces are driven from, against a `NullEvaluator` standing in
 > for the `Scene` that will produce its draw items. `Headless` is the first thing behind either seam:
 > a simulated panel whose vblanks are arithmetic, a device that is the one source for all of them, a
-> synthetic plane catalog, and a renderer that charges a cost and draws nothing. The rest is a
+> synthetic plane catalog, and a renderer that charges a cost and draws nothing. `Compositor` closes
+> the circuit: it is the first module in the tree that is not portable, and it holds the `while`, the
+> ring, the thread, and the one call that turns admission control's answer back into what the loop is
+> configured with. `gyro --backend=headless` runs. The rest is a
 > declaration of
 > where code goes when it is written. What is worth writing down this early is the *graph* rather
 > than the file list, because the graph is enforced from the first module and the edge that must not
@@ -436,6 +439,51 @@ including why the observer owns the link and why a `Connection` cannot move.
 ownership puts `free` on the frame path wearing a destructor's clothes, where the debug allocator
 cannot catch it, and a shared lock rebuilds the priority inversion the thread ordering exists to
 prevent. Reclamation is deferred against the consumed-sequence watermark.
+
+### The root is where the platform collects
+
+`Compositor` is the first module here that is not portable, and that is the tier working rather than
+eroding. `io_uring`, `SCHED_FIFO`, `mlockall`, and `RLIMIT_RTTIME` all live in it, and they live in it
+*because* `Frame` and `Headless` may not say any of those words.
+[Decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait) is what put
+them on this side of the line: the loop is a step and the wait is the root's, so the platform
+collects at the top instead of seeping into the module the
+[schedulability sweep](Architecture.md#outputs-are-independent-periodic-tasks) runs.
+
+Four things sit here and nowhere else, and each is a consequence of something above rather than a new
+choice.
+
+**The `while`, the ring, and the thread.** The shim arms one absolute `IORING_OP_TIMEOUT` for the
+`Wake` the step returned, waits, and calls the step again. It is *absolute* rather than relative
+because a relative timeout has to be computed from a `now` read before the enter, which puts every
+preemption between the two on the far side of the deadline — and a late wake is the one error the
+contract does not permit it to make. The ring has exactly one reap site, for the reason
+[why io_uring](Architecture.md#why-io_uring) gives: `DEFER_TASKRUN` defers only while the ring is
+reaped through `io_uring_enter`, and peeking the completion tail withdraws the property silently
+rather than failing.
+
+**The stop path is an `IEventSource`.** A `SIGINT` has to reach a frame thread that folded to idle,
+which is the same problem
+[decision 83](Decisions.md#83-dispatchs-publication-is-an-event-source) solves for a publication, so
+it gets the same answer and the machinery is written once. Dispatch's nudge will be a second instance
+rather than a second mechanism.
+
+**Admission control's answer has to be turned back into two numbers.** `Admit` reasons about one `C`
+per output; [Budget](../Source/Frame/Budget.h) keeps a CPU mark and a GPU mark and
+[Timing](../Source/Frame/Timing.h) composes them as a *pipeline* rather than a sum. So something
+crosses that difference in both directions, and it is `Compositor/Schedule.h`: going in, `C` is the
+composed reserve, because a set admitted against a smaller figure than the record-time check
+evaluates is a set that passes the test and misses the frame; coming back, a reduced allocation
+scales both device halves and leaves the safety margin alone, since the margin is gyro's own wakeup
+latency and not the scene's to give up. It is here rather than in `Frame` because admission runs when
+a *configuration* changes and the configuration is the root's.
+
+**The renderer is per output; the device is per queue.** `IRenderer::BindTargets` allocates and
+imports, so a writer is bound to one presenter's target set for as long as that set exists. What
+`FrameOutput::Bind` is told is the *device* index — the queue the work serialises on — and that is
+what makes [decision 29](Decisions.md#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)'s
+blocking term per device rather than per output. Two outputs on one GPU are two renderers naming one
+queue.
 
 ## The three cases that decide ownership
 

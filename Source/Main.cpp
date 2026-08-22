@@ -1,7 +1,21 @@
+#include <array>
 #include <cstring>
+#include <format>
 #include <iostream>
+#include <span>
+#include <string_view>
+#include <vector>
 
+#include "Compositor/Compositor.h"
+#include "Compositor/Options.h"
 #include "Version.h"
+
+// The entry point, and deliberately almost nothing.
+//
+// `--version` and `--help` answer and exit without constructing anything, because a person asking
+// either of them on a machine where gyro cannot start still deserves an answer. Everything else is
+// handed to Compositor/Options.h, which is total, and then to the composition root, which is the only
+// thing in the process that knows what an implementation is.
 
 static void PrintVersion()
 {
@@ -13,32 +27,82 @@ static void PrintUsage()
 	std::cout << "Usage: " << AppName << " [options]\n"
 			  << "\n"
 			  << "Options:\n"
-			  << "  --help       Show this help message\n"
-			  << "  --version    Show version information\n"
+			  << "  --help              Show this help message\n"
+			  << "  --version           Show version information\n"
 			  << "\n"
-			  << "Running with no options launches the desktop application.\n";
+			  << "  --backend=KIND      auto, headless, nested, or drm (only headless is built)\n"
+			  << "  --output[=SPEC]     Add an output, as WIDTHxHEIGHT@REFRESH or a refresh rate\n"
+			  << "                      alone. Repeat for several; the default is one 1920x1080@60\n"
+			  << "  --cost=MS           What a planned composite is charged, in milliseconds\n"
+			  << "  --floor=MS          What a floor composite is charged, in milliseconds\n"
+			  << "  --frames=N          Run at most N iterations, stopping early once the loop\n"
+			  << "                      reaches idle. The default runs until SIGINT or SIGTERM\n"
+			  << "  --realtime          Ask for SCHED_FIFO even under a hosted backend\n"
+			  << "  --no-realtime       Do not ask for SCHED_FIFO\n"
+			  << "  --priority=N        SCHED_FIFO priority, 1 to 99\n"
+			  << "\n"
+			  << "Running with no options starts the compositor.\n";
 }
 
 int main(int argc, char** argv)
 {
-	for (int i = 1; i < argc; ++i)
+	std::vector<std::string_view> arguments;
+	arguments.reserve(static_cast<std::size_t>(argc > 1 ? argc - 1 : 0));
+
+	for (int index = 1; index < argc; ++index)
 	{
-		if (std::strcmp(argv[i], "--version") == 0 || std::strcmp(argv[i], "-v") == 0)
+		const std::string_view argument = argv[index];
+
+		if (argument == "--version" || argument == "-v")
 		{
 			PrintVersion();
-			return 0;
-		}
-		if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0)
-		{
-			PrintUsage();
+
 			return 0;
 		}
 
-		std::cerr << "Unknown option: " << argv[i] << "\n";
+		if (argument == "--help" || argument == "-h")
+		{
+			PrintUsage();
+
+			return 0;
+		}
+
+		arguments.push_back(argument);
+	}
+
+	const Result<Options> options = ParseOptions(arguments);
+
+	if (!options)
+	{
+		// Which argument, where one argument is at fault. `ParseOptions` reports what is wrong and not
+		// where, because an `Error` carries a `string_view` and a literal cannot name a runtime value —
+		// so the naming happens here, in the one place that still has the list. Re-parsing each argument
+		// alone finds it, since the grammar is per argument; a failure no single argument reproduces is a
+		// *combination* — `--floor` above `--cost` is the one that exists — and those messages already say
+		// what the combination was.
+		for (const std::string_view argument : arguments)
+		{
+			if (!ParseOptions({ &argument, 1 }))
+			{
+				std::cerr << std::format("{}: {}\n", argument, options.error());
+				PrintUsage();
+
+				return 1;
+			}
+		}
+
+		std::cerr << std::format("{}\n", options.error());
 		PrintUsage();
+
 		return 1;
 	}
 
-	std::cout << "All the time in the world, but nothing to do yet..." << std::endl;
+	if (const Result<void> ran = Run(*options); !ran)
+	{
+		std::cerr << std::format("{}\n", ran.error());
+
+		return 1;
+	}
+
 	return 0;
 }

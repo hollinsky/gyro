@@ -443,4 +443,21 @@ been waiting on a question that could not be answered until the rule behind it w
   is left open is the premise underneath, which is that `DEFER_TASKRUN` measurably keeps kernel
   completion work off the render. Unmeasured, load-bearing, and the same shape as the argument
   decision 2 lost. Wants the headless harness, alongside the presentation-timing sweep.
+- **Whether a source can answer when it will next have something.** *(Raised 2026-08-21, by the
+  composition root running headless against a real clock.)*
+  [`IEventSource`](../Source/Seam/EventSource.h) has a descriptor and a drain, and
+  [decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait) makes an
+  invalid descriptor an ordinary answer — a headless flip is a function of the clock and no file
+  becomes readable. That leaves one hole, and it is exactly one frame wide: before an output's first
+  `Presented`, `FrameClock` has no anchor, so `Timing::WakeFor` contributes `Never()`, the loop arms
+  nothing, and the flip that would have anchored the clock is never drained. The backend and the idle
+  fold wait for each other. `Compositor` closes it by folding `HeadlessDevice::NextEvent()` into the
+  wake it hands the shim, which is defensible — the root wired a clock-driven presenter to a real
+  clock, so the consequence is the root's — and is also the root knowing which backend it built,
+  which is the thing the seam exists to stop. The alternative is a third verb on `IEventSource`, and
+  what makes it a question rather than a patch is that every *real* source would answer `Never()`:
+  a DRM file cannot say when it will next be readable, so the verb would exist for the fake alone,
+  which is [the test](Structure.md#orchestration) for whether a seam is real run in reverse. Settle
+  it when nested lands, since a host connection is the second source with a genuine answer — a frame
+  callback is a promise about the future in a way a page-flip event is not.
 - **spdlog async sink** — file I/O from the frame thread punts to io-wq and surfaces as jitter.

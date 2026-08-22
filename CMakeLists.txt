@@ -54,7 +54,35 @@ add_custom_target(ClockDiscipline ALL
 	VERBATIM
 )
 
-# spdlog
+# The platform stack, consumed through pkg-config; CPM is for C++ libraries. See
+# Docs/Architecture.md#dependencies, where this row already sits.
+#
+# liburing is the first of them, and it arrives with the frame ring rather than with the event loop in
+# general: the dispatch ring is a convenience where plain epoll would be defensible, and the frame
+# ring is where DEFER_TASKRUN earns its place. Docs/Architecture.md#why-io_uring has the argument, and
+# Source/Compositor/Uring.h has the one reap-site constraint that follows from it.
+#
+# Named REQUIRED with a sentence rather than left to pkg-config's own message, because the machine
+# that hits this is a machine somebody is setting up and the fix is one package away.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(liburing IMPORTED_TARGET liburing)
+
+if(NOT liburing_FOUND)
+	message(FATAL_ERROR
+		"liburing was not found. gyro's frame ring is io_uring and carries no epoll fallback, "
+		"deliberately; see Docs/Architecture.md#dependencies. Install liburing-devel (Fedora) or "
+		"liburing-dev (Debian)."
+	)
+endif()
+
+# spdlog, on std::format rather than on its bundled fmt.
+#
+# This codebase writes std::formatter specializations — Wake, FrameDecision, OutputConfiguration,
+# Budget, Plan — and writes them precisely so that a log line can print one. Left on bundled fmt,
+# spdlog would accept none of them and every log site would hand-expand the fields, which is how a
+# formatter and the line that prints it drift apart. One vocabulary, decided here.
+set(SPDLOG_USE_STD_FORMAT ON CACHE BOOL "spdlog formats with std::format" FORCE)
+
 CPMAddPackage(
 	NAME spdlog
 	GITHUB_REPOSITORY gabime/spdlog
@@ -252,6 +280,46 @@ gyro_add_module(Headless PORTABLE
 		Vblank.Test.cpp
 )
 
+# The composition root, and the only module that knows both sides of either waist. Docs/Structure.md
+# #orchestration is its whole brief: it constructs the clock, the backend, the rendering device, the
+# publication channel, and the threads, and hands each subsystem what it needs.
+#
+# Not PORTABLE, and it is the first module in the tree that is not. That is the tier working rather
+# than eroding — io_uring, SCHED_FIFO, mlockall, and RLIMIT_RTTIME all live here, and they live here
+# *because* Frame and Headless may not say any of those words. Decision 80 is what put them on this
+# side of the line: the loop is a step and the wait is the root's, so the platform collects at the
+# top rather than seeping into the module the schedulability sweep runs.
+#
+# It depends on everything below it and always will, which is why it is the one module whose DEPENDS
+# list is not an argument about layering. No DISPATCH_HALF: the root is what *constructs* both threads
+# and runs on neither, so it belongs to the frame side by the default the halves are written around.
+gyro_add_module(Compositor
+	DEPENDS
+		Core
+		Geometry
+		Publication
+		Seam
+		Frame
+		Headless
+	SOURCES
+		Compositor.cpp
+		RealTime.cpp
+		Uring.cpp
+	TESTS
+		Options.Test.cpp
+		Schedule.Test.cpp
+)
+
+# PUBLIC so that both the gyro binary and this module's own tests inherit them. gyro_add_module names
+# only the module graph, which is the right thing for it to know: an external dependency is a property
+# of the module rather than an edge in Docs/Structure.md's graph, and CheckLayering has nothing to say
+# about either of these.
+target_link_libraries(Compositor
+	PUBLIC
+		PkgConfig::liburing
+		spdlog::spdlog
+)
+
 # Declared after the modules, because the module list is what they check. ALL for the same reason as
 # the clock check above.
 #
@@ -316,10 +384,14 @@ target_include_directories(gyro
 	PRIVATE
 		${CMAKE_CURRENT_BINARY_DIR}/Generated
 )
+# Core is named alongside Compositor for gyro_add_module's reason: it is an OBJECT library, so
+# DebugAllocator.cpp's replacement of the global allocator reaches only the targets that name it
+# directly. Reached through the graph it would be dropped, and decision 36's check would be silently
+# absent from the one binary that has a real frame section in it.
 target_link_libraries(gyro
 	PRIVATE
+		Compositor
 		Core
-		spdlog::spdlog
 )
 
 # Standalone diagnostics. Not linked into gyro, and deliberately dependency-free — BuildFlags
@@ -349,8 +421,11 @@ add_executable(IntegrationTests
 )
 target_link_libraries(IntegrationTests
 	PRIVATE
+		Frame
+		Headless
 		Publication
 		Animation
+		Seam
 		Geometry
 		Core
 		Testing

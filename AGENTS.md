@@ -133,6 +133,29 @@ Codebase Structure:
 		                        nothing and charges a simulated C, here rather than in Render because
 		                        Render is platform and would take the tier with it
 
+		Compositor/           - The composition root, and the first module in the tree that is not
+		                        portable — which is the tier working rather than eroding, since
+		                        io_uring, SCHED_FIFO, mlockall and RLIMIT_RTTIME live here precisely
+		                        because Frame and Headless may not say any of those words (decision
+		                        80). Uring.h is the wait: one absolute IORING_OP_TIMEOUT armed from
+		                        the Wake the step returned, absolute rather than relative because a
+		                        relative one is computed from a now read before the enter and every
+		                        preemption between the two lands past the deadline; it has exactly
+		                        one reap site, because DEFER_TASKRUN defers only while the ring is
+		                        reaped through io_uring_enter and peeking the tail withdraws that
+		                        silently. Interrupt is beside it and is an IEventSource rather than a
+		                        mechanism, so that decision 83's publication nudge is a second
+		                        instance rather than a second machine. Schedule.h is the bridge
+		                        across an arity difference — Admit reasons about one C, Budget keeps
+		                        two marks and Timing composes them as a pipeline — so C goes in as
+		                        the composed reserve and a reduced allocation comes back scaling both
+		                        device halves while leaving the safety margin alone. RealTime.h is
+		                        the three calls that make the frame thread real-time and the one that
+		                        stops it taking the machine with it, each refusable and none fatal.
+		                        Options.h is total: an argument either sets a field or names itself
+		                        in an error, because an ignored one on a boot service is a
+		                        configuration somebody believes is in effect
+
 		Integration/          - The tests that name both Publication and Animation, which no module may:
 		                        the coefficient round trip, and the two-thread soak that proves the
 		                        crossing's memory ordering under GYRO_SANITIZE=thread. The soak runs
