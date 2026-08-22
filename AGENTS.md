@@ -103,13 +103,16 @@ Source layout and the invariant each module carries. The *why* is in the cited d
 | `Seam` | portable | both | The control waist: every interface with more than one implementation and the data crossing it. `IPresenter`, `IEventSource`, `IRenderer`, `ISession`, `IInput`, `RenderTarget`, `SyncPoint`, `PresentationInfo`, `OutputConfiguration`, `RenderMode` (73, 78, 79, 80, 82) |
 | `Frame` | portable | frame | `FrameClock` the per-output prediction, `Budget` the cost figures, `Timing` the one runtime timing decision, `Loop` the step, `Admission` the processor-demand test read backwards, `Projection` the composed chain turned into a `Quad` — it is here because `Geometry` may not name `Seam` and a quad builder is not an interface (93). `Evaluator` the walk that turns a published scene into a draw list, whose interface is internal because no backend is ever on the far end of it (29, 30, 35, 61, 80, 97–101) |
 | `Headless` | **portable** | split | The instrument the schedulability sweep runs against, so it must work on a machine with no GPU. Simulated vblanks, an `IPresenter` over them, one `IEventSource` for all of them, a synthetic plane catalog, a renderer that charges a cost and draws nothing (85) |
+| `Render` | platform | frame | The Vulkan renderer. `Device` brings up an instance and a device by *class* — decision 40 makes software rendering a device selection rather than a backend, so the floor tier is `DeviceClass::Software` — and `Renderer` imports the presenter's dmabufs under an explicit DRM modifier and composites the damage region. It draws no items yet and refuses a request carrying any, so a missing pipeline is an error rather than a black screen (103, 104) |
 | `Virtual` | platform | frame | The presenter that *allocates*: an output whose consumer is a file, an encoder, or a test rather than a panel. `udmabuf` turns a sealed `memfd` into a real dmabuf, so the renderer is exercised against real imports on a machine with no GPU. Targets retire on consumer release, not on a flip, which is why it is not `Headless` with a provider (102) |
 | `Compositor` | platform | constructs | The composition root and the first non-portable module. `io_uring`, `SCHED_FIFO`, `mlockall`, `RLIMIT_RTTIME` live here *because* `Frame` and `Headless` may not say those words. `Uring`, `Schedule`, `RealTime`, `Options` (80, 83) |
-| `Integration` | portable | — | The tests that name both `Publication` and `Animation`, which no module may |
+| `Integration` | portable | — | The tests that name two modules no module may: `Publication` with `Animation`, and `Render` with `Virtual` — a renderer and a presenter, which only the composition root wires together |
 | `Testing` | portable | — | The hand-rolled harness and every test binary's `main()`: `GYRO_TEST` / `GYRO_CHECK` / `GYRO_REQUIRE` (9) |
 
 Also: `Source/Main.cpp` is a thin entry point; `Tools/UringProbe.cpp` is a standalone io_uring probe
-with raw syscalls and no liburing, so it runs on a target machine before gyro does (3).
+with raw syscalls and no liburing, so it runs on a target machine before gyro does (3);
+`Tools/VulkanProbe.cpp` is the same idea for Vulkan — headers only, `dlopen`s the loader, runs where
+there is no ICD — and it is what retired decision 40's unverified extension claim and produced 104.
 
 Tests live beside what they test as `<Unit>.Test.cpp`, and are listed in the module's `TESTS` rather
 than compiled into it. A test for something in a dispatch half belongs in that half.

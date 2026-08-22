@@ -440,9 +440,19 @@ public:
 	// Draw one composite into one target and submit it.
 	//
 	// **This is `C` on the CPU device, so its cost is the contract.** It records and submits and does
-	// not wait for the GPU — the whole reason Seam/SyncPoint.h is a timeline point rather than a fence
-	// is that the present can be issued against work that has not run. Nothing in here may allocate,
-	// take a device-wide lock, or block on another output's work.
+	// not wait for the GPU *where the GPU is a device that can be waited on separately* — the whole
+	// reason Seam/SyncPoint.h is a timeline point rather than a fence is that the present can be
+	// issued against work that has not run. Nothing in here may allocate, take a device-wide lock, or
+	// block on another output's work.
+	//
+	// **The qualification is decision 104 and it is narrower than it sounds.** *(Revised 2026-08-22.)*
+	// A device that cannot export a timeline — lavapipe, measured, which is decision 40's permanent
+	// floor tier — has no descriptor to name in a `SyncPoint`, and an invalid one there means *nothing
+	// to wait for*. So such a renderer waits for its own submission here and reports an immediate
+	// point, which is accurate rather than a concession: its queue runs on the CPU this call is
+	// already on, so there is no second processor for a point to overlap with and the wait is work
+	// that had to happen inside `C` either way. `Submission::RecordCost` on that device therefore
+	// includes rasterization, which is the honest figure for it.
 	//
 	// **Chunking is expressible and needs nothing added.** Decision 29's contingency splits an
 	// output's work at submission boundaries; that is several calls against the same held target with

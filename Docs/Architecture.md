@@ -2499,11 +2499,11 @@ flow. That is what disqualified basu.
 | `libxkbcommon`                 | pkg-config | keymaps, both directions               |
 | `libdrm`                       | pkg-config | atomic KMS, dmabuf                     |
 | `libinput`, `libudev`          | pkg-config | native input                           |
-| Vulkan headers + loader        | pkg-config | renderer                               |
 | `liburing`                     | pkg-config | event loop                             |
 | spdlog                         | CPM        | logging — async sink only              |
-| volk                           | CPM        | Vulkan meta-loader, dispatch overhead  |
-| shaderc / glslang              | CPM        | runtime shader compilation, hot reload |
+| `Vulkan-Headers`               | CPM        | renderer — headers only, version pinned |
+| volk                           | CPM        | Vulkan meta-loader; `dlopen`s the loader |
+| shaderc / glslang              | CPM        | runtime shader compilation, hot reload — not taken yet |
 
 Not used: `libwayland-client` (the client codec is gyro's, per
 [decision 1](Decisions.md#1-the-nested-backend-drives-raw-wayland-protocol-not-vulkan-wsi)),
@@ -2518,8 +2518,21 @@ records what would replace it.
 Fedora setup:
 
 ```bash
-sudo dnf install wayland-devel wayland-protocols-devel libdrm-devel libinput-devel libxkbcommon-devel vulkan-loader-devel vulkan-headers liburing-devel
+sudo dnf install wayland-devel wayland-protocols-devel libdrm-devel libinput-devel libxkbcommon-devel liburing-devel
 ```
+
+**Vulkan is deliberately absent from that line**, and its absence is the content of
+[decision 103](Decisions.md#103-vulkan-arrives-through-cpm-and-gyro-never-links-the-loader): gyro
+does not link the loader. volk resolves it with `dlopen("libvulkan.so.1")` at startup, so the headers
+are the only build input and they arrive pinned through CPM. What that buys is not convenience — it
+is that a machine with a broken or missing Vulkan install answers `volkInitialize()` with a failure
+gyro can *report* and fall back from, where a linked loader would make it a refusal to `execve`. On a
+boot service that has [subsumed the splash](#from-firmware-to-gyro) and removed the VTs, that
+difference is a legible error against a black machine with no way in.
+
+`Tools/VulkanProbe.cpp` is what answers "what does this machine actually have" — it links the headers
+only, `dlopen`s the loader itself, and runs where there is no ICD at all. Run it before diagnosing a
+renderer that will not come up.
 
 `systemd-devel` supplies `libudev` and is typically already present.
 

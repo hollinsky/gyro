@@ -7481,3 +7481,128 @@ never scans out, so the constraint that actually differs between a buffer that w
 does not — a modifier the display plane will accept, and the scanout usage that makes the allocation
 eligible — is untested until the DRM backend lands. That failure should arrive there honestly rather
 than appear to have been covered by a fixture.
+
+### 103. Vulkan arrives through CPM and gyro never links the loader
+
+*(Decided 2026-08-22, on going to add the pkg-config rows for the renderer and finding they buy
+nothing.)*
+
+**`Vulkan-Headers` and `volk` are CPM packages pinned to the same SDK, and there is no `vulkan.pc`
+entry, no `libvulkan` link line, and no `vulkan-loader-devel` in the setup instructions.** volk
+resolves Vulkan with `dlopen("libvulkan.so.1")` inside `volkInitialize()`, so the only build input is
+a directory of headers — which is a git tag rather than a distribution package.
+
+**The reason that is better rather than merely equivalent is what gyro is.** A linked loader makes a
+missing or broken `libvulkan.so.1` a failure of `execve`: the dynamic linker refuses, the process
+never runs a line, and nothing reaches a screen. On a login-session compositor that is an error
+message in a terminal somebody already has. On a boot service that has subsumed the splash and
+[removed the VTs](#37-no-vts-the-recovery-console-is-gyros-own), it is a black machine with no way in.
+`volkInitialize()` returning `VK_ERROR_INITIALIZATION_FAILED` is a condition gyro can *report*, and
+[decision 79](#79-the-pre-vulkan-console-is-a-renderer-not-a-second-presentation-path)'s console
+renderer is what it falls back to — the same path the boot splash already draws through, so the
+fallback is a path that runs rather than one that is argued about.
+
+The second-order benefit is that this was found by trying to build on a machine that had
+`vulkan-loader` and `mesa-vulkan-drivers` installed and neither `vulkan-headers` nor a
+`libvulkan.so` symlink, which is the ordinary state of a Fedora workstation that has never had a
+Vulkan SDK on it. That configuration is not a broken machine — it is what a *deployment* target looks
+like, and the build should not have needed more than it.
+
+**Rejected: pkg-config for the headers and the loader, which is what
+[Architecture.md](Architecture.md#dependencies)'s table said until today.** *(This decision reverses
+that row.)* The stated rule is that the platform stack comes through pkg-config and CPM is for C++
+libraries, and Vulkan looks like the platform stack. It is not: the loader is a runtime artefact
+gyro deliberately does not depend on at link time, and the headers are a version-pinned interface
+definition rather than something the distribution owns. `libdrm`, `libinput` and `wayland-server` all
+stay on pkg-config, because gyro genuinely links those and a distribution's copy is the right one.
+
+**Rejected: taking the distribution's headers where they exist and CPM's otherwise.** That is one
+build that compiles against two different `vulkan_core.h` revisions depending on the machine, and
+volk's dispatch table is *generated* from a header revision — a table built against one and used over
+another is a null pointer in the middle of a struct, which is a crash with no symbol on it. The
+build sets `VULKAN_HEADERS_INSTALL_DIR` explicitly for exactly this reason, because volk's own search
+tries `FindVulkan` first and would silently prefer the system copy.
+
+**Deferred, and it is the interesting half: `shaderc`.** The first renderer commit draws with
+`vkCmdClearAttachments` and has no shader in it, so the question has not been forced. When it is, the
+options are worse than this one: `shaderc` through CPM drags in glslang and SPIRV-Tools and roughly
+doubles a clean build, and the alternative — SPIR-V compiled offline and checked in — needs a
+compiler nobody has on the machine and makes a shader edit a two-step ritual.
+[Decision 9](#9-volk-and-runtime-shader-compilation-in-vma-and-a-test-framework-out) took runtime
+compilation for hot reload and that argument still holds; what has changed is that the cost is now
+known to be a build-time one rather than a dependency-availability one, which is a different
+trade to make and worth making when there is a shader to compile.
+
+### 104. A device that cannot export a timeline finishes the frame inside `Record`
+
+*(Decided 2026-08-22, on writing the Vulkan renderer's first commit and discovering that the floor
+tier cannot do what [Seam/SyncPoint.h](../Source/Seam/SyncPoint.h) says every device does.)*
+
+**lavapipe cannot create an exportable semaphore of any kind, so a renderer on it has no descriptor
+to put in a `SyncPoint` — and rather than lie about that, it waits for its own submission and returns
+`SyncPoint::Immediate()`.** Whether a device can export is asked once at device creation with
+`vkGetPhysicalDeviceExternalSemaphoreProperties` and stored on `DeviceDescription`; it is a device
+property, not a per-frame branch.
+
+**What the measurement was, because the entry it corrects rested on a reading nobody had done.**
+`Tools/VulkanProbe.cpp` was written to settle
+[decision 40](#40-software-rendering-is-a-device-not-a-backend-and-it-is-the-floor-tier)'s extension
+claim, which turned out to be correct — lavapipe advertises all four, and linear is the only modifier
+it accepts, so the udmabuf pairing
+[decision 102](#102-a-virtual-output-allocates-the-buffers-it-hands-out-and-that-is-what-stands-the-renderer-up)
+rests on is exact. What did not survive is one sentence in `Seam/SyncPoint.h` — *DRM syncobj
+timelines throughout, exported from Vulkan timeline semaphores*:
+
+| | timeline opaque_fd | binary opaque_fd | binary sync_fd |
+| --- | --- | --- | --- |
+| anv (Intel, real driver) | exports, `anon_inode:syncobj_file` | exports | not exportable |
+| lavapipe | `VK_ERROR_INVALID_EXTERNAL_HANDLE` at *create* | same | advertised, see below |
+
+So the premise is **confirmed where it matters and false on the tier that is permanently occupied**.
+That is a gap between two files written apart rather than an error in either: decision 40 never
+claimed export, and `SyncPoint.h` never asked which device it was describing.
+
+**Immediate is the accurate description rather than a workaround, and that is the whole argument.** A
+sync point exists so that *two* devices can overlap — the frame thread issues a present against work
+the GPU has not finished. On lavapipe there is one device, the CPU, and it is the same one that would
+be doing the waiting; there is nothing to overlap with, so "already finished" is simply true. This is
+the case `SyncPoint.h` already names as a legitimate producer of the null point — *content that was
+finished on the CPU before the call* — and it is why `Blit` and `SimulatedRenderer` answer the same
+way. Nothing at the seam changes: KMS gets no `IN_FENCE_FD` and needs none, nested sends no
+`wp_linux_drm_syncobj_v1` and needs none, and a virtual output ignores the point entirely.
+
+**What it costs, stated rather than buried.** `IRenderer::Record`'s *records and submits and does not
+wait for the GPU* becomes *does not wait where the device can be waited on separately*, and
+`Submission::RecordCost` on such a device includes rasterization. Both are more accurate than the
+text they replace. It also makes decision 40's priority ladder load-bearing rather than
+precautionary: the rasterizer pool runs `SCHED_FIFO` one below the frame thread precisely so that the
+frame thread can block on llvmpipe without inheriting every `SCHED_OTHER` process on the machine, and
+until now nothing in the tree ever blocked on it.
+
+**Rejected: exporting a binary `sync_fd` per frame, which is the one that looks like it works.**
+lavapipe advertises it, and KMS `IN_FENCE_FD` takes a sync_file rather than a syncobj, so on paper
+the floor tier could hand a real fence to a real display plane. It cannot. Exporting a `sync_fd`
+requires the semaphore to have a pending signal operation, so the descriptor can only be asked for
+*after* submission — which is the round trip inside the frame section that `SyncPoint.h` chose a
+timeline over a binary fence to avoid, now measured rather than argued. Asking before there is a
+pending signal does not return an error; it **hangs**, which is how this was found. It also serves
+nested not at all, since `wp_linux_drm_syncobj_v1` wants a timeline, and an owned per-frame descriptor
+breaks `RawFd Timeline`'s contract that the timeline outlives every point on it.
+
+**Rejected: a third `SyncPoint` state meaning "not immediate, poll the renderer".** `SyncPoint.h`
+already warns that the two producers of the null point must not be conflated, and a third state makes
+that worse rather than better — the type is a trivially copyable value in a per-frame layer list, and
+every presenter would grow a case. Worse, the presenter that most needs the descriptor is the DRM one,
+and handing it "poll the renderer" leaves it blocking anyway, at a point where it does not own the
+semaphore. That is this decision relocated to the party least able to act on it.
+
+**Rejected: making the syncobj ourselves.** Open a render node, `drmSyncobjCreate`, and signal it from
+a helper thread when the Vulkan timeline advances. This does produce a genuine syncobj on lavapipe.
+It costs a thread, a syscall per frame, `libdrm`, and a render node — which a machine with a display
+and no GPU driver may not have at all, that being the machine the floor tier exists for.
+
+**What is still open, and it belongs to the DRM backend rather than here.** A floor-tier machine with
+a real panel pays software rasterization inside the frame section, and whether the frame clock's
+prediction absorbs that gracefully is a question for the first time gyro drives a real display on
+lavapipe. Nothing is blocked meanwhile: the virtual output never waits on a point, so the path is
+exercised end to end without a panel.

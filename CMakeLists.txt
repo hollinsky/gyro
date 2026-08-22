@@ -97,6 +97,37 @@ CPMAddPackage(
 	EXCLUDE_FROM_ALL YES
 )
 
+# Vulkan, and every part of it arrives through CPM rather than pkg-config. See
+# Docs/Decisions.md decision 103; the short of it is that gyro never links the loader. volk resolves
+# it with `dlopen("libvulkan.so.1")` at startup, so a machine with a broken Vulkan install answers
+# `volkInitialize()` with a failure gyro can report and fall back from, rather than refusing to exec
+# a boot service. The headers are the only build input, and they are headers.
+#
+# The two are pinned to the same SDK on purpose: volk's dispatch table is generated from a header
+# revision, and a table built against one revision over a `vulkan_core.h` from another is a null
+# entry in the middle of a struct.
+set(VULKAN_HEADERS_ENABLE_MODULE OFF CACHE BOOL "No Vulkan-Hpp C++20 module; gyro is not on Vulkan-Hpp" FORCE)
+
+CPMAddPackage(
+	NAME Vulkan-Headers
+	GITHUB_REPOSITORY KhronosGroup/Vulkan-Headers
+	GIT_TAG v1.4.357
+	SYSTEM YES
+	EXCLUDE_FROM_ALL YES
+)
+
+# Named explicitly rather than left to volk's own search, which tries FindVulkan first and would
+# quietly prefer a distribution's headers over the pinned ones on a machine that has both.
+set(VULKAN_HEADERS_INSTALL_DIR "${Vulkan-Headers_SOURCE_DIR}" CACHE PATH "The headers volk generates against" FORCE)
+
+CPMAddPackage(
+	NAME volk
+	GITHUB_REPOSITORY zeux/volk
+	GIT_TAG vulkan-sdk-1.4.357.0
+	SYSTEM YES
+	EXCLUDE_FROM_ALL YES
+)
+
 # The test harness, declared before the modules whose tests link it.
 gyro_add_module(Testing PORTABLE OBJECT
 	SOURCES
@@ -350,6 +381,39 @@ gyro_add_module(Virtual
 		Udmabuf.Test.cpp
 )
 
+# The Vulkan renderer. Platform code by definition — Docs/Structure.md's table has had this row since
+# before the module existed, and volk, dmabufs and a device that can be lost are what it means.
+#
+# DEPENDS names what the code has rather than where the module is going, which is Frame's rule above.
+# The eventual set adds `Publication` for the import half and `World` for the dressings; neither
+# arrives until something includes them, because CheckLayering denies what is not declared and a
+# narrower declaration is a stronger rule.
+#
+# No DISPATCH_HALF yet, and it is not an omission. Docs/Structure.md#threads-are-a-second-partition
+# splits this module `Record` / `Import`, and `Import` is a directory that does not exist: a
+# `wl_buffer` becomes a device image on the dispatch thread, and there is no protocol layer to hand
+# one over. `gyro_add_module` refuses a half that names no directory, which is the right moment for
+# the declaration to appear.
+gyro_add_module(Render
+	DEPENDS
+		Core
+		Geometry
+		Seam
+	SOURCES
+		Device.cpp
+		Renderer.cpp
+	TESTS
+		Device.Test.cpp
+)
+
+# PUBLIC for Compositor's reason below: the module's own tests compile against volk's prototypes too,
+# and Render's headers name Vulkan handles rather than hiding them behind an opaque pointer.
+target_link_libraries(Render
+	PUBLIC
+		volk::volk
+		spdlog::spdlog
+)
+
 # The composition root, and the only module that knows both sides of either waist. Docs/Structure.md
 # #orchestration is its whole brief: it constructs the clock, the backend, the rendering device, the
 # publication channel, and the threads, and hands each subsystem what it needs.
@@ -472,6 +536,19 @@ add_executable(UringProbe
 	Tools/UringProbe.cpp
 )
 
+# The same brief as UringProbe and the same shape: it answers a question about the machine before
+# gyro runs on it, and it answers the questions Docs/Decisions.md decision 40 rested on for a year
+# without being run. It links the *headers* and nothing else — the loader is `dlopen`ed exactly as
+# volk does it, so this builds and runs on a machine with no Vulkan at all and says so.
+add_executable(VulkanProbe
+	Tools/VulkanProbe.cpp
+)
+target_link_libraries(VulkanProbe
+	PRIVATE
+		Vulkan::Headers
+		${CMAKE_DL_LIBS}
+)
+
 # The tests that stand on both sides of the publication waist: they publish real spring coefficients
 # through Publication and reconstitute them through Animation/Solve, which no single module may do —
 # Publication does not depend on Animation, by the graph. So this is a bespoke executable rather than
@@ -488,6 +565,7 @@ add_executable(UringProbe
 add_executable(IntegrationTests
 	Source/Integration/PublicationRoundTrip.Test.cpp
 	Source/Integration/PublicationSoak.Test.cpp
+	Source/Integration/RenderImport.Test.cpp
 	Source/Integration/SceneRoundTrip.Test.cpp
 	Source/Integration/Schedulability.Test.cpp
 )
@@ -497,6 +575,8 @@ target_link_libraries(IntegrationTests
 		Headless
 		Publication
 		Animation
+		Render
+		Virtual
 		World
 		Seam
 		Geometry

@@ -609,7 +609,11 @@ nothing only proves the grep.
   it when nested lands, since a host connection is the second source with a genuine answer — a frame
   callback is a promise about the future in a way a page-flip event is not.
 - **spdlog async sink** — file I/O from the frame thread punts to io-wq and surfaces as jitter.
-- **How `Virtual`'s tests are gated, and where the dmabuf comes from in CI.**
+- **How the render tests are gated, and where the dmabuf comes from in CI.** *(Widened 2026-08-22:
+  the renderer's own tests have landed and there are now two gates rather than one — a machine may
+  lack `/dev/udmabuf`, and it may equally have no Vulkan ICD at all, which is the ordinary state of a
+  minimal container. `Render/Device.Test.cpp` and `Integration/RenderImport.Test.cpp` both print a
+  named skip line and pass. The question below is unchanged and is now the live one.)*
   [Decision 102](Decisions.md#102-a-virtual-output-allocates-the-buffers-it-hands-out-and-that-is-what-stands-the-renderer-up)
   puts the renderer's targets behind a udmabuf allocator and records the awkward half: `/dev/udmabuf`
   is `0600 root:kvm` and reachable on a workstation only through logind's `uaccess` ACL, so a
@@ -619,8 +623,21 @@ nothing only proves the grep.
   asserting at the CI level that they did not skip. The last is the current lean, and what makes it a
   question rather than a preference is that a green run which skipped everything is precisely the rot
   [decision 36](Decisions.md#36-frame-path-discipline-is-enforced-mechanically-not-by-review)'s
-  build-time checks exist to prevent. Wants deciding when the renderer's own tests land, since that is
-  the first suite it can silently hollow out.
+  build-time checks exist to prevent. That suite now exists and is exactly as hollow-able as
+  predicted: on a machine with neither udmabuf nor an ICD, sixteen tests pass having asserted
+  nothing.
+- **Whether the frame clock absorbs a blocking `Record` on the floor tier.**
+  [Decision 104](Decisions.md#104-a-device-that-cannot-export-a-timeline-finishes-the-frame-inside-record)
+  has a renderer that cannot export a timeline wait for its own submission before returning, which is
+  the accurate thing to do on a device with no second processor to overlap with — but it means that
+  on a machine with a real panel and no GPU driver, software rasterization happens inside the frame
+  section rather than beside it. Every input to
+  [decision 35](Decisions.md#35-a-miss-costs-one-frame-bounded-by-the-floor-composite)'s record-time
+  check is a duration, so the arithmetic is unchanged and the cost lands in the CPU half of `C` where
+  it belongs; what is unknown is whether the *variance* of llvmpipe under load is something a
+  prediction built for a GPU queue tracks well. It will not yield to reading — it wants a panel, a
+  scene, and `LP_NUM_THREADS` turned down — and nothing is blocked meanwhile, because a virtual output
+  never waits on a point and the path is exercised end to end without a display.
 - **What a virtual output's cadence should be when nobody is asking for one.** Decision 102 gives it
   a `VblankTimeline`, which needs a period, and a recording at a fixed rate has an obvious one. A test
   stepping frame by frame does not, and neither does an encoder that wants to consume as fast as the
