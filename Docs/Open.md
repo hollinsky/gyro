@@ -234,7 +234,15 @@ been waiting on a question that could not be answered until the rule behind it w
   gyro wants it at all before the rule is bent to admit it.
 - **The capability probe.** What it renders, at what sizes, how long it may take at startup, and how
   its result maps onto tiers. It runs on every boot of a system-layer process, so it has a latency
-  budget.
+  budget. **The floor composite belongs in what it renders**, at output resolution, because `C_min`
+  is a target rather than a measurement and this is the one place a per-machine figure to check it
+  against can be obtained for free — the probe is already running the real pass chain off the frame
+  path, and the alternative is rendering a floor composite nothing asked for on a machine where
+  [decision 35](Decisions.md#35-a-miss-costs-one-frame-bounded-by-the-floor-composite)'s second
+  branch never fires. Subtracting the effect passes from an ordinary frame is not that alternative:
+  [decision 62](Decisions.md#62-effect-composition-is-an-optimization-and-the-unfused-path-is-the-reference)
+  fuses pointwise effects into the composite pipeline, so a planned frame holds no separable
+  base-composite span.
 - **Output-to-session assignment must not be client-reachable.** Surfaced while resolving decision
   44 and independent of it. `Filtered globals` puts *output configuration* in the System tier, and
   if a System-tier client could move an output between sessions that is a direct bypass of decision

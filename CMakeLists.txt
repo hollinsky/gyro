@@ -217,6 +217,7 @@ gyro_add_module(Frame PORTABLE
 		Core
 		Seam
 	TESTS
+		Budget.Test.cpp
 		FrameClock.Test.cpp
 )
 

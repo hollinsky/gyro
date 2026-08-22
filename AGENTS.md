@@ -75,8 +75,13 @@ Codebase Structure:
 		                        coming out of idle needs and nothing else in the interface does. It holds
 		                        no figure about gyro's own cost (decision 35's budget is the loop's), and
 		                        the VRR servo converges inside Observe because an observation is the only
-		                        new evidence there is. The frame loop, admission control, and the timing
-		                        policy join it here
+		                        new evidence there is. Budget.h is that figure, and it is the clock's
+		                        counterpart rather than a second copy of it: two devices never summed
+		                        because the schedule composes them differently on every axis, C_planned a
+		                        windowed maximum and C_min a target the floor composite is checked
+		                        against, and a generation on the GPU half because a timestamp outlives
+		                        the configuration it was taken under. The frame loop, admission control,
+		                        and the timing policy join it here
 
 		Integration/          - The tests that name both Publication and Animation, which no module may:
 		                        the coefficient round trip, and the two-thread soak that proves the
