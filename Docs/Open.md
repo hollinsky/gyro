@@ -184,6 +184,13 @@ been waiting on a question that could not be answered until the rule behind it w
   and the answer sizes decision 62's variant lattice. It wants doing *with* the vocabulary rather
   than after it: a set designed without the question in mind produces a gathering material where a
   pointwise one would have done, and each of those is a pass boundary that can never be fused away.
+- **Where `Material` lives.** [Decision 87](Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)
+  moves `TextureId` and `ColorState` out of `Seam` because the world authors them and the frame side
+  consumes them, and it cannot place the third field of a `DrawItem` that has the same shape. A
+  material is the shell's vocabulary, so it plausibly belongs to `Scene` — and `Seam` may not depend
+  on `Scene`, which is what makes this the one of the four that neither relocation nor translation
+  answers. It wants deciding with the entry above rather than before it, since a set of one enumerator
+  does not need a home yet and a designed set might justify a fourth base module below both waists.
 - **The intermediate format for unfused effect passes.** Decision 62 requires the fused and unfused
   paths to agree below the perceptual threshold, and the whole of the difference is rounding at pass
   boundaries — registers at full precision against whatever the intermediate stores. `fp16` is
@@ -366,8 +373,12 @@ been waiting on a question that could not be answered until the rule behind it w
   has a draw item name a `TextureId` and nothing in `IRenderer` creates one, on the grounds that a
   `wl_buffer` arrives on the dispatch thread and turning it into a device image must not happen inside
   the frame section — so import is the renderer's dispatch half, written when there is a protocol
-  layer to call it. What that half looks like is genuinely open and it is the promoted-buffer entry
-  above wearing different clothes: the import verb, the release that has to be safe while the frame
+  layer to call it. **The layering half of this is now answered, and was worse than it looked**:
+  [decision 87](Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)
+  found `TextureId` sitting in `Seam`, which neither `Protocol` nor `Scene` may name, so the import
+  verb had no legal caller rather than merely no design — and moves the type to `Core`. What stays
+  open is the shape, and it is the promoted-buffer entry above wearing different clothes: the
+  import verb, the release that has to be safe while the frame
   thread may still hold the id in a list it is recording from, and whether a failed import is a frame
   that draws nothing there or a surface that is refused at commit. The snapshot atlas is the case that
   says it cannot simply be deferred to whoever writes `Protocol` — an exit snapshot is minted by the

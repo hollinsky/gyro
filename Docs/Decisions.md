@@ -445,6 +445,15 @@ emit cost is proportional to the dirty set that
 fine. Start with eager full re-emit and measure; the representation is offset-addressed either way,
 so the arena strategy is contained.
 
+**The structural half is now settled.** *(Annotated 2026-08-22.)* This decision fixed what crosses
+for *animation* and never said what the coefficients are coefficients of, which stayed unnoticed
+while [Snapshot.h](../Source/Publication/Snapshot.h) had no `Scene` writing into it.
+[Decision 86](#86-the-published-scene-is-a-preorder-tree-model-values-inline-coefficients-by-reference)
+answers it: the topology crosses as a preorder run of node records carrying their own subtree
+lengths, a node names its active channels by index into the runs this decision established and
+carries its settled ones inline, and the flattened alternative turns out to be unauthorable rather
+than merely cheaper. The pacing question above is untouched by it.
+
 ### 74. The forward ring recycles only below the watermark, and a full ring defers
 
 *(Settles the flow control [decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) left implicit,
@@ -1224,6 +1233,152 @@ frame section to serve a fact that changes on hotplug, which makes every iterati
 one — the trade [decision 50](#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients)
 already refuses when it puts coefficients rather than values on the wire.
 
+### 86. The published scene is a preorder tree; model values inline, coefficients by reference
+
+*(Decided 2026-08-22, on asking what `Scene` actually produces.
+[Decision 50](#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients)
+settled the animation half of the publication boundary and was silent about the structural half.)*
+
+**The snapshot carries the scene's topology, as a preorder run of node records each naming the length
+of its own subtree.** Decision 50 put spring coefficients on the wire and evaluation on the frame
+thread; it never said what those coefficients are coefficients *of*.
+[Snapshot.h](../Source/Publication/Snapshot.h) shows the gap plainly — three coefficient runs and a
+wake schedule, and nothing from which a `DrawItem` could be built. This is the other half of that
+decision, taken four decisions later because nothing needed it until there was a `Scene`.
+
+**The flat alternative is not merely worse; it is unauthorable, and one field proves it.**
+[Decision 82](#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene)'s `DrawGroup::Count` is
+a run length over *emitted* items, and the emitted list is post-cull: back faces go by
+`NodeTransform::FacesViewer` over the composed chain, and anything wholly outside the target is gone
+before the list is built. Both tests are post-evaluation and per instance. So emission depends on
+evaluation, `Count` depends on emission, and the dispatch thread — which by decision 50 evaluates
+nothing — cannot compute it. The repair is to publish skeletons and let the frame thread fix the
+counts up after culling, at which point dispatch has published a tree with extra steps *and* a second
+representation that can disagree with the first, which is exactly what
+[decision 16](#16-nodes-own-their-properties-the-active-set-is-mirrored)'s "derived, never
+maintained" exists to refuse.
+
+Three things that read as arguments for flattening dissolve the same way. A group's offscreen sits at
+its subtree's **screen-space** bound, which is evaluated and per instance, so dispatch declares which
+subtrees are groups and never places them. **Ordering is the only thing a dispatch-side flatten
+actually saves**, and [decision 55](#55-transforms-are-3d-the-scene-is-a-painters-algorithm)'s strict
+tree order makes it free on whichever side does it. And `TimeScale`
+([decision 19](#19-hierarchical-time-is-a-per-subtree-timescale-only)) composes down the tree, which
+is a traversal it gets for nothing once there is a traversal to hang it on.
+
+**Preorder plus subtree length, rather than parent indices.** The frame side's walk is then a linear
+scan over a contiguous run with an explicit transform stack, and skipping a hidden or wholly-culled
+subtree is an addition rather than a test per node — which is what a scene with one workspace visible
+out of nine costs on every frame. Parent indices are equally pointer-free and cannot express that
+skip. It is also the encoding `DrawGroup::Count` already uses, so the source tree and the emitted list
+are read the same way rather than in two idioms; the asymmetry that makes the length legal here and
+illegal there is that a structural length counts **nodes**, which dispatch knows, and not emissions,
+which it does not.
+
+**A node names each channel by index where it is moving and carries it inline where it is not.** The
+coefficient runs are the *active* set — that is decision 16 as decision 50 re-derived it, and the
+cache-friendly walk over only what moves is the whole of what it buys — so a node cannot simply hold
+six run indices, because most nodes at most instants have no active channel at all. What it holds per
+channel is an index or a sentinel, and beside it the settled value. That is
+[model versus presentation](Animation.md#model-versus-presentation) crossing the boundary in its own
+shape: the model value inline, the coefficients by reference, and for a channel at rest the two agree
+by construction because a settled spring *is* its model value.
+
+**Rejected: a spring per channel on every node**, making the runs dense and the indices implicit. It
+is simpler at the reader and it makes the run length `O(nodes × channels)` on a scene where almost
+nothing is animating, which gives up the one property the active set exists for and makes a still
+desktop cost the same to publish as a moving one — on the eager-per-commit path
+[decision 50](#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients)
+leaves open at its foot.
+
+**Rejected: parent indices, matched rather than nested.** The ordinary flat-tree encoding, and it
+loses nothing except the subtree skip — which is the operation the frame thread performs most and the
+only one whose cost scales with what is *not* on screen.
+
+**Rejected: a flattened skeleton list, per the `Count` argument above.** Recorded rather than merely
+absent because it is the shape the render seam invites: `IRenderer::Record` takes a flat span, so a
+snapshot carrying the same thing looks like it would save `Frame` a pass. It would, and it cannot be
+built.
+
+**Consequences.** `SnapshotRun` grows a node run now and gains client damage and
+[decision 46](#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)'s
+capture requests later; `SnapshotVersion` bumps, which is free while both halves of the boundary still
+ship together. `Frame` walks a tree to build a list a renderer walks again — decision 82 already
+accepted that cost and this is where the first of the two walks comes from.
+
+### 87. A type both halves of the world name lives below both waists, not in `Seam`
+
+*(Decided 2026-08-22, on reading what a `DrawItem` carries against who produces each of its fields.)*
+
+**`TextureId` and `ColorState` move to `Core`; `Scene` declares its own output record and the
+composition root converts.** The rule is
+[Structure.md](Structure.md#region-is-in-geometry-and-reachability-is-why)'s and is already load
+bearing once — *a type that a dispatch-side module and a frame-side module must both name lives in
+`Core`, `Geometry`, or a waist both can reach, never in `Seam`* — and what this decision adds is that
+the rule has three more instances and resolves them differently.
+
+**The reading that found it.** Take
+[decision 82](#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene)'s `DrawItem` field by
+field and ask who produces the value. `Quad`, `Sampling`, `Opacity`, and `Radius` are frame-derived,
+which is the decision working. `TextureId` is an import's identity, `ColorState` is what the client
+declared, and `Material` is what the shell named — all three authored on the dispatch side, all three
+declared in `Seam`. `Scene` depends on `Core`, `Geometry`, `Animation`, and `Publication`; `Protocol`
+on `Core`, `Geometry`, and `Scene`. Neither may say `Seam`, so `CheckLayering.cmake` fails the day
+`Scene` stores any of them, and its report names a missing edge rather than this paragraph.
+
+**`TextureId` goes to `Core`, and it unblocks a hole rather than merely avoiding one.**
+[Open.md](Open.md)'s *how a texture is minted, and who holds it* has import happening dispatch-side
+because a `wl_buffer` must not become a device image inside the frame section — and today neither
+`Protocol` nor `Scene` can name the type such an import would return. The entry has no legal caller,
+not merely no design, and nobody had noticed because nothing has called it. The move is nearly
+notional besides: it is `Core/Handle.h`'s generational handle in everything but its declaration.
+
+**`ColorState` goes to `Core` as well, and `Geometry` is the wrong answer for it.** `Region` landed
+in `Geometry` because it is rect arithmetic over the coordinate spaces and `Rect<S, T>` was already
+there; a colour state is not geometry, and putting it there would quietly redefine that module as
+*domain content that is not `Core`* rather than what
+[Structure.md](Structure.md#geometry-is-not-part-of-core) says it is. It meets `Core`'s own test
+instead: it depends on nothing, it names no other domain's vocabulary, and it has more than one caller
+before it has two implementations. [ColorState.h](../Source/Seam/ColorState.h)'s own header says it
+sits in `Seam` "because both halves of the seam need it and neither owns it" — that sentence stays
+true and turns out to have named the wrong pair of halves.
+
+**`OutputConfiguration` is translated rather than relocated, and the difference is the point.**
+`Scene` needs an output model — [decision 69](#69-settling-answers-with-a-wake-idleness-folds-a-monoid-not-an-or)'s
+wake fold is per output and happens dispatch-side before publication,
+[decision 67](#67-the-settled-snap-is-unconditional)'s snap is to an output's device grid, and
+[decision 32](#32-a-surfaces-frame-cadence-follows-its-fastest-output)'s cadence needs to know which
+outputs a surface intersects. Almost none of what `OutputConfiguration` carries serves any of that:
+it is what `Reconfigure` asks for and `Reconfigured` reports achieved, a negotiation between the frame
+thread and a backend. So `Scene` declares the record it actually wants — identity, the set generation,
+the global rectangle, the exact scale, the device grid — and the composition root fills it in, which
+it may do because it is already the only thing that knows both sides of both waists.
+
+**Why not translate all of them, since translation is available.** Because it is right for a fact that
+changes on hotplug and wrong for one that changes per commit. A texture identity is per surface and
+per frame, so a translation layer is a map maintained and consulted on the frame path, which is an
+allocation and a lookup where neither is permitted. The axis is how often the fact moves, not how
+awkward the type is to relocate.
+
+**Rejected: `Scene` stores an opaque `uint32_t` and the root reconstitutes it.** It satisfies the
+build check and gives one fact two spellings, which is the objection
+[decision 82](#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene) already made to a blend
+flag and [decision 84](#84-the-snapshots-per-output-run-is-indexed-under-a-set-generation) to an
+output identity on `Wake`. It also puts the reconstitution somewhere, and every candidate is on the
+frame path.
+
+**Rejected: giving `Scene` a `Seam` edge.** One line in `gyro_add_module` and the rule stops being
+true. `Seam` is on the frame side's edge set and not on the world's, and what would be given up is the
+composition root being the only thing that knows both sides of a waist — the property that lets a
+presenter be swapped during device migration without the scene noticing.
+
+**Left open: where `Material` lives**, and it is the one that may cost a module. It is the shell's
+vocabulary, so it plausibly belongs to `Scene` itself — and `Seam` cannot depend on `Scene`, which
+makes it the first of these four that neither relocation nor translation obviously answers. It is
+[open](Open.md) alongside the material vocabulary it names, since deciding what is in the set and
+deciding where the set lives are close enough to be one reading. A fourth base module below both
+waists is the shape that would resolve it, and one header is not enough reason to create one.
+
 ---
 
 ## Animation
@@ -1441,6 +1596,13 @@ What it adds is a progress parameter, which is not time: no `beginTime`, no `rep
 decisions, and the shape is the same both times — the conclusion survives, the sentence justifying
 it does not. Worth reading as a caution about this entry specifically, since it is the shortest
 decision in the log and has now been the least reliable.
+
+**The word *instance* has since narrowed.** *(Annotated 2026-08-22.)*
+[Decision 88](#88-an-instance-is-a-node-the-published-scene-is-a-dag) makes an instance a node
+expanded inline rather than a target of its own, so what samples its own time is an *output* —
+including [decision 26](#26-remote-presentation-is-a-virtual-output-with-client-supplied-targets)'s
+virtual one, which is where the different rates in the paragraph above actually come from. The
+widening survives unchanged; it is narrower than the word it was written with.
 
 ### 20. Exit animations use full-resolution snapshots
 
@@ -5376,6 +5538,25 @@ live windows rather than snapshots since 2003; Compiz's `paintOutput` took a tra
 reason. It is the least-copied of the three ideas recorded here and the one with the longest
 uninterrupted track record.
 
+**The instance is a node.** *(Revised 2026-08-22.)*
+[Decision 88](#88-an-instance-is-a-node-the-published-scene-is-a-dag) keeps this decision's claim —
+one primitive with several consumers, and identity on it rather than a render parameter — and
+changes what the primitive is made of: a reference node in
+[decision 86](#86-the-published-scene-is-a-preorder-tree-model-values-inline-coefficients-by-reference)'s
+published tree, expanded inline by the frame thread, rather than a retained object rendering into a
+target of its own. Two of the six consumers listed above had already left the list by the time it
+was read — [decision 82](#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene) made a
+group's flattening offscreen a draw item, and decision 26 makes a virtual output an output — and
+what remained composites into the target of whatever references it.
+
+Three paragraphs above narrow with it. *Each instance samples its own time* becomes the host
+output's presentation instant, which is [decision 28](#28-the-frame-clock-is-per-output) and needs
+nothing further. *Cost enters admission control per instance* holds in its first half and the count
+is **withdrawn** as a new axis: a reference node is area, which `Admit` already prices. And the
+permission is checked dispatch-side at commit, where the reference is authored, rather than by the
+side that draws — which is where it was always going to land, since that is the side that holds the
+tree.
+
 ### 67. The settled snap is unconditional
 
 [Decision 54](#54-settled-geometry-snaps-to-the-outputs-device-grid) left open whether the snap
@@ -5535,3 +5716,87 @@ what `libinput` delivers. The first is additive and can stay a copy; the second 
 arrives with the input seam, at which point the module gains a `DISPATCH_HALF` and the question is
 asked again — for that half, and not for the panel. Either way the check reports it as a build failure
 with the include named, which is the whole reason to declare the tier while the answer is still cheap.
+
+### 88. An instance is a node; the published scene is a DAG
+
+*(Decided 2026-08-22. Revises [decision 64](#64-the-scene-is-instantiable-an-instance-has-identity-a-clock-and-a-permission),
+whose claim survives and whose mechanism does not.)*
+
+**A node may reference another subtree, and the frame thread expands the reference inline during its
+preorder walk.** Decision 64's primitive — *render this subtree, under this transform, to this target*
+— stays one primitive with one identity. What changes is that it is a node in
+[decision 86](#86-the-published-scene-is-a-preorder-tree-model-values-inline-coefficients-by-reference)'s
+published tree rather than a retained object with a target of its own, so nothing new is enumerated,
+`EvaluateRequest` is unchanged, and decision 84's per-output indexing is untouched.
+
+**Two of decision 64's six consumers had already left the list, and noticing that is most of the
+argument.** Decision 82 made a group's flattening offscreen a `DrawGroup` in the draw list, managed by
+the renderer. And
+[decision 26](#26-remote-presentation-is-a-virtual-output-with-client-supplied-targets) makes a
+virtual output an *output* — its own frame clock, its own damage, its own row in the admission set —
+which covers remote presentation and the screen recorder wanting per-output frames alike. What was
+left needing a mechanism is the overview thumbnail, the switcher tile, and the one-shot still.
+
+**The transition it has to serve is window-to-thumbnail, and a reference node is the only shape that
+resamples it once.** [Decision 56](#56-clients-render-at-the-ceiling-and-gyro-downscales) and
+[decision 52](#52-coordinate-spaces-are-three-and-quantization-belongs-to-the-output) between them
+forbid resampling an already-resampled image. Under a reference node the transform chain composes and
+the client's buffer is sampled once at whatever scale the moment requires, with the mip chain off the
+import path where [Animation.md](Animation.md#matched-geometry) already puts it. Under an instance
+with its own target, the subtree renders at the target's size and is then drawn at the animating size
+— two resamples for the length of the transition, on
+[decision 18](#18-matched-geometry-is-in-the-first-cut)'s worked example and
+[Experience.md](Experience.md#one-hand-made-all-of-it)'s most-watched motion. It is the failure the
+[two-output atlas](Open.md) entry describes, reached through storage rather than through geometry.
+
+**Identity comes out stronger than the mechanism it replaces.** A referenced subtree is *literally the
+same nodes with the same springs*, so a switcher tile and an overview thumbnail are one object by
+construction rather than two the system keeps in agreement — which is what
+[decision 15](#15-identity-is-a-generational-handle) was wanted for here, obtained without a second
+kind of thing to have identity.
+
+**It keeps the schedule and the fold where they are.** Instance count would have been a new axis of
+[decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)'s admission
+set, and decision 64 said so; as a node it is area, which `Admit` already prices, on the frame
+decision 64 correctly named as the one least able to afford a surprise. A reference node's springs are
+the host output's springs, so decision 69's per-output fold covers it unchanged instead of
+partitioning per instance — and every instance that could arm its own wake is another way to fail
+[doing nothing costs nothing](Experience.md#doing-nothing-costs-nothing).
+
+**And it keeps decision 84 from firing on the transition it must not disturb.** An instance run would
+have made the header's generation an *instance*-set generation, and thirty thumbnails coming into
+being renumbers the set at overview entry — where the guard's correct behaviour is to contribute
+nothing for an iteration. That is a dropped frame at the start of the most demanding transition in the
+system, against [every frame](Experience.md#every-frame). Avoiding it means matching instances by
+handle rather than indexing them, which is decision 84's rejected alternative; 84 named the condition
+for reopening it — *if the run ever needs to be sparse* — and a volatile instance set is that
+condition. Better not to create it.
+
+**Two obligations fall on `Scene`, and they are the price.** A reference cycle is an unbounded
+traversal inside the frame section and the frame thread cannot afford to detect one, so **acyclicity
+and a bounded reference depth are guaranteed dispatch-side**, at commit, like every other invariant
+the authoring side owes the frame side. And **a reference is not a second identity**: the referenced
+subtree keeps its own `EntityId`s and the reference node has its own for its own transform, or matched
+geometry has two objects to reconcile and the property above is given away again.
+
+**Rejected: an instance run with per-instance targets and clocks** — decision 64 read literally. It is
+the more general mechanism and every part of the generality costs something here: a pool of targets
+reserved at configuration, because `BindTargets` allocates and may not run in the frame section; an
+eviction policy over that pool, whose visible form is a thumbnail showing a frame from a moment ago,
+which is decision 64's own rejected snapshot-backed overview arriving through the back door under
+exactly the load where somebody is looking at it; and a dependency order among instances inside one
+iteration. It stays available for anything that genuinely needs its own clock *and* its own target,
+and the still capture is where it would first arrive.
+
+**Rejected: rendering a thumbnail once and sharing it across outputs**, which is the efficiency
+argument for the instance run and the reason it looks like the scalable answer. Two outputs showing an
+overview are at two densities, so the shared render is the one that would be *wrong* — the same
+reasoning the two-output atlas entry already carries. The sharing on offer is sharing that would have
+to be refused.
+
+**What would overturn this.** A thumbnail that must run at a rate other than the output it is drawn
+on. A reference node inherits its host's clock by construction and cannot express that, and the
+promotion path — turning one into a target-owning instance under load — would be a visible rate change
+in something being watched, which
+[quality does not visibly fluctuate](Experience.md#the-picture-is-correct) is close enough to forbid.
+Nothing in the design wants it today, and it is the load-bearing assumption rather than a detail.
