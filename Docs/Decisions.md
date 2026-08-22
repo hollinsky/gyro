@@ -1521,6 +1521,18 @@ established by one commit at gesture start, and the events that follow retarget 
 parameter instead of dirtying the channels it feeds. The differ runs once per gesture, and what a
 1000 Hz device produces afterwards is one coefficient tuple republished.
 
+**The pacing and the staged model are both withdrawn.** *(Revised 2026-08-22.)*
+[Decision 89](#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete)
+keeps everything above and replaces *resolve the dirty set at most once per frame* with a phase
+boundary drawn at input availability: a property change retargets at the write, and anything whose
+inputs are the rest of the commit — matching, lifetime, atlas reservation, derived geometry — resolves
+at close. The annotation above had already removed the traffic that motivated the pacing; what 89 adds
+is that the pacing was also *wrong*, since two commits inside one frame carry different `t₀` and
+resolving them together discards the motion between them. `SetModel` goes with it: the model value is
+the spring target, so setting the model is retargeting and there is nothing to stage. The rejection of
+snapshot-and-compare above is untouched — the argument was against comparison passes, not for
+deferral.
+
 ### 15. Identity is a generational handle
 
 `{ uint32 Index, uint32 Generation }` from a slot map, for every animatable entity whether
@@ -2040,6 +2052,112 @@ the spring's `(x, v)` to seed a ramp on takeover. It is the same retarget as eve
 once per gesture rather than per channel, and it never touches the frame path. Animation.md's *like
 any other* gains the clause that it means the free regime, and the snapshot representation is fixed: a
 spring-coefficient array and a driven-progress array, both offset-addressed, the second usually empty.
+
+### 89. A commit resolves in two phases; a change becomes motion where its inputs are complete
+
+*(Decided 2026-08-22, settling [Structure.md](Structure.md#open)'s "where the differ lives". Revises
+[decision 14](#14-declarative-commits-with-dirty-tracking)'s dirty-set timing, and the `SetModel` the
+same decision names.)*
+
+**A property change retargets at the write, under the commit's shared `t₀`. Everything whose inputs
+are the rest of the commit resolves at close. The differ is `Scene`'s.** Structure.md placed the
+differ in `Scene` so that `Animation` could stay a pure library of springs and catalog and be built
+first per [decision 10](#10-the-animation-system-is-built-first);
+[Animation.md](Animation.md#declarative-commits) described the same machinery in a way that read the
+other way, and the entry asked for the two to be reconciled before either was written. The module
+half turns out to be the smaller one. What the reconciliation actually had to settle is *when* a
+mutation becomes motion, and that question has a different answer for a channel than for an entity.
+
+**Phase one is eager because deferral discards motion that happened.** Decision 14 answers gesture
+traffic by resolving the dirty set at most once per frame. The case that breaks it is two commits
+inside one frame, with different `t₀`, touching one property — ordinary against 1000 Hz input and a
+60 Hz output. A window opens at `t₀₁`; eight milliseconds later a second event focuses and moves it.
+Resolved once per frame, the second target wins and the opening never existed. Resolved at the write,
+the second is a retarget from the true `(x, v)` of an open already eight milliseconds in progress,
+which is [uniform interruption](Animation.md#declarative-commits) working. The first is right for the
+same reason `t₀` is the event's timestamp and not `now`: **render what happened, not a summary of
+it.** The traffic that motivated the pacing is separately gone —
+[decision 65](#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)
+makes a gesture one commit and a republished tuple, which decision 14 already records.
+
+Eager costs nothing to be eager. `AnimateTo` is `Begin(motion, PresentationState(t₀))`: four floats,
+no allocation, no lookup, since the commit's bundle resolved at open. And two retargets at the same
+`t₀` are **exactly** idempotent — the second samples the first's spring at its own origin and reads
+back identical `(x, v)` — so repeated writes to one channel inside one commit are arithmetic rather
+than motion, and the last target wins with no trace of the others.
+
+**The model value is the spring target, and there is no second field.** `Animatable::Model()` returns
+`Spring::Target`, so a settled property and its model are one number by construction. Decision 14's
+`SetModel` implies a staged value resolved later, and staging is not observable — a commit is a
+transaction on the dispatch thread, so nothing reads the model between a mutation and the close. What
+it would cost is an invariant to maintain across resurrection, hard settle on resume, atlas eviction,
+and device migration, each of which rewrites springs wholesale. Drift there is not a hitch that
+passes: it is a window whose logical position and animated destination permanently disagree, so
+clicks land where it is not and layout packs against a ghost. That is
+[decision 16](#16-nodes-own-their-properties-the-active-set-is-mirrored)'s *derived, never maintained*
+with a user-facing failure attached. **Setting the model is retargeting.**
+
+**Phase two exists because some inputs are the rest of the commit.** Four things are in it, and the
+fourth is what makes it a rule rather than a list.
+
+- **Matching.** [Animation.md](Animation.md#matched-geometry) is explicit that a move is emitted when
+  a key-`K` exit and a key-`K` enter occur *in the same commit*. Resolved at the write, both halves
+  have already been launched by the time the match is knowable.
+- **Lifetime**, including the resurrection of a retiring entity, which is the same set operation seen
+  from the other side.
+- **Atlas reservation.** An exit is not only arithmetic:
+  [Animation.md](Animation.md#when-the-blit-happens) reserves the rectangle *when the retirement is
+  observed*. Eager exits therefore reserve for entities that turn out to be moves, and under
+  [decision 46](#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)
+  that pressure settles *other* exits early — menus and tooltips snapping out instead of fading, on
+  precisely the busy commit where several things move at once. The user who pays is not the one whose
+  window matched.
+- **Derived geometry**, which is where the rule came from. The anchor is
+  [declared by a transition rather than animated by one](Animation.md#bundles-are-the-real-unit) and
+  a bundle names its *source* while the scene resolves the coordinate against the node's extent. A
+  transition resolved at the write captures the extent as it stood then, so changing the extent later
+  in the same commit leaves the anchor resolved against a size the node never had — a window growing
+  out of the wrong corner, which is the defect the anchor field exists to prevent.
+
+So the phase boundary is stated as availability rather than as an enumeration: **phase one retargets
+channels and resolves nothing derived; every derivation is phase two.** Layout is thereby where it
+already belonged — a pass at close rather than arithmetic inline in a commit body — and the rule does
+not need extending the first time a derived quantity is added.
+
+**Atomicity is unaffected, and the checking of it is worth recording.** Three things could have torn
+and none do. The frame thread never reads dispatch state, only a published snapshot through the ring,
+and publication is at close at the earliest — so write order inside a commit is invisible across the
+waist by construction ([decision 45](#45-protocol-dispatch-is-a-thread-not-a-task),
+[decision 74](#74-the-forward-ring-recycles-only-below-the-watermark-and-a-full-ring-defers)). Every
+eager write uses the commit's `t₀`, fixed at open rather than read per write, so opacity and scale
+share an origin whatever order they were written in. And under the paced publication
+[decision 50](#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients)
+leaves open, two commits coalescing into one snapshot lose nothing, because the earlier commit's
+motion is already baked into the `(x, v)` the later one's retarget sampled. Coalescing whole commits
+is lossless in the only currency the frame side reads, which is the same property that makes phase one
+correct.
+
+**Rejected: resolving everything at close**, decision 14 read literally. It is right for phase two and
+it collapses the multi-commit case above, on the input bursts where gestures live. It also needs the
+staged model value, so the two halves of decision 14's wording fail together rather than separately.
+
+**Rejected: resolving everything at the write.** Simplest, and it breaks matching, spends atlas
+rectangles on entities that are about to become moves, and makes a commit body order-sensitive for
+anything derived. The three failures are one failure: an operation was resolved before its inputs
+existed.
+
+**Rejected: the differ in `Animation`.** Everything in phase two is entity knowledge — identity, match
+keys, the retiring set, the atlas — and decision 10 builds `Animation` before there are entities to
+know. [Bundle.h](../Source/Animation/Author/Bundle.h) and
+[Animatable.h](../Source/Animation/Author/Animatable.h) were written against the differ as a *caller*
+for this reason, which is the placement holding under its own weight rather than by having been
+written down first.
+
+**Consequences.** Dirty tracking survives and relocates: what remains of it is the *publication* set —
+which nodes to re-serialize — which is decision 50's open pacing question and belongs to
+`Publication` rather than to the differ. `Animation` stays a pure library. Structure.md's open entry
+closes, and Animation.md's *dirty tracking, not snapshot diffing* section is rewritten around the two
+phases, since the heading now names a publication concern rather than a resolve queue.
 
 ---
 

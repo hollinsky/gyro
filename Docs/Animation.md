@@ -578,13 +578,32 @@ Three things fall out:
 - **Uniform interruption.** A commit landing mid-flight retargets every affected spring from its
   current `(x, v)`.
 
-### Dirty tracking, not snapshot diffing
+### Two phases, and no comparison pass
 
-There is no world snapshot and no comparison pass. `SetModel` records the change as it happens, so a
-commit closes by walking a dirty set whose size is proportional to what changed, not to world size.
-Enter and exit come from entity creation and destruction recorded within the same commit. The
-transition resolver has everything it needs: current presentation `(x, v)` from the spring, and the
-new model value from the property.
+There is no world snapshot and nothing is diffed against anything. A commit resolves in two phases,
+and the boundary between them is **whether a change's inputs are complete at the moment it is
+written**.
+
+**Phase one is every property change, resolved at the write.** Setting a property *is* retargeting
+it: the model value is the spring's target, so there is no staged value and nothing to reconcile
+later. The resolver has what it needs on the spot — the current presentation `(x, v)` from the
+spring, the new value from the assignment, and the bundle and `t₀` the commit was opened with. It
+costs four floats and no allocation, and writing one property twice inside a commit is exactly
+idempotent, because the second retarget samples the first's spring at its own origin and reads back
+the same `(x, v)`. Order does not matter and the last target wins.
+
+**Phase two is everything whose inputs are the rest of the commit.** Enter and exit come from entity
+creation and destruction, and neither can be resolved where it is written: a key-`K` exit becomes a
+[move](#matched-geometry) rather than an exit if a key-`K` enter arrives later in the same commit, a
+removal is a [resurrection](#lifetime) if the entity was retiring, an exit
+[reserves atlas space](#when-the-blit-happens) that a move would not have wanted, and a
+[derived](#bundles-are-the-real-unit) quantity like an anchor coordinate depends on an extent that
+may still change. So phase one retargets channels and resolves nothing derived; layout, matching,
+lifetime, and atlas reservation all run at close.
+
+Neither phase walks the world. Phase one's cost is proportional to what was written and phase two's
+to what was created, destroyed, or derived from those — never to world size. See
+[decision 89](Decisions.md#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete).
 
 ### Timing and rates
 
@@ -608,9 +627,13 @@ to evaluate correctly from the coefficients already published. The degradation m
 authoring side is therefore input latency and not judder.
 
 Commits happen at event rate; evaluation happens at frame rate. The declarative machinery therefore
-never executes inside the frame budget. One case needs care: gesture tracking commits at input rate,
-and a 1000 Hz mouse would otherwise diff a thousand times a second. Mark dirty on commit and resolve
-at most once per frame.
+never executes inside the frame budget. Gesture tracking is the case that looks like it needs pacing,
+and it does not, twice over. [Decision 65](Decisions.md#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)
+removes the traffic rather than throttling it — a gesture is one commit and then a single progress
+tuple republished, so a 1000 Hz device resolves one transition and not a thousand. And pacing would
+be wrong even where the traffic is real: two commits inside one frame carry two `t₀`, so resolving
+them together would discard the motion between two input events that genuinely happened. Retargeting
+at the write keeps it, in the only place it needs to survive — the `(x, v)` the next retarget samples.
 
 ### Escape hatch
 

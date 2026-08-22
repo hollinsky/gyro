@@ -575,11 +575,15 @@ is.
 
 - **Generated sources.** `gyro_add_module` prepends the module directory to every source, so the
   protocol bindings — generated into the build tree by a host tool — cannot yet be expressed.
-- **Where the differ lives.** Placed in `Scene` here, so that `Animation` stays a pure library of
-  springs and catalog with no knowledge of entities and can be built first per
-  [decision 10](Decisions.md#10-the-animation-system-is-built-first).
-  [Animation.md](Animation.md#declarative-commits) reads the other way, and the two should be
-  reconciled before either is written.
+- ~~**Where the differ lives.**~~ *Answered 2026-08-22 by
+  [decision 89](Decisions.md#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete):
+  `Scene`, as placed here, and the module question was the smaller half of the entry. What the
+  reconciliation had to settle is *when* a mutation becomes motion — at the write for a property
+  change, at commit close for anything whose inputs are the rest of the commit — and the second of
+  those is entity knowledge throughout, which is what keeps it out of `Animation` and leaves
+  [decision 10](Decisions.md#10-the-animation-system-is-built-first)'s build order intact.
+  `Animation.md` did not in fact read the other way; it described the same machinery without saying
+  where it ran.*
 - ~~**Whether `Console` shares `Seam`'s presenter.**~~ *Answered 2026-08-17 by
   [decision 79](Decisions.md#79-the-console-is-a-renderer-not-a-presenter): neither of the two
   readings this entry offered. The axis is who writes the pixels rather than who owns the images, so
