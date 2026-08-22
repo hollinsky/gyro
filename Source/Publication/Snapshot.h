@@ -40,7 +40,8 @@
 // **The one payload it does name by type is the wake schedule, because Core owns that type.**
 // Docs/Animation.md#storage puts the reduced wake fold in the snapshot header, one entry per output,
 // so the frame thread reads a schedule rather than deriving one. `Wake` is a Core primitive
-// (Docs/Structure.md#the-wake-is-in-core), on a declared edge, so the header holds it as itself.
+// (Docs/Structure.md#the-wake-is-in-core-and-the-table-above-is-why), on a declared edge, so the
+// header holds it as itself.
 
 // A gyro snapshot, recognisable as one. A magic and a version guard a stale or foreign mapping —
 // which decision 45's process option makes a real possibility rather than a theoretical one — so that
