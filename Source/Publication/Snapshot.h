@@ -34,8 +34,14 @@
 //
 // The node run is the same arrangement one level up. Docs/Decisions.md decision 86 fixes what crosses
 // — the scene in preorder, each record carrying the length of its own subtree — and this file
-// reserves the slot without naming the record, exactly as it does for the driven ramp. The record is
-// Scene's to define, because what a node *is* waits on a vocabulary Docs/Open.md still has open.
+// reserves the slot without naming the record, exactly as it does for the driven ramp.
+//
+// **The record is `World/Node.h`'s, and it is not Scene's.** *(Revised: decision 91.)* Scene writes
+// it and Frame walks it — decision 90 puts the tree's validation on the frame thread's own traversal
+// — and Frame may not depend on Scene, so a record Scene declared would be one Frame could not name.
+// That is decision 87's rule one level up: a type both halves of the world name lives below both
+// waists. What is left open is what a node *carries* rather than where the record lives; the fields
+// that wait on Docs/Open.md's scene vocabulary are absent from it and arrive with that vocabulary.
 //
 // **The one payload it does name by type is the wake schedule, because Core owns that type.**
 // Docs/Animation.md#storage puts the reduced wake fold in the snapshot header, one entry per output,

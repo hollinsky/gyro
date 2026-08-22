@@ -40,6 +40,18 @@ struct Narrow
 
 	friend bool operator==(const Narrow&, const Narrow&) = default;
 };
+
+// A stand-in node record, shaped like World/Node.h's but owing nothing to it — Publication does not
+// depend on World, by the module graph, and this file proves that PutNodes and Nodes<T>() need it not
+// to. Decision 91 is why the real record lives there; the point being made here is that the waist
+// carries it as bytes at an offset and would carry any other record the same way.
+struct Skeleton
+{
+	std::uint32_t SubtreeLength;
+	std::uint32_t Translation;
+
+	friend bool operator==(const Skeleton&, const Skeleton&) = default;
+};
 } // namespace
 
 GYRO_TEST(SnapshotPublisher, EmptyPublishIsAValidEmptySnapshot)
@@ -52,6 +64,7 @@ GYRO_TEST(SnapshotPublisher, EmptyPublishIsAValidEmptySnapshot)
 	GYRO_CHECK(reader.Run<Wide>(SnapshotRun::Translation).empty());
 	GYRO_CHECK(reader.Run<Narrow>(SnapshotRun::Opacity).empty());
 	GYRO_CHECK(reader.Wakes().empty());
+	GYRO_CHECK(reader.Nodes<Skeleton>().empty());
 }
 
 GYRO_TEST(SnapshotPublisher, TheSequenceCrosses)
@@ -99,6 +112,36 @@ GYRO_TEST(SnapshotPublisher, HeterogeneousRunsRoundTrip)
 	// The driven-progress slot was never written, so it is an absent run rather than a present empty
 	// one — the pinned shape reserves it, and this cut leaves it unfilled.
 	GYRO_CHECK(reader.Run<Narrow>(SnapshotRun::DrivenProgress).empty());
+}
+
+GYRO_TEST(SnapshotPublisher, TheNodeRunCrossesWithoutTheWaistNamingItsRecord)
+{
+	// Decision 86's shape, at its smallest interesting size: a root that owns the two nodes after it,
+	// the first of them a leaf whose translation is animating.
+	const std::array<Skeleton, 3> scene{ Skeleton{ 2, 0xFFFF'FFFFu }, Skeleton{ 0, 4 }, Skeleton{ 0, 0xFFFF'FFFFu } };
+	const std::array<Wake, 1> wakes{ Wake::EveryFrame(Monotonic::FromNanoseconds(100)) };
+
+	const SnapshotBuffer buffer = SnapshotPublisher{}.PutWakes(wakes).PutNodes<Skeleton>(scene).Build(3);
+
+	const SnapshotReader reader{ buffer.Bytes() };
+	GYRO_REQUIRE(reader.IsValid());
+
+	const std::span<const Skeleton> read = reader.Nodes<Skeleton>();
+	GYRO_REQUIRE_EQ(read.size(), std::size_t{ 3 });
+	GYRO_CHECK(read[0] == scene[0]);
+	GYRO_CHECK(read[1] == scene[1]);
+	GYRO_CHECK(read[2] == scene[2]);
+
+	// It sits beside the wake schedule and never in the run directory, because Runs is indexed by
+	// channel and the topology is not one — decision 90, and the reason Nodes is addressed by name.
+	GYRO_CHECK(reinterpret_cast<std::uintptr_t>(read.data()) % alignof(Skeleton) == 0);
+	GYRO_REQUIRE_EQ(reader.Wakes().size(), std::size_t{ 1 });
+
+	// Asked for as a record of a different shape it resolves to nothing, which is the same type check
+	// every coefficient run gets and matters more here: the record will change shape as the scene
+	// vocabulary lands, and a reader compiled against the old one must read no scene rather than a
+	// wrong one.
+	GYRO_CHECK(reader.Nodes<Wide>().empty());
 }
 
 GYRO_TEST(SnapshotPublisher, EachRunLandsAtAnAlignedAddress)

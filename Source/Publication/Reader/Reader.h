@@ -93,6 +93,31 @@ public:
 		return m_Valid ? Resolve<Wake>(m_Header.Wakes) : std::span<const Wake>{};
 	}
 
+	// The scene: decision 86's preorder run, one record per node, each naming the length of its own
+	// subtree. Empty on the same terms every run above is — an invalid reader, a size or alignment the
+	// writer disagrees about, or a run that does not lie wholly inside the snapshot.
+	//
+	// **Templated for the reason `Run` is, and here it is what keeps the waist below `World`.** The
+	// record is `World/Node.h`'s, because `Scene` writes it and `Frame` walks it and neither may name
+	// the other (decision 91). This module never names it, so it stays on `Core` and `Geometry` and a
+	// field added to a node is not a change to the boundary.
+	//
+	// The bounds check is worth more here than anywhere else in this file. Every other run is a flat
+	// array whose worst misreading is a wrong number; this one is walked as a tree, and decision 90
+	// puts a depth counter and a subtree-length check on that walk for the same reason this span is
+	// clamped — an unbounded traversal inside the frame section is the most expensive failure the
+	// system has.
+	template<typename T>
+	[[nodiscard]] std::span<const T> Nodes() const noexcept
+	{
+		static_assert(
+			std::is_trivially_copyable_v<T> && std::is_standard_layout_v<T>,
+			"A node record is reconstituted from bytes at an offset, so it must be one"
+		);
+
+		return m_Valid ? Resolve<T>(m_Header.Nodes) : std::span<const T>{};
+	}
+
 private:
 	// Whether the span's base meets the alignment every element depends on. Checked against the actual
 	// address rather than assumed, so that a reader handed an under-aligned mapping refuses it rather

@@ -77,7 +77,7 @@ standard, say so and we will talk about it.
 | How does a mechanism work — seam, backends, timing, color, sessions, protocol? | [Docs/Architecture.md](Docs/Architecture.md) |
 | How does animation work — springs, catalog, commits, transforms, identity? | [Docs/Animation.md](Docs/Animation.md) |
 | Where does code live, what may depend on what, which thread runs it? | [Docs/Structure.md](Docs/Structure.md) |
-| Why not X? What was rejected? | [Docs/Decisions.md](Docs/Decisions.md), 90 entries, anchored `### N.` |
+| Why not X? What was rejected? | [Docs/Decisions.md](Docs/Decisions.md), 91 entries, anchored `### N.` |
 | What is still unsettled? | [Docs/Open.md](Docs/Open.md) |
 | What does gyro want from the kernel and cannot have? | [Docs/KernelWishlist.md](Docs/KernelWishlist.md) |
 
@@ -95,8 +95,9 @@ Source layout and the invariant each module carries. The *why* is in the cited d
 
 | Module | Tier | Thread | What it is |
 | --- | --- | --- | --- |
-| `Core` | portable | either | Timebase (`Time.h`), `IClock`, `Signal`, `Result`, `Fd`, `Wake`, `Handle` the generational identity (15), `SlotAllocator`, `FrameSection`, `ColorState`, `Texture`. Types the world authors live here rather than `Seam`, because neither `Protocol` nor `Scene` may name `Seam` (87) |
+| `Core` | portable | either | Timebase (`Time.h`), `IClock`, `Signal`, `Result`, `Fd`, `Wake`, `Handle` the generational identity (15), `SlotAllocator`, `FrameSection`, `ColorState`, `Texture`. Types the world authors live here rather than `Seam`, because neither `Protocol` nor `Scene` may name `Seam` (87) — the ones that also need a coordinate go to `World` instead (91) |
 | `Geometry` | portable | either | `Scale` the exact rational, `Space` the coordinate spaces, `Region` the damage set. The integer grid is kept off the world (52, 53) |
+| `World` | portable | both | What a node is. `Node` is the record the published scene is a preorder run of — `Scene` writes it, `Frame` walks it, and neither may name the other, so it lives below both waists rather than in either half (86, 90, 91). The node kind and `Material` join it when the scene vocabulary lands |
 | `Animation` | portable | both | Split by direction: `Solve/` is the closed forms the frame thread evaluates, `Author/` produces coefficients and is dispatch-side (11, 12, 72) |
 | `Publication` | portable | both | The data waist. `Snapshot` the offset-addressed layout, `Ring` the newest-wins forward channel, `Return` the per-frame report carrying the watermark; `Reader/` frame-side, `Publisher/` dispatch-side (45, 50, 74, 75, 86, 90) |
 | `Seam` | portable | both | The control waist: every interface with more than one implementation and the data crossing it. `IPresenter`, `IEventSource`, `IRenderer`, `ISession`, `IInput`, `RenderTarget`, `SyncPoint`, `PresentationInfo`, `OutputConfiguration`, `RenderMode` (73, 78, 79, 80, 82) |

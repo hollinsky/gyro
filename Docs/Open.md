@@ -94,12 +94,20 @@ what to suspect. [AGENTS.md](../AGENTS.md#how-decisions-get-made) carries these 
   report and sleeps — so the conditional form is correct only with the step re-checking the ring after
   posting and before it returns `Never()`. Settle it by measuring the waste on a busy system rather
   than before.
-- **The shell's scene vocabulary.** Decision 51 commits to a closed set of node kinds — surface
-  reference, snapshot reference, solid, effect layer — and that list is a sketch rather than a
-  design. It is the same problem as the material vocabulary below and wants solving with it and with
-  the motion catalog, since a node, the material that dresses it, and the transition that reveals it
-  are one design problem seen three ways. The test named in decision 51 is the constraint: a shell
-  must not be able to produce motion that does not match the catalog.
+- **The shell's scene vocabulary.** *(Narrowed 2026-08-22.)* Decision 51 commits to a closed set of
+  node kinds — surface reference, snapshot reference, solid, effect layer — and that list is a sketch
+  rather than a design. It is the same problem as the material vocabulary below and wants solving
+  with it and with the motion catalog, since a node, the material that dresses it, and the transition
+  that reveals it are one design problem seen three ways. The test named in decision 51 is the
+  constraint: a shell must not be able to produce motion that does not match the catalog.
+
+  **The sketch is known wrong rather than merely undesigned, which raises the priority.** Decision 88
+  added a node kind the list does not contain — a node referencing another subtree — so anything
+  built against the four would be built against a set already superseded once. Decision 91 is why
+  this now blocks something concrete: `World/Node.h` exists and carries what the frame side's walk
+  needs, and the fields that wait on this entry are absent from it. A node kind, a material, a
+  texture, a color state, and the encoding of decision 88's reference all arrive together when this
+  is settled, and `SnapshotVersion` is what absorbs them.
 - **Which transitions declare an opacity group.** *(Narrowed 2026-08-17.)* Decision 60 settles that
   a group fade flattens and what it costs; it does not settle which bundles ask for one, and "every
   fade" is the wrong answer — paying for an offscreen on a single window fading out would put a
@@ -172,13 +180,16 @@ what to suspect. [AGENTS.md](../AGENTS.md#how-decisions-get-made) carries these 
   and the answer sizes decision 62's variant lattice. It wants doing *with* the vocabulary rather
   than after it: a set designed without the question in mind produces a gathering material where a
   pointwise one would have done, and each of those is a pass boundary that can never be fused away.
-- **Where `Material` lives.** [Decision 87](Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)
-  moves `TextureId` and `ColorState` out of `Seam` because the world authors them and the frame side
-  consumes them, and it cannot place the third field of a `DrawItem` that has the same shape. A
-  material is the shell's vocabulary, so it plausibly belongs to `Scene` — and `Seam` may not depend
-  on `Scene`, which is what makes this the one of the four that neither relocation nor translation
-  answers. It wants deciding with the entry above rather than before it, since a set of one enumerator
-  does not need a home yet and a designed set might justify a fourth base module below both waists.
+- **Where `Material` lives.** *(Answered 2026-08-22; what remains is the move.)*
+  [Decision 87](Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)
+  moved `TextureId` and `ColorState` out of `Seam` because the world authors them and the frame side
+  consumes them, and could not place the third field of a `DrawItem` that has the same shape.
+  [Decision 91](Decisions.md#91-the-worlds-vocabulary-is-a-module-of-its-own-below-both-waists)
+  creates the fourth base module that entry said would resolve it, on the strength of the node record
+  rather than of `Material`. So `Material` goes to `World` and `Seam` gains a `World` edge, and the
+  two halves of this question come apart: *where* is settled, *what is in the set* is the entry above.
+  It moves with the vocabulary rather than before it, because a move made while the set is one
+  enumerator is a move nothing can check.
 - **The intermediate format for unfused effect passes.** Decision 62 requires the fused and unfused
   paths to agree below the perceptual threshold, and the whole of the difference is rounding at pass
   boundaries — registers at full precision against whatever the intermediate stores. `fp16` is

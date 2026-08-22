@@ -31,6 +31,17 @@ struct Coeff
 	friend bool operator==(const Coeff&, const Coeff&) = default;
 };
 
+// A stand-in node record. Publication does not depend on World and Nodes<T>() is a template so that
+// it need not — decision 91 — so what the reader is exercised against here is a record of the right
+// shape and the wrong provenance, which is the case the boundary's type check exists for.
+struct Skeleton
+{
+	std::uint32_t SubtreeLength;
+	std::uint32_t Translation;
+
+	friend bool operator==(const Skeleton&, const Skeleton&) = default;
+};
+
 // Storage aligned as the reader demands of any snapshot it adopts. std::array over-aligned this way
 // gives a base the resolver will accept, which a bare array would not guarantee.
 template<std::size_t N>
@@ -180,6 +191,48 @@ GYRO_TEST(SnapshotReader, WakesRoundTripInOutputOrder)
 	GYRO_CHECK(wakes[0] == schedule[0]);
 	GYRO_CHECK(wakes[1] == schedule[1]);
 	GYRO_CHECK(wakes[2] == schedule[2]);
+}
+
+GYRO_TEST(SnapshotReader, NodesResolveAsATreeOrAsNothing)
+{
+	constexpr std::uint32_t offset = sizeof(SnapshotHeader);
+	const std::array<Skeleton, 2> scene{ Skeleton{ 1, 0xFFFF'FFFFu }, Skeleton{ 0, 7 } };
+
+	Bytes<offset + 2 * sizeof(Skeleton)> buffer;
+	std::memcpy(buffer.Data.data() + offset, scene.data(), scene.size() * sizeof(Skeleton));
+
+	SnapshotHeader header{};
+	header.ByteSize = static_cast<std::uint32_t>(buffer.Data.size());
+	header.Nodes = { offset, 2, sizeof(Skeleton), alignof(Skeleton) };
+	std::memcpy(buffer.Data.data(), &header, sizeof(SnapshotHeader));
+
+	const SnapshotReader reader{ buffer.View() };
+	GYRO_REQUIRE(reader.IsValid());
+
+	const std::span<const Skeleton> nodes = reader.Nodes<Skeleton>();
+	GYRO_REQUIRE_EQ(nodes.size(), std::size_t{ 2 });
+	GYRO_CHECK(nodes[0] == scene[0]);
+	GYRO_CHECK(nodes[1] == scene[1]);
+
+	GYRO_CHECK(reader.Nodes<Coeff>().empty());
+}
+
+GYRO_TEST(SnapshotReader, ANodeRunReachingPastTheEndResolvesEmpty)
+{
+	Bytes<sizeof(SnapshotHeader)> buffer;
+
+	SnapshotHeader header{};
+	header.ByteSize = sizeof(SnapshotHeader);
+	// The count the header claims does not fit in the snapshot. The clamp matters more for this run
+	// than for any other: a coefficient run read past its end is a wrong number, and a node run read
+	// past its end is a walk with no bound on it, inside the frame section, on a SCHED_FIFO thread.
+	header.Nodes = { sizeof(SnapshotHeader), 4, sizeof(Skeleton), alignof(Skeleton) };
+	std::memcpy(buffer.Data.data(), &header, sizeof(SnapshotHeader));
+
+	const SnapshotReader reader{ buffer.View() };
+
+	GYRO_CHECK(reader.IsValid());
+	GYRO_CHECK(reader.Nodes<Skeleton>().empty());
 }
 
 GYRO_TEST(SnapshotReader, TheSameBytesResolveAtADifferentAddress)

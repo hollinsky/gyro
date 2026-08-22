@@ -1375,6 +1375,15 @@ makes it the first of these four that neither relocation nor translation obvious
 deciding where the set lives are close enough to be one reading. A fourth base module below both
 waists is the shape that would resolve it, and one header is not enough reason to create one.
 
+**The module exists, and it was the node record that paid for it.** *(Revised 2026-08-22.)*
+[Decision 91](#91-the-worlds-vocabulary-is-a-module-of-its-own-below-both-waists) creates `World` on
+the strength of a record `Frame` must walk and `Scene` must write, which is this entry's rule one
+level up and is unimplementable rather than merely homeless. Half of what was bundled here comes
+apart with it: *where* `Material` lives is answered, and *what is in the set* is still open. The
+bundling was a consequence of there being no home rather than a real coupling between the two
+questions, and `Material` stays in `Seam` until the vocabulary lands because moving it before then
+would be a move nobody could check.
+
 ### 90. The snapshot's runs are one per channel, and the frame side validates the tree it walks
 
 *(Decided 2026-08-22, building the node run
@@ -1481,6 +1490,16 @@ convenience, since a node record names a channel by that index. The node record 
 here: the waist reserves the slot without naming the record, exactly as it does for decision 72's
 driven ramp, because what a node *is* waits on the vocabulary Open.md holds open.
 
+**The record is `World`'s, and a node names its channels by slot rather than by that index.**
+*(Revised 2026-08-22.)*
+[Decision 91](#91-the-worlds-vocabulary-is-a-module-of-its-own-below-both-waists) places it: `Scene`
+writes it, and the validating walk above means `Frame` reads it, so it belongs below both waists.
+The sentence here that a node *names a channel by that index* is true of what a slot means and not of
+how it is spelled — the record carries one named slot per channel rather than an array `SnapshotRun`
+indexes, because `World` may not reach the waist's schema and a second spelling of the run order is
+what this entry's own argument against merged runs exists to avoid. What still waits on the vocabulary
+is what a node *carries*, not where the record lives.
+
 **And a debt, recorded rather than paid.** Decision 50 says the copy-on-write arena — share unchanged
 subtrees between consecutive snapshots so a gesture does not re-serialise the scene per input event —
 is "contained", because the representation is offset-addressed either way. That was written before the
@@ -1492,6 +1511,92 @@ valid across publications and give that up. Inline springs would have had no suc
 the one real argument in their favour. It does not change the answer — decision 50's own instruction
 is to ship the full re-emit and measure — but the arena is less contained than it was, and whoever
 builds it should find that here rather than discover it.
+
+### 91. The world's vocabulary is a module of its own, below both waists
+
+*(Decided 2026-08-22, on trying to write the node record
+[decision 90](#90-the-snapshots-runs-are-one-per-channel-and-the-frame-side-validates-the-tree-it-walks)
+had reserved the slot for. Takes
+[decision 87](#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)'s deferred
+fourth module.)*
+
+**`World` is created, on `Geometry` alone, and it holds the published node record.**
+[Snapshot.h](../Source/Publication/Snapshot.h) said the record was `Scene`'s to define. That is a
+sentence `CheckLayering.cmake` fails the day it becomes true: decision 90 puts the tree's validation
+on the frame thread's *own walk*, so `Frame` reads these fields, and
+[Structure.md](Structure.md#the-modules) calls the absent `Frame`-to-`Scene` edge the one thing in
+that document worth enforcing rather than describing. Decision 87's rule settles where such a type
+goes — below both waists, never in `Seam` — and the record is that rule one level up.
+
+**The parallel the waist drew for itself breaks in a specific place, and that is what says where the
+fix goes.** Publication carries spring coefficients without naming `Spring`, and the arrangement works
+on two legs: the waist names a run rather than an element, *and* both namers can reach the element's
+home, because `Animation` is below both of them. Only the second leg fails for the node record.
+`Scene` is not below anything. So the waist is already right and needs no change — `PutNodes` and
+`Nodes<T>()` are templates exactly as `Put` and `Run<T>` are, and `Publication` keeps its edge set at
+`Core` and `Geometry`.
+
+**`Core` is not available, and the reason is its own test.** A node record has to name a transform and
+an extent, which are `Geometry`'s, and `Core` may not say `Geometry`. That is what makes this a module
+rather than a header move — decision 87 could send `TextureId` and `ColorState` to `Core` precisely
+because neither of them needs a coordinate.
+
+**They stay in `Core`, and the line is worth stating before somebody asks.** Decision 87 put them
+there because `Core` was the only legal home, and creating `World` removes that reason without
+changing the answer: `Core` holds primitives that happen to be world-visible — a handle, a pixel
+encoding, a texture — and `World` holds the authored vocabulary, what a node *is* and what it is
+dressed in. The mechanical test *does it need `Geometry`* happens to sort all of them the same way,
+which is reassuring and is not the rule; a future world type of pure scalars would sort wrong.
+
+**The record carries what the walk needs and nothing that waits on the vocabulary.** Decisions 86, 90,
+19, and 55 pin a subtree length, a per-channel index-or-sentinel beside the model value, the
+orientation as the chart's base point, the anchor and projection, the extent the bounding radius is
+taken over, a time scale, and the hidden and group declarations. A node *kind*, a material, a texture,
+a color state, and the encoding of decision 88's subtree reference are all the shell's scene
+vocabulary, which [Open.md](Open.md) holds open — and that list is not merely undesigned, it is known
+wrong: [decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism)'s four kinds do not contain the
+reference node decision 88 added. So the kind enum follows `Material` rather than shipping beside the
+record, on the same reasoning: a set nobody has designed is a set that will be replaced, and both are
+one field in a record that has no callers.
+
+**The channel slots are named rather than an array indexed by `SnapshotRun`.** That enum is the
+waist's schema, which [Snapshot.h](../Source/Publication/Snapshot.h) argues belongs at the waist, and
+`World` may not reach it — so an array here would carry a second spelling of the run order, which is
+the objection decision 87 made to giving one fact two spellings. Named, the correspondence is nominal
+and the compiler checks it at the site that asks for the run. Nothing is lost with it: reconstitution
+differs per channel anyway, since rotation goes back through `FromDeviation` and no other channel
+does, so there was never a generic loop to write.
+
+**Rejected: `Geometry` takes the record.** It is the cheapest-looking answer, since `Geometry` is
+already below everything and already holds the transform. `Scale`, `Space`, and `Region` are the
+coordinate grid and its reachability; *what a node is* is not that, and admitting it makes `Geometry`
+the home for anything that happens to need a `Vector3`.
+
+**Rejected: `Frame` declares its own node record and the composition root converts** — decision 87's
+`OutputConfiguration` move, applied one level up. It dies on decision 87's own axis, which is how
+often the fact moves: an output configuration changes on hotplug, and a node record changes per node
+per frame, so the conversion is a pass over the whole scene on the frame path and a second layout that
+can disagree with the wire. That second half is the objection
+[decision 86](#86-the-published-scene-is-a-preorder-tree-model-values-inline-coefficients-by-reference)
+already made to publishing skeletons and fixing them up after culling.
+
+**Rejected: `Publication` declares the record.** It is legal — the waist reaches `Geometry` — and it
+gives up the property the waist was built for. A field added to a node would then be a change to the
+boundary both threads bind to, and `SnapshotVersion` would move for a reason that has nothing to do
+with the format.
+
+**Rejected: waiting until `Scene` has callers.** [Decision 69](#69-settling-answers-with-a-wake-idleness-folds-a-monoid-not-an-or)'s
+trigger is not the size of the question but the size of what has been built on the current answer, and
+it is at zero. Decision 87 deferred this because one homeless header was not enough reason to create a
+module; what changed is not that the count went up but that the next commit could not be written
+without it.
+
+**Consequences.** `Structure.md`'s graph gains a node between the base and the waists. `World` sits
+below `Seam` rather than beside it the moment `Material` moves, because `DrawItem` carries one — so
+the position is forced by decision 87's third field rather than chosen. `SnapshotVersion` does not
+move: the header already reserved `Nodes`, and what changed is that something now writes and reads it.
+[Open.md](Open.md)'s *where `Material` lives* is answered and its *what is in the set* is not, which is
+the untying decision 87 could not do because there was no home to untie it from.
 
 ---
 

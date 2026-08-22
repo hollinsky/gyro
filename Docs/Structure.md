@@ -17,9 +17,11 @@ volatile of the three tiers and that is the arrangement working correctly — a 
 splitting, or being renamed changes this file and nothing else. If a change here forces a change in
 [Architecture.md](Architecture.md), the change was not structural.
 
-> **Most of this does not exist yet.** `Core`, `Geometry`, `Animation`, `Publication`, `Seam`, and
-> `Testing` are built — `Seam` in its two frame-side halves, which is `IPresenter` and `IRenderer`,
-> the data their verbs take and report, and the source the presenter's completions arrive on — and
+> **Most of this does not exist yet.** `Core`, `Geometry`, `World`, `Animation`, `Publication`,
+> `Seam`, and `Testing` are built — `World` so far being the published node record alone, which is
+> there because `Frame` walks it and `Scene` writes it and neither may name the other, and `Seam` in
+> its two frame-side halves, which is `IPresenter` and `IRenderer`, the data their verbs take and
+> report, and the source the presenter's completions arrive on — and
 > `Frame` now holds the step those interfaces are driven from, against a `NullEvaluator` standing in
 > for the `Scene` that will produce its draw items. `Headless` is the first thing behind either seam:
 > a simulated panel whose vblanks are arithmetic, a device that is the one source for all of them, a
@@ -125,9 +127,16 @@ flowchart TB
     Frame --> Publication
     Dispatch --> Seam
     Frame --> Seam
+    Dispatch --> World
+    Frame --> World
     Publication --> Base["Core · Geometry"]
     Seam --> Base
+    World --> Base
 ```
+
+`World` is not a third waist. Nothing crosses *through* it — it is the vocabulary both halves of the
+world spell their nodes in, placed below both waists for the reason
+[the rule below](#region-is-in-geometry-and-reachability-is-why) gives and neither waist names it.
 
 **The frame side does not depend on `Scene`, `Protocol`, or `Session`, and that edge must never be
 added.** It is the one thing in this document worth enforcing rather than describing: an include of
@@ -138,11 +147,12 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | --- | --- | --- | --- |
 | `Core` | portable | either | — |
 | `Geometry` | portable | either | `Core` |
+| `World` | portable | **both** | `Geometry` |
 | `Animation` | portable | **both** | `Core`, `Geometry` |
 | `Publication` | portable | **both** | `Core`, `Geometry` |
 | `Seam` | portable | **both** | `Core`, `Geometry` |
-| `Scene` | portable | dispatch | `Core`, `Geometry`, `Animation`, `Publication` |
-| `Frame` | portable | frame | `Core`, `Geometry`, `Animation`, `Publication`, `Seam` |
+| `Scene` | portable | dispatch | `Core`, `Geometry`, `World`, `Animation`, `Publication` |
+| `Frame` | portable | frame | `Core`, `Geometry`, `World`, `Animation`, `Publication`, `Seam` |
 | `Render` | platform | **both** | `Core`, `Geometry`, `Publication`, `Seam` |
 | `Protocol` | platform | dispatch | `Core`, `Geometry`, `Scene` |
 | `Session` | platform | dispatch | `Core`, `Protocol`, `Scene`, `Seam` |
@@ -378,6 +388,19 @@ both waists. The axis is how often the fact moves: translation is right for a fa
 hotplug and wrong for one that changes per commit, since a per-commit translation is a map consulted
 on the frame path.
 See [decision 87](Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam).
+
+**The fourth application is what finally costs a module.** The published node record is a type
+`Scene` writes and `Frame` walks — the frame side validates the tree as it traverses it, so it reads
+these fields rather than passing them along — and `Frame` may not depend on `Scene`, which is
+[the one edge](#the-modules) above. Neither relocation nor translation answers it. `Core` cannot take
+it, because a node names a transform and an extent and `Core` may not say `Geometry`; a per-node
+translation on the frame path is what the axis above rejects; and `Scene` declaring it is the edge
+that must not exist. So `World` is created on `Geometry` alone and the record lives there, with the
+node kind and `Material` following when the scene vocabulary [Open.md](Open.md) holds open is
+designed. Note what did *not* have to change: `Publication` still names none of it, because
+`PutNodes` and `Nodes<T>()` are templates for the same reason `Put` and `Run<T>` are — the exemption
+two paragraphs up, working. See
+[decision 91](Decisions.md#91-the-worlds-vocabulary-is-a-module-of-its-own-below-both-waists).
 
 ## Threads are a second partition
 

@@ -166,6 +166,22 @@ public:
 		return *this;
 	}
 
+	// Stage the scene: decision 86's preorder run, one record per node, each naming the length of its
+	// own subtree.
+	//
+	// **A template, exactly as `Put` is, and that is what keeps `World` out of this module.** The node
+	// record is `World/Node.h`'s, because `Scene` writes it and `Frame` walks it and neither may name
+	// the other (decision 91). The waist does not need to know that: it carries the run as bytes, a
+	// count, and the writer's size and alignment, so a field added to the record touches this file not
+	// at all — the same property Publication/Snapshot.h claims for spring coefficients, obtained the
+	// same way.
+	template<typename T>
+	SnapshotPublisher& PutNodes(std::span<const T> nodes)
+	{
+		Stage(m_Nodes, nodes);
+		return *this;
+	}
+
 	// Assemble the staged runs into one contiguous offset-addressed snapshot, in a buffer the caller
 	// owns. The header goes first, then each non-empty run at an offset aligned for its element, then
 	// the wake schedule; the directory records where each landed. The result is self-describing: its
@@ -195,6 +211,9 @@ public:
 		std::uint32_t wakeOffset = 0;
 		cursor = Place(m_Wakes, cursor, wakeOffset);
 
+		std::uint32_t nodeOffset = 0;
+		cursor = Place(m_Nodes, cursor, nodeOffset);
+
 		const std::size_t byteSize = cursor;
 
 		SnapshotHeader header{};
@@ -205,6 +224,7 @@ public:
 			header.Runs[index] = Entry(m_Runs[index], offsets[index]);
 		}
 		header.Wakes = Entry(m_Wakes, wakeOffset);
+		header.Nodes = Entry(m_Nodes, nodeOffset);
 
 		into.Reset(byteSize);
 		const std::span<std::byte> bytes = into.Bytes();
@@ -215,6 +235,7 @@ public:
 			CopyInto(bytes, offsets[index], m_Runs[index]);
 		}
 		CopyInto(bytes, wakeOffset, m_Wakes);
+		CopyInto(bytes, nodeOffset, m_Nodes);
 	}
 
 	// The same assembly into a buffer nobody had yet. The outbox never takes this path — it always has
@@ -290,4 +311,5 @@ private:
 
 	std::array<Staged, SnapshotRunCount> m_Runs;
 	Staged m_Wakes;
+	Staged m_Nodes;
 };

@@ -146,6 +146,24 @@ gyro_add_module(Geometry PORTABLE
 		Space.Test.cpp
 )
 
+# The world's own vocabulary: what a node is. It exists because Scene writes the published node
+# record and Frame walks it, and Frame may not depend on Scene — so the record belongs below both
+# waists rather than in either half that names it. Decision 91, and decision 87 for the rule.
+#
+# DEPENDS Geometry alone, and the omission is the point rather than an oversight. The record names a
+# transform and an extent and nothing of Core's, and CheckLayering denies what is not declared — so
+# the narrower declaration is the stronger rule, exactly as Frame's below says. Core still reaches the
+# test binary, because gyro_add_module names it on every one.
+#
+# No DISPATCH_HALF. This is declarations both sides read, like Seam: the world authors these records
+# and the frame thread reconstitutes them, and neither half owns the type.
+gyro_add_module(World PORTABLE
+	DEPENDS
+		Geometry
+	TESTS
+		Node.Test.cpp
+)
+
 # Split by direction rather than by tier: Solve consumes spring coefficients and is what the frame
 # thread may call, Author produces them and is dispatch-side.
 #
@@ -424,6 +442,7 @@ add_executable(UringProbe
 add_executable(IntegrationTests
 	Source/Integration/PublicationRoundTrip.Test.cpp
 	Source/Integration/PublicationSoak.Test.cpp
+	Source/Integration/SceneRoundTrip.Test.cpp
 	Source/Integration/Schedulability.Test.cpp
 )
 target_link_libraries(IntegrationTests
@@ -432,6 +451,7 @@ target_link_libraries(IntegrationTests
 		Headless
 		Publication
 		Animation
+		World
 		Seam
 		Geometry
 		Core
