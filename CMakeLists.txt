@@ -121,6 +121,7 @@ gyro_add_module(Core PORTABLE OBJECT
 		Signal.cpp
 	TESTS
 		Clock.Test.cpp
+		ColorState.Test.cpp
 		Fd.Test.cpp
 		FrameSection.Test.cpp
 		Handle.Test.cpp
@@ -225,7 +226,6 @@ gyro_add_module(Seam PORTABLE
 		Core
 		Geometry
 	TESTS
-		ColorState.Test.cpp
 		EventSource.Test.cpp
 		OutputConfiguration.Test.cpp
 		PresentationInfo.Test.cpp

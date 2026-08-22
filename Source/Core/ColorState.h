@@ -12,11 +12,16 @@
 // alpha mode, reference luminance — and untagged content is sRGB by rule and never by inspection.**
 // Decisions 47 and 48 are the argument; what is here is the four fields that argument names.
 //
-// **It is in Seam because both halves of the seam need it and neither owns it.** The renderer needs
-// it to linearise on import and to encode at the end; the presenter needs it to program a plane's
-// degamma, CTM, and gamma when a layer is promoted to scanout. Docs/Architecture.md's rule that
-// direct scanout is conditional on the KMS pipeline expressing what the composite would have applied
-// is a comparison between two of these, made by a party that can see both.
+// **Neither half of the render seam owns it, and neither half of the world does either — so it is
+// in Core.** The renderer needs it to linearise on import and to encode at the end; the presenter
+// needs it to program a plane's degamma, CTM, and gamma when a layer is promoted to scanout.
+// Docs/Architecture.md's rule that direct scanout is conditional on the KMS pipeline expressing what
+// the composite would have applied is a comparison between two of these, made by a party that can
+// see both. That argument put this file in Seam and it was the wrong pair of halves: a color state
+// is what a *client* declared, so Protocol authors one per commit and Scene stores it, and neither
+// may name Seam. Decision 87 is the move; what makes Core the answer rather than Geometry is that a
+// color state is not rect arithmetic, and Core's own test — depends on nothing, names no other
+// domain's vocabulary, has more than one caller before it has two implementations — is met here.
 //
 // **Spelled without the u, alone in this codebase.** The documents say color and keep saying it;
 // the identifiers say color, because the surrounding ecosystem an implementation has to be read

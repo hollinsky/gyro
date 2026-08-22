@@ -1339,8 +1339,8 @@ there; a colour state is not geometry, and putting it there would quietly redefi
 *domain content that is not `Core`* rather than what
 [Structure.md](Structure.md#geometry-is-not-part-of-core) says it is. It meets `Core`'s own test
 instead: it depends on nothing, it names no other domain's vocabulary, and it has more than one caller
-before it has two implementations. [ColorState.h](../Source/Seam/ColorState.h)'s own header says it
-sits in `Seam` "because both halves of the seam need it and neither owns it" — that sentence stays
+before it has two implementations. [ColorState.h](../Source/Core/ColorState.h)'s own header said it
+sat in `Seam` "because both halves of the seam need it and neither owns it" — that sentence stays
 true and turns out to have named the wrong pair of halves.
 
 **`OutputConfiguration` is translated rather than relocated, and the difference is the point.**

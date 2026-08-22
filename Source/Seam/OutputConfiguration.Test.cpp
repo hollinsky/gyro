@@ -3,8 +3,8 @@
 #include <format>
 #include <string>
 
+#include "Core/ColorState.h"
 #include "Core/Time.h"
-#include "Seam/ColorState.h"
 #include "Seam/RenderTarget.h"
 #include "Testing/Test.h"
 

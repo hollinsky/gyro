@@ -236,10 +236,19 @@ Which also keeps the two waists from touching. `Publication` and `Seam` both res
 from one to the other, added for the benefit of a single interface, is the kind that is never removed
 afterwards. See [decision 82](Decisions.md#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene).
 
+**The list is at the waist; two of the fields in it are not, and the split is by producer rather than
+by awkwardness.** A quad, its sampling, its opacity, and its corner radius are frame-derived, which is
+what the decision above is for. A `TextureId` is an import's identity and a `ColorState` is what the
+client declared — both authored on the dispatch side, so both are in `Core`, by
+[the rule below](#region-is-in-geometry-and-reachability-is-why). `Seam/Renderer.h` includes them the
+same way it includes `Geometry/Space.h`, and the item's shape is unchanged.
+See [decision 87](Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam).
+
 ### Geometry is not part of Core
 
 `Core` is dependency-free primitives: the timebase, the wake, handles, the slot allocator, the
-observer signal, the result and descriptor types, logging.
+observer signal, the result and descriptor types, logging, and — since both halves of the world name
+them — a texture's identity and a buffer's color state.
 `Geometry` is domain content: the exact rational scale, the restricted transform and its
 classification predicate, the 3D TRS with anchor and quaternion, the coordinate spaces.
 
@@ -358,6 +367,17 @@ what crosses backwards is the report. `Protocol` sends `wp_presentation_feedback
 [decision 75](Decisions.md#75-the-return-channel-is-one-report-per-frame-per-surface-facts-are-derived-not-sent)'s
 record, and `PresentationInfo` stays in `Seam` as what a presenter signals to `FrameClock`. The two
 are near enough to fuse and the table says not to.
+
+**The rule has since been applied three more times, and it does not always answer *move*.**
+`TextureId` and `ColorState` relocate to `Core` for damage's reason exactly — `Protocol` mints one
+and `Scene` stores the other, and neither may say `Seam`. `OutputConfiguration` does not: `Scene`
+needs an output model, but almost nothing `OutputConfiguration` carries serves it, because that type
+is a negotiation between the frame thread and a backend. So `Scene` declares the record it wants and
+the composition root fills it in — which it may do, being the only thing that knows both sides of
+both waists. The axis is how often the fact moves: translation is right for a fact that changes on
+hotplug and wrong for one that changes per commit, since a per-commit translation is a map consulted
+on the frame path.
+See [decision 87](Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam).
 
 ## Threads are a second partition
 

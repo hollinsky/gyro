@@ -9,13 +9,13 @@
 #include <type_traits>
 #include <variant>
 
-#include "Core/Handle.h"
+#include "Core/ColorState.h"
 #include "Core/Result.h"
+#include "Core/Texture.h"
 #include "Core/Time.h"
 #include "Geometry/AxisTransform.h"
 #include "Geometry/Region.h"
 #include "Geometry/Space.h"
-#include "Seam/ColorState.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/SyncPoint.h"
 
@@ -73,24 +73,6 @@ enum class RenderMode : std::uint8_t
 	Planned,
 	Floor,
 };
-
-struct TextureTag
-{
-	static constexpr std::string_view Name = "Texture";
-};
-
-// An image the renderer holds and can sample: a client's buffer imported onto the device, a slot in
-// the snapshot atlas, the firmware logo the splash continues. One id space rather than one per
-// origin, for `EntityId`'s reason — Docs/Animation.md#exit-pixels has a window's live surface become
-// a snapshot mid-transition, and a source that changed identity when its pixels changed owner would
-// make that a different node rather than the same one.
-//
-// Generational per Core/Handle.h, which is what makes the interesting failure loud: a client
-// destroying a buffer while the frame thread still holds the id resolves to nothing, rather than to
-// whatever image took the slot. What a renderer does with a null or stale id is draw nothing and say
-// nothing — a frame is not the place to report a lifetime bug, and the frame after it would report
-// the same one again.
-using TextureId = Handle<TextureTag>;
 
 // How an item is dressed. Decision 33's closed set, named rather than parameterized.
 //

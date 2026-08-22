@@ -4,11 +4,11 @@
 #include <optional>
 #include <span>
 
+#include "Core/ColorState.h"
 #include "Core/Result.h"
 #include "Core/Signal.h"
 #include "Geometry/Region.h"
 #include "Geometry/Space.h"
-#include "Seam/ColorState.h"
 #include "Seam/OutputConfiguration.h"
 #include "Seam/PresentationInfo.h"
 #include "Seam/RenderTarget.h"

@@ -32,7 +32,12 @@ Codebase Structure:
 		                        own so that connect, emit and disconnect never allocate and either
 		                        side may die first (decision 77); Result.h is expected<T, Error>
 		                        over an errno plus the operation that failed, and Fd.h is the
-		                        owning descriptor beside the borrowed RawFd a signal can carry
+		                        owning descriptor beside the borrowed RawFd a signal can carry.
+		                        ColorState.h and Texture.h are here rather than in Seam because the
+		                        world authors them and the frame side only consumes them — a client
+		                        declares a color state and an import mints a texture id, both on the
+		                        dispatch thread, and neither Protocol nor Scene may name Seam
+		                        (decision 87)
 		Geometry/             - Portable tier. Scale.h is the exact rational output scale; Space.h is
 		                        the coordinate spaces and the values that live in them, with the
 		                        integer grid kept off the world; Region.h is damage as a bounded set

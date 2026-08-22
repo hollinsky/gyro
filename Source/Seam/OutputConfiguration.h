@@ -5,9 +5,9 @@
 #include <string_view>
 #include <type_traits>
 
+#include "Core/ColorState.h"
 #include "Core/Time.h"
 #include "Geometry/Space.h"
-#include "Seam/ColorState.h"
 #include "Seam/RenderTarget.h"
 
 // What an output is programmed to be, in both directions: what `Reconfigure()` is asked for and what
