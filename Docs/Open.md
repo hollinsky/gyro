@@ -119,6 +119,15 @@ what to suspect. [AGENTS.md](../AGENTS.md#how-decisions-get-made) carries these 
   without animating it, and whether that case is real decides whether the rule is worth having. This
   is decision 51's falsifiable test with a mechanism attached, so it should be settled before a shell
   exists to violate it.
+- **What a dressing means on a reference node.**
+  [Decision 95](Decisions.md#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind)
+  puts a material and an elevation on *every* node and makes a reference a kind like any other, which
+  leaves it unsaid whether a dressed reference dresses the subtree it expands, is ignored, or is a
+  malformed record. The case is real rather than hypothetical: an overview thumbnail is a reference,
+  and giving the whole tile a shadow is the obvious thing a shell would ask for — while dressing each
+  window *inside* the expansion with the same material is the obvious thing the encoding would do.
+  Settle it with the walk, since that is the code that has to answer it, and the same question
+  decides whether a dressed container's emission and a reference's expansion can nest.
 - **Clipping and masking.**
   [Decision 95](Decisions.md#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind)
   leaves both out and says so rather than assuming them away. A node's children are not clipped to

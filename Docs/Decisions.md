@@ -3199,8 +3199,19 @@ so one node over two backdrops in different colour states would mean two differe
 `World/Node.h` gains `Kind`, `Material`, `Elevation`, and `Content`, taking the record from 120 bytes
 to 128 — two cache lines exactly, where 120 straddled, so the walk's indexing becomes a shift.
 `Material` moves from `Seam` to `World` as decision 91 said it would, and `Seam` gains its `World`
-edge. `SnapshotRun` gains a run per content kind, and `SnapshotVersion` bumps to 3, which is free
-while both halves of the boundary still ship together.
+edge. `SnapshotRun` gains a run per content kind.
+
+**`SnapshotVersion` does not move, and the trigger is worth stating once rather than deciding again
+per record.** Decisions 86 and 90 each say the version bumps "which is free while both halves of the
+boundary still ship together", and that clause is an argument for why bumping *costs* nothing rather
+than a reason to do it. What the number is for is a reader that could be looking at a writer's bytes
+across a version gap, and there is no such reader: one binary, and nothing has been run. The per-run
+check is already stronger for everything below the header — `RunEntry` carries the writer's element
+size and alignment and the reader compares them against the type it is asked to resolve, so a node
+record that drifts yields an empty run rather than a reinterpretation, without the version being
+consulted at all. **The version starts earning its keep when there are two artefacts that can
+disagree**, which is [decision 49](#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot)'s
+dispatch-as-a-separate-process, and it moves once when that arrives rather than once per field.
 
 What stays open is the *contents* of the two dressing enums rather than their shape: which materials
 exist and which of them are pointwise (decision 33), and where the elevation levels sit. Both ship

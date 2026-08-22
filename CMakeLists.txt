@@ -159,8 +159,8 @@ gyro_add_module(Geometry PORTABLE
 # and the frame thread reconstitutes them, and neither half owns the type.
 gyro_add_module(World PORTABLE
 	DEPENDS
-		Geometry
 		Core
+		Geometry
 	TESTS
 		Node.Test.cpp
 		Content.Test.cpp

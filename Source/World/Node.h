@@ -235,10 +235,18 @@ struct Node
 
 	[[nodiscard]] constexpr bool IsReference() const noexcept { return Kind == NodeKind::Reference; }
 
-	// A leaf that draws: the two kinds whose `Content` is a position in a content run rather than a
-	// node index or nothing. Named because that is the distinction the walk actually makes — it emits
-	// a draw item for these and for neither of the others.
-	[[nodiscard]] constexpr bool IsDrawn() const noexcept { return Kind == NodeKind::Image || Kind == NodeKind::Solid; }
+	// The two kinds whose `Content` is a position in a content run, rather than a node index or
+	// nothing.
+	//
+	// **It is not the emission test, and what separates the two is decision 95's effect layer.** A
+	// container dressed `Glass` draws the blurred backdrop and nothing else — that is what makes a
+	// material a field rather than a kind — so it emits a draw item while naming no content at all.
+	// The walk emits for `HasContent() || IsDressed()`; this predicate says where a node's pixels come
+	// from, not whether it has any.
+	[[nodiscard]] constexpr bool HasContent() const noexcept
+	{
+		return Kind == NodeKind::Image || Kind == NodeKind::Solid;
+	}
 
 	[[nodiscard]] constexpr bool IsDressed() const noexcept { return Dress != Material::None; }
 
@@ -282,7 +290,7 @@ static_assert(Node{}.SubtreeLength == 0 && Node{}.Past(7) == 8, "A leaf's subtre
 static_assert(!Node{}.IsTranslating() && !Node{}.IsScaling() && !Node{}.IsRotating());
 static_assert(!Node{}.IsFading() && !Node{}.IsDriven());
 static_assert(!Node{}.IsHidden() && !Node{}.IsGroup());
-static_assert(Node{}.IsContainer() && !Node{}.IsReference() && !Node{}.IsDrawn(), "Nothing drawn is nothing named");
+static_assert(Node{}.IsContainer() && !Node{}.IsReference() && !Node{}.HasContent(), "Nothing drawn is nothing named");
 static_assert(Node{}.Content == NoContent && !Node{}.IsDressed() && !Node{}.IsLifted());
 static_assert(Node{}.Opacity == 1.0F && Node{}.TimeScale == 1.0F);
 static_assert(Node{}.Transform.Rotation == Quaternion{}, "The chart's base point, and it crosses always");
@@ -291,6 +299,6 @@ static_assert(Node{ .Flags = Node::Hidden | Node::Group }.IsHidden());
 static_assert(Node{ .Flags = Node::Hidden | Node::Group }.IsGroup());
 static_assert(Node{ .Flags = Node::Group }.IsGroup() && !Node{ .Flags = Node::Group }.IsHidden());
 
-static_assert(Node{ .Content = 0, .Kind = NodeKind::Image }.IsDrawn());
+static_assert(Node{ .Content = 0, .Kind = NodeKind::Image }.HasContent());
 static_assert(Node{ .Content = 3, .Kind = NodeKind::Reference }.IsReference());
-static_assert(!Node{ .Content = 3, .Kind = NodeKind::Reference }.IsDrawn(), "A reference names a node, not a run");
+static_assert(!Node{ .Content = 3, .Kind = NodeKind::Reference }.HasContent(), "A reference names a node, not a run");

@@ -151,7 +151,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | --- | --- | --- | --- |
 | `Core` | portable | either | — |
 | `Geometry` | portable | either | `Core` |
-| `World` | portable | **both** | `Geometry` |
+| `World` | portable | **both** | `Core`, `Geometry` |
 | `Animation` | portable | **both** | `Core`, `Geometry` |
 | `Publication` | portable | **both** | `Core`, `Geometry` |
 | `Seam` | portable | **both** | `Core`, `Geometry`, `World` |
