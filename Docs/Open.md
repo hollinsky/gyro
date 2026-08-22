@@ -598,3 +598,22 @@ which is legible from the code and was not legible from the entry.
   it when nested lands, since a host connection is the second source with a genuine answer — a frame
   callback is a promise about the future in a way a page-flip event is not.
 - **spdlog async sink** — file I/O from the frame thread punts to io-wq and surfaces as jitter.
+- **How `Virtual`'s tests are gated, and where the dmabuf comes from in CI.**
+  [Decision 102](Decisions.md#102-a-virtual-output-allocates-the-buffers-it-hands-out-and-that-is-what-stands-the-renderer-up)
+  puts the renderer's targets behind a udmabuf allocator and records the awkward half: `/dev/udmabuf`
+  is `0600 root:kvm` and reachable on a workstation only through logind's `uaccess` ACL, so a
+  container or an SSH session with no seat has the capability and not the permission. Three exits and
+  none is obviously right — a udev rule shipped beside gyro's own, which is heavy for a test
+  dependency; running the render tests as a member of a group CI grants; or accepting the skip and
+  asserting at the CI level that they did not skip. The last is the current lean, and what makes it a
+  question rather than a preference is that a green run which skipped everything is precisely the rot
+  [decision 36](Decisions.md#36-frame-path-discipline-is-enforced-mechanically-not-by-review)'s
+  build-time checks exist to prevent. Wants deciding when the renderer's own tests land, since that is
+  the first suite it can silently hollow out.
+- **What a virtual output's cadence should be when nobody is asking for one.** Decision 102 gives it
+  a `VblankTimeline`, which needs a period, and a recording at a fixed rate has an obvious one. A test
+  stepping frame by frame does not, and neither does an encoder that wants to consume as fast as the
+  compositor produces. Presenting at whatever rate the consumer releases buffers is the honest answer
+  and it makes the output's period a function of backpressure, which is the one thing
+  [FrameClock](../Source/Frame/FrameClock.h) is built to assume is stable. Small, and worth settling
+  before a second consumer exists rather than after.

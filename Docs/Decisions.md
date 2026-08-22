@@ -6976,3 +6976,89 @@ window came to rest, is the artefact this whole area exists to prevent.
 **What it costs today is bandwidth on animating frames and nothing on still ones**, which is the trade
 worth taking while the scissor is the only consumer of the region. It stops being worth taking when
 there is a partial-composite path to feed, and the entry above is what has to land first.
+
+### 102. A virtual output allocates the buffers it hands out, and that is what stands the renderer up
+
+*(Decided 2026-08-22, on asking what a Vulkan renderer would bind and finding that nothing in the
+tree hands out a dmabuf.)*
+
+**`Virtual` is the third backend: an `IPresenter` whose consumer is a file, an encoder, or a test
+rather than a panel, which allocates its own dmabufs and hands them out as `RenderTarget`s.** It is
+what screen recording and remote desktop are eventually built on, and it is what the Vulkan renderer
+is exercised against in the meantime.
+
+**It is not a new concept, and [Seam/RenderTarget.h](../Source/Seam/RenderTarget.h) already contains
+the sentence it falls out of** — *a virtual output renders into dmabufs a client owns and a local
+output renders into dmabufs gyro allocated; only the source of the constraint differs*. A local
+output's constraints are the display plane's. A client-registered virtual output's are the client
+device's. A file's are *empty*, which makes this the degenerate case of the rule rather than an
+exception to it: one presenter, with the allocator swapped. Building the empty case as a special
+fixture is exactly what that paragraph says makes remote desktop a fork instead of an output.
+
+**What forced it now is that the renderer has nothing legal to bind.** [Decision
+85](#85-the-headless-backend-is-portable-and-the-instrument-is-the-reason) keeps `Headless` in the
+portable tier, so its images are heap pages behind `MappedImage` and must stay so; the DRM and nested
+backends do not exist. A Vulkan renderer written against that binds nothing, and the import path —
+the half that actually breaks — goes unexercised.
+
+**udmabuf makes the whole path run on a machine with no GPU, and the reading confirmed it rather than
+assuming it.** A `memfd` sealed with `F_SEAL_SHRINK` becomes a dmabuf through `UDMABUF_CREATE`; the
+size must be page-aligned or the ioctl is `EINVAL`; the memfd may then be *closed*, because the
+driver pins the pages, so a target costs one descriptor rather than two; the resulting dmabuf is
+directly `mmap`-able and coherent with the memfd's own mapping, so a test inspects composited pixels
+with no readback and no staging buffer; and `DMA_BUF_IOCTL_SYNC` is accepted on it, so the CPU-access
+bracket is real rather than skipped. What it can produce is `DRM_FORMAT_MOD_LINEAR` and nothing else
+— which is exactly the only modifier lavapipe accepts, per [decision
+40](#40-software-rendering-is-a-device-not-a-backend-and-it-is-the-floor-tier). The GPU-free path is
+therefore complete rather than approximate: real dmabufs, really imported, by the driver that is the
+permanently occupied floor tier.
+
+**The permission story points the opposite way from the capability story, which is worth knowing
+before it is discovered in CI.** `/dev/udmabuf` is `0600 root:kvm` and is reachable on a developer's
+machine only because logind puts a `uaccess` ACL on it for the seat-local user — over SSH with no
+session, or in a container, it needs a udev rule or root. `/dev/dri/renderD128` is `0666` by udev
+default and needs neither. So udmabuf is the more portable *capability* and the less portable
+*permission*, and a build that assumed either one would be wrong in a different environment.
+
+**Rejected: exporting the targets from the Vulkan device.** The chip that scans out is not always the
+chip that draws, and the modifier set is an intersection with the display plane's while GBM's scanout
+usage is what makes an allocation eligible for a framebuffer at all — none of which a `VkImage`
+exported from the render device can carry, and nested there is nothing to export into, since
+[decision 1](#1-the-nested-backend-drives-raw-wayland-protocol-not-vulkan-wsi) refuses WSI and a
+target is a `wl_buffer` the host handed back. The narrower objection is the one that matters for
+testing: a renderer verified against images it allocated for itself is verified against the one
+configuration that cannot fail.
+
+**Rejected: giving `HeadlessOutput` a dmabuf provider, which looks like much the smaller change.** The
+two rings retire on different events, and that is the one part that is not shared. A headless target
+is held until the *next* flip, because a plane is scanning it out — the bound
+[Frame/Loop.h](../Source/Frame/Loop.h) leans on when it declines to treat a refused `AcquireTarget`
+as an error. A virtual target is held until the consumer lets go, which is the backpressure
+[Seam/Presenter.h](../Source/Seam/Presenter.h) already describes as the ordinary reason `AcquireTarget`
+answers nothing. What looked like duplication is the mechanism. Decision 85's second argument applies
+on top: the instrument should not acquire a shipping backend's requirements.
+
+**What *is* reused is `VblankTimeline`, and that is not a compromise.** A virtual output's cadence is
+a period and a phase — a recording at 60 Hz wants vblanks at exact intervals — which is what that
+class computes, in arithmetic over `Core/Time.h` with nothing test-only in it. A platform module
+depending down onto a portable one is the direction the graph already allows. If it ever grows
+behaviour that only a sweep wants, that is the moment it moves rather than a reason to copy it now.
+
+**Deferred: the GBM provider, and the reason is that it costs a dependency for something the DRM
+backend owns anyway.** `libgbm` is a new pkg-config entry, and what it buys over udmabuf is tiled
+modifiers from a real driver — which is worth exercising against a real *display* plane, not against
+a file. The allocator interface is written so the provider drops in; the entry in
+[Architecture.md](Architecture.md#dependencies)'s table is not taken until it does.
+
+**Deferred: a consumer interface.** There is one consumer — a test that reads the mapping — so the
+output exposes the presented frame and a release verb, the way `HeadlessOutput` exposes `Scanout()`.
+An `IFrameSink` with a file writer and an encoder behind it is a second implementation away, and
+[Structure.md](Structure.md#the-modules)'s standing rule is that an interface exists where there is a
+fake. Encoding in particular stays out: this log already records that Vulkan Video encode coverage is
+uneven, and a presenter that hands out buffers and takes them back does not care what reads them.
+
+**What this deliberately does not test, said plainly rather than papered over.** A virtual output
+never scans out, so the constraint that actually differs between a buffer that works and one that
+does not — a modifier the display plane will accept, and the scanout usage that makes the allocation
+eligible — is untested until the DRM backend lands. That failure should arrive there honestly rather
+than appear to have been covered by a fixture.

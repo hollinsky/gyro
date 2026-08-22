@@ -161,6 +161,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Protocol` | platform | dispatch | `Core`, `Geometry`, `Scene` |
 | `Session` | platform | dispatch | `Core`, `Protocol`, `Scene`, `Seam` |
 | `Headless` | **portable** | split | `Core`, `Geometry`, `Seam` |
+| `Virtual` | platform | frame | `Core`, `Geometry`, `Seam`, `Headless` |
 | `Nested`, `Drm` | platform | split | `Core`, `Geometry`, `Seam` |
 | `Console` | platform | own | `Core`, `Geometry`, `Seam` |
 | `Compositor` | platform | constructs | everything |
@@ -230,6 +231,26 @@ including what would take it back out of the tier and why the build would say so
 
 It has no dispatch half yet. Presentation is all that is built; scripted input is dispatch-side and
 arrives with the input seam, at which point the module names one.
+
+### Virtual is platform, and it is the one that allocates
+
+`Virtual` is a presenter whose consumer is a file, an encoder, or a test rather than a panel. It sits
+one row below `Headless` in the table and on the other side of the tier line, and the two differences
+are the whole of why it is a separate module: its images are real dmabufs, so it names
+`linux/udmabuf.h` and cannot be portable; and its targets retire when the *consumer* releases them
+rather than when the next flip lands, which is the backpressure
+[Seam/Presenter.h](../Source/Seam/Presenter.h) writes `AcquireTarget`'s empty answer around.
+
+**It depends on `Headless`, and that edge is one class.** `VblankTimeline` is a period and a phase and
+the arithmetic between them, which is what a recording's cadence is as much as a panel's. A platform
+module depending down onto a portable one is the direction the graph allows; what would change the
+answer is the timeline acquiring behaviour only a sweep wants, at which point it moves rather than
+being copied.
+
+**It is frame-side entire**, like the presentation half of every other backend. The allocation is not
+— `BindTargets`' whole contract is that it runs at a target invalidation and never inside the frame
+section — but that is a phase rather than a thread, and nothing here is authored on dispatch. See
+[decision 102](Decisions.md#102-a-virtual-output-allocates-the-buffers-it-hands-out-and-that-is-what-stands-the-renderer-up).
 
 ### The draw list is in Seam
 

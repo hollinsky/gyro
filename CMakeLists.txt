@@ -319,6 +319,37 @@ gyro_add_module(Headless PORTABLE
 		Vblank.Test.cpp
 )
 
+# The presenter that allocates. An output whose consumer is a file, an encoder, or a test rather than
+# a panel, which is what gives the renderer a real dmabuf to bind before there is a DRM backend to
+# hand it one. Docs/Decisions.md decision 102.
+#
+# Not PORTABLE, and the reason is one include: `linux/udmabuf.h`. Everything above it in this list
+# either has no platform in it or is the composition root; this is the first backend that genuinely
+# reaches for the kernel, which is the line CheckPortability.cmake exists to draw.
+#
+# The Headless edge is `VblankTimeline` and nothing else. A recording's cadence is a period and a
+# phase exactly as a panel's is, and a platform module depending down onto a portable one is the
+# direction the graph allows — see Docs/Structure.md#virtual-is-platform-and-it-is-the-one-that-
+# allocates for what would change the answer.
+#
+# No DISPATCH_HALF. Presentation is frame-side, and the allocation is a phase rather than a thread:
+# it runs at a target invalidation, which is where `IRenderer::BindTargets` runs, and nothing here is
+# authored on dispatch.
+gyro_add_module(Virtual
+	DEPENDS
+		Core
+		Geometry
+		Seam
+		Headless
+	SOURCES
+		Buffer.cpp
+		Udmabuf.cpp
+	TESTS
+		Buffer.Test.cpp
+		Output.Test.cpp
+		Udmabuf.Test.cpp
+)
+
 # The composition root, and the only module that knows both sides of either waist. Docs/Structure.md
 # #orchestration is its whole brief: it constructs the clock, the backend, the rendering device, the
 # publication channel, and the threads, and hands each subsystem what it needs.
