@@ -249,6 +249,18 @@ what to suspect. [AGENTS.md](../AGENTS.md#how-decisions-get-made) carries these 
   undecided; the visibility half of *what the floor composite may contain* is the entry above, and
   the two constrain each other, since a floor that holds the previous blur is a different number from
   one that draws a flat fill.
+- **Scheduling policy constants.** The `// SPEC:` numbers in `FrameClockPolicy`, `TimingPolicy`, and
+  `BudgetPolicy` cite this entry and it had never been written. They are the latch lead a commit must
+  be programmed by, the clearance the variable-refresh servo keeps from the panel's longest period,
+  the servo's per-frame step bound, the safety margin held over a composed reserve, and the length of
+  the window a budget's mark is the maximum over. What makes them one entry rather than five is their
+  provenance: every one is read from documentation and driver source rather than from a panel, which
+  is why they are policy fields a test can vary rather than constants compiled into the arithmetic.
+  Each one's unset value is chosen to be the recoverable direction — a zero margin admits a frame
+  that may miss by the wakeup latency, where an overstated one holds an output at the floor tier for
+  as long as it is wrong — so the whole set is deferrable, and it is deferred until there is hardware
+  in front of it. Retiring this is a bench with panels on it and not an afternoon of reading, which
+  is the triage rule above sorting it into the slow pile.
 - **The snapshot atlas multiple.** Decision 46 denominates capacity in output render-target
   equivalents and declines to guess the number. The derivation to check it against is the largest
   *legitimate* simultaneous retirement — closing an application with a menu open is a window plus
