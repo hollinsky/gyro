@@ -418,6 +418,7 @@ find_package(Threads REQUIRED)
 add_executable(IntegrationTests
 	Source/Integration/PublicationRoundTrip.Test.cpp
 	Source/Integration/PublicationSoak.Test.cpp
+	Source/Integration/Schedulability.Test.cpp
 )
 target_link_libraries(IntegrationTests
 	PRIVATE
