@@ -56,14 +56,44 @@
 // already served. Without the floor it is handed that same instant back on every iteration until the
 // flip lands, and the frame after it is never armed for at all.
 //
-// **The tier comparisons stay equalities, and what they refuse is the repeat rather than the lead.**
-// `plannedReach == owed` says work started now arrives in the owed frame's window and not before it,
-// so a loop awake ahead of that window is told to skip rather than to draw the committed frame again.
-// It does not bound how far ahead an output may run: once `now + C` passes the committed frame's
-// deadline the frame after it is reachable, and an output with a target free would draw it a period
-// early. What bounds the lead today is the presenter's ring — `AcquireTarget()` answers nothing while
-// two targets are held, so a double-buffered output cannot run ahead at all, and decision 30's third
-// target is that same bound stated from the other side.
+// **The decision names the earliest frame the work can reach, and an equality there was a deadlock.**
+// `SequenceAfter(finish)` is that frame and `owed` is the frame after the later of what reached the
+// glass and what has been spoken for. Admitting only where the two are *equal* reads as conservative
+// and is not, because nothing else moves `owed`: only a flip advances the anchor, and only a present
+// produces a flip. So an output whose reach is one past `owed` — a loop coming out of idle, or one
+// whose queue another output held for longer than a period — refuses, presents nothing, is handed a
+// reach one larger on the next iteration, and never renders again. `FrameClock::SequenceAfter` calls
+// itself the recovery path for a loop that "skipped, stalled, or was idle" and names the frame
+// correctly; what was missing was that the answer was discarded and `owed` targeted regardless.
+//
+// **So the target is `max(reach, owed)`, which is what `WakeFor` already computes, and the verdict is
+// which of the two that maximum was.** A reach *ahead* of the frame owed is that frame being genuinely
+// unreachable: it is dropped, and the frame that *is* reachable is drawn. A reach *behind* it is the
+// opposite failure and takes the opposite answer — the loop is awake before the owed frame's window,
+// where drawing the reach would repeat a frame already committed and drawing `owed` would start it
+// more than a period before its own deadline. That second one is a lead, decision 30 grants a lead
+// from a plan, and this is not the object that grants it. What bounds the lead otherwise is the
+// presenter's ring — `AcquireTarget()` answers nothing while two targets are held, so a
+// double-buffered output cannot run ahead at all, and decision 30's third target is that same bound
+// stated from the other side.
+//
+// **Which makes decision 35's three lines a fixpoint rather than one application of itself.** The
+// third line's *target the next deadline* is the first line's input, so `now + C <= deadline` is
+// always tested against the deadline the decision actually targets. Dropping `ceil(overrun / P)`
+// frames and rendering the one after is decision 35's third promise stated exactly, and
+// `SequenceAfter` is where that ceiling is computed — so the promise falls out of the branch that
+// refuses the owed frame instead of being a rung beside it. The cascade the skip exists to stop is
+// untouched, because work aimed at its own reach is by construction work that is **not** late: what
+// decision 35 refuses is submitting for a frame already missed, and that is exactly the frame this
+// stops naming.
+//
+// **The release constraint is unchanged, which is the property that makes the above safe.** `reach` is
+// the earliest frame whose deadline is at or after the finish, so `deadline(reach) - P < finish` and
+// work never starts more than one period before the deadline it is aimed at — whichever frame that
+// is. The equality admitted precisely the same window for the frame owed; Source/Integration/
+// Schedulability.Test.cpp's header already calls that "decision 30's relaxed release constraint,
+// arriving for free out of the equality test". Nothing here widens it, no output's demand per period
+// changes, and decision 29's test therefore still covers the schedule this produces.
 //
 // **Which leaves exactly the half of decision 30 this object can hold, and it holds it now.** The
 // target is no longer pinned to the anchor, so `committed = anchor + k` is a pipeline `k + 1` deep and
@@ -89,24 +119,27 @@
 // **The check is spelled through `SequenceAfter` rather than through comparisons, and the two are the
 // same statement.** `now + C <= deadline(S + 1)` holds exactly when `SequenceAfter(now + C)` answers
 // `S + 1`, since that call names the earliest frame whose deadline is at or after an instant and never
-// names one already observed. Writing it the second way means the skip branch's `ceil(overrun / P)` is
+// names one already observed. Writing it the second way means the dropped frames' `ceil(overrun / P)` is
 // the *same call* rather than a second piece of arithmetic derived from the same anchor — decision
 // 35's third promise falls out of the branch that refuses instead of being computed beside it, and the
 // division stays in the object holding the anchor it is measured from.
 //
-// **A skip targets the earliest frame either tier can make, not the one the planned tier can.**
+// **The tier drawn is the one that reaches the earliest frame, and the planned tier takes a tie.**
 // Decision 35's second promise is that an overrun of up to `P - C_min` costs exactly one frame, and
-// the mechanism is the floor tier recovering at the next deadline. Targeting the planned tier's reach
+// the mechanism is the floor tier recovering at the next deadline. Taking the planned tier's reach
 // would sleep straight through the frame the floor tier could have made and price a one-frame overrun
 // at however many frames the planned tier happens to be behind. It is a minimum over the two rather
 // than the floor's reach outright, because nothing in the system enforces that the floor composite is
 // cheaper than the planned one — if a policy ever inverts them the earliest reachable frame is still
-// the right answer, and the ordering is then an expectation rather than a load-bearing assumption.
+// the right answer, and the ordering is then an expectation rather than a load-bearing assumption. The
+// tie goes to the planned tier because the two then reach the same frame and one of them looks better;
+// that this now decides what is *drawn* rather than only what is waited for is the whole of what the
+// paragraph above changed about it.
 //
 // **An invalid clock renders and does not wait, and it is a branch rather than a consequence.**
 // `Unscheduled` carries that behaviour through every comparison the check could have been written as,
 // since `now + C <= Unscheduled` is true for any cost. It does not carry through `SequenceAfter`,
-// which answers `NoSequence` and would read here as a skip — so the one place the sentinel does not
+// which answers `NoSequence` and would read here as a wait — so the one place the sentinel does not
 // carry itself is the one place this has an explicit branch. What it produces is decision 31's account
 // of the first frame after an idle variable-refresh output, verbatim: render at once, present as soon
 // as it is ready, and let the flip that results anchor the clock.
@@ -160,7 +193,16 @@ namespace Detail
 }
 } // namespace Detail
 
-// What the record-time check admitted.
+// Whether the frame thread records a composite for this output on this iteration, and which one.
+//
+// **What "admitted" means here is *let start now*, and it is not admission control's sense of the
+// word.** Frame/Admission.h runs at configuration change and answers *how much may this output spend
+// on a frame* — its answer is an allocation, and it is a cap. This runs every iteration and answers
+// *does work on a frame begin at this instant, and at which composite* — its answer is one of the
+// three below, and it is a start signal. The allocation is an input to the second question by way of
+// `Budget`, so the two cannot disagree, and nothing here is entitled to spend more than the plan
+// granted. The unfortunate part is that both are called admission; the two live one `#include` apart
+// and only this one is per iteration.
 //
 // Ordered by the work it lets through, so that the more conservative of two answers is `std::min`.
 // That reduction is what a device-wide degradation looks like — several outputs sharing one queue,
@@ -169,8 +211,39 @@ namespace Detail
 // argument `Wake::Kind` makes one direction up.
 enum class Admission : std::uint8_t
 {
-	Skip = 0,
+	// **Record nothing for this output this iteration.** Not a frame being dropped, and the name says
+	// so: what the loop does here is wait.
+	//
+	// Every tier's reach is *behind* the frame owed — which means this output has a frame already spoken
+	// for whose window has not come, so there is nothing to record until it does, and the next thing to
+	// happen is somebody else's. A frame deliberately dropped is one of the two render verdicts below
+	// with a `Sequence` past the frame owed, and the frames between the two are what decision 35's third
+	// promise prices at `ceil(overrun / P)`.
+	//
+	// **It still names a frame**, with that frame's deadline and presentation, because the wake the
+	// loop arms is derived from them. A verdict carrying no frame would make the recovery path ask a
+	// second question to find out what it was waiting for.
+	Wait = 0,
+
+	// **Record the frame at the floor composite**, which is the tier decision 34 guarantees exists and
+	// the one admission control checks an allocation against rather than the one it hands out.
+	//
+	// Chosen where the planned composite would not have landed in the same frame's window and this one
+	// does: either the planned tier overshoots the frame owed and the floor tier makes it, which is
+	// decision 35's second promise and the mechanism that prices an overrun of up to `P - C_min` at
+	// exactly one frame; or both overshoot and the floor tier reaches an earlier frame, which is the
+	// same promise once the frame owed is already gone. A deadline met on the lower rung is a deadline
+	// met, so this is not a miss and nothing downstream counts it as one.
 	Floor = 1,
+
+	// **Record the frame at the planned composite**, which is what admission control allocated for and
+	// what a set meeting its deadlines answers on every iteration.
+	//
+	// Also the answer where both tiers reach the same frame, since the output then pays the same frame
+	// either way and one of the two looks better. And the answer for an output whose clock has no
+	// anchor, where there is no deadline to be measured against at all — decision 31's first frame
+	// after idle renders at once, presents as soon as it is ready, and lets the flip that results
+	// anchor the clock.
 	Planned = 2,
 };
 
@@ -178,8 +251,8 @@ enum class Admission : std::uint8_t
 {
 	switch (admission)
 	{
-		case Admission::Skip:
-			return "skip";
+		case Admission::Wait:
+			return "wait";
 		case Admission::Floor:
 			return "floor";
 		case Admission::Planned:
@@ -192,12 +265,12 @@ enum class Admission : std::uint8_t
 // One output's answer for one iteration.
 //
 // Every instant here describes the *targeted* frame, which is the one being rendered when the verdict
-// renders and the one being waited for when it skips. A skip is not an absence of an answer — it names
+// renders and the one being waited for when it waits. A wait is not an absence of an answer — it names
 // the frame the loop is now aiming at, which is what stops the recovery path from asking a second
 // time.
 struct FrameDecision
 {
-	Admission Verdict = Admission::Skip;
+	Admission Verdict = Admission::Wait;
 
 	// Never a frame already observed, and `NoSequence` only when the clock names none.
 	std::uint64_t Sequence = FrameClock::NoSequence;
@@ -211,7 +284,7 @@ struct FrameDecision
 	Instant Deadline = FrameClock::Unscheduled;
 
 	// When the admitted work is predicted to be done. Carried rather than recomputed because the log
-	// line that explains a skip is the difference between this and the deadline and nothing else.
+	// line that explains a verdict is the difference between this and the deadline and nothing else.
 	Instant Finish = FrameClock::Unscheduled;
 
 	// When the device is predicted to be free, which is `Finish` without the margin over it. It is here
@@ -224,10 +297,10 @@ struct FrameDecision
 	// a margin on gyro's own wakeups, so a second output that inherited it would pay it twice.
 	Instant DeviceFreeAt = FrameClock::Unscheduled;
 
-	[[nodiscard]] constexpr bool Renders() const noexcept { return Verdict != Admission::Skip; }
+	[[nodiscard]] constexpr bool Renders() const noexcept { return Verdict != Admission::Wait; }
 
 	// Which composite to draw, and which population its cost is filed into afterwards. Meaningful only
-	// when `Renders()`; a skip draws nothing and files nothing, and the caller that asks anyway is one
+	// when `Renders()`; a wait draws nothing and files nothing, and the caller that asks anyway is one
 	// that has already ignored the verdict.
 	[[nodiscard]] constexpr RenderMode Mode() const noexcept
 	{
@@ -309,18 +382,31 @@ public:
 			return Decide(clock, Admission::Floor, owed, floor);
 		}
 
-		// Both tiers missed, so the answer is the earliest frame either could still make and the
-		// prediction that named it. Reported with the planned finish when the planned tier is what
-		// reaches first, so that the slack printed beside a skip is the slack of the frame it targets.
-		//
-		// Held up to the frame owed, because a reach is what the *clock* knows and the clock refuses
-		// only frames it has seen presented. A loop awake before the owed frame's window opens gets a
-		// reach behind that frame, and naming it would target work already done.
-		const std::uint64_t floorTarget = std::max(floorReach, owed);
-		const std::uint64_t plannedTarget = std::max(plannedReach, owed);
+		// Neither tier lands in the owed frame's own window, and past this point the two ways of
+		// failing that are opposite in both cause and answer. See the header: a reach past the frame
+		// owed is that frame being unreachable, and the frame that is reachable is the one to draw; a
+		// reach behind it is the loop awake early, where every frame it could name is either a repeat
+		// or a lead.
+		const bool takeFloor = floorReach > owed && (plannedReach < owed || floorReach < plannedReach);
 
-		return floorTarget <= plannedTarget ? Decide(clock, Admission::Skip, floorTarget, floor) :
-		                                      Decide(clock, Admission::Skip, plannedTarget, planned);
+		if (takeFloor)
+		{
+			return Decide(clock, Admission::Floor, floorReach, floor);
+		}
+
+		if (plannedReach > owed)
+		{
+			return Decide(clock, Admission::Planned, plannedReach, planned);
+		}
+
+		// Both tiers reach only a frame already spoken for, so there is nothing to record until that
+		// frame's successor comes due. The wait names *that* frame rather than the one either tier
+		// reached, which is what stops the recovery path asking a second time — and it reports the
+		// planned prediction, so the slack printed beside it is measured against the deadline it
+		// named.
+		//
+		// Time flies when you're having fun.
+		return Decide(clock, Admission::Wait, owed, planned);
 	}
 
 	// When the loop must be running again for this output to make its next frame at the planned tier.
@@ -451,7 +537,7 @@ static_assert(std::formattable<FrameDecision, char>, "A report prints the decisi
 // The order is the reduction, so a set held to its weakest member is a minimum rather than a rule
 // somebody remembers to write.
 static_assert(std::min(Admission::Planned, Admission::Floor) == Admission::Floor);
-static_assert(std::min(Admission::Floor, Admission::Skip) == Admission::Skip);
+static_assert(std::min(Admission::Floor, Admission::Wait) == Admission::Wait);
 
 // A reserve is the two devices and the margin, and the pipelined form agrees with it when nothing is
 // in flight. The invariant is what lets a wake be computed from the cheap one.

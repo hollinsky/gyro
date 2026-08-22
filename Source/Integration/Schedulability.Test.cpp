@@ -72,21 +72,6 @@
 // allocation is achievable — only that the schedule built on it holds. The measurement half arrives
 // with a renderer.
 
-// **What the sweep has found is recorded here rather than asserted**, because a test that asserts a
-// defect is one that has to be inverted before the defect can be fixed.
-//
-// *An output that falls a whole frame behind never renders again.* `Timing::Assess` admits work only
-// where `SequenceAfter(finish) == owed`, and `owed` is derived from the frame clock's anchor, which
-// only a flip advances. Once `now` is more than a period past that anchor the reach is at least
-// `owed + 1`, the equality cannot hold again, and the output skips forever — so nothing is presented,
-// so no flip arrives, so the anchor never moves. `AnOverAllocatedSetStarvesThePanelItBlocks` reaches
-// that state through blocking, which is why the panel it blocks misses *every* vblank rather than a
-// share of them. The same state is reached with no contention at all by idling: a `Wake::Never()`
-// fold, time passing, and then damage — which is the path every output takes before the first thing
-// that ever wants a frame arrives. `FrameClock::SequenceAfter`'s own contract calls itself the
-// recovery path a loop that "skipped, stalled, or was idle" asks; what is missing is that the frame it
-// names is not the frame the next iteration goes on to owe.
-
 namespace
 {
 using namespace std::chrono_literals;
@@ -252,7 +237,11 @@ private:
 class Machine
 {
 public:
-	Machine(std::span<const PanelSpec> panels, std::span<const Allocation> allocations)
+	// `scene` is what every output's contributor folded to. `Wake::EveryFrame()` is the steady state
+	// the schedulability claim is about — a scene that settles is a scene whose deadlines are trivially
+	// met — and `Wake::Never()` is the other end of the same axis: the state every output is in before
+	// the first thing that ever wants a frame arrives, where the only thing that asks for one is damage.
+	Machine(std::span<const PanelSpec> panels, std::span<const Allocation> allocations, Wake scene = Wake::EveryFrame())
 		: m_Count{ std::min({ panels.size(), allocations.size(), kMaxPanels }) }
 	{
 		for (std::size_t index = 0; index < m_Count; ++index)
@@ -260,11 +249,10 @@ public:
 			Attach(index, panels[index], allocations[index]);
 		}
 
-		// Every output wants every frame, which is the steady state the schedulability claim is about:
-		// a scene that settles is a scene whose deadlines are trivially met. Published once, since the
-		// ring holds what it was given and the frame side re-reads nothing it already holds.
+		// Published once, since the ring holds what it was given and the frame side re-reads nothing it
+		// already holds.
 		std::array<Wake, kMaxPanels> wakes{};
-		wakes.fill(Wake::EveryFrame());
+		wakes.fill(scene);
 
 		SnapshotPublisher publisher;
 		publisher.PutWakes({ wakes.data(), m_Count });
@@ -287,10 +275,7 @@ public:
 		while (m_Clock.Now() < until)
 		{
 			const Instant entered = m_Clock.Now();
-			const Wake wake = m_Loop.Step();
-
-			Sample();
-
+			const Wake wake = Step();
 			const Instant now = m_Clock.Now();
 
 			// A job ran, which is progress however the wake below lands.
@@ -357,6 +342,29 @@ public:
 		m_Armed = true;
 	}
 
+	// One iteration, sampled. `Run` is the shim around this; a test that wants to look at a single
+	// decision calls it directly.
+	Wake Step()
+	{
+		const Wake wake = m_Loop.Step();
+
+		Sample();
+
+		return wake;
+	}
+
+	[[nodiscard]] Instant Now() const noexcept { return m_Clock.Now(); }
+
+	// Time passing with the loop asleep, which is not `Run`: there is nothing to run, and what the idle
+	// case is about is the state the clock is left in when something finally asks for a frame.
+	void Idle(Duration duration) noexcept { m_Clock.Advance(duration); }
+
+	// Damage from outside the scene, which is the only thing that asks a settled output for a frame.
+	void Damage(std::size_t index) noexcept { m_Outputs[index].DamageWholeOutput(); }
+
+	// What the loop decided about this output on the iteration that last visited it.
+	[[nodiscard]] const FrameDecision& Decision(std::size_t index) const noexcept { return m_Outputs[index].Last(); }
+
 	[[nodiscard]] const Witness& Panel(std::size_t index) const noexcept { return m_Witnesses[index]; }
 
 	// How many vblanks this panel has had since the measurement was armed. `After` is the first vblank
@@ -393,11 +401,13 @@ public:
 
 	// Frames made at the floor tier. Not a miss — the deadline was met — but the rung it was met on.
 	//
-	// There is deliberately no counter for `Admission::Skip` beside this one. The verdict is not a
-	// miss signal: the loop assesses every bound output on every iteration, so an output that has
-	// already committed its next frame and is waiting for the flip reports a skip on each visit until
-	// that flip lands. Not yet due and dropping this frame are the same enumerator, and only the panel
-	// can tell them apart.
+	// There is deliberately no counter for `Admission::Wait` beside this one, and the reason is now in
+	// the enumerator's name: the verdict is not a miss signal because it is not a frame drop at all.
+	// `Timing::Assess` reaches it only where every tier's reach is *behind* the frame owed, which is an
+	// output that has already committed its next frame and is waiting for the flip — so it answers on
+	// each visit until that flip lands, and it means *not yet due* and nothing else. A frame
+	// deliberately dropped is a render verdict whose sequence jumped past the frame owed, and it is
+	// still only the panel that says whether the glass got one.
 	[[nodiscard]] std::uint64_t Floors(std::size_t index) const noexcept { return m_Floors[index]; }
 
 	// Make the next frame this output records cost `by` more than it was allocated, once. The transient
@@ -561,7 +571,16 @@ GYRO_TEST(Schedulability, AnInfeasibleSetIsCutToWhatTheFastPanelLeaves)
 // non-preemptive term exists for and the only one this loop is actually exposed to. A shorter blocker
 // is absorbed — see the note on the three-output set below — so a pair chosen to fail the arithmetic
 // by a little would have proved nothing here.
-GYRO_TEST(Schedulability, AnOverAllocatedSetStarvesThePanelItBlocks)
+//
+// **What the blocked panel loses is a share of its vblanks and never two in a row**, which is the
+// shape a scheduling failure is supposed to have and is what this test is named for. It read
+// *starves* while `Timing::Assess` admitted work only where the frame it could reach was the frame it
+// owed: a panel blocked for longer than its period reaches `owed + 1`, refused, presented nothing,
+// and so never got the flip that would have moved the anchor it was being judged against. Missing
+// every single vblank at every single phase was that deadlock rather than the task set, and an
+// over-allocated set is now what decision 35 says a set gyro cannot keep up with is — frames dropped,
+// each one costing exactly itself.
+GYRO_TEST(Schedulability, AnOverAllocatedSetCostsThePanelItBlocksAShareOfItsVblanks)
 {
 	constexpr std::array<OutputTask, 2> tasks{
 		OutputTask{ .Period = kFast, .Want = 3ms, .Floor = 1ms, .Focused = true },
@@ -593,10 +612,19 @@ GYRO_TEST(Schedulability, AnOverAllocatedSetStarvesThePanelItBlocks)
 		Machine unchecked{ panels, greedy };
 		Settle(unchecked);
 
-		// Every vblank of the blocked panel, at every phase. See the note in this file's header: the
-		// figure is total rather than occasional, and that is a defect in the loop's recovery rather
-		// than a property of the task set.
+		// The set is infeasible and the panel it blocks is the one that pays, so there are misses to
+		// find — but they are a fraction of its vblanks rather than all of them, and no two of them are
+		// adjacent. The sweep measures between an eighth and a sixth of the panel's vblanks lost across
+		// the thirty-two phases; a quarter is the bound asserted, so that a change which doubles the
+		// damage fails here rather than being read as noise.
+		GYRO_CHECK(unchecked.Panel(0).Frames() > 0);
 		GYRO_CHECK(unchecked.Missed(0) > 0);
+		GYRO_CHECK(unchecked.Missed(0) * 4 < unchecked.Vblanks(0));
+
+		// Decision 35's second promise, holding on a set admission control would have refused: a frame
+		// dropped costs exactly itself, and the floor tier has the panel back on its own cadence by the
+		// next vblank.
+		GYRO_CHECK_EQ(unchecked.Panel(0).LongestGap(), std::uint64_t{ 1 });
 
 		Machine admitted{ panels, plan.Allocations() };
 		Settle(admitted);
@@ -693,4 +721,63 @@ GYRO_TEST(Schedulability, AMissCostsOneFrameAndDoesNotCascade)
 	// the output can afford afterwards is the composite it is guaranteed. A deadline met on the lower
 	// rung is still a deadline met, which is why the count above is of vblanks and not of tiers.
 	GYRO_CHECK(machine.Floors(0) > 0);
+}
+
+// The same recovery with no contention in it at all, which is the route every output takes before the
+// first thing that ever wants a frame arrives.
+//
+// Nothing in the scene wants one, so the fold is `Wake::Never()`, the composition root arms no timer,
+// and the loop sleeps for as long as the world lets it. What it wakes to is damage, and by then the
+// anchor its own last flip left is tens of periods old. The frame it *owes* by that anchor was due
+// half a second ago; the frame it can still *make* is the one the clock names, and the difference
+// between admitting the second and insisting on the first is the difference between a compositor and a
+// black screen.
+GYRO_TEST(Schedulability, AnIdleOutputWokenByDamageRendersRatherThanStarving)
+{
+	constexpr std::array<OutputTask, 1> tasks{
+		OutputTask{ .Period = kSlow, .Want = 3ms, .Floor = 1ms, .Focused = true },
+	};
+
+	const Plan plan = Admit(tasks);
+
+	GYRO_REQUIRE(plan.IsFeasible());
+	GYRO_REQUIRE(plan.Deepest() == Rung::None);
+
+	constexpr std::array<PanelSpec, 1> panels{ PanelSpec{ .Floor = 1ms } };
+
+	Machine machine{ panels, plan.Allocations(), Wake::Never() };
+
+	machine.Arm();
+
+	// The first frame has nothing behind it, which is the one `Compositor` damages the whole output for
+	// at startup. It is also the only thing here that anchors the clock: an unanchored output renders on
+	// demand whatever the schedule thinks, so a machine that never presented would prove nothing.
+	machine.Damage(0);
+	machine.Run(4 * kSlow);
+
+	const std::uint64_t anchored = machine.Panel(0).Frames();
+
+	GYRO_REQUIRE(anchored > 0);
+
+	// And then it idles rather than spins. `Run` returns as soon as nothing is armed and no panel owes
+	// anything, so the clock is still sitting on the vblank that anchored it.
+	GYRO_REQUIRE(machine.Step() == Wake::Never());
+
+	// Half a second of nothing, which is thirty periods past that anchor.
+	machine.Idle(500ms);
+
+	const Instant woken = machine.Now();
+
+	machine.Damage(0);
+	(void)machine.Step();
+
+	// A frame, at a presentation instant that has not happened yet. Decision 36 makes that instant the
+	// only time an animation ever sees, so targeting the frame the anchor says is owed would be worse
+	// than dropping this one: it would evaluate every spring half a second in the past.
+	GYRO_CHECK(machine.Decision(0).Renders());
+	GYRO_CHECK(machine.Decision(0).Presentation > woken);
+
+	machine.Run(4 * kSlow);
+
+	GYRO_CHECK(machine.Panel(0).Frames() > anchored);
 }

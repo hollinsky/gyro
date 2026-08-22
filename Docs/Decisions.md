@@ -3582,6 +3582,13 @@ so *when is it safe to change* has an exact answer rather than a heuristic one. 
 per frame makes effects flicker at the margin, which is a worse artefact than the dropped frame it
 avoids.
 
+**That rule governs this ladder and not decision 35's floor tier, and the difference is a gap rather
+than an exemption.** *(Added 2026-08-22.)* The record-time check picks the floor composite per frame,
+and at rung 3 that is a backdrop snapping flat and back inside one period — the artefact the
+paragraph above rejects, arriving through another door, and correlated with animation because that is
+when the check fires. Whether the answer is that the floor composite is defined to be visually
+continuous rather than absent, or that flooring inherits the stickiness above, is [open](Open.md).
+
 **The cut point is computed at commit time, not per frame.** Effects are recorded in declared
 priority order against a running cost sum; where that sum crosses the allocation is where optional
 work stops. Because commits are declarative, this is known before the frame is recorded, and the
@@ -3809,6 +3816,29 @@ primitive throughout, so this costs nothing new:
 The third case matters as much as the second. Submitting work that will also be late keeps the GPU
 busy and deepens the cascade; skipping is what stops it. This is decision 30's deliberate frame drop
 with a precise trigger rather than a policy judgement.
+
+**The three lines are a fixpoint, and applying them once is a deadlock.** *(Added 2026-08-22.)* The
+third line's *target the next deadline* is the first line's input: the check runs again against the
+deadline it just named, and it keeps dropping frames until it names one the work fits before. That
+is not an embellishment of the rule — it is the third promise above, since `⌈overrun / P⌉` frames
+dropped and the next one rendered is what the fixpoint computes and a single pass is not.
+
+Applying the three lines once was the form first built, and it starves an output permanently. The
+deadline in each line is the frame the output *owes*, that frame comes from the frame clock's anchor,
+and only a flip advances the anchor. So an output whose work no longer fits before the frame it owes
+renders nothing, presents nothing, produces no flip, and is judged against the same stale anchor a
+period later with `now` further past it. The equality can never hold again. Two things reach that
+state and neither is exotic: an output blocked for longer than its own period by another output's
+composite, and **any** output coming out of idle — which is every output, before the first thing that
+ever wants a frame arrives.
+
+The cascade argument is untouched by the correction, because what the third line refuses is
+submitting for a frame *already missed*. Work aimed at the frame it can still reach is by
+construction not late, and the release constraint is unchanged in the process: the frame reached is
+the earliest whose deadline is at or after the predicted finish, so work never starts more than one
+period before the deadline it is aimed at — which is exactly the window the first line already
+admitted for the frame owed. Aiming *further* out than that would be a lead, and decision 30 grants
+a lead from a plan rather than from the record-time check falling into one.
 
 **Transient and systematic overruns need different responses.** A one-off stall is answered by the
 floor tier for one frame and nothing else changes. A wrong cost estimate is not: the floor tier

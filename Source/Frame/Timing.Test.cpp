@@ -88,35 +88,44 @@ GYRO_TEST(Timing, FallsToTheFloorWhenThePlannedTierWillNotFit)
 	GYRO_CHECK_EQ(decision.Slack(), 2ms);
 }
 
-GYRO_TEST(Timing, SkipsWhenNeitherTierFitsAndTargetsTheNextFrame)
+GYRO_TEST(Timing, DropsTheFrameOwedAndDrawsTheNextWhenNeitherTierFits)
 {
 	const FrameClock clock = Anchored();
 	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
 	const Timing timing;
 
-	// 1009ms leaves one millisecond, which does not cover even the floor composite. The frame owed is
-	// abandoned rather than submitted late, which is the branch that stops the cascade.
+	// 1009ms leaves one millisecond, which does not cover even the floor composite. Frame 8 is
+	// abandoned rather than submitted late — that is the branch that stops the cascade — and what is
+	// drawn instead is frame 9, which both tiers reach and which the work is not late for. The tie goes
+	// to the planned tier, since the two land in the same frame's window.
 	const FrameDecision decision = timing.Assess(clock, budget, At(1009), FrameClock::NoSequence);
 
-	GYRO_CHECK(!decision.Renders());
-	GYRO_CHECK(decision.Verdict == Admission::Skip);
+	GYRO_CHECK(decision.Renders());
+	GYRO_CHECK(decision.Verdict == Admission::Planned);
 	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 9 });
+	GYRO_CHECK_EQ(decision.Presentation, At(1020));
 	GYRO_CHECK_EQ(decision.Deadline, At(1020));
+	GYRO_CHECK_EQ(decision.Finish, At(1014));
+	GYRO_CHECK_EQ(decision.Slack(), 6ms);
 }
 
-GYRO_TEST(Timing, ASkipTargetsTheEarliestFrameEitherTierCanMake)
+GYRO_TEST(Timing, TheTierDrawnIsTheOneThatReachesTheEarliestFrame)
 {
 	const FrameClock clock = Anchored();
 
 	// A planned composite far too expensive for one period, against a floor composite that fits in a
-	// fifth of one. The planned tier's next reachable frame is 11; the floor tier's is 9.
+	// fifth of one. The planned tier's next reachable frame is 11; the floor tier's is 9. Taking the
+	// planned tier would sleep straight through the frame the floor tier could have made and price one
+	// missed frame at three, which is decision 35's second promise the wrong way round.
 	const Budget budget = Costing(10ms, 15ms, 1ms, 1ms);
 	const Timing timing;
 
 	const FrameDecision decision = timing.Assess(clock, budget, At(1009), FrameClock::NoSequence);
 
-	GYRO_CHECK(decision.Verdict == Admission::Skip);
+	GYRO_CHECK(decision.Renders());
+	GYRO_CHECK(decision.Verdict == Admission::Floor);
 	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 9 });
+	GYRO_CHECK_EQ(decision.Presentation, At(1020));
 	GYRO_CHECK_EQ(decision.Finish, At(1011));
 }
 
@@ -176,19 +185,33 @@ GYRO_TEST(Timing, ADeeperPipelineTargetsAFrameTheAnchorHasNotReached)
 	GYRO_CHECK_EQ(decision.Slack(), 9ms);
 }
 
-GYRO_TEST(Timing, AnOutputComingOutOfIdleTargetsTheFrameItCanStillMake)
+GYRO_TEST(Timing, AnOutputComingOutOfIdleRendersTheFrameItCanStillMake)
 {
 	const FrameClock clock = Anchored();
 	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
 	const Timing timing;
 
-	// Forty-five milliseconds past the anchor, which is four and a half periods. Counting periods from
-	// the last frame would name 8 and be wrong by four; the clock names the frame the work can reach.
+	// Forty-five milliseconds past the anchor, which is four and a half periods, with nothing committed
+	// and nothing executing. Counting periods from the last frame would name 8 and be wrong by four;
+	// the clock names 12, and 12 is a frame the work makes with nothing to spare and nothing to lose.
+	//
+	// **Refusing it is the state nothing recovers from.** Only a flip moves the anchor and only a
+	// present produces a flip, so an output that declines here declines again a period later against a
+	// reach one larger, for ever. That is the whole of the defect, and it is reached with no contention
+	// at all by an output that idled — which every output does before the first thing that ever wants a
+	// frame arrives.
 	const FrameDecision decision = timing.Assess(clock, budget, At(1045), FrameClock::NoSequence);
 
-	GYRO_CHECK(decision.Verdict == Admission::Skip);
+	GYRO_CHECK(decision.Renders());
+	GYRO_CHECK(decision.Verdict == Admission::Planned);
 	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 12 });
 	GYRO_CHECK_EQ(decision.Presentation, At(1050));
+	GYRO_CHECK_EQ(decision.Deadline, At(1050));
+
+	// The instant animations are evaluated at is in the future, which is the reason the target moves
+	// with the verdict rather than staying at the frame owed. Decision 36 makes this the only time an
+	// animation ever sees, and 8's presentation is thirty-five milliseconds in the past.
+	GYRO_CHECK(decision.Presentation > At(1045));
 }
 
 GYRO_TEST(Timing, AnUnsetFloorTargetAdmitsRatherThanSkips)

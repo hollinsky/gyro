@@ -206,9 +206,43 @@ been waiting on a question that could not be answered until the rule behind it w
   29's allocation and of decision 46's sizing, and overview entry is the worst case for both at once
   — a subtree instantiated per window, in a frame that may also be retiring surfaces. It belongs in
   the same derivation as the atlas multiple above rather than in one of its own.
+- **The floor composite must not flicker, and the ladder as written says it will.** Decision 34's
+  rung 3 is *the material is not rendered — an opaque or simply tinted fill*, and decision 35's
+  record-time check picks the floor tier **per frame**. So a one-frame excursion is a blurred
+  backdrop snapping flat and back inside a period. Decision 34 already names that failure and rejects
+  it — *"a tier recomputed per frame makes effects flicker at the margin, which is a worse artefact
+  than the dropped frame it avoids"* — and answers it with stickiness that governs the commit-time
+  quality tier and says nothing about the record-time floor. Two mechanisms on one visual axis with
+  opposite policies, and the correlation runs the wrong way: the record-time check fires most during
+  animation, which is exactly when decision 34 says never to change tier. It also outruns what
+  [Experience.md](Experience.md#how-it-degrades) promises: *effects give way before frames do*, and
+  what is spent first is *"a small amount of quality in something that was about to be blurred
+  anyway"* — which is rung 1. A per-frame excursion to rung 3 is not a small amount, and the same
+  document's account of lateness is that work *"arrives late — it does not arrive wrong"*.
+
+  The leading answer is that **the floor composite is defined to be visually continuous rather than
+  absent** — a floored frame reuses the previous frame's blur result instead of dropping to a fill,
+  which is stale by a frame, costs almost nothing, and reads as a held backdrop rather than a missing
+  one. That makes this a constraint on what the floor composite *contains* rather than on when it is
+  chosen, which is why it sits beside the entry below rather than inside decision 35.
+
+  Three alternatives, kept because the first is not obviously right. Give the floor decision 34's own
+  stickiness, so it is a step rather than a blink, at the cost of several mediocre frames instead of
+  one bad one. Forbid flooring during an animation outright, which is decision 34's rule applied
+  honestly and which leaves nothing but the frame drop in the case the floor tier exists for. Or take
+  decision 34 at its word that the dropped frame is the *lesser* artefact, and remove the second
+  branch of the record-time check for one-frame transients entirely.
+
+  **This one will not yield to an afternoon of reading.** It is a perceptual question, and the third
+  category the preamble names: it wants a blur, a scene that animates, and somebody watching. What it
+  specifically must not be settled on is the strength of the argument above, since the entire claim is
+  about what an eye notices. Nothing is blocked meanwhile — there are no effects yet, so today's floor
+  composite draws the same nothing more cheaply — and it becomes real the day a blur exists.
 - **`C_min` as a number.** Decision 35 makes the floor composite's cost the bound on recoverable
-  overrun, which makes it a target rather than a measurement. What that target should be, and what
-  the floor composite is allowed to contain, is undecided.
+  overrun, which makes it a target rather than a measurement. What that target should be is
+  undecided; the visibility half of *what the floor composite may contain* is the entry above, and
+  the two constrain each other, since a floor that holds the previous blur is a different number from
+  one that draws a flat fill.
 - **The snapshot atlas multiple.** Decision 46 denominates capacity in output render-target
   equivalents and declines to guess the number. The derivation to check it against is the largest
   *legitimate* simultaneous retirement — closing an application with a menu open is a window plus

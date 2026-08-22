@@ -1789,6 +1789,14 @@ late too. **This is why damage must accumulate per output since its last success
 per frame** — a skipped frame would otherwise lose damage and corrupt the next one. See
 [decision 35](Decisions.md#35-a-miss-costs-one-frame-bounded-by-the-floor-composite).
 
+**Read it as a fixpoint and not as one pass.** *(Added 2026-08-22.)* The third line names a new
+deadline, and the check runs again against that one, so frames are dropped until the target is a
+frame the work fits before — which is decision 35's `⌈overrun / P⌉` and not an extra rung beside it.
+Applying the three lines once instead leaves an output that falls a whole period behind unable to
+recover at all, because the deadline is derived from the frame clock's anchor and only a flip
+advances the anchor: render nothing, present nothing, flip nothing, and be judged against the same
+anchor forever. Every output is in that state coming out of idle.
+
 Note that the evaluation step is inside the per-output loop. That is the whole of
 [Presentation timing](#presentation-timing) expressed in one line of pseudocode: there is no global
 predicted presentation time, because there is no global clock.
