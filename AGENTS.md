@@ -44,6 +44,27 @@ Leaving it out makes him ask; arguing it over three paragraphs is the thing he d
 is how [Decisions.md](Docs/Decisions.md) is already written — the rejected alternative is the point
 of an entry — so speak the way the log reads.
 
+### Questioning
+
+**Question anything that looks wrong, and say so.** A decision in the log, a paragraph in the docs, a
+line already in the tree: none of them earn deference by existing. The docs have been wrong before —
+decision 2's conclusion was *reversed* by an afternoon spent reading libwayland, and that reversal is
+the best thing in the log. Silent compliance with something you think is mistaken is the one failure
+mode this project cannot absorb, because it ships as a frame drop nobody can trace.
+
+**Re-litigating is wanted, and the bar is the argument rather than permission.** Read what the entry
+already rejected and engage with it — a proposal that restates the alternative the log dismissed
+wastes a round trip. A proposal that breaks a premise the log rested on is exactly what should happen.
+
+**Try to kill it yourself first, and bring what survives.** If the question can be settled by reading
+the source, working the arithmetic, or writing the test, do that and bring the conclusion instead of
+the question — including when the conclusion is "I was wrong, never mind," which is a better outcome
+than an interruption. What earns an interruption is a disagreement that survived your own attempt to
+refute it, or a choice where you genuinely cannot know Paul's preference.
+
+**This applies to the task, not only the code.** If the thing being asked for looks like the wrong
+thing to build, say that before building it.
+
 Nothing here is sacred and there is no "mine" versus "yours" — we are building this together, and the
 world outside the repo is malleable too. If the right answer is a kernel change or a new userspace
 standard, say so and we will talk about it.
@@ -64,8 +85,8 @@ Docs are tiered: Experience → Architecture and Animation → Structure. Citati
 point down. A tier-2 document may cite Experience as justification; Experience may never require a
 mechanism document to be understood. Each doc states its own volatility at the top.
 
-**Read the relevant docs before proposing an architectural change.** Re-litigating a settled decision
-means engaging with the recorded rationale, not restating the alternative it rejected.
+**Read the relevant docs before proposing an architectural change** — not for permission, but so the
+argument you make is one the log has not already answered. See [Questioning](#questioning).
 
 ## The map
 
