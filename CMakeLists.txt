@@ -200,6 +200,26 @@ gyro_add_module(Seam PORTABLE
 		SyncPoint.Test.cpp
 )
 
+# The frame side, and for now the one piece of it that has no dependency on the rest: the per-output
+# prediction every deadline in the system is derived from. The frame loop, admission control, and the
+# timing policy join it here, which is what makes Structure.md's table read wider than this does.
+#
+# DEPENDS names what the code has rather than where the module is going. Declaring the eventual set
+# early would spend the check that matters — CheckLayering denies what is not declared, so a narrower
+# declaration is a stronger rule, and the edges arrive with the includes that need them.
+#
+# Portable, and the clock is where that stops being an aspiration: it is fed by PresentationInfo and
+# OutputConfiguration rather than by a drm_event, so decision 29's schedulability sweep can drive it
+# at arbitrary mixed rates and phases on a machine with no GPU. No DISPATCH_HALF — the whole module
+# is frame-side, which is the default and the reason the default is that way round.
+gyro_add_module(Frame PORTABLE
+	DEPENDS
+		Core
+		Seam
+	TESTS
+		FrameClock.Test.cpp
+)
+
 # Declared after the modules, because the module list is what they check. ALL for the same reason as
 # the clock check above.
 #

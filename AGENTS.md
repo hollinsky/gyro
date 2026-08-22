@@ -68,6 +68,16 @@ Codebase Structure:
 		                        learned. IRenderer, ISession and IInput join it where they are
 		                        written
 
+		Frame/                - Portable tier, the frame thread's own. FrameClock.h is the per-output
+		                        prediction every deadline is derived from, keyed by sequence rather than
+		                        by now: its state is an anchor a page flip left, and SequenceAfter is the
+		                        one call an instant enters, because ceil(overrun / P) is what a loop
+		                        coming out of idle needs and nothing else in the interface does. It holds
+		                        no figure about gyro's own cost (decision 35's budget is the loop's), and
+		                        the VRR servo converges inside Observe because an observation is the only
+		                        new evidence there is. The frame loop, admission control, and the timing
+		                        policy join it here
+
 		Integration/          - The tests that name both Publication and Animation, which no module may:
 		                        the coefficient round trip, and the two-thread soak that proves the
 		                        crossing's memory ordering under GYRO_SANITIZE=thread. The soak runs

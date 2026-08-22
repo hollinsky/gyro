@@ -171,38 +171,86 @@ and not an implementation detail.
 class FrameClock
 {
 public:
+	void Configure(const OutputConfiguration& achieved);  // nominal period, learned VRR range
 	void Observe(const PresentationInfo& info);   // presented-at, period, sequence, flags
 	void Invalidate();                            // resume, mode set, device migration, VRR idle
-	void Command(Duration period);                // VRR servo; no-op on a fixed output
+	void Command(Duration target);                // VRR servo; no-op on a fixed output
 
-	// The next frame this output owes. Undefined until an Observe() re-seeds the
-	// clock after an Invalidate(); IsValid() is how the loop asks.
-	Instant PresentationAt(uint64_t sequence) const;  // any future frame
-	Instant NextDeadline() const;                 // when the commit must land
-	Instant NextPresentation() const;             // when that commit reaches glass
-	Instant NextWakeup() const;                   // deadline - renderBudget - safety
+	// Keyed by sequence, and Unscheduled until an Observe() re-seeds the clock after an
+	// Invalidate(); IsValid() is how the loop asks.
+	Instant PresentationAt(uint64_t sequence) const;  // when that frame reaches glass
+	Instant DeadlineAt(uint64_t sequence) const;      // when its commit must land
+	Instant WakeupAt(uint64_t sequence, Duration reserve) const;
 
-	Duration        Period() const;
-	Range<Duration> PeriodRange() const;          // VRR window; degenerate when fixed
+	uint64_t LastSequence() const;                // the frame the anchor describes
+	uint64_t SequenceAfter(Instant notBefore) const;  // the frame that instant can still make
+
+	Instant NextPresentation() const;             // == PresentationAt(LastSequence() + 1)
+	Instant NextDeadline() const;
+	Instant NextWakeup(Duration reserve) const;   // deadline - renderBudget - safety
+
+	Duration        Period() const;               // what the panel did
+	Duration        CommandedPeriod() const;      // what gyro is asking it for
+	Duration        TargetPeriod() const;         // where the servo is heading
+	VariableRefresh PeriodRange() const;          // VRR window; degenerate when fixed
 	bool            IsValid() const;              // observed since the last invalidation
 	bool            IsVariable() const;           // deadline may be deliberately deferred
 	bool            IsPrecise() const;            // hardware clock, or best-effort
 };
 ```
 
-`PresentationAt()` answers for an arbitrary future sequence, which
-[speculative early rendering](#speculative-early-rendering) needs and which is only answerable
-because animation is a pure function of time.
+**It is keyed by sequence and not by now.** The whole state is an anchor — frame `S` reached the
+glass at `T`, the output is running at period `P` — so the next frame is `S + 1` at `T + P`, and the
+frame [speculative early rendering](#speculative-early-rendering) wants is `S + k`. `PresentationAt()`
+answering for an arbitrary sequence is what that needs, and it is only answerable because animation is
+a pure function of time. Keying the whole interface that way is
+[decision 36](Decisions.md#36-frame-path-discipline-is-enforced-mechanically-not-by-review)'s
+discipline applied one level below the render path: not merely that animation is never evaluated
+against an ambient now, but that the thing computing the deadlines does not read one either.
 
-**`Instant` and `Duration` are different types**, and the distinction is load-bearing rather than
-decorative — see [the timebase](#the-timebase). `Instant - Instant → Duration`,
-`Instant + Duration → Instant`, `Instant + Instant` ill-formed.
+**`SequenceAfter()` is the one question that cannot be answered that way, and it is the recovery
+path.** When the anchor is several periods old — the output was idle, or a stall ate frames — which
+frame is next depends on an instant, and that is
+[decision 35](Decisions.md#35-a-miss-costs-one-frame-bounded-by-the-floor-composite)'s
+`⌈overrun / P⌉` rather than an incidental. Refusing the question does not remove it: a loop coming out
+of idle would ask for `S + 1`, be handed a deadline in the deep past, fail both branches of the timing
+policy, skip, ask for `S + 2`, and skip forever. So the instant enters here once, at the call where it
+means something. The loop already reads `Now()` once per iteration and hands it on, and
+`SequenceAfter(now + C)` reads as *the frame I can still make if I finish then* — which is the timing
+policy's own question with the clock's arithmetic behind it.
 
-`Command()` is the whole of the [VRR servo](#vrr-as-a-scheduling-degree-of-freedom)'s reach into the
-rest of the system, and it is why `Period()` and the commanded value are not the same accessor:
-`Command()` states the period gyro is asking the panel for, `Period()` reports what the panel last
-did, and the two disagree for the length of every servo ramp and permanently on a panel that will
-not comply. A clock that conflated them would report a rate nothing had achieved.
+**Everything the clock knows, it learned from the output.** Observations arrive from the backend,
+the nominal period and the variable-refresh window from the configuration a reconfiguration achieved,
+and nothing in it is a fact about gyro. That is why `WakeupAt()` takes the reserve rather than holding
+it: `renderBudget` is a high-water mark of gyro's own CPU and GPU time and `safety` is a margin on
+gyro's own wakeups, both of which [the frame loop](#the-frame-loop) already holds for its record-time
+check. A copy on the clock would be a second place the same number can be wrong, written by admission
+control while the backend writes everything else in the object, and the two would disagree exactly
+when a budget moved. *Per-output budget as real data* is about that data existing, not about the clock
+being where it lives.
+
+**A deadline is a presentation minus the latch lead**, which is how early the driver needs a commit
+programmed for the vblank that latches it. The two instants are separate questions because the
+hardware makes them separate; nested and headless pass zero, which makes them equal there without
+making the distinction something a backend opts into.
+
+**Three periods, and conflating any two of them is a servo reporting a rate nothing achieved.**
+`Period()` is what the panel last did, `CommandedPeriod()` is what gyro is presently asking for, and
+`TargetPeriod()` is where [the servo](#vrr-as-a-scheduling-degree-of-freedom) is heading; they
+disagree for the length of every ramp and permanently on a panel that will not comply. `Command()` is
+the whole of the servo's reach into the rest of the system, and it states a target rather than a
+value: each observation moves the commanded period toward it by a bounded step, clamped into the
+window the panel reported and held clear of the bottom so low-framerate compensation never engages
+underneath it. Convergence happens inside `Observe()` because an observation is the only moment new
+evidence exists — [decision 31](Decisions.md#31-vrr-is-a-scheduling-degree-of-freedom-not-only-a-latency-feature)
+requires the loop to close on one rather than on an acknowledgement, since panels misreport their
+ranges. Prediction takes the commanded period on a variable output, where the vblank happens when gyro
+submits, and the observed one on a fixed output, where gyro's intention is not an input.
+
+A window that cannot be true — disabled, inverted, non-positive — is a backend saying nothing rather
+than saying something to distrust, so the servo is refused outright and
+[admission control](#admission-control) falls through to the next rung. That is the direction that
+cannot produce a period no panel agreed to.
 
 **`Invalidate()` and `IsValid()` exist because a clock can become a liar.** After a system resume,
 after a mode set, and after [device migration](#device-migration), the last observation describes a
@@ -210,6 +258,16 @@ world that no longer exists — and a stale observation is worse than none, beca
 then returns an instant in the deep past and [the frame loop](#the-frame-loop)'s timing policy fails
 every branch forever rather than falling to the floor tier. An invalid clock owes no frame and arms
 no timer until an observation re-seeds it.
+
+What it answers meanwhile is chosen rather than convenient. Saturating forward — `Unscheduled` —
+inverts both halves of that failure into the behaviour the design already asks for: nothing is ever
+due, so no timer is armed and an idle output costs nothing, while any frame damage demands passes the
+record-time check immediately and presents as soon as it is ready. That is
+[decision 31](Decisions.md#31-vrr-is-a-scheduling-degree-of-freedom-not-only-a-latency-feature)'s
+account of the first frame after an idle VRR output, falling out of the sentinel rather than needing a
+mode. What an invalidation drops is the anchor and not the rate: what a resume falsifies is where in
+the cadence the output is, and admission control still has to size an output that has not presented
+since.
 
 Sources per backend:
 
@@ -219,6 +277,18 @@ Sources per backend:
   to KMS.
 - **Headless** — a fake clock the tests drive, including deliberately missed deadlines and
   arbitrary mixed-refresh combinations.
+
+A backend that reports no period at all is answered by a fallback ladder rather than by a fabricated
+one: difference the anchor, which divides by the sequence advance and is therefore right across
+skipped frames, and fall back to the configured nominal when even that is unavailable. There is no
+filter over the observed period, deliberately — every observation re-anchors, so prediction error is
+bounded by one period of extrapolation rather than by however long ago the estimate was formed, and a
+filter would buy accuracy in a term already re-measured every frame at the cost of lag in the one
+quantity the servo closes its loop on.
+
+**`Instant` and `Duration` are different types**, and the distinction is load-bearing rather than
+decorative — see [the timebase](#the-timebase). `Instant - Instant → Duration`,
+`Instant + Duration → Instant`, `Instant + Instant` ill-formed.
 
 `renderBudget` is a high-water mark of gyro's own CPU and GPU time for **that output**, measurable
 everywhere. Resolution and effect load differ per output, so one figure for the machine is not
