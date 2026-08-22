@@ -56,6 +56,23 @@ struct Monotonic
 	{
 		return Instant{ std::chrono::microseconds{ microseconds } };
 	}
+
+	// The one way back out, and it exists for exactly one caller: arming an absolute kernel timeout.
+	//
+	// io_uring's IORING_TIMEOUT_ABS wants a timespec in the same domain an Instant already counts, so
+	// this is FromNanoseconds run backwards rather than a new conversion — which is why it is named
+	// here beside its inverse rather than with the ToSeconds egress below. The distinction matters:
+	// ToSeconds is for a human and may lose precision, and this may not, because a rounded deadline is
+	// a frame served at the wrong vblank.
+	//
+	// **It is not the escape hatch for arithmetic.** Elapsed and Advanced are the total forms and this
+	// is not a cheaper way to reach them; a caller doing sums on the result is the hand-rolled timebase
+	// CheckClockDiscipline.cmake exists to stop, one indirection further out. What is sanctioned is
+	// handing the count straight to a kernel interface that takes one.
+	[[nodiscard]] static constexpr std::int64_t ToNanoseconds(Instant instant) noexcept
+	{
+		return instant.time_since_epoch().count();
+	}
 };
 
 // Configuration and the motion catalog author in seconds, so this is the one sanctioned
@@ -231,6 +248,9 @@ static_assert(std::is_same_v<decltype(Instant{} - Instant{}), Duration>);
 static_assert(std::is_same_v<decltype(Instant{} + Duration{}), Instant>);
 static_assert(Instant{} + Duration{ 5 } - Instant{} == Duration{ 5 });
 static_assert(Monotonic::FromMicroseconds(1) == Monotonic::FromNanoseconds(1'000));
+static_assert(Monotonic::ToNanoseconds(Monotonic::FromNanoseconds(1'234)) == 1'234);
+static_assert(Monotonic::ToNanoseconds(Monotonic::FromMicroseconds(2)) == 2'000);
+static_assert(Monotonic::ToNanoseconds(Instant{}) == 0);
 
 static_assert(DurationFromSeconds(1.0) == std::chrono::seconds{ 1 });
 static_assert(DurationFromSeconds(-0.5) == std::chrono::milliseconds{ -500 });
