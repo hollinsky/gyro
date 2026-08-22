@@ -85,6 +85,15 @@ struct Vector3
 	{
 		return { value.X * factor, value.Y * factor, value.Z * factor };
 	}
+
+	// Division rather than multiplication by the reciprocal, and it is here because a spring needs
+	// it. Animation/Solve/Spring.h's SpringValue asks for both, since the closed form divides by the
+	// natural frequency and forming 1/omega first loses a bit at every scale where it matters least
+	// — a near-settled channel, whose remaining offset is what decides the settle instant.
+	friend constexpr Vector3 operator/(Vector3 value, T divisor) noexcept
+	{
+		return { value.X / divisor, value.Y / divisor, value.Z / divisor };
+	}
 };
 
 template<std::floating_point T>
@@ -105,6 +114,26 @@ template<std::floating_point T>
 [[nodiscard]] inline T Length(Vector3<T> value) noexcept
 {
 	return std::sqrt(Dot(value, value));
+}
+
+// The same number under the name Animation/Solve/Spring.h's SpringValue asks for, which is what makes
+// a three-component channel solvable at all.
+//
+// **Two names for one quantity, deliberately, and this is the cheaper direction.** `Length` is the
+// geometric name and stays the one geometry uses. `Magnitude` is the solver's concept spelling, and
+// the concept reaches it by argument-dependent lookup — so the adapter has to sit beside the type
+// rather than beside the solver, and Solve keeps depending on nothing but Core. The alternative is a
+// trait specialisation inside Animation naming Vector3, which is the edge Docs/Structure.md refuses:
+// the frame half of Animation may not say Geometry.
+//
+// It is a whole-vector norm rather than a per-component one because settling is per channel and not
+// per component (Docs/Decisions.md decision 17). A per-component criterion is axis-dependent, and its
+// visible form is the same rotation finishing at different moments depending on where its axis
+// happened to point.
+template<std::floating_point T>
+[[nodiscard]] inline T Magnitude(Vector3<T> value) noexcept
+{
+	return Length(value);
 }
 
 // Named conversions rather than an implicit narrowing, for the reason Geometry/Space.h gives about
@@ -636,9 +665,7 @@ struct std::formatter<Quaternion> : Detail::PlainFormatter<Quaternion>
 		// Divided rather than multiplied by a reciprocal, so an axis-aligned turn prints as (0, 0, 1)
 		// rather than as (0, 0, 0.99999994) — the rounding is invisible in the value and glaring in
 		// the log line.
-		const Vector3<float> axis{ logarithm.X / angle, logarithm.Y / angle, logarithm.Z / angle };
-
-		return std::format_to(context.out(), "rot({}deg @ {})", degrees, axis);
+		return std::format_to(context.out(), "rot({}deg @ {})", degrees, logarithm / angle);
 	}
 };
 
@@ -701,6 +728,12 @@ static_assert(std::bit_cast<std::array<float, 4>>(Quaternion{}) == std::array<fl
 static_assert(
 	std::bit_cast<Quaternion>(std::array<float, 4>{ 0.0F, 0.0F, 0.0F, 1.0F }) == Quaternion{ 0.0F, 0.0F, 0.0F, 1.0F }
 );
+
+// Division is exact where the divisor is a power of two, which is the property the formatter above
+// leans on: an axis-aligned turn prints as (0, 0, 1) rather than as (0, 0, 0.99999994), because the
+// components are divided by the angle rather than multiplied by its reciprocal. The same choice is
+// why Animation/Solve/Spring.h's SpringValue asks for the operator at all.
+static_assert(Vector3<float>{ 3.0F, 6.0F, -9.0F } / 3.0F == Vector3<float>{ 1.0F, 2.0F, -3.0F });
 
 // The default is the identity transform, not a null state — Geometry/Scale.h's argument, and the
 // reason a node that has never been animated needs no initialization pass.

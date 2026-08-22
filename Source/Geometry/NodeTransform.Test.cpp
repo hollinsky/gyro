@@ -106,6 +106,32 @@ static bool CheckSameRotation(
 	return false;
 }
 
+// The norm Animation/Solve/Spring.h's SpringValue reaches for, and the property
+// Docs/Decisions.md decision 17 rests on: a channel settles on the magnitude of the whole vector,
+// never per component. Three turns through the same angle about three different axes are therefore
+// the same distance from settled, which is what makes a rotation finish at one moment rather than at
+// a moment that depends on where its axis happened to point.
+//
+// Magnitude and Length are the same number under two names, and that is asserted here rather than
+// assumed: the first is the solver's concept spelling reached by argument-dependent lookup, the
+// second is geometry's own, and a divergence between them would be a settle instant computed from a
+// quantity nothing else in the system uses.
+GYRO_TEST(Vector3, MagnitudeIsTheWholeVectorNorm)
+{
+	CheckNear(Magnitude(Vector3<float>{ 3.0F, 4.0F, 12.0F }), 13.0F, PositionTolerance, "the Euclidean norm");
+	CheckNear(Magnitude(Vector3<float>{}), 0.0F, PositionTolerance, "and zero at the origin");
+
+	const Vector3<float> logarithms[]{ Quaternion::FromAxisAngle({ 1.0F, 0.0F, 0.0F }, Radians(30.0F)).Log(),
+		                               Quaternion::FromAxisAngle({ 0.0F, 1.0F, 0.0F }, Radians(30.0F)).Log(),
+		                               Quaternion::FromAxisAngle({ 1.0F, 1.0F, 1.0F }, Radians(30.0F)).Log() };
+
+	for (const Vector3<float>& logarithm : logarithms)
+	{
+		CheckNear(Magnitude(logarithm), Radians(30.0F), AngleTolerance, "the same angle is the same magnitude");
+		CheckNear(Magnitude(logarithm), Length(logarithm), AngleTolerance, "Magnitude is Length");
+	}
+}
+
 GYRO_TEST(Quaternion, TheLogMapRoundTrips)
 {
 	// The awkward cases, and they are awkward for different reasons. The identity divides by zero in

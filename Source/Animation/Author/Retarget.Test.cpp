@@ -1,9 +1,11 @@
 #include "Animation/Author/Retarget.h"
 
 #include <cmath>
+#include <concepts>
 #include <limits>
 #include <numbers>
 
+#include "Geometry/NodeTransform.h"
 #include "Testing/Test.h"
 
 // Authoring is arithmetic, so most of its contract is a static_assert in the header and what remains
@@ -210,6 +212,17 @@ GYRO_TEST(ParametersFromResponse, LeavesOrdinaryValuesAlone)
 	GYRO_CHECK_EQ(parameters.Damping, 0.82);
 	GYRO_CHECK(std::abs(parameters.Frequency - 2.0 * std::numbers::pi / 0.35) <= 1e-12);
 }
+
+// The types the transform channels are actually sprung over, asserted against the concept rather than
+// left to their first caller.
+//
+// Pair below is a stand-in, and a stand-in is how the real type came to be missing the concept for as
+// long as it did: Geometry's Vector3 had no whole-vector magnitude, so scale and rotation — the two
+// channels Docs/Decisions.md decision 17 exists for — could not be instantiated at all, and nothing
+// noticed because nothing had asked yet.
+static_assert(SpringValue<Vector3<float>>, "scale, and the rotation log map");
+static_assert(SpringValue<Vector3<double>>, "translation, at Geometry/Space.h's precision");
+static_assert(std::same_as<SpringScalar<Vector3<float>>, float>);
 
 // The whole authoring surface on a vector channel. Nothing here is a different code path — that is
 // the claim: one spring per channel, whatever the channel's arity, so a rotation and an opacity are
