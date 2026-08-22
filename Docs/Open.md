@@ -382,7 +382,13 @@ been waiting on a question that could not be answered until the rule behind it w
   [decision 76](Decisions.md#76-cadence-authority-follows-predictability-not-foreground) confines to
   the case where a client has stated no cadence, so it is now a fallback's constant rather than the
   mechanism's — how recently a surface must have committed to disqualify its output from early
-  rendering, and decision 56's debounce before a surface's preferred scale is lowered.
+  rendering, and decision 56's debounce before a surface's preferred scale is lowered. The timing
+  policy's safety margin joins them, and it is the one of these that is measurable rather than
+  chosen: it covers the interval between the timer the composition root arms expiring and the first
+  instruction of the record, so what sizes it is the wakeup latency of a `SCHED_FIFO` thread on an
+  `io_uring` absolute timeout — a distribution to sample on the target machine, and a worst case
+  rather than a percentile for the reason
+  [Architecture.md](Architecture.md#budgets) gives about every other figure in the schedule.
 - **The imperative escape hatch** for event-driven one-shots — shape and boundary.
 - **Color interpolation space for animation** — Oklab proposed over sRGB. Distinct from
   [decision 47](Decisions.md#47-compositing-happens-in-linear-light-at-wide-primaries)'s composite

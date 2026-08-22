@@ -2729,6 +2729,11 @@ contact with the cheap one. Chunking additionally rests on an assumption nobody 
 submission boundary is a scheduling opportunity for the GPU rather than merely a place we stopped
 recording.
 
+What already exists is the half that costs nothing: the frame loop names the frame it is recording
+rather than deriving it from the last one presented, so a deeper pipeline is a number the loop
+states and an early frame's animation is evaluated at its own presentation time. Everything else
+described here is unbuilt.
+
 **Chunking** splits an output's work at render-pass and submission boundaries, reducing the blocking
 term from `max(C_other)` to `max(chunk)`. Blur pass chains split naturally, which is where `C` comes
 from in the first place.
@@ -2736,6 +2741,21 @@ from in the first place.
 **Early rendering** produces a frame one period ahead of its normal record time and holds the target
 for its flip. In scheduling terms it relaxes the release-time constraint: the job may run in any
 window within the period preceding its deadline rather than only the one immediately before it.
+
+**It splits a frame into two scheduled events, and only the first one moves.** The commit must still
+land in the frame's own window: issued at the early record point it would flip at the *previous*
+frame's vblank, showing the early frame a period early and the one before it not at all. So the
+output still wakes at its ordinary commit point, and what that wake costs is a `Present` rather than
+a composite. An output at lead `k` therefore contributes the earlier of two instants to the wake
+fold — the placed record point of the frame it is producing, and the commit point of the frame it
+already holds.
+
+**An early frame is bound by its placement, not by its own deadline.** That deadline is `k` periods
+away, so [decision 35](#35-a-miss-costs-one-frame-bounded-by-the-floor-composite)'s record-time
+check would admit the work however long it ran; what has to hold is the end of the gap the schedule
+placed it in, since overrunning *that* is what blocks the fast output. The binding deadline is the
+earlier of the two, and at lead 0 the placement is the deadline — which is why the check reads as
+one number today.
 
 Neither alone is general. Early rendering fixes cases where the slow job fits in *some* gap — in the
 144 + 60 example the gap is 2.944 ms and a contiguous 5 ms composite fits in none of them. Together,
@@ -2763,7 +2783,9 @@ judgement but the record-time check in
 [decision 35](#35-a-miss-costs-one-frame-bounded-by-the-floor-composite).
 
 **Cost accepted:** an output using early rendering needs three targets in flight — scanning out,
-pending flip, being recorded.
+pending flip, being recorded. The ring depth is also what enforces the bound: `AcquireTarget()`
+answers nothing while every target is held, so a double-buffered output cannot run ahead whatever
+else is true, and a lead is something a plan grants rather than something the frame loop falls into.
 
 **This is not triple buffering in the sense that costs latency.** The conventional version pipelines
 every frame through a three-deep queue and pays a period on all of them. Here the third target is

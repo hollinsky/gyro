@@ -949,6 +949,20 @@ transition, or a window animating out is pure animation and loses nothing. A ful
 game loses a frame of latency. So the decision is per output, gated on whether any surface there
 committed recently — and, per the rule above, never applied to the input-focused output.
 
+Two mechanics are easy to miss and both constrain the frame loop:
+
+- **The record moves and the commit does not.** Issuing the commit at the early record point flips
+  the frame at the *previous* frame's vblank — the early frame lands a period early and the one
+  before it never lands at all. So the output still wakes in the frame's own commit window, and what
+  that wake costs is a `Present` rather than a composite. An output at lead `k` contributes the
+  earlier of two instants to [the wake fold](#doing-nothing-must-cost-nothing): the placed record
+  point of the frame it is producing, and the commit point of the frame it already holds.
+- **What bounds an early frame is its placement, not its deadline.** That deadline is `k` periods
+  away, so the [record-time check](#the-frame-loop) would admit the work however long it ran; what
+  has to hold is the end of the gap it was placed in, since overrunning that is what blocks the fast
+  output. The binding deadline is the earlier of the two, and at lead 0 the placement is the
+  deadline — which is why that check reads as one number.
+
 Two refinements make it better than the naive version:
 
 - **Pull the frame callback forward too.** Frame callbacks are the compositor's lever on when
@@ -957,7 +971,10 @@ Two refinements make it better than the naive version:
   stated target time this recovers the freshness entirely; for clients that simply draw on callback
   it is neutral. Nobody uses frame callbacks predictively today.
 - **Bound the lead to one period, and require a free target.** Rendering one frame ahead means three
-  targets in flight on that output — one scanning out, one pending flip, one being recorded.
+  targets in flight on that output — one scanning out, one pending flip, one being recorded. The
+  ring depth is also what enforces the bound: `AcquireTarget()` answers nothing while every target
+  is held, so a double-buffered output cannot run ahead whatever else is true, and a lead is
+  something the admitted plan grants rather than something the loop falls into.
 
 That last point is **not** triple buffering in the sense that costs latency. The conventional
 version pipelines every frame through a three-deep queue and pays a full period on all of them.
@@ -1718,15 +1735,16 @@ spuriously. See [decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-compo
 	due = outputs owing a frame, earliest deadline first
 
 	for each output in due:                    // earliest deadline first
-		if previous frame still in flight or now + C_planned > deadline:
+		target = the frame after the last one committed, never the last one presented
+		if previous frame still executing or now + C_planned > deadline(target):
 			fall to the floor tier, or skip this output entirely   // see below
-		evaluate animations at Clock(output).NextPresentation()
+		evaluate animations at Clock(output).PresentationAt(target)
 		record and submit per the admitted plan
 		Presenter(output).Present(...)
 
 	for each output the admitted schedule places early here:
 		evaluate animations at Clock(output).PresentationAt(sequence)
-		record and submit, holding the target until its flip
+		record and submit; the commit waits for that frame's own window above
 
 	publish the consumed snapshot sequence      // releases the dispatch thread to reclaim
 
@@ -1748,6 +1766,13 @@ by one iteration; the seam artefact is bounded by nothing.
 
 The plan this executes is static, computed by admission control at configuration change. The loop
 does not decide anything about timing relationships; it runs the schedule it was given.
+
+**The target is the frame after the last one committed, and the distinction is not pedantic.** The
+clock's anchor is the last frame *presented*, and between a submit and its vblank the two differ —
+on a 144 + 60 configuration the loop visits the 60 Hz output two or three times inside that
+interval, and a target derived from the anchor would name a frame already drawn and spend three
+allocations on it. It is also the one number [early rendering](#speculative-early-rendering) moves:
+a pipeline `k + 1` deep is `committed = anchor + k`, and nothing else in the check changes.
 
 The one exception is that first `if`, which is the whole of gyro's runtime timing policy:
 

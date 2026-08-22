@@ -152,10 +152,9 @@ If those interfaces lived in `Render` instead, `Frame` would be platform code an
 testing a reimplementation of the loop — which is the thing that rots.
 
 The table above is where `Frame` lands rather than what it declares today. `gyro_add_module` names the
-edges the code actually has — `Core` and `Seam` while `FrameClock` and `Budget` are the only things in
-it — because
-`CheckLayering.cmake` denies what is not declared, so the narrower declaration is the stronger rule and
-the rest arrive with the includes that need them.
+edges the code actually has — `Core` and `Seam` while `FrameClock`, `Budget`, and `Timing` are the
+only things in it — because `CheckLayering.cmake` denies what is not declared, so the narrower
+declaration is the stronger rule and the rest arrive with the includes that need them.
 
 **Which is also why `Frame` does not wait.** It exposes one iteration, returning the
 [`Wake`](../Source/Core/Wake.h) the next one is owed at; the `while` above it and the `io_uring`

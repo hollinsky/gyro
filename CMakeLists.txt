@@ -219,6 +219,7 @@ gyro_add_module(Frame PORTABLE
 	TESTS
 		Budget.Test.cpp
 		FrameClock.Test.cpp
+		Timing.Test.cpp
 )
 
 # Declared after the modules, because the module list is what they check. ALL for the same reason as

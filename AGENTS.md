@@ -80,8 +80,17 @@ Codebase Structure:
 		                        because the schedule composes them differently on every axis, C_planned a
 		                        windowed maximum and C_min a target the floor composite is checked
 		                        against, and a generation on the GPU half because a timestamp outlives
-		                        the configuration it was taken under. The frame loop, admission control,
-		                        and the timing policy join it here
+		                        the configuration it was taken under. Timing.h is where the two meet and
+		                        the only timing decision taken at runtime: decision 35's three branches,
+		                        spelled through SequenceAfter so the skip's ceil(overrun / P) is the same
+		                        call rather than arithmetic beside it, and the composition of the two
+		                        device figures written as a pipeline because that is the term that stops
+		                        being a sum. It takes the last frame the loop *committed* as well as the
+		                        last the clock saw *presented*, because those differ between a submit and
+		                        its vblank and a target derived from the anchor draws a frame twice — and
+		                        because that one number is also decision 30's early rendering, a pipeline
+		                        k + 1 deep being committed = anchor + k. The frame loop and admission
+		                        control join it here
 
 		Integration/          - The tests that name both Publication and Animation, which no module may:
 		                        the coefficient round trip, and the two-thread soak that proves the
