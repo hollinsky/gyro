@@ -163,6 +163,7 @@ gyro_add_module(World PORTABLE
 		Core
 	TESTS
 		Node.Test.cpp
+		Content.Test.cpp
 )
 
 # Split by direction rather than by tier: Solve consumes spring coefficients and is what the frame
