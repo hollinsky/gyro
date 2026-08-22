@@ -1,238 +1,135 @@
-This is going to be a large compositor for Linux / Wayland, which sets itself apart by being an entire system layer, i.e. one compositor per system, not per session. It is run in SCHED_FIFO, with the goal of hitting every single frame. It handles animations and visual effects like blurs. Code quality is paramount so typically you should ask if you think there's some extra effort which should be added to make the code better.
+gyro is a compositor for Linux / Wayland that is an entire system layer: one compositor per system,
+not per session. It runs `SCHED_FIFO` with the goal of hitting every frame, and it handles animation
+and visual effects itself.
 
-It does not use VTs at all. It has no session dependencies either: device access comes from udev rules,
-DRM master from first-open, and session lifecycle from a listener handed to it by a per-session agent.
-That makes it a boot service rather than a login one — it subsumes the boot splash, continuing the
-firmware's BGRT logo, and provides the recovery console that replaces VTs.
+It uses no VTs and has no session dependencies — device access comes from udev rules, DRM master from
+first-open, and session lifecycle from a listener handed to it by a per-session agent. That makes it a
+boot service rather than a login one: it subsumes the boot splash, continuing the firmware's BGRT
+logo, and provides the recovery console that replaces VTs.
 
-Nothing commercial. Do not add dependencies without asking first and justifying their inclusion.
+Stack: C++23, CMake with CPM, Vulkan, spdlog. Nothing commercial.
 
-None of these code or architecture decisions are sacred, there's no "mine" vs "yours," we're building this in its entirety together. We should also treat the world around us as malleable if it helps us. If we need to propose some change to the kernel or create a new standard for userspace, let's talk about it.
+## Working model
 
-Ask questions before implementing where it helps you to implement more effectively.
+**Never commit.** Stage the change, write the commit message, and hand both to Paul for review. He
+commits. When a change is ready, `git add` it and put the message in the reply — subject on one line,
+blank line, then the body.
 
-Always format C++ code using the project's `.clang-format` configuration before finalizing changes.
+- **Ask before implementing** where an answer would make the implementation better, and ask when you
+  think extra effort would make the code better. Code quality is the point.
+- **Ask before adding a dependency**, and justify it.
+- **Build and test before saying a change is done**: `cmake -S . -B build -G Ninja && ninja -C build
+  && ctest --test-dir build`. The disciplines below are `ALL` targets, so an ordinary build runs them.
+- **Format C++ with the project's `.clang-format`** before finalizing.
+- No `Co-Authored-By:` or other attribution footers in commit messages.
 
-Summary of the Stack:
-	Language: C++23 (CMake, CPM)
-	Graphics API: Vulkan
-	Logging: spdlog
+### Explaining your work
 
-Codebase Structure:
-	Source/
-		Main.cpp              - Thin entry point: CLI arg parsing (--version, --help)
-		Version.h.in          - CMake-configured version string template
+**Never cite a decision number without saying what it is.** "Decision 87" tells Paul nothing and
+costs him a follow-up question. Write "the rule that keeps the world-authoring types below both
+waists (87)" — the number is a pointer for the next agent, the words are for the reader.
 
-		Core/                 - Portable tier. Time.h is the timebase (Instant, Duration, the
-		                        ingest conversions); Clock.h is IClock, MonotonicClock, and the
-		                        ManualClock the headless backend and tests drive; Wake.h is the
-		                        contribution the idle fold reduces, and is in Core rather than
-		                        Animation because Console contributes to it too (decision 69);
-		                        Signal.h is the seam's observer callback, whose links the observers
-		                        own so that connect, emit and disconnect never allocate and either
-		                        side may die first (decision 77); Result.h is expected<T, Error>
-		                        over an errno plus the operation that failed, and Fd.h is the
-		                        owning descriptor beside the borrowed RawFd a signal can carry.
-		                        ColorState.h and Texture.h are here rather than in Seam because the
-		                        world authors them and the frame side only consumes them — a client
-		                        declares a color state and an import mints a texture id, both on the
-		                        dispatch thread, and neither Protocol nor Scene may name Seam
-		                        (decision 87)
-		Geometry/             - Portable tier. Scale.h is the exact rational output scale; Space.h is
-		                        the coordinate spaces and the values that live in them, with the
-		                        integer grid kept off the world; Region.h is damage as a bounded set
-		                        of rectangles, here rather than in Seam because Protocol and Scene
-		                        produce it and neither may name Seam
-		Animation/            - Portable tier, split by direction rather than by purity. Solve/ holds
-		                        the two closed forms the frame thread evaluates — the spring, and the
-		                        driven ramp of decision 72; Author/ produces coefficients and is
-		                        dispatch-side. A frame-side include of Author/ is a violation; see
-		                        decisions 11 and 12
-		Publication/          - Portable tier, the data waist, split by direction like Animation.
-		                        Snapshot.h is the offset-addressed layout both halves bind to; Ring.h is
-		                        the newest-wins forward channel and Return.h the per-frame report that
-		                        carries the watermark back; Reader/ is the wait-free frame half and
-		                        Publisher/ the dispatch half that serialises, owns, and reclaims. See
-		                        decisions 45, 50, 74, and 75
-		Seam/                 - Portable tier, the control waist: every interface with more than one
-		                        implementation and the plain data that crosses them. Both frame-side
-		                        halves are built — Presenter.h is IPresenter and its two verbs with
-		                        opposite contracts (decisions 73 and 78), Present taking a layer list
-		                        and returning a Result, Reconfigure initiating a transition it never
-		                        performs; EventSource.h is IEventSource, the descriptor a loop waits on
-		                        and the drain that turns it into those signals — the backend's rather
-		                        than the presenter's, because one DRM file serves every CRTC on the
-		                        device (decision 80); RenderTarget.h describes an image the backend
-		                        owns, dmabuf or CPU-mapped, which is what lets the console be a
-		                        renderer rather than a second presenter (decision 79); SyncPoint.h
-		                        is a timeline point rather than a fence, so a present is issued
-		                        against work the GPU has not reached; PresentationInfo.h is what a
-		                        flip reports and the sole input to every deadline;
-		                        OutputConfiguration.h is what Reconfigure asks for and Reconfigured
-		                        achieved, including the variable-refresh range that can only be
-		                        learned. Renderer.h is IRenderer and the evaluated draw list it takes:
-		                        the seam is written against Presenter.h — Record fills a target the
-		                        presenter owns and yields the point its Present waits on — and what
-		                        crosses is a flat span of quads rather than a scene, because Frame is
-		                        the evaluator and the snapshot carries coefficients (decision 82). A
-		                        group item names the run that flattens into it, which is the only
-		                        structure the list has and is decision 60's; a node's transform crosses
-		                        as its projected corners with a weight each, because a chain of TRS
-		                        transforms is not one and a matrix belongs to the render path. It is
-		                        also where RenderMode now lives, next to the interface that is told
-		                        which composite to draw. ISession and IInput join it where they are
-		                        written
+**Justify a choice by what a person using the compositor would perceive**, not by the codebase's own
+vocabulary. A waist, a run, a watermark, a floor composite: these are internal names, and reaching
+for them to explain *why* something is right is almost always a way of avoiding the real argument.
+Say what breaks on screen, what stutters, what a user waits for.
 
-		Frame/                - Portable tier, the frame thread's own. FrameClock.h is the per-output
-		                        prediction every deadline is derived from, keyed by sequence rather than
-		                        by now: its state is an anchor a page flip left, and SequenceAfter is the
-		                        one call an instant enters, because ceil(overrun / P) is what a loop
-		                        coming out of idle needs and nothing else in the interface does. It holds
-		                        no figure about gyro's own cost (decision 35's budget is the loop's), and
-		                        the VRR servo converges inside Observe because an observation is the only
-		                        new evidence there is. Budget.h is that figure, and it is the clock's
-		                        counterpart rather than a second copy of it: two devices never summed
-		                        because the schedule composes them differently on every axis, C_planned a
-		                        windowed maximum and C_min a target the floor composite is checked
-		                        against, and a generation on the GPU half because a timestamp outlives
-		                        the configuration it was taken under. Timing.h is where the two meet and
-		                        the only timing decision taken at runtime: decision 35's three branches,
-		                        spelled through SequenceAfter so the skip's ceil(overrun / P) is the same
-		                        call rather than arithmetic beside it, and the composition of the two
-		                        device figures written as a pipeline because that is the term that stops
-		                        being a sum. It takes the last frame the loop *committed* as well as the
-		                        last the clock saw *presented*, because those differ between a submit and
-		                        its vblank and a target derived from the anchor draws a frame twice — and
-		                        because that one number is also decision 30's early rendering, a pipeline
-		                        k + 1 deep being committed = anchor + k. Loop.h is the iteration those two
-		                        are read from, and decision 80's shape: it takes no now and no readiness
-		                        set, drains every source before it reads a clock because a late Presented
-		                        is a stale deadline, acquires once per iteration rather than once per
-		                        output, threads decision 29's device instant through the outputs in
-		                        deadline order, and returns the Wake the composition root arms. What it
-		                        has no producer for yet is draw items, so IEvaluator is an interface
-		                        inside the module rather than at either waist and NullEvaluator is the
-		                        floor case rather than a stub. Admission.h is the other half of the
-		                        schedule, and the one solved rather than decided: decision 29's
-		                        processor-demand test read backwards, so its answer is an allocation
-		                        per output rather than a verdict and `Admit` returns a degraded plan
-		                        and never a refusal. `U` is fixed point rounded up at every term and
-		                        everything else is integer nanoseconds, so the floors are exact; two
-		                        rungs of decision 30's ladder are built — a variable-refresh period
-		                        lengthened minimally, then an allocation taken from the output that
-		                        can least afford it — and the gap at 3 and 4 in `Rung` is the doc's
-		                        own gate on chunking and early rendering. It owns `MaxOutputs`,
-		                        because the capacity is the admission set's size
+**Lead with the conclusion, then name where to dig.** A short summary and a list of two or three
+places worth opening beats paragraphs of justification. Paul is usually already onboard with the
+part you are about to explain at length. Let him ask for depth rather than pre-empting it.
 
-		Headless/             - Portable tier, and the tier is the point (decision 85). The instrument the
-		                        schedulability sweep runs against, so it has to keep working on a machine
-		                        with no GPU: Vblank.h is the simulated display timeline — a phase, a
-		                        period, and which vblank a commit at a given instant makes — Output.h the
-		                        IPresenter over it, whose target ring holds a buffer until the *next*
-		                        flip retires it and whose Reconfigure records and returns; Device.h is
-		                        the one IEventSource for all of them, reporting an invalid descriptor
-		                        because a headless flip is a function of the clock and no file becomes
-		                        readable; Planes.h is the synthetic plane catalog whose descriptor
-		                        filters and whose Test decides, with the scripted refusal that arrives
-		                        after a budget was planned; Renderer.h is the renderer that draws
-		                        nothing and charges a simulated C, here rather than in Render because
-		                        Render is platform and would take the tier with it
+**But always name the alternative you rejected, in one sentence.** "Not TCP — the delayed-ack stall
+would land as input lag." That is enough for him to pull the thread or say "ah yeah" and move on.
+Leaving it out makes him ask; arguing it over three paragraphs is the thing he does not want. This
+is how [Decisions.md](Docs/Decisions.md) is already written — the rejected alternative is the point
+of an entry — so speak the way the log reads.
 
-		Compositor/           - The composition root, and the first module in the tree that is not
-		                        portable — which is the tier working rather than eroding, since
-		                        io_uring, SCHED_FIFO, mlockall and RLIMIT_RTTIME live here precisely
-		                        because Frame and Headless may not say any of those words (decision
-		                        80). Uring.h is the wait: one absolute IORING_OP_TIMEOUT armed from
-		                        the Wake the step returned, absolute rather than relative because a
-		                        relative one is computed from a now read before the enter and every
-		                        preemption between the two lands past the deadline; it has exactly
-		                        one reap site, because DEFER_TASKRUN defers only while the ring is
-		                        reaped through io_uring_enter and peeking the tail withdraws that
-		                        silently. Interrupt is beside it and is an IEventSource rather than a
-		                        mechanism, so that decision 83's publication nudge is a second
-		                        instance rather than a second machine. Schedule.h is the bridge
-		                        across an arity difference — Admit reasons about one C, Budget keeps
-		                        two marks and Timing composes them as a pipeline — so C goes in as
-		                        the composed reserve and a reduced allocation comes back scaling both
-		                        device halves while leaving the safety margin alone. RealTime.h is
-		                        the three calls that make the frame thread real-time and the one that
-		                        stops it taking the machine with it, each refusable and none fatal.
-		                        Options.h is total: an argument either sets a field or names itself
-		                        in an error, because an ignored one on a boot service is a
-		                        configuration somebody believes is in effect
+Nothing here is sacred and there is no "mine" versus "yours" — we are building this together, and the
+world outside the repo is malleable too. If the right answer is a kernel change or a new userspace
+standard, say so and we will talk about it.
 
-		Integration/          - The tests that name both Publication and Animation, which no module may:
-		                        the coefficient round trip, and the two-thread soak that proves the
-		                        crossing's memory ordering under GYRO_SANITIZE=thread. The soak runs
-		                        twice: flat out, and again with the frame thread parked by a handshake,
-		                        so that the full ring, the second refusal, the supersede and the
-		                        repeated watermark are walked on purpose rather than when the scheduler
-		                        happens to allow it
-		Testing/              - The hand-rolled test harness and every test binary's main().
-		                        GYRO_TEST / GYRO_CHECK / GYRO_REQUIRE; see decision 9
+## Where to look
 
-		Tests live beside what they test, as <Unit>.Test.cpp, and are listed in the module's
-		TESTS rather than compiled into it.
+| Question | Read |
+| --- | --- |
+| What does a person perceive? What is promised? | [Docs/Experience.md](Docs/Experience.md) |
+| How does a mechanism work — seam, backends, timing, color, sessions, protocol? | [Docs/Architecture.md](Docs/Architecture.md) |
+| How does animation work — springs, catalog, commits, transforms, identity? | [Docs/Animation.md](Docs/Animation.md) |
+| Where does code live, what may depend on what, which thread runs it? | [Docs/Structure.md](Docs/Structure.md) |
+| Why not X? What was rejected? | [Docs/Decisions.md](Docs/Decisions.md), 90 entries, anchored `### N.` |
+| What is still unsettled? | [Docs/Open.md](Docs/Open.md) |
+| What does gyro want from the kernel and cannot have? | [Docs/KernelWishlist.md](Docs/KernelWishlist.md) |
 
-	Tools/
-		UringProbe.cpp        - Standalone io_uring capability probe. Raw syscalls, no liburing,
-		                        so it runs on a target machine before gyro does. First draft of
-		                        gyro's own startup check; see Decisions.md decision 3
+Docs are tiered: Experience → Architecture and Animation → Structure. Citations point up, dependencies
+point down. A tier-2 document may cite Experience as justification; Experience may never require a
+mechanism document to be understood. Each doc states its own volatility at the top.
 
-	Docs/
-		Experience.md   - Tier 1. What a person perceives, stated without mechanism: the six
-		                  promises, how the system degrades, what is deliberately not promised
-		Architecture.md - Tier 2. Platform seam, backends, boot and display lifetime, rendering
-		                  devices, threads and the publication boundary, presentation timing,
-		                  geometry and coordinate spaces, effects and quality, color, sessions and
-		                  users, the shell, login agent, event loop, protocol layer
-		Animation.md    - Tier 2. Animation system: springs, motion catalog, commits, transforms,
-		                  interactive transitions, identity, lifetime, exit pixels
-		Structure.md    - Tier 3. Modules and their tiers, the dependency graph and the two waists
-		                  it hangs off, which thread each piece runs on, the composition root, and
-		                  what the build checks enforce
-		Decisions.md    - Cross-cutting. Decision log with rejected alternatives and rationale
-		                  (90 decisions). Append-mostly: a revised decision keeps its superseded
-		                  position as a rejected alternative, and carries its revision history
-		                  inline and dated rather than in any global ledger
-		Open.md         - Cross-cutting. The questions not yet settled, roughly in the order they
-		                  will bite. Answering one produces a decision; this is the churning half
-		                  of what used to be Decisions.md's tail
-		KernelWishlist.md - Cross-cutting. What gyro wants from the kernel and cannot have yet,
-		                  each entry a reading of a named tree at a named commit with file:line
-		                  citations, plus the workaround gyro runs instead and what would let it
-		                  be deleted. Leaves by the kernel changing, not by gyro deciding
+**Read the relevant docs before proposing an architectural change.** Re-litigating a settled decision
+means engaging with the recorded rationale, not restating the alternative it rejected.
 
-	Docs are tiered: Experience (what the user perceives) → Architecture and Animation (mechanism
-	and invariants) → Structure (where the mechanism lives). Citations point up; dependencies
-	point down. A tier-2 document may cite Experience as justification; Experience may never require
-	a mechanism document in order to be understood.
+## The map
 
-	CMakeLists.txt  - Build configuration, dependency management via CPM
-	.clang-format   - Code style (tabs, Allman braces, 120 col limit)
-	AGENTS.md       - Project context for AI agents (note that CLAUDE.md is a symlink for Claude)
+Source layout and the invariant each module carries. The *why* is in the cited decision;
+[Structure.md](Docs/Structure.md) has the dependency graph, the thread partition, and the tier table.
 
-	CMake/
-		BuildFlags.cmake           - The warning set, sanitizers (GYRO_SANITIZE), GYRO_WERROR,
-		                             GYRO_LTO, and the source-root include path. Everything links it
-		Module.cmake               - gyro_add_module(). PORTABLE declares a module part of the tier
-		                             decision 6 keeps free of Linux headers; DEPENDS declares its
-		                             edges in Structure.md's module graph
-		CheckClockDiscipline.cmake - One reader of the timebase, enforced (decision 57)
-		CheckPortability.cmake     - No platform headers in a PORTABLE module (decision 6)
-		CheckLayering.cmake        - Every #include lies on a declared DEPENDS edge; graph is a DAG
+| Module | Tier | Thread | What it is |
+| --- | --- | --- | --- |
+| `Core` | portable | either | Timebase (`Time.h`), `IClock`, `Signal`, `Result`, `Fd`, `Wake`, `Handle` the generational identity (15), `SlotAllocator`, `FrameSection`, `ColorState`, `Texture`. Types the world authors live here rather than `Seam`, because neither `Protocol` nor `Scene` may name `Seam` (87) |
+| `Geometry` | portable | either | `Scale` the exact rational, `Space` the coordinate spaces, `Region` the damage set. The integer grid is kept off the world (52, 53) |
+| `Animation` | portable | both | Split by direction: `Solve/` is the closed forms the frame thread evaluates, `Author/` produces coefficients and is dispatch-side (11, 12, 72) |
+| `Publication` | portable | both | The data waist. `Snapshot` the offset-addressed layout, `Ring` the newest-wins forward channel, `Return` the per-frame report carrying the watermark; `Reader/` frame-side, `Publisher/` dispatch-side (45, 50, 74, 75, 86, 90) |
+| `Seam` | portable | both | The control waist: every interface with more than one implementation and the data crossing it. `IPresenter`, `IEventSource`, `IRenderer`, `ISession`, `IInput`, `RenderTarget`, `SyncPoint`, `PresentationInfo`, `OutputConfiguration`, `RenderMode` (73, 78, 79, 80, 82) |
+| `Frame` | portable | frame | `FrameClock` the per-output prediction, `Budget` the cost figures, `Timing` the one runtime timing decision, `Loop` the step, `Admission` the processor-demand test read backwards. `IEvaluator` is internal because `Scene` does not exist yet (29, 30, 35, 61, 80) |
+| `Headless` | **portable** | split | The instrument the schedulability sweep runs against, so it must work on a machine with no GPU. Simulated vblanks, an `IPresenter` over them, one `IEventSource` for all of them, a synthetic plane catalog, a renderer that charges a cost and draws nothing (85) |
+| `Compositor` | platform | constructs | The composition root and the first non-portable module. `io_uring`, `SCHED_FIFO`, `mlockall`, `RLIMIT_RTTIME` live here *because* `Frame` and `Headless` may not say those words. `Uring`, `Schedule`, `RealTime`, `Options` (80, 83) |
+| `Integration` | portable | — | The tests that name both `Publication` and `Animation`, which no module may |
+| `Testing` | portable | — | The hand-rolled harness and every test binary's `main()`: `GYRO_TEST` / `GYRO_CHECK` / `GYRO_REQUIRE` (9) |
 
-	All three checks are ALL targets, so an ordinary build runs them; a violation fails the build
-	rather than waiting for review. Add a discipline here rather than to a style guide nobody greps.
+Also: `Source/Main.cpp` is a thin entry point; `Tools/UringProbe.cpp` is a standalone io_uring probe
+with raw syscalls and no liburing, so it runs on a target machine before gyro does (3).
 
-	Build: cmake -S . -B build -G Ninja && ninja -C build && ctest --test-dir build
+Tests live beside what they test as `<Unit>.Test.cpp`, and are listed in the module's `TESTS` rather
+than compiled into it. A test for something in a dispatch half belongs in that half.
 
-Read Docs/ before proposing architectural changes. Decisions.md records what was rejected and why;
-re-litigating a settled decision requires engaging with the recorded rationale.
+## Disciplines the build enforces
 
-Dependencies are managed via CPM (CMake Package Manager):
-	- All dependencies fetched at configure time from GitHub
-	- Static linking preferred for deployment simplicity
+A discipline belongs here rather than in a style guide nobody greps. All of these fail the build
+rather than waiting for review (36).
 
-AI Agent Notes:
-	- Agents shall NOT include "Co-Authored-By:" footers or any other attribution in commit messages for this project
+- `CheckClockDiscipline.cmake` — one reader of the timebase (57)
+- `CheckPortability.cmake` — no platform headers in a `PORTABLE` module (6)
+- `CheckLayering.cmake` — every `#include` lies on a declared edge, the graph is a DAG, nothing
+  outside a dispatch half includes one, and a narrowed frame half reaches only its `FRAME_DEPENDS`
+- `Core/DebugAllocator.cpp` — aborts on an allocation inside a `Core/FrameSection.h` guard. Not a
+  build check; it is the one decision 36 actually names
+
+`gyro_add_module()` in `CMake/Module.cmake` is where a module declares itself to all of them:
+`PORTABLE`, `DEPENDS`, `DISPATCH_HALF` / `DISPATCH`, `FRAME_DEPENDS`, `SOURCES`, `TESTS`. Only the
+dispatch half is ever named — the frame side is what is being protected, so it is the default.
+`CMake/BuildFlags.cmake` holds the warning set, `GYRO_SANITIZE`, `GYRO_WERROR`, and `GYRO_LTO`.
+
+## How decisions get made
+
+Answering something in [Open.md](Docs/Open.md) produces an entry in
+[Decisions.md](Docs/Decisions.md). Decisions.md is append-mostly: a revised decision keeps its
+superseded position as a rejected alternative, because the reasoning that led somewhere wrong is the
+most useful part of a log. Revisions are marked inline and dated at the paragraph they touch; there
+is no global ledger of what revised what.
+
+**Write the decision when the change is still cheap.** Decision 69 changed a type, and the argument
+for making it then was that the type had one caller. The trigger is not the size of the question, it
+is the size of what has been built on top of the current answer.
+
+Four entries have been settled by going and reading the source an argument rested on, and they taught
+three rules worth applying before the fifth:
+
+- **An entry that names the source its argument rests on can be retired by an afternoon of reading.**
+  An entry that names no source needs a frame loop, a panel, or a user in front of it.
+- **Read even when you expect to be confirmed.** Decision 49's answer was right and its argument was
+  wrong; that is the kind that survives review and fails in the field.
+- **A question that resists the reading may be malformed rather than hard, and the thing to suspect
+  is the rule upstream of it.** Decision 76's question was circular, and reading found an absence
+  rather than an answer.
+
+When a reading changes something, the narrative belongs in the decision it changed rather than in a
+preamble that accretes one paragraph per event.

@@ -17,47 +17,21 @@ one of those markers, and a list that must be appended to on every edit is a lis
 Older revisions predating the convention are not all marked, and a decision whose text was rewritten
 without one is not thereby unrevised.
 
-Most of this was recorded before implementation. Decisions 67 and 68 are the first settled *during*
-it, and neither was settled by the code — 67 comes from a promise in
-[Experience.md](Experience.md#the-picture-is-correct) that the narrower rule could not keep, and 68
-from working the arithmetic of what a client has already rasterized by the time it declares a
-subsurface position. What implementation supplied was the occasion to ask. Decision 69 is the first
-here to change a type rather than a rule, and the argument for making it when it was made is that
+Most of this was recorded before implementation. What implementation has supplied since is the
+occasion to ask rather than the answer: 67 came from a promise in
+[Experience.md](Experience.md#the-picture-is-correct) that the narrower rule could not keep, 68 from
+the arithmetic of what a client has already rasterized, and 70 and 71 from trying to *write a
+transition down* — which is the argument for building the motion catalog early rather than last.
+69 is the first to change a type rather than a rule, and the argument for making it then was that
 the type had one caller.
 
-Decisions 70 and 71 are the first that would not have been reached any other way, and the mechanism
-is worth naming because it is the argument for building the catalog early rather than last. Both
-came from trying to *write* a transition down: the three dispositions from finding that a slide-in
-which becomes a fade-in needs a channel that is neither animated nor untouched, and the three
-reduced forms from finding that the obvious five collapse. Neither is a fact about C++ — each is a
-question the prose had passed over because nothing had yet been obliged to answer it.
-
-Three times, reasoning on record has failed against the source it rested on, and those three are the
-point of having written any of this down. Decision 2's decisive argument was read against libwayland
-and did not survive, reversing that decision's conclusion. Decision 49's `// SPEC:` question was read
-against the kernel's DRM core and inverted: the framebuffer does *not* survive `drm_file` teardown,
-so the file descriptor store that decision had recorded as insurance is in fact the entire
-mechanism. Only the first changed a conclusion — which is exactly why the second was worth reading,
-because a right answer resting on a wrong argument is the kind that survives review and fails in the
-field. An afternoon each.
-
-Decision 73 is the third and differs from both in *when* it happened. Open.md had carried a
-presumptive answer for the mode-setting path since 2026-08-16, explicitly marked as awaiting
-confirmation against a frame loop that does not exist yet. Reading the kernel first confirmed the
-shape and broke one premise inside it — `DRM_MODE_ATOMIC_NONBLOCK` defers commitment and not
-validation — which moved the frame thread from performing the transition to initiating it. The entry
-had even named what would overturn it, and named the wrong thing: it expected blocking *duration* to
-be decisive and the synchronous validation phase was. Worth noting because the reading cost an
-afternoon and the alternative was discovering it from a frame loop already built around the premise.
-
-Decision 76 is a fourth reading and the first where the source's answer was an **absence**.
-wayland-protocols was read for the signal by which a client states that it controls the refresh rate,
-and there is no such request in any of the three candidates or anywhere else in the tree: rate
-information flows compositor to client and never back. An absence is a weaker thing to find than a
-broken premise, and it turned out to be worth more, because it sent the question back to the rule
-that had generated it — which was circular, defining client control as the client controlling. The
-lesson is not the one the other three teach. **A question that cannot be answered from a source is
-sometimes malformed rather than merely open**, and the way to tell is to go read.
+Four entries were settled by going and reading the source an argument rested on — 2, 49, 73, and
+76 — and each carries that reading in its own text. The rules they taught are in
+[AGENTS.md](../AGENTS.md#how-decisions-get-made), because they are instructions to whoever works
+this list next rather than history. In short: an argument that names its source can be retired by an
+afternoon of reading; read even when you expect to be confirmed, since a right answer on a wrong
+argument survives review and fails in the field; and a question that resists the reading may be
+malformed, in which case suspect the rule upstream of it.
 
 Detail lives in [Architecture.md](Architecture.md) and [Animation.md](Animation.md); this file is
 the short answer to "why didn't we do X".

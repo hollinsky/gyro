@@ -5,31 +5,19 @@ of these produces an entry in [Decisions.md](Decisions.md), which is where the r
 file holds only what has not been settled yet, so an item leaves it by being decided rather than by
 being crossed off.
 
-Three entries have left this list by being answered rather than deferred, and all three left the same
-way — by someone reading the source the entry rested on. *libwayland's abort reachability* stood
-first here because decision 2's decisive argument rested on it; it was read on 2026-08-16, the
-argument did not survive, and the outcome is in
-[decision 2](Decisions.md#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec).
-*`IPresenter` has no mode-setting path* was read against the kernel's DRM core on 2026-08-17 and is
-now [decision 73](Decisions.md#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it);
-the constrained answer this file had carried since 2026-08-16 was confirmed in shape and broken in
-one premise, and the entry had named the wrong thing as what would overturn it. *What signal says a
-client controls the refresh rate* was read against wayland-protocols on 2026-08-17 and is now
+Three entries have left this list by being answered rather than deferred, and all three left the
+same way — someone read the source the entry rested on. *libwayland's abort reachability* became
+[decision 2](Decisions.md#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec),
+*`IPresenter` has no mode-setting path* became
+[decision 73](Decisions.md#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it), and
+*what signal says a client controls the refresh rate* became
 [decision 76](Decisions.md#76-cadence-authority-follows-predictability-not-foreground).
 
-Noted because the list is otherwise a record of things not yet done, and what it has retired is three
-times the same lesson: **an entry that names the source its argument rests on is one that can be
-retired by an afternoon of reading.** The entries below that name no such source are the ones that
-will need a frame loop, a panel, or a user in front of them.
-
-The third adds a lesson the first two do not teach, and it is worth keeping in front of whoever works
-this list next. That entry was well-formed, named its source, and was **unanswerable as posed** — the
-signal it asked for does not exist, because rate information in Wayland flows compositor to client
-and never back. Reading that sent the question back one step, to the rule in Architecture.md that had
-generated it, which turned out to be circular: it defined a client as controlling the rate when the
-client was driving the rate. So **an entry that resists an afternoon of reading may be malformed
-rather than merely hard, and the thing to suspect is the rule upstream of it.** Two decisions had
-been waiting on a question that could not be answered until the rule behind it was.
+That is the triage rule for everything below. **An entry that names the source its argument rests on
+can be retired by an afternoon of reading; an entry that names none needs a frame loop, a panel, or
+a user in front of it.** The third also showed that an entry can be well-formed and still
+unanswerable — the signal it asked for does not exist — in which case the rule upstream of it is
+what to suspect. [AGENTS.md](../AGENTS.md#how-decisions-get-made) carries these as working rules.
 
 - **The two client-reachable `wl_abort` sites**, which
   [decision 2](Decisions.md#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)
