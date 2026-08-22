@@ -203,6 +203,75 @@ GYRO_TEST(Budget, ANegativeMeasurementCannotShortenAReservation)
 	GYRO_CHECK_EQ(budget.MeasuredFloorCpu(), Duration::zero());
 }
 
+GYRO_TEST(Budget, ANegativeWalkCannotShortenAReservationEither)
+{
+	Budget budget{ Windowed(2) };
+
+	budget.ObserveIrreducibleCpu(-4ms);
+
+	GYRO_CHECK_EQ(budget.IrreducibleCpu(), Duration::zero());
+}
+
+// Decision 94's whole content, as three marks that cannot see each other. The failure it prevents is
+// the walk being filed against whichever composite happened to follow it: a session under load draws
+// the floor tier, so the walk's cost would land in a population that is not used to size anything and
+// the planned mark would describe a frame that never had to build its own list.
+GYRO_TEST(Budget, TheWalkIsChargedToNeitherTier)
+{
+	Budget budget{ BudgetPolicy{ .FloorCpu = 1ms, .Window = 4 } };
+
+	budget.ObserveCpu(RenderMode::Planned, 3ms);
+	budget.ObserveCpu(RenderMode::Floor, 2ms);
+	budget.ObserveIrreducibleCpu(500us);
+
+	GYRO_CHECK_EQ(budget.PlannedCpu(), 3ms);
+	GYRO_CHECK_EQ(budget.MeasuredFloorCpu(), 2ms);
+	GYRO_CHECK_EQ(budget.IrreducibleCpu(), 500us);
+
+	// And the reverse: a walk that grew moves nothing a composite is sized by.
+	budget.ObserveIrreducibleCpu(4ms);
+
+	GYRO_CHECK_EQ(budget.PlannedCpu(), 3ms);
+	GYRO_CHECK_EQ(budget.MeasuredFloorCpu(), 2ms);
+	GYRO_CHECK_EQ(budget.IrreducibleCpu(), 4ms);
+}
+
+// It is a window like the planned marks rather than a running maximum like the floor's measurement,
+// because it sizes a reservation rather than contradicting a target. A workspace closing has to give
+// the time back, or the machine reserves the crowded scene for as long as it runs.
+GYRO_TEST(Budget, TheWalkComesBackDownWhenTheCrowdedSceneLeavesTheWindow)
+{
+	constexpr std::size_t Window = 4;
+	Budget budget{ Windowed(Window) };
+
+	budget.ObserveIrreducibleCpu(9ms);
+
+	for (std::size_t frame = 0; frame < Window - 1; ++frame)
+	{
+		budget.ObserveIrreducibleCpu(1ms);
+		GYRO_CHECK_EQ(budget.IrreducibleCpu(), 9ms);
+	}
+
+	// The seed and the peak have both aged out.
+	budget.ObserveIrreducibleCpu(1ms);
+
+	GYRO_CHECK_EQ(budget.IrreducibleCpu(), 1ms);
+}
+
+// A mode set changed the grid every node is projected onto, so the walk that produced the last list
+// described a different frame. It clears with everything else measured.
+GYRO_TEST(Budget, InvalidationClearsTheWalkAndReseedsIt)
+{
+	Budget budget{ BudgetPolicy{ .InitialIrreducibleCpu = 200us, .Window = 4 } };
+
+	budget.ObserveIrreducibleCpu(9ms);
+	GYRO_CHECK_EQ(budget.IrreducibleCpu(), 9ms);
+
+	budget.Invalidate();
+
+	GYRO_CHECK_EQ(budget.IrreducibleCpu(), 200us);
+}
+
 // Zero means not yet chosen rather than free, so nothing reports a defect against a figure nobody set.
 GYRO_TEST(Budget, AnUnchosenFloorTargetCannotBeExceeded)
 {
@@ -271,7 +340,8 @@ GYRO_TEST(Budget, ThePrintedFormReadsAsABudget)
 
 	GYRO_CHECK_EQ(
 		std::format("{}", budget),
-		std::string{ "budget gen 0 planned cpu 3000000ns gpu 4000000ns floor cpu 1000000ns gpu 2000000ns" }
+		std::string{ "budget gen 0 planned cpu 3000000ns gpu 4000000ns floor cpu 1000000ns gpu 2000000ns "
+	                 "irreducible cpu 0ns" }
 	);
 
 	budget.ObserveGpu(RenderMode::Floor, budget.Generation(), 5ms);
@@ -279,6 +349,6 @@ GYRO_TEST(Budget, ThePrintedFormReadsAsABudget)
 	GYRO_CHECK_EQ(
 		std::format("{}", budget),
 		std::string{ "budget gen 0 planned cpu 3000000ns gpu 4000000ns floor cpu 1000000ns gpu 2000000ns "
-	                 "over-floor cpu 0ns gpu 5000000ns" }
+	                 "irreducible cpu 0ns over-floor cpu 0ns gpu 5000000ns" }
 	);
 }

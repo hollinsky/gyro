@@ -36,6 +36,16 @@
 // it will not stay at. So the composition belongs to the schedule, which knows those things, rather
 // than to the record, which knows none of them.
 //
+// **There is a third figure on the CPU device, and what separates it is that no mode reduces it.**
+// Decision 94. The frame thread walks the published scene to build the draw list, and it walks the
+// same scene whichever composite follows — decision 35's floor tier is a cheaper shader over the
+// same items rather than a smaller scene — so the walk sits outside the pair above and is added to
+// both of them. Folding it into `FloorCpu` instead would make the floor target scene-dependent,
+// which is the one thing that target cannot be: it is set at configuration change, and the session
+// acquires windows afterwards. It is measured rather than policy for the reason the planned pair is,
+// and it varies along a different axis from either of them — pixels and effects size those, and how
+// many nodes exist sizes this.
+//
 // **`C_planned` is measured and `C_min` is policy, and that asymmetry is the type's shape.**
 // Architecture.md#the-floor-tier states it directly: the floor composite's cost is a design target
 // rather than a residue, because it is the size of the shock decision 35 can absorb. So it is a figure
@@ -102,6 +112,12 @@ struct BudgetPolicy
 	// at exactly one frame, which is the cheaper mistake by a window's worth of frames.
 	Duration InitialCpu{};
 	Duration InitialGpu{};
+
+	// What the irreducible mark holds before any frame has been measured, on the terms the pair above
+	// is seeded on and optimistic for the same reason. This is the one of the three whose figure
+	// belongs to the *scene* rather than to the machine, so a probe can only seed the empty session
+	// and everything after that is measurement.
+	Duration InitialIrreducibleCpu{};
 
 	// How many measurements a mark is the maximum over. Long enough that a scene which is expensive
 	// every second frame is not forgotten between occurrences, short enough that a thermal event ends
@@ -215,12 +231,13 @@ public:
 	constexpr Budget() noexcept : Budget{ BudgetPolicy{} } {}
 
 	constexpr explicit Budget(BudgetPolicy policy) noexcept
-		: m_Policy{ policy }, m_Cpu{ policy.Window }, m_Gpu{ policy.Window }
+		: m_Policy{ policy }, m_Cpu{ policy.Window }, m_Gpu{ policy.Window }, m_Irreducible{ policy.Window }
 	{
 		m_Policy.FloorCpu = NonNegative(m_Policy.FloorCpu);
 		m_Policy.FloorGpu = NonNegative(m_Policy.FloorGpu);
 		m_Policy.InitialCpu = NonNegative(m_Policy.InitialCpu);
 		m_Policy.InitialGpu = NonNegative(m_Policy.InitialGpu);
+		m_Policy.InitialIrreducibleCpu = NonNegative(m_Policy.InitialIrreducibleCpu);
 
 		Seed();
 	}
@@ -258,6 +275,17 @@ public:
 		return File(mode, NonNegative(cost), m_Gpu, m_MeasuredFloorGpu);
 	}
 
+	// What producing this frame's draw list cost, before any composite was recorded.
+	//
+	// **No mode, and the absence is the whole of decision 94.** A cost that takes one is a cost the
+	// ladder can step down, and this one cannot be: the same tree is walked and the same springs are
+	// evaluated whichever composite the verdict named. Filing it against a mode would split one
+	// population in two and leave each half describing work both halves did.
+	//
+	// No generation either, for `ObserveCpu`'s reason exactly — it is measured and filed inside the
+	// iteration that produced it, so nothing can arrive between the work and its cost.
+	constexpr bool ObserveIrreducibleCpu(Duration cost) noexcept { return m_Irreducible.Push(NonNegative(cost)); }
+
 	// The cost record describes a world that no longer exists: a mode set, a device migration, a
 	// quality tier step. See the liveness obligation above — the tier step is the one that has to reach
 	// here, and it is the only caller whose omission is silent.
@@ -267,6 +295,7 @@ public:
 
 		m_Cpu.Clear();
 		m_Gpu.Clear();
+		m_Irreducible.Clear();
 		m_MeasuredFloorCpu = Duration::zero();
 		m_MeasuredFloorGpu = Duration::zero();
 
@@ -281,6 +310,11 @@ public:
 	[[nodiscard]] constexpr Duration PlannedCpu() const noexcept { return m_Cpu.Mark(); }
 
 	[[nodiscard]] constexpr Duration PlannedGpu() const noexcept { return m_Gpu.Mark(); }
+
+	// What a frame costs before it costs anything a tier can take away. Frame/Timing.h adds it to
+	// whichever of the two pairs below the verdict is composing, which is what makes it irreducible in
+	// the only sense the schedule cares about.
+	[[nodiscard]] constexpr Duration IrreducibleCpu() const noexcept { return m_Irreducible.Mark(); }
 
 	// `C_min`, which is policy where the pair above is measurement. The record-time check's second
 	// branch reads these exactly as its first branch reads those, so the timing policy composes one
@@ -341,12 +375,14 @@ private:
 	{
 		m_Cpu.Push(m_Policy.InitialCpu);
 		m_Gpu.Push(m_Policy.InitialGpu);
+		m_Irreducible.Push(m_Policy.InitialIrreducibleCpu);
 	}
 
 	BudgetPolicy m_Policy{};
 
 	Detail::HighWater m_Cpu{};
 	Detail::HighWater m_Gpu{};
+	Detail::HighWater m_Irreducible{};
 
 	Duration m_MeasuredFloorCpu{};
 	Duration m_MeasuredFloorGpu{};
@@ -356,8 +392,9 @@ private:
 	std::uint32_t m_Generation = 0;
 };
 
-// Prints as budget gen 3 planned cpu 2000000ns gpu 5000000ns floor cpu 1000000ns gpu 2000000ns, with
-// the floor's measured pair appended only when it contradicts the target it is printed beside.
+// Prints as budget gen 3 planned cpu 2000000ns gpu 5000000ns floor cpu 1000000ns gpu 2000000ns
+// irreducible cpu 300000ns, with the floor's measured pair appended only when it contradicts the
+// target it is printed beside.
 template<>
 struct std::formatter<Budget>
 {
@@ -368,12 +405,13 @@ struct std::formatter<Budget>
 	{
 		auto out = std::format_to(
 			context.out(),
-			"budget gen {} planned cpu {} gpu {} floor cpu {} gpu {}",
+			"budget gen {} planned cpu {} gpu {} floor cpu {} gpu {} irreducible cpu {}",
 			budget.Generation(),
 			budget.PlannedCpu(),
 			budget.PlannedGpu(),
 			budget.FloorCpu(),
-			budget.FloorGpu()
+			budget.FloorGpu(),
+			budget.IrreducibleCpu()
 		);
 
 		if (budget.FloorExceedsTarget())
@@ -396,6 +434,7 @@ static_assert(std::formattable<Budget, char>, "A report prints the budget rather
 static_assert(Budget{}.PlannedCpu() == Duration::zero());
 static_assert(Budget{}.PlannedGpu() == Duration::zero());
 static_assert(Budget{}.FloorCpu() == Duration::zero());
+static_assert(Budget{}.IrreducibleCpu() == Duration::zero(), "A scene nobody has walked costs nothing to walk");
 static_assert(!Budget{}.FloorExceedsTarget());
 
 // The mark is the maximum over the window, and the window is what brings it back down.

@@ -163,6 +163,23 @@ private:
 	std::size_t m_Drained = 0;
 };
 
+// An evaluator that draws nothing and charges what it was told to, which is `SimulatedRenderer`'s
+// arrangement one seam over and for the same reason: what decision 94 added is a duration, so a walk
+// that reports one exercises the whole of it without a scene to walk.
+class CostingEvaluator final : public IEvaluator
+{
+public:
+	[[nodiscard]] DrawList Evaluate(const EvaluateRequest&) override
+	{
+		++Evaluations;
+
+		return DrawList{ .Items = {}, .Damage = {}, .EvaluateCost = Cost };
+	}
+
+	int Evaluations = 0;
+	Duration Cost{};
+};
+
 // A source whose drain delivers a flip, which is how the ordering claim becomes observable: if the
 // loop assessed before draining, the decision would be built on the previous anchor.
 class FakeSource final : public IEventSource
@@ -224,7 +241,7 @@ struct Harness
 	ManualClock Clock{ At(1000) };
 	SnapshotRing Ring;
 	ReturnChannel Returns;
-	NullEvaluator Evaluator;
+	CostingEvaluator Evaluator;
 
 	FakePresenter Presenter;
 	FakeRenderer Renderer;
@@ -543,4 +560,37 @@ GYRO_TEST(FrameLoop, TwoOutputsOnOneDeviceSerialiseOnTheQueue)
 	// prediction is three milliseconds of GPU past the first's rather than past now.
 	GYRO_CHECK_EQ(outputs[0].Last().DeviceFreeAt, At(1006));
 	GYRO_CHECK_EQ(outputs[1].Last().DeviceFreeAt, At(1009));
+}
+
+// Decision 94's term arriving where the schedule can see it. The evaluator measures its own walk for
+// `Submission::RecordCost`'s reason — the party that did the work is the one that knows where it
+// started — and the loop files it against neither tier.
+GYRO_TEST(FrameLoop, TheWalkIsFiledWhereNoTierCanTakeItAway)
+{
+	Harness harness;
+	harness.Anchor();
+	harness.Evaluator.Cost = 700us;
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Evaluator.Evaluations, 1);
+	GYRO_CHECK_EQ(harness.Output().Cost().IrreducibleCpu(), 700us);
+	GYRO_CHECK_EQ(harness.Output().Cost().PlannedCpu(), harness.Renderer.Cost);
+}
+
+// The walk happened whether or not anything came of it, which is where it parts company with the
+// record cost beside it: a refused record is not a frame's cost, and a list that was built is built.
+GYRO_TEST(FrameLoop, ARefusedRecordStillPaidForItsWalk)
+{
+	Harness harness;
+	harness.Anchor();
+	harness.Evaluator.Cost = 700us;
+	harness.Renderer.Refuse = true;
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Output().Cost().IrreducibleCpu(), 700us);
+	GYRO_CHECK_EQ(harness.Output().Cost().PlannedCpu(), Duration::zero());
 }

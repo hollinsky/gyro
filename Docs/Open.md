@@ -293,6 +293,13 @@ what to suspect. [AGENTS.md](../AGENTS.md#how-decisions-get-made) carries these 
   [decision 62](Decisions.md#62-effect-composition-is-an-optimization-and-the-unfused-path-is-the-reference)
   fuses pointwise effects into the composite pipeline, so a planned frame holds no separable
   base-composite span.
+
+  **It also has to seed the irreducible term, and that half it cannot finish.**
+  [Decision 94](Decisions.md#94-a-frames-cost-has-a-part-no-tier-reduces-and-the-walk-is-it) makes
+  the scene walk a third figure in `BudgetPolicy`, and unlike the two beside it that figure is a
+  property of the session rather than of the machine — a probe can measure the walk over an empty
+  scene and nothing more, so what is open is whether an empty-scene seed is worth taking at all or
+  whether the first window's worth of measurement arrives soon enough to start at zero.
 - **Output-to-session assignment must not be client-reachable.** Surfaced while resolving decision
   44 and independent of it. `Filtered globals` puts *output configuration* in the System tier, and
   if a System-tier client could move an output between sessions that is a direct bypass of decision

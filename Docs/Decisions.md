@@ -6245,3 +6245,76 @@ the defect exists only during the gesture, which is exactly when someone is look
 closely. They now sweep a lifted window and assert through the walk rather than through the matrix,
 since the walk is what the transforms *mean* and a matrix built over a projection that was not
 projective would satisfy a test of its own internal consistency while the screen disagreed.
+### 94. A frame's cost has a part no tier reduces, and the walk is it
+
+*(Decided 2026-08-22, on asking where the real evaluator's time goes before writing it.
+[Decision 82](#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene) put a walk on the frame
+thread, [decision 86](#86-the-published-scene-is-a-preorder-tree-model-values-inline-coefficients-by-reference)
+gave it something to walk, and decision 93 builds it; none of the three says what it costs.)*
+
+**`Budget` carries a third figure on the CPU device, and `Timing` adds it to both tiers.**
+[Budget.h](../Source/Frame/Budget.h) held exactly two terms — the CPU record cost a renderer reports
+and the GPU execution cost it resolves late — and
+[decision 35](#35-a-miss-costs-one-frame-bounded-by-the-floor-composite)'s check composes them into a
+verdict. Between that verdict and the record, the frame thread turns a snapshot into a draw list.
+[Loop.h](../Source/Frame/Loop.h) calls it, nothing times it, and while `NullEvaluator` is what is
+bound that is exactly right. The moment a real evaluator is bound it stops being right, and the
+failure is silent: the check admits a frame on figures that describe only the composite, the walk
+runs anyway, and the frame lands late with no term in the model that moved.
+
+**It is not a bigger CPU figure, because the ladder cannot step it down.**
+[Decision 34](#34-effect-quality-is-a-tier-gyro-chooses-and-the-floor-tier-is-the-recovery-path)'s tiers and decision 35's
+floor composite reduce what a frame *draws*. They do not reduce what it walks: the floor tier is a
+cheaper shader over the same items, so the same tree is traversed and the same springs are evaluated
+whichever verdict came back. Folding the walk into `FloorCpu` would therefore make the floor target
+scene-dependent — and that target is set at configuration change, before the session has the windows
+that make the walk expensive, so it is the one figure in the record that cannot be allowed to depend
+on the scene. Decision 35's second promise, that an overrun costs exactly one frame, rests on the
+floor composite being a cost the machine can always afford; a floor whose real cost grows as the
+user opens windows is not that.
+
+Stated as a property rather than as a name, the axis is **what varies with mode**. Pixels and effects
+size the two figures that were already there; how many nodes exist sizes this one. Adding it to both
+tiers is what makes it irreducible in the only sense the schedule can act on.
+
+**The evaluator measures itself, and the measurement comes back in the `DrawList`.** That is
+`Submission::RecordCost` one step earlier and for the same reason
+[Seam/Renderer.h](../Source/Seam/Renderer.h) gives: the party that knows where the work started and
+stopped is the party that did it. The alternative is the loop bracketing the call with two clock
+reads per output, where [Core/Clock.h](../Source/Core/Clock.h) asks for one per iteration — and a
+frame thread that reads the timebase per output is the shape decision 57 exists to prevent, arriving
+in the one part of the loop the schedulability sweep drives hardest.
+
+**Measured and windowed, like the planned marks and unlike the floor's.** A figure that sizes a
+reservation must forget, or a workspace that was crowded once reserves for the crowd forever; a
+figure whose job is to contradict a target must not, which is why `MeasuredFloorCpu` accumulates
+differently. This one sizes a reservation. It seeds from `InitialIrreducibleCpu` and clears on
+`Invalidate()`, since a mode set changes the grid every node is projected onto and the last walk
+described a different frame.
+
+**Rejected: restructuring the two mode figures into a fixed part plus a reducible part**, which is
+the tidier shape and is what the paragraphs above sound like they are arguing for. It cannot be
+measured. [Decision 62](#62-effect-composition-is-an-optimization-and-the-unfused-path-is-the-reference)'s fusion means a planned
+composite contains no separable base-composite span, so the reducible part is obtainable only by
+subtracting the floor mark from the planned one — two high-water marks taken over different
+populations at different times, whose difference can come out negative. The record currently never
+subtracts, and that is worth more than the symmetry.
+
+**Rejected: charging the walk to whichever mode followed it**, the one-line version that needs no new
+field. It files one population into two, and it fails in the direction that compounds: a machine in
+trouble renders the floor tier often, so the walk's cost would go mostly into a population nothing
+sizes with, while the planned mark came to describe frames that never had to build their own list.
+It is the same objection this record already makes to letting floor frames size the planned mark.
+
+**Rejected: a symmetric GPU term.** Nothing irreducible occupies the GPU today — the walk is pure
+CPU work and there is no second device between the snapshot and the record. The field can arrive
+when something needs it, and a field with no writer is a field whose meaning is decided by whoever
+first guesses at it.
+
+**Consequences.** `Timing::Cpu` is a sum where it was a selection, so `Reserve`, `Finish`, and
+`Project` all carry the term without knowing it exists. `BudgetPolicy` gains a third `// SPEC:`
+number, and [Open.md](Open.md)'s *the capability probe* is where it lands — as the one figure that
+probe can only partly supply, since it measures the machine and this one belongs to the scene. A
+probe can seed an empty session; everything after that is measurement. The
+schedulability sweep gains a real number here the day the real evaluator is bound, which is the
+first figure in that sweep that is not one a test chose.

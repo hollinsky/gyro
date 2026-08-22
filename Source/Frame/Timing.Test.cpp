@@ -45,10 +45,19 @@ FrameClock Anchored()
 	return clock;
 }
 
-Budget Costing(Duration plannedCpu, Duration plannedGpu, Duration floorCpu = {}, Duration floorGpu = {})
+Budget Costing(
+	Duration plannedCpu,
+	Duration plannedGpu,
+	Duration floorCpu = {},
+	Duration floorGpu = {},
+	Duration irreducibleCpu = {}
+)
 {
-	return Budget{ BudgetPolicy{
-		.FloorCpu = floorCpu, .FloorGpu = floorGpu, .InitialCpu = plannedCpu, .InitialGpu = plannedGpu } };
+	return Budget{ BudgetPolicy{ .FloorCpu = floorCpu,
+		                         .FloorGpu = floorGpu,
+		                         .InitialCpu = plannedCpu,
+		                         .InitialGpu = plannedGpu,
+		                         .InitialIrreducibleCpu = irreducibleCpu } };
 }
 } // namespace
 
@@ -86,6 +95,40 @@ GYRO_TEST(Timing, FallsToTheFloorWhenThePlannedTierWillNotFit)
 	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 8 });
 	GYRO_CHECK_EQ(decision.Finish, At(1008));
 	GYRO_CHECK_EQ(decision.Slack(), 2ms);
+}
+
+// Decision 94. The walk that builds the draw list is CPU work neither tier reduces, so it lands in
+// both reserves — and the two cases below are the same budget read from either side of that.
+GYRO_TEST(Timing, BothTiersReserveTheWalk)
+{
+	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms, 500us);
+	const Timing timing;
+
+	GYRO_CHECK_EQ(timing.Reserve(budget, RenderMode::Planned), 5500us);
+	GYRO_CHECK_EQ(timing.Reserve(budget, RenderMode::Floor), 2500us);
+}
+
+// The failure the term exists to stop, run rather than argued: the composite fits and the frame still
+// misses, because the part that overran was the list it was given. On screen that is a workspace with
+// enough windows in it that the walk itself no longer fits the gap — and with the walk invisible to
+// the check, the loop would admit the floor tier here and hand KMS a frame two milliseconds late.
+GYRO_TEST(Timing, AWalkTheDeadlineCannotHoldTakesTheFloorTierWithIt)
+{
+	const FrameClock clock = Anchored();
+	const Timing timing;
+
+	// Without the walk this is exactly `FallsToTheFloorWhenThePlannedTierWillNotFit`: at 1006ms the
+	// floor composite finishes at 1008ms against a deadline of 1010ms.
+	GYRO_CHECK(timing.Assess(clock, Costing(2ms, 3ms, 1ms, 1ms), At(1006), FrameClock::NoSequence).Sequence == 8);
+
+	// Three milliseconds of walk is more than the two the floor tier had spare, so frame 8 is abandoned
+	// and frame 9 is what the work is not late for.
+	const FrameDecision decision =
+		timing.Assess(clock, Costing(2ms, 3ms, 1ms, 1ms, 3ms), At(1006), FrameClock::NoSequence);
+
+	GYRO_CHECK(decision.Renders());
+	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 9 });
+	GYRO_CHECK_EQ(decision.Presentation, At(1020));
 }
 
 GYRO_TEST(Timing, DropsTheFrameOwedAndDrawsTheNextWhenNeitherTierFits)

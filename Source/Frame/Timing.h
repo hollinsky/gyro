@@ -116,6 +116,14 @@
 // outputs serialises on one queue however it was recorded — which is decision 29's reason for
 // rejecting parallel recording as a rescue, arriving here as a parameter.
 //
+// **The CPU term is a sum of two figures and the GPU term is one, which is decision 94 landing in a
+// single line.** Producing the draw list is CPU work that happens before either composite is
+// recorded and is the same work whichever one follows, so `Budget::IrreducibleCpu()` is added to the
+// planned and floor figures alike. Both tiers therefore reserve it, which is what stops the ladder
+// from promising a step down it cannot take: on a large scene the floor composite may fit a deadline
+// the walk that fed it does not, and a check that could not see the walk would admit that frame and
+// miss.
+//
 // **The check is spelled through `SequenceAfter` rather than through comparisons, and the two are the
 // same statement.** `now + C <= deadline(S + 1)` holds exactly when `SequenceAfter(now + C)` answers
 // `S + 1`, since that call names the earliest frame whose deadline is at or after an instant and never
@@ -483,9 +491,14 @@ private:
 		return latest == std::numeric_limits<std::uint64_t>::max() ? latest : latest + 1;
 	}
 
+	// The tier's own figure plus the part of the frame no tier reduces. Saturating for `Sum`'s reason:
+	// both addends are figures this process measured, and an overflowed reservation is a value the
+	// optimiser may assume away where a saturated one merely refuses every frame.
 	[[nodiscard]] static constexpr Duration Cpu(const Budget& budget, RenderMode mode) noexcept
 	{
-		return mode == RenderMode::Planned ? budget.PlannedCpu() : budget.FloorCpu();
+		return Detail::Sum(
+			budget.IrreducibleCpu(), mode == RenderMode::Planned ? budget.PlannedCpu() : budget.FloorCpu()
+		);
 	}
 
 	[[nodiscard]] static constexpr Duration Gpu(const Budget& budget, RenderMode mode) noexcept

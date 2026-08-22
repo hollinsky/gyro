@@ -9,6 +9,7 @@
 #include "Core/Clock.h"
 #include "Core/FrameSection.h"
 #include "Core/Signal.h"
+#include "Core/Time.h"
 #include "Core/Wake.h"
 #include "Frame/Admission.h"
 #include "Frame/Budget.h"
@@ -66,6 +67,13 @@
 // rather than at the seam because it has no second implementation that is not a test: `Scene` will
 // publish, `Frame` will evaluate, and no backend is ever on the other end of it. Until there is a
 // scene to evaluate, `NullEvaluator` draws nothing and every ordering above is still exercised.
+//
+// **An evaluator reports what it cost, and the loop files it where no tier can take it away.**
+// Decision 94 puts the walk in `Budget::IrreducibleCpu()` rather than in either mode's figure, and
+// the measurement comes back through `DrawList` for the reason `Submission::RecordCost` comes back
+// through `Submission` — the party that knows where the work started and stopped is the one that did
+// it, and a loop timing it from outside would read the clock twice per output where Core/Clock.h
+// asks for once per iteration.
 
 // SPEC: sized rather than measured. Four rendering devices is past any configuration gyro has been
 // pointed at, and it is fixed capacity because the frame section forbids growing it. Its counterpart
@@ -81,6 +89,13 @@ struct DrawList
 {
 	std::span<const DrawItem> Items;
 	Region<DeviceSpace> Damage;
+
+	// What building this list cost on the frame thread, measured by the evaluator across its own walk.
+	//
+	// It is filed whether or not the composite that follows is recorded or presented, because the walk
+	// happened either way — where `Submission::RecordCost` is filed only against a submission that
+	// succeeded, since a refused record is not a frame's cost. The two differ on purpose.
+	Duration EvaluateCost{};
 };
 
 struct EvaluateRequest
@@ -455,6 +470,7 @@ private:
 			{ .Snapshot = m_Snapshot, .Output = index, .Presentation = decision.Presentation, .Mode = decision.Mode() }
 		);
 
+		(void)output.m_Cost.ObserveIrreducibleCpu(list.EvaluateCost);
 		output.m_Damage.Add(list.Damage);
 
 		const RecordRequest request{ .Target = *target,
