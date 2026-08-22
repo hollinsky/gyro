@@ -55,17 +55,17 @@ GYRO_TEST(PublicationRoundTrip, SpringsEvaluateIdenticallyAcrossTheBoundary)
 	const Spring<float> opacityCoefficients = opacity.Coefficients();
 
 	const SnapshotBuffer buffer = SnapshotPublisher{}
-	                                  .Put<Spring<double>>(SnapshotRun::Positions, { &positionCoefficients, 1 })
-	                                  .Put<Spring<float>>(SnapshotRun::Channels, { &opacityCoefficients, 1 })
+	                                  .Put<Spring<double>>(SnapshotRun::Translation, { &positionCoefficients, 1 })
+	                                  .Put<Spring<float>>(SnapshotRun::Opacity, { &opacityCoefficients, 1 })
 	                                  .Build(1);
 
 	const SnapshotReader reader{ buffer.Bytes() };
 	GYRO_REQUIRE(reader.IsValid());
 
-	const std::span<const Spring<double>> positions = reader.Run<Spring<double>>(SnapshotRun::Positions);
-	const std::span<const Spring<float>> channels = reader.Run<Spring<float>>(SnapshotRun::Channels);
+	const std::span<const Spring<double>> positions = reader.Run<Spring<double>>(SnapshotRun::Translation);
+	const std::span<const Spring<float>> opacityRun = reader.Run<Spring<float>>(SnapshotRun::Opacity);
 	GYRO_REQUIRE_EQ(positions.size(), std::size_t{ 1 });
-	GYRO_REQUIRE_EQ(channels.size(), std::size_t{ 1 });
+	GYRO_REQUIRE_EQ(opacityRun.size(), std::size_t{ 1 });
 
 	for (const Instant probe : kProbes)
 	{
@@ -77,7 +77,7 @@ GYRO_TEST(PublicationRoundTrip, SpringsEvaluateIdenticallyAcrossTheBoundary)
 		{
 			const FrameSection guard;
 			fromSnapshot = positions[0].Evaluate(probe);
-			channelFromSnapshot = channels[0].Evaluate(probe);
+			channelFromSnapshot = opacityRun[0].Evaluate(probe);
 		}
 
 		const SpringState<double> fromModel = position.PresentationState(probe);
@@ -99,12 +99,12 @@ GYRO_TEST(PublicationRoundTrip, AnAtRestSpringCrossesAndStaysAtRest)
 	const Spring<double> coefficients = resting.Coefficients();
 
 	const SnapshotBuffer buffer =
-		SnapshotPublisher{}.Put<Spring<double>>(SnapshotRun::Positions, { &coefficients, 1 }).Build(1);
+		SnapshotPublisher{}.Put<Spring<double>>(SnapshotRun::Translation, { &coefficients, 1 }).Build(1);
 
 	const SnapshotReader reader{ buffer.Bytes() };
 	GYRO_REQUIRE(reader.IsValid());
 
-	const std::span<const Spring<double>> positions = reader.Run<Spring<double>>(SnapshotRun::Positions);
+	const std::span<const Spring<double>> positions = reader.Run<Spring<double>>(SnapshotRun::Translation);
 	GYRO_REQUIRE_EQ(positions.size(), std::size_t{ 1 });
 
 	const SpringState<double> state = positions[0].Evaluate(Monotonic::FromNanoseconds(1'000'000'000));
@@ -146,7 +146,7 @@ GYRO_TEST(PublicationRoundTrip, ADrivenProgressCrossesInItsOwnRunAndKeepsItsWake
 	// The runs do not bleed into one another: a driven record is in the driven run and nowhere else,
 	// and the spring runs are absent rather than empty-looking.
 	GYRO_CHECK(reader.Run<Spring<float>>(SnapshotRun::DrivenProgress).empty());
-	GYRO_CHECK(reader.Run<Ramp>(SnapshotRun::Channels).empty());
+	GYRO_CHECK(reader.Run<Ramp>(SnapshotRun::Opacity).empty());
 
 	for (const Instant probe : kProbes)
 	{

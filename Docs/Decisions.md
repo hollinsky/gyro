@@ -445,6 +445,16 @@ emit cost is proportional to the dirty set that
 fine. Start with eager full re-emit and measure; the representation is offset-addressed either way,
 so the arena strategy is contained.
 
+**The arena is less contained than this says.** *(Annotated 2026-08-22.)* The sentence above is true
+of the offsets and not of the indices.
+[Decision 86](#86-the-published-scene-is-a-preorder-tree-model-values-inline-coefficients-by-reference)
+has a node name its active channels by index into runs whose packing is global, so a shared,
+unchanged subtree can be invalidated by a node elsewhere becoming active and renumbering a run.
+[Decision 90](#90-the-snapshots-runs-are-one-per-channel-and-the-frame-side-validates-the-tree-it-walks)
+records the fork that falls out — node-ordered runs, which make the frame thread's reads monotonic,
+against append-ordered runs, which keep indices valid across publications. The instruction here is
+unchanged: ship the full re-emit and measure.
+
 **The structural half is now settled.** *(Annotated 2026-08-22.)* This decision fixed what crosses
 for *animation* and never said what the coefficients are coefficients of, which stayed unnoticed
 while [Snapshot.h](../Source/Publication/Snapshot.h) had no `Scene` writing into it.
@@ -1300,6 +1310,18 @@ absent because it is the shape the render seam invites: `IRenderer::Record` take
 snapshot carrying the same thing looks like it would save `Frame` a pass. It would, and it cannot be
 built.
 
+**Two of these did not survive contact.** *(Revised 2026-08-22.)*
+[Decision 90](#90-the-snapshots-runs-are-one-per-channel-and-the-frame-side-validates-the-tree-it-walks)
+builds the run and changes two things here. The runs a node indexes into are now **one per channel**
+rather than the two this decision inherited, because scale and rotation are three-component and
+opacity is not, so the single-precision run could not be one stride — and the finer split is what
+makes a channel index unambiguous rather than merely unpadded. And *a settled spring is its model
+value* is true of every channel except the one it was most needed for: a rotation is sprung over a
+deviation anchored at its target, so a settled one is zero and carries no orientation. The rule
+becomes **a node carries whatever reconstitutes its value**, of which inline-when-settled is the
+common case. The topology also moves out of `Runs` into a named header entry, since it is not a
+channel and an index that could reach it would defeat the paragraph above.
+
 **Consequences.** `SnapshotRun` grows a node run now and gains client damage and
 [decision 46](#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)'s
 capture requests later; `SnapshotVersion` bumps, which is free while both halves of the boundary still
@@ -1378,6 +1400,124 @@ makes it the first of these four that neither relocation nor translation obvious
 [open](Open.md) alongside the material vocabulary it names, since deciding what is in the set and
 deciding where the set lives are close enough to be one reading. A fourth base module below both
 waists is the shape that would resolve it, and one header is not enough reason to create one.
+
+### 90. The snapshot's runs are one per channel, and the frame side validates the tree it walks
+
+*(Decided 2026-08-22, building the node run
+[decision 86](#86-the-published-scene-is-a-preorder-tree-model-values-inline-coefficients-by-reference)
+specified. Three things that decision left implicit, one of which amends
+[decision 88](#88-an-instance-is-a-node-the-published-scene-is-a-dag).)*
+
+**One coefficient run per channel, and the count follows the channel set rather than the other way
+round.** [Snapshot.h](../Source/Publication/Snapshot.h) carried three runs: translation springs at
+double, "everything else" at single, and the driven ramp. The middle one was never a decision to
+pack. It was written when everything else was assumed to be scalar, and
+[decision 17](#17-transforms-are-decomposed-into-trs-with-per-channel-springs) makes scale and the
+rotation log map three-component — so `Spring<Vector3<float>>` is fifty-six bytes against
+`Spring<float>`'s thirty-two, and one homogeneous run holding both is either impossible or padded.
+
+Padding is the wrong direction on the merits rather than merely on the bytes. Opacity is the most
+animated channel in the system — every enter, every exit, every cross-fade — and
+[decision 71](#71-reduced-motion-is-three-named-forms-not-a-per-bundle-reduced-table) makes fades the
+*substitute* for movement, so for a reader who has asked for reduced motion it is very nearly the only
+channel that ever moves. Taxing it seventy-five percent to share a stride with scale spends the most
+on the population decision 71 exists to serve.
+
+Nothing pushes back, because **a run costs one sixteen-byte directory entry**. There is no
+allocation, no indirection, and no lookup — the reader indexes a fixed array in the header. So the
+rule is one run per channel, and adding a channel is adding a run rather than re-striding one that
+already works, which is how blur and corner radius will arrive when the material vocabulary
+[Open.md](Open.md) holds open is settled.
+
+Two channels of the same element type still get their own run, and that case is what makes the rule
+per *channel* rather than per element type: scale and rotation are both `Spring<Vector3<float>>`, so
+merged, an index meant for one would resolve happily against the other and nothing downstream could
+tell. Separate, **a node's channel index is a position within its own channel's array**, and pointing
+a scale index at a rotation spring stops being expressible rather than being caught.
+
+**`Vector3` was not a `SpringValue`, which is why none of this had come up.** The solver asks its
+value type for a whole-vector magnitude, and only the scalar spelling existed —
+[Retarget.Test.cpp](../Source/Animation/Author/Retarget.Test.cpp) exercised the vector path through a
+locally defined stand-in, so the shape was proven and the real type had never been asked. Geometry
+gains `Magnitude(Vector3<T>)` beside its own `Length`, and the adapter sits there rather than as a
+trait inside Animation because the concept reaches it by argument-dependent lookup and
+[Structure.md](Structure.md) forbids the frame half of Animation from naming Geometry. Two names for
+one number, which is the cheaper of the two prices available.
+
+**The topology is not a channel, so it is a named header entry rather than a sixth run.** `Runs` is
+indexed by channel and that index is what a node record holds; an entry in it that is not a channel
+would make the scene reachable by an index a node could name. `Nodes` sits beside the wake schedule
+instead, addressed by name.
+
+**A node must carry whatever reconstitutes its value, and inline-when-settled is the common case of
+that rule rather than the rule.** Decision 86 says a node names a channel by index where it is moving
+and carries the value inline where it is not, "and for a channel at rest the two agree by construction
+because a settled spring *is* its model value." That holds for three channels and fails for rotation.
+[Animation.md](Animation.md#transforms) anchors the log map **at the target**, so a rotation
+spring is over a deviation whose target is zero: a settled one reads `(0, 0)` and says nothing about
+which way the node faces. The orientation is the chart's base point and has to cross unconditionally,
+active or not. Stated as availability rather than as a storage trick, the rule survives the next
+chart-valued channel; stated as decision 86 stated it, the exception is invisible at rest and appears
+only once something rotates.
+
+**The frame thread validates the tree as it walks it, and decision 88's guarantee is not enough on its
+own.** Decision 88 puts acyclicity and bounded reference depth dispatch-side, "like every other
+invariant the authoring side owes the frame side", on the grounds that the frame thread cannot afford
+to detect a cycle. But the file it would be walking already refuses to trust its writer:
+`RunWithinBounds` exists so that a corrupt or truncated mapping yields an empty run rather than a read
+past the end, precisely because [decision 49](#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot) holds open
+dispatch becoming a separate *process*.
+
+The asymmetry is in what the two failures cost. A bad run offset is a garbage read. A cycle, or a
+subtree length that overruns, is an **unbounded walk inside the frame section on a `SCHED_FIFO`
+thread in the only compositor the machine has** — nothing preempts it, and what saves the box is
+[decision 22](#22-gyro-runs-as-a-dedicated-unprivileged-uid-with-cap_sys_nice-and-nothing-else)'s
+`RLIMIT_RTTIME` killing gyro, which takes every session's UI with it. That is the most expensive
+failure in the system, and it is the one being taken on trust. So the walk carries a depth counter
+against a cap and checks each subtree length against what remains in the run: one comparison per node,
+on a walk that already does one, and the cost becomes bounded by construction rather than by promise.
+A malformed tree then draws nothing where the bad subtree was — a missing thumbnail rather than a dead
+session, which is the same conservative direction as every other ingest in the codebase. Decision 88's
+dispatch-side guarantee stays; it stops being the only thing standing between a bug and the machine.
+
+**Rejected: springs inline in the node record**, the denormalized form, which needs no indices at all.
+Four springs inline is about two hundred and forty bytes per node, always, where a settled node needs
+about fifty-six — half a megabyte per snapshot against a couple hundred kilobytes on a scene of a few
+thousand nodes, re-emitted as often as input arrives. It is also worse on the *hot* path, which is the
+counterintuitive half: the common case is a node that is not moving, and inline that means dragging
+240 bytes through cache to use 56 of them. The narrow record wins the walk, not only the wire. The
+trade is two cache lines instead of one for a node that *is* moving, which is the right side of it,
+because moving is a handful of nodes and not-moving is all of them.
+
+**Rejected: springs carrying their owner's node index**, so the frame thread streams each channel
+array end to end into a scratch slot per node. Tighter loops, no sentinel test, trivially vectorised —
+and it gives up the subtree skip, because it would evaluate every spring in a hidden workspace before
+the walk ever discovered the workspace was hidden. The skip is the whole reason the tree carries
+subtree lengths, so evaluation has to be *driven by* the walk to inherit it. **That is what fixes the
+direction of the reference**: the node reaches for the spring, and not the other way round. Worth
+recording because the inverse is the faster-looking shape and the reason it loses is not performance
+at the loop level.
+
+**Rejected: one run per element type** rather than per channel. Strictly fewer runs, and it merges
+exactly the two channels — scale and rotation — whose confusion an index cannot detect.
+
+**Consequences.** `SnapshotVersion` bumps to 2, which is free while both halves ship together.
+`SnapshotRun`'s enumerators are the channel set, and the order is part of the format rather than a
+convenience, since a node record names a channel by that index. The node record itself is not defined
+here: the waist reserves the slot without naming the record, exactly as it does for decision 72's
+driven ramp, because what a node *is* waits on the vocabulary Open.md holds open.
+
+**And a debt, recorded rather than paid.** Decision 50 says the copy-on-write arena — share unchanged
+subtrees between consecutive snapshots so a gesture does not re-serialise the scene per input event —
+is "contained", because the representation is offset-addressed either way. That was written before the
+scene had a relational encoding. A shared, unchanged subtree still holds indices into channel arrays
+whose packing is global, so one node elsewhere becoming active can renumber a run and invalidate a
+subtree that did not change. There is a fork nobody has had to take yet: **node-ordered runs**, which
+are what make the frame thread's reads monotonic, against **append-ordered runs**, which keep indices
+valid across publications and give that up. Inline springs would have had no such problem, and that is
+the one real argument in their favour. It does not change the answer — decision 50's own instruction
+is to ship the full re-emit and measure — but the arena is less contained than it was, and whoever
+builds it should find that here rather than discover it.
 
 ---
 
@@ -5896,6 +6036,15 @@ and a bounded reference depth are guaranteed dispatch-side**, at commit, like ev
 the authoring side owes the frame side. And **a reference is not a second identity**: the referenced
 subtree keeps its own `EntityId`s and the reference node has its own for its own transform, or matched
 geometry has two objects to reconcile and the property above is given away again.
+
+**The frame thread checks anyway.** *(Revised 2026-08-22.)* The obligation above stands and stops
+being the only thing between a dispatch-side bug and the machine.
+[Decision 90](#90-the-snapshots-runs-are-one-per-channel-and-the-frame-side-validates-the-tree-it-walks)
+has the walk carry a depth counter and check each subtree length against what remains — one comparison
+per node, against an unbounded traversal at `SCHED_FIFO` in the only compositor the machine has, whose
+survivable outcome is `RLIMIT_RTTIME` killing every session's UI at once. *The frame thread cannot
+afford to detect one* was read as a reason to trust the producer; it is a reason to bound the work,
+which is cheaper than detection and does not require trust.
 
 **Rejected: an instance run with per-instance targets and clocks** — decision 64 read literally. It is
 the more general mechanism and every part of the generality costs something here: a pool of targets

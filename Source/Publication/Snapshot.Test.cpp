@@ -13,7 +13,10 @@ static_assert(Detail::AlignUp(0, 8) == 0);
 static_assert(Detail::AlignUp(1, 8) == 8);
 static_assert(Detail::AlignUp(8, 8) == 8);
 static_assert(Detail::AlignUp(9, 8) == 16);
-static_assert(Detail::AlignUp(88, 8) == 88, "The header ends on an eight-boundary, so the first run needs no padding");
+static_assert(
+	Detail::AlignUp(136, 8) == 136,
+	"The header ends on an eight-boundary, so the first run needs no padding"
+);
 static_assert(Detail::AlignUp(5, 4) == 8);
 
 // A zero-count run is vacuously within bounds — the reader reads the count first and never consults
@@ -32,11 +35,19 @@ static_assert(
 	!Detail::RunWithinBounds(RunEntry{ .Offset = 200, .Count = 1, .ElementSize = 24, .ElementAlign = 8 }, 88)
 );
 
-// The pinned schema: three runs, indexed in order, with the driven regime last.
-static_assert(RunIndex(SnapshotRun::Positions) == 0);
-static_assert(RunIndex(SnapshotRun::Channels) == 1);
-static_assert(RunIndex(SnapshotRun::DrivenProgress) == 2);
-static_assert(SnapshotRunCount == 3);
+// The pinned schema: one run per channel, indexed in order, with the driven regime last. The order is
+// part of the format rather than a convenience — a node record names a channel by this index, so
+// renumbering here silently repoints every active channel in every published snapshot.
+static_assert(RunIndex(SnapshotRun::Translation) == 0);
+static_assert(RunIndex(SnapshotRun::Scale) == 1);
+static_assert(RunIndex(SnapshotRun::Rotation) == 2);
+static_assert(RunIndex(SnapshotRun::Opacity) == 3);
+static_assert(RunIndex(SnapshotRun::DrivenProgress) == 4);
+static_assert(SnapshotRunCount == 5);
+
+// The topology is addressed by name and never through RunIndex, because it is not a channel. A sixth
+// enumerator here would make the node run reachable by an index a node record could hold.
+static_assert(SnapshotHeader{}.Nodes.Count == 0, "Absent until Scene writes one, and absent is empty");
 
 // A fresh header carries the magic and version rather than zeroes, so a value-initialised header is
 // already a recognisable one before its fields are filled.

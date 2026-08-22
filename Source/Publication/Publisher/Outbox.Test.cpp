@@ -73,14 +73,14 @@ void CollectAll(SnapshotOutbox& outbox)
 	const std::array<Mark, 1> marks{ Mark{ value } };
 
 	SnapshotPublisher publisher;
-	publisher.Put<Mark>(SnapshotRun::Positions, marks);
+	publisher.Put<Mark>(SnapshotRun::Translation, marks);
 
 	return publisher;
 }
 
 [[nodiscard]] std::uint64_t MarkOf(const SnapshotReader& reader)
 {
-	const std::span<const Mark> marks = reader.Run<Mark>(SnapshotRun::Positions);
+	const std::span<const Mark> marks = reader.Run<Mark>(SnapshotRun::Translation);
 
 	return marks.empty() ? 0 : marks[0].Value;
 }

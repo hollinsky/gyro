@@ -50,7 +50,7 @@ GYRO_TEST(SnapshotReader, DefaultIsValidlyEmpty)
 	GYRO_CHECK(!reader.IsValid());
 	GYRO_CHECK(reader.Sequence() == 0);
 	GYRO_CHECK(reader.Wakes().empty());
-	GYRO_CHECK(reader.Run<Coeff>(SnapshotRun::Positions).empty());
+	GYRO_CHECK(reader.Run<Coeff>(SnapshotRun::Translation).empty());
 }
 
 GYRO_TEST(SnapshotReader, TooSmallForAHeaderIsRejected)
@@ -75,7 +75,7 @@ GYRO_TEST(SnapshotReader, HeaderOnlyIsValidAndEmpty)
 
 	GYRO_CHECK(reader.IsValid());
 	GYRO_CHECK_EQ(reader.Sequence(), std::uint64_t{ 42 });
-	GYRO_CHECK(reader.Run<Coeff>(SnapshotRun::Positions).empty());
+	GYRO_CHECK(reader.Run<Coeff>(SnapshotRun::Translation).empty());
 	GYRO_CHECK(reader.Wakes().empty());
 }
 
@@ -124,20 +124,20 @@ GYRO_TEST(SnapshotReader, ResolvesATypedRunAndGuardsItsType)
 
 	SnapshotHeader header{};
 	header.ByteSize = static_cast<std::uint32_t>(buffer.Data.size());
-	header.Runs[RunIndex(SnapshotRun::Positions)] = { offset, 1, sizeof(Coeff), alignof(Coeff) };
+	header.Runs[RunIndex(SnapshotRun::Translation)] = { offset, 1, sizeof(Coeff), alignof(Coeff) };
 	std::memcpy(buffer.Data.data(), &header, sizeof(SnapshotHeader));
 
 	const SnapshotReader reader{ buffer.View() };
 	GYRO_REQUIRE(reader.IsValid());
 
-	const std::span<const Coeff> run = reader.Run<Coeff>(SnapshotRun::Positions);
+	const std::span<const Coeff> run = reader.Run<Coeff>(SnapshotRun::Translation);
 	GYRO_REQUIRE_EQ(run.size(), std::size_t{ 1 });
 	GYRO_CHECK(run[0] == written);
 
 	// The same bytes asked for as the wrong-sized type resolve to nothing rather than to a
 	// reinterpretation: the boundary's type check is the writer's size and alignment against the
 	// reader's.
-	GYRO_CHECK(reader.Run<double>(SnapshotRun::Positions).empty());
+	GYRO_CHECK(reader.Run<double>(SnapshotRun::Translation).empty());
 }
 
 GYRO_TEST(SnapshotReader, ARunReachingPastTheEndResolvesEmpty)
@@ -148,13 +148,13 @@ GYRO_TEST(SnapshotReader, ARunReachingPastTheEndResolvesEmpty)
 	header.ByteSize = sizeof(SnapshotHeader);
 	// A run whose bytes would begin at the very end of the snapshot and extend beyond it. The header
 	// is well-formed, so the reader is valid; only the run is refused.
-	header.Runs[RunIndex(SnapshotRun::Channels)] = { sizeof(SnapshotHeader), 1, sizeof(Coeff), alignof(Coeff) };
+	header.Runs[RunIndex(SnapshotRun::Opacity)] = { sizeof(SnapshotHeader), 1, sizeof(Coeff), alignof(Coeff) };
 	std::memcpy(buffer.Data.data(), &header, sizeof(SnapshotHeader));
 
 	const SnapshotReader reader{ buffer.View() };
 
 	GYRO_CHECK(reader.IsValid());
-	GYRO_CHECK(reader.Run<Coeff>(SnapshotRun::Channels).empty());
+	GYRO_CHECK(reader.Run<Coeff>(SnapshotRun::Opacity).empty());
 }
 
 GYRO_TEST(SnapshotReader, WakesRoundTripInOutputOrder)
@@ -192,7 +192,7 @@ GYRO_TEST(SnapshotReader, TheSameBytesResolveAtADifferentAddress)
 
 	SnapshotHeader header{};
 	header.ByteSize = static_cast<std::uint32_t>(original.Data.size());
-	header.Runs[RunIndex(SnapshotRun::Positions)] = { offset, 1, sizeof(Coeff), alignof(Coeff) };
+	header.Runs[RunIndex(SnapshotRun::Translation)] = { offset, 1, sizeof(Coeff), alignof(Coeff) };
 	std::memcpy(original.Data.data(), &header, sizeof(SnapshotHeader));
 
 	// A second, independently allocated buffer at a different address, holding a byte-for-byte copy.
@@ -204,7 +204,7 @@ GYRO_TEST(SnapshotReader, TheSameBytesResolveAtADifferentAddress)
 	const SnapshotReader reader{ copy.View() };
 	GYRO_REQUIRE(reader.IsValid());
 
-	const std::span<const Coeff> run = reader.Run<Coeff>(SnapshotRun::Positions);
+	const std::span<const Coeff> run = reader.Run<Coeff>(SnapshotRun::Translation);
 	GYRO_REQUIRE_EQ(run.size(), std::size_t{ 1 });
 	GYRO_CHECK(run[0] == written);
 	GYRO_CHECK(reinterpret_cast<const std::byte*>(run.data()) >= copy.Data.data());

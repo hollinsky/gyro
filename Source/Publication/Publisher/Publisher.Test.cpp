@@ -49,8 +49,8 @@ GYRO_TEST(SnapshotPublisher, EmptyPublishIsAValidEmptySnapshot)
 
 	GYRO_CHECK(reader.IsValid());
 	GYRO_CHECK_EQ(buffer.Size(), sizeof(SnapshotHeader));
-	GYRO_CHECK(reader.Run<Wide>(SnapshotRun::Positions).empty());
-	GYRO_CHECK(reader.Run<Narrow>(SnapshotRun::Channels).empty());
+	GYRO_CHECK(reader.Run<Wide>(SnapshotRun::Translation).empty());
+	GYRO_CHECK(reader.Run<Narrow>(SnapshotRun::Opacity).empty());
 	GYRO_CHECK(reader.Wakes().empty());
 }
 
@@ -65,15 +65,15 @@ GYRO_TEST(SnapshotPublisher, HeterogeneousRunsRoundTrip)
 {
 	const std::array<Wide, 2> positions{ Wide{ Monotonic::FromNanoseconds(0), 1.0, 2.0 },
 		                                 Wide{ Monotonic::FromNanoseconds(1'000), 3.0, 4.0 } };
-	const std::array<Narrow, 3> channels{ Narrow{ 0.1f, 0.2f, 0.3f },
-		                                  Narrow{ 0.4f, 0.5f, 0.6f },
-		                                  Narrow{ 0.7f, 0.8f, 0.9f } };
+	const std::array<Narrow, 3> opacities{ Narrow{ 0.1f, 0.2f, 0.3f },
+		                                   Narrow{ 0.4f, 0.5f, 0.6f },
+		                                   Narrow{ 0.7f, 0.8f, 0.9f } };
 	const std::array<Wake, 2> wakes{ Wake::EveryFrame(Monotonic::FromNanoseconds(500)),
 		                             Wake::At(Monotonic::FromNanoseconds(700)) };
 
 	const SnapshotBuffer buffer = SnapshotPublisher{}
-	                                  .Put<Wide>(SnapshotRun::Positions, positions)
-	                                  .Put<Narrow>(SnapshotRun::Channels, channels)
+	                                  .Put<Wide>(SnapshotRun::Translation, positions)
+	                                  .Put<Narrow>(SnapshotRun::Opacity, opacities)
 	                                  .PutWakes(wakes)
 	                                  .Build(9);
 
@@ -81,15 +81,15 @@ GYRO_TEST(SnapshotPublisher, HeterogeneousRunsRoundTrip)
 	GYRO_REQUIRE(reader.IsValid());
 	GYRO_CHECK_EQ(reader.Sequence(), std::uint64_t{ 9 });
 
-	const std::span<const Wide> readPositions = reader.Run<Wide>(SnapshotRun::Positions);
+	const std::span<const Wide> readPositions = reader.Run<Wide>(SnapshotRun::Translation);
 	GYRO_REQUIRE_EQ(readPositions.size(), std::size_t{ 2 });
 	GYRO_CHECK(readPositions[0] == positions[0]);
 	GYRO_CHECK(readPositions[1] == positions[1]);
 
-	const std::span<const Narrow> readChannels = reader.Run<Narrow>(SnapshotRun::Channels);
-	GYRO_REQUIRE_EQ(readChannels.size(), std::size_t{ 3 });
-	GYRO_CHECK(readChannels[0] == channels[0]);
-	GYRO_CHECK(readChannels[2] == channels[2]);
+	const std::span<const Narrow> readOpacities = reader.Run<Narrow>(SnapshotRun::Opacity);
+	GYRO_REQUIRE_EQ(readOpacities.size(), std::size_t{ 3 });
+	GYRO_CHECK(readOpacities[0] == opacities[0]);
+	GYRO_CHECK(readOpacities[2] == opacities[2]);
 
 	const std::span<const Wake> readWakes = reader.Wakes();
 	GYRO_REQUIRE_EQ(readWakes.size(), std::size_t{ 2 });
@@ -104,18 +104,18 @@ GYRO_TEST(SnapshotPublisher, HeterogeneousRunsRoundTrip)
 GYRO_TEST(SnapshotPublisher, EachRunLandsAtAnAlignedAddress)
 {
 	const std::array<Wide, 1> positions{ Wide{ Monotonic::FromNanoseconds(0), 1.0, 2.0 } };
-	const std::array<Narrow, 1> channels{ Narrow{ 1.0f, 2.0f, 3.0f } };
+	const std::array<Narrow, 1> opacities{ Narrow{ 1.0f, 2.0f, 3.0f } };
 
 	const SnapshotBuffer buffer = SnapshotPublisher{}
-	                                  .Put<Wide>(SnapshotRun::Positions, positions)
-	                                  .Put<Narrow>(SnapshotRun::Channels, channels)
+	                                  .Put<Wide>(SnapshotRun::Translation, positions)
+	                                  .Put<Narrow>(SnapshotRun::Opacity, opacities)
 	                                  .Build(1);
 
 	const SnapshotReader reader{ buffer.Bytes() };
 	GYRO_REQUIRE(reader.IsValid());
 
-	const std::span<const Wide> wide = reader.Run<Wide>(SnapshotRun::Positions);
-	const std::span<const Narrow> narrow = reader.Run<Narrow>(SnapshotRun::Channels);
+	const std::span<const Wide> wide = reader.Run<Wide>(SnapshotRun::Translation);
+	const std::span<const Narrow> narrow = reader.Run<Narrow>(SnapshotRun::Opacity);
 	GYRO_REQUIRE_EQ(wide.size(), std::size_t{ 1 });
 	GYRO_REQUIRE_EQ(narrow.size(), std::size_t{ 1 });
 

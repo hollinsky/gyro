@@ -114,7 +114,7 @@ enum class Revision : std::uint8_t
 	const Ramp ramp = RampFor(sequence, revision);
 
 	SnapshotPublisher publisher;
-	publisher.Put<Spring<double>>(SnapshotRun::Positions, { &spring, 1 });
+	publisher.Put<Spring<double>>(SnapshotRun::Translation, { &spring, 1 });
 	publisher.Put<Ramp>(SnapshotRun::DrivenProgress, { &ramp, 1 });
 
 	return publisher;
@@ -264,7 +264,7 @@ void RunFrameSide(
 		}
 		else
 		{
-			const std::span<const Spring<double>> springs = reader.Run<Spring<double>>(SnapshotRun::Positions);
+			const std::span<const Spring<double>> springs = reader.Run<Spring<double>>(SnapshotRun::Translation);
 			const std::span<const Ramp> ramps = reader.Run<Ramp>(SnapshotRun::DrivenProgress);
 
 			const bool agrees =

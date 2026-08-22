@@ -32,6 +32,11 @@
 // schema both sides agree on: which runs exist and in what order. A name is not a type, and fixing
 // the schema at the waist both halves bind to is where it belongs.
 //
+// The node run is the same arrangement one level up. Docs/Decisions.md decision 86 fixes what crosses
+// — the scene in preorder, each record carrying the length of its own subtree — and this file
+// reserves the slot without naming the record, exactly as it does for the driven ramp. The record is
+// Scene's to define, because what a node *is* waits on a vocabulary Docs/Open.md still has open.
+//
 // **The one payload it does name by type is the wake schedule, because Core owns that type.**
 // Docs/Animation.md#storage puts the reduced wake fold in the snapshot header, one entry per output,
 // so the frame thread reads a schedule rather than deriving one. `Wake` is a Core primitive
@@ -46,26 +51,50 @@ inline constexpr std::uint32_t SnapshotMagic = 0x6779726Fu;
 // Bumped when the layout below changes in a way a reader compiled against the old one would
 // misinterpret. A reader that does not recognise the version resolves to nothing rather than to
 // garbage — the same conservative direction as every settling and ingest decision in the codebase.
-inline constexpr std::uint32_t SnapshotVersion = 1;
+inline constexpr std::uint32_t SnapshotVersion = 2;
 
-// The runs the snapshot carries, and the order they are indexed in. This is the pinned shape of
-// Docs/Decisions.md decision 50 and decision 72: two homogeneous spring-coefficient runs split by
-// precision, and the driven-progress ramp as its own homogeneous run beside them.
+// The coefficient runs, and the order they are indexed in. This is the pinned shape of
+// Docs/Decisions.md decisions 50, 72, and 90: **one run per channel**, plus the driven ramp beside
+// them.
 //
-// **The precision split is Docs/Architecture.md#the-spaces**: positions cross at double and
-// everything else at single, so translation springs are one run and the scale, rotation-log-map,
-// opacity, blur, and corner-radius springs are another. **The third run is decision 72's** — the
-// driven regime is a distinct closed form, not reachable from any spring, so it travels as its own
-// fixed-stride run and the spring runs stay one shape each rather than a tagged union. The waist
-// reserves the slot; the record that fills it is Animation's to define when that regime is built.
+// **One per channel rather than as few as will fit, and decision 90 is why.** A run's whole job is
+// to be a homogeneous fixed-stride array, and it costs one sixteen-byte directory entry in the
+// header below — so there is no pressure to merge, and merging is not free. The channels differ in
+// arity as well as precision: translation and scale and the rotation log map are three-component,
+// opacity is one, and a `Spring<Vector3<float>>` is fifty-six bytes against a `Spring<float>`'s
+// thirty-two. One run for "everything at single precision" is therefore either impossible or
+// padded, and padding taxes opacity hardest — the most animated channel in the system, and under
+// Docs/Decisions.md decision 71 the *only* channel that moves for a reader who has asked for
+// reduced motion.
+//
+// **Separate runs also make the node's index unambiguous.** A node names its active channels by
+// index (decision 86), and with one run per channel that index is a position within its own
+// channel's array — so pointing a scale index at a rotation spring stops being expressible rather
+// than being caught. Merged, the two are the same element size and nothing downstream could tell
+// them apart.
+//
+// **`DrivenProgress` is decision 72's** — the driven regime is a distinct closed form, not reachable
+// from any spring, so it travels as its own fixed-stride run rather than making a spring run a
+// tagged union. The waist reserves the slot; the record that fills it is Animation's to define when
+// that regime is built.
+//
+// **The precision split is Docs/Architecture.md#the-spaces**: positions cross at double because
+// global space runs out of single precision at exactly wl_fixed's resolution, and every other
+// channel is bounded by the node it belongs to.
+//
+// Blur and corner radius are absent because the material vocabulary they belong to is open
+// (Docs/Open.md). They arrive as runs, which is the point of the rule: a channel is added by adding
+// a run, never by re-striding one that already works.
 enum class SnapshotRun : std::uint32_t
 {
-	Positions = 0,      // translation springs, at double
-	Channels = 1,       // scale, rotation, opacity, blur, corner-radius springs, at single
-	DrivenProgress = 2, // the driven ramp (p0, v0, t0, horizon), usually empty
+	Translation = 0,    // translation springs, at double
+	Scale = 1,          // scale springs, three-component at single
+	Rotation = 2,       // rotation springs over the log-map deviation, three-component at single
+	Opacity = 3,        // opacity springs, scalar at single
+	DrivenProgress = 4, // the driven ramp (p0, v0, t0, horizon), usually empty
 };
 
-inline constexpr std::size_t SnapshotRunCount = 3;
+inline constexpr std::size_t SnapshotRunCount = 5;
 
 [[nodiscard]] constexpr std::size_t RunIndex(SnapshotRun run) noexcept
 {
@@ -97,6 +126,14 @@ static_assert(sizeof(RunEntry) == 16, "Four uint32s, and no padding to leave uni
 // has active springs. The wake schedule is beside them for the reason Docs/Animation.md#storage
 // gives: the frame thread reads the reduced fold rather than folding per output itself.
 //
+// **`Nodes` is a member rather than a sixth entry in `Runs`, and the distinction is load bearing.**
+// `Runs` is indexed by channel, and Docs/Decisions.md decision 90 makes that index the thing a node
+// record names — so every entry in that array has to *be* a channel, or the index stops meaning one
+// position in one channel's array. The scene's topology is not a channel. It is what the channels
+// belong to, so it sits beside the wake schedule as its own named entry, addressed by name and never
+// by `RunIndex`. See decision 86 for the record it holds and the preorder-plus-subtree-length shape
+// the frame thread walks it in.
+//
 // **`Sequence` is the snapshot's identity, and it is here for shape rather than for use this cut.**
 // Decision 45's deferred reclamation has the frame thread publish the sequence it last consumed and
 // the dispatch thread free below that. The watermark and the ring that carry it are a later part of
@@ -116,10 +153,14 @@ struct SnapshotHeader
 	std::uint32_t Reserved = 0;
 	RunEntry Runs[SnapshotRunCount] = {};
 	RunEntry Wakes = {}; // the per-output wake schedule, one Wake per output
+	RunEntry Nodes = {}; // the scene, in preorder, one record per node
 };
 
 static_assert(std::is_trivially_copyable_v<SnapshotHeader> && std::is_standard_layout_v<SnapshotHeader>);
-static_assert(sizeof(SnapshotHeader) == 88, "One uint64, four uint32, three run entries, and the wake entry, exactly");
+static_assert(
+	sizeof(SnapshotHeader) == 136,
+	"One uint64, four uint32, five coefficient run entries, and the wake and node entries, exactly"
+);
 static_assert(
 	alignof(SnapshotHeader) == 8,
 	"The base is eight-aligned, and so the header decides nothing the runs do not"
