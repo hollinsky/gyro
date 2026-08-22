@@ -5,6 +5,8 @@
 
 #include "Geometry/NodeTransform.h"
 #include "Geometry/Space.h"
+#include "World/Elevation.h"
+#include "World/Material.h"
 
 // One node of the published scene, as bytes in the snapshot's node run.
 //
@@ -23,18 +25,67 @@
 // `Nodes<T>()` are templates, so `World` sits beside the waist rather than under it and adding a
 // field here does not touch the boundary.
 //
-// **What is deliberately absent is content.** A node kind, a material, a texture, a color state, and
-// the encoding of decision 88's subtree reference are all the shell's scene vocabulary, which
-// Docs/Open.md holds open — decision 51's sketch list has already been outgrown once, by decision 88
-// adding a kind it does not contain. What is here is what decisions 86, 90, 19, and 55 pin between
-// them: the structure the walk traverses and the transform it composes. The rest arrives when the
-// vocabulary does, alongside `Material`, and `SnapshotVersion` is what absorbs it.
+// **This file does not include World/Content.h, and the omission is the design.** Decision 95 keeps
+// what a leaf draws in per-kind runs beside the node run, so a node addresses content by *index* and
+// never names the record — exactly as it addresses a spring by index below without including
+// Animation/Solve/Spring.h. The include looks obviously missing and adding it would be the union this
+// record refuses: the common node is a container or a group with nothing to draw, and it would drag
+// the payload through cache in order not to use it.
+//
+// **What is deliberately absent is now smaller and worth naming.** Decision 95 settles the scene
+// vocabulary that Docs/Open.md carried as decision 51's sketch, and it lands here as four fields.
+// What it explicitly leaves out is clipping — a node's children are not clipped to its extent, and
+// `Group` is not a substitute, since its offscreen sits at the subtree's screen-space bound and so
+// contains the overflow rather than cutting it — and any blend mode but `over`. Both stay in
+// Docs/Open.md. What stays open *inside* the vocabulary is the contents of the two dressing enums
+// rather than their shape, which World/Material.h and World/Elevation.h each say for themselves.
 
 // A channel that is not moving, in the slots below. Every run is shorter than this by many orders of
 // magnitude, so the sentinel costs no representable index — and it is the *default*, which is the
 // direction that matters: a record somebody filled in partially names no coefficients rather than
 // naming element zero of every run.
 inline constexpr std::uint32_t NoCoefficient = 0xFFFF'FFFFu;
+
+// The same sentinel for the same reason, one field down: a node that draws nothing addresses no
+// content. Every per-kind run is shorter than this by many orders of magnitude, so it costs no
+// representable position — and it is the *default*, which is again the direction that matters. A
+// record somebody filled in partially names no content rather than naming element zero of every run,
+// which would be a container silently wearing the first window's pixels.
+inline constexpr std::uint32_t NoContent = 0xFFFF'FFFFu;
+
+// What a node is: decision 95's closed set of four, and the run its `Content` indexes.
+//
+// **Free rather than nested inside `Node`, and that is a language constraint rather than a taste.**
+// The member is `Kind`, and a data member cannot share a name with a nested type declared in the same
+// class — so nesting it would force the member to be called something else, and every read site to
+// say a word that is not the word. `Node::Flag` above is nested for the opposite reason: it is scoped
+// so the flags combine without a cast and cannot be spelled without `Node::`.
+enum class NodeKind : std::uint8_t
+{
+	// Subnodes and no content. Forced rather than convenient: `wl_subsurface.place_below` names the
+	// parent surface itself as a legal reference, and decision 55 makes z the list order, so the only
+	// encoding of a subsurface beneath its parent's own pixels is a container holding the
+	// below-subsurfaces, the parent's own surface, and the above-subsurfaces in that order. An
+	// ordinary toplevel is therefore already one, as is every opacity group, workspace, and overview
+	// grid. Without the kind a container would be a fully transparent `Solid`: one draw item per
+	// container per frame, sampling nothing and covering nothing.
+	Container,
+
+	// `Content` is a position in the image run. A live client surface and a compositor-owned snapshot
+	// are the same kind, which World/Content.h argues at length: exit pixels swap one for the other
+	// while the closing spring is running, and a kind that changes mid-transition restarts the
+	// collapse a person is watching.
+	Image,
+
+	// `Content` is a position in the solid run. Mostly gyro's own — the background before a wallpaper,
+	// the firmware colour the handoff continues into, a letterbox fill.
+	Solid,
+
+	// `Content` is a *node index*, and decision 88's subtree reference is the whole payload, so this
+	// kind needs no run at all. One field with two readings, and they are the same reading: a
+	// reference's content is a node.
+	Reference,
+};
 
 // A node, in the preorder run.
 //
@@ -133,14 +184,65 @@ struct Node
 	// for the reason the run is reserved at the waist.
 	std::uint32_t DrivenRamp = NoCoefficient;
 
+	// Where this node's content is: a position in whichever run `Kind` selects, or `NoContent`. A
+	// `Container` names nothing and that is what the sentinel is for.
+	//
+	// **When `Kind` is `Reference` this is a node index instead, and it must point backwards.**
+	// Decision 95 requires the target's index to be *lower* than this node's, which makes a cycle
+	// unrepresentable rather than something the frame thread has to detect — and a detector is what
+	// decision 90 declines to rely on, because an unbounded walk inside the frame section on a
+	// `SCHED_FIFO` thread ends with `RLIMIT_RTTIME` taking every session's UI at once. A rule that
+	// makes the bad state unwritable beats a test that would run per node per frame.
+	//
+	// What it costs is an authoring order — a subtree is published before every presentation of it —
+	// and that is how an overview is written anyway: the real windows near the top of the run under a
+	// hidden container, the thumbnails below pointing back at them. A reference expands the referenced
+	// root's flags as authored, which is why the originals are hidden by hiding their *parent* rather
+	// than each of them.
+	std::uint32_t Content = NoContent;
+
+	// Which of the four the node is, and therefore which run `Content` is a position in. See
+	// `NodeKind` above for what each one means and why the type is free rather than nested.
+	NodeKind Kind = NodeKind::Container;
+
+	// Decision 33's dressing, on every kind rather than being a kind of its own. As a kind, a glass
+	// window would be an effect-layer node stacked over a surface node — two transforms and two corner
+	// radii that agree only while nothing moves, and every frame in which they disagree is a bright
+	// seam around a translucent panel.
+	//
+	// **Spelled the way Seam/Renderer.h's `DrawItem::Dress` is spelled, and deliberately**, so the
+	// published field and the emitted one are read as one thing rather than as two fields that happen
+	// to carry the same value.
+	Material Dress = Material::None;
+
+	// Decision 96's window shadow, as a named level. Orthogonal to `Dress` and to `Kind`, because a
+	// glass panel casts a shadow too — which is why it is a second byte here rather than more
+	// enumerators in the first.
+	Elevation Lift = Elevation::None;
+
 	// Padding that is spelled, so the tail is the publisher's to value-initialise rather than
 	// whatever the arena last held — the obligation Core/Wake.h and Animation/Solve/Spring.h record
-	// for their own, and the reason a publisher builds this from a value-initialised object.
-	std::uint32_t Reserved = 0;
+	// for their own, and the reason a publisher builds this from a value-initialised object. It is
+	// also what lands the record on 128: three one-byte fields and five spelled bytes, rather than
+	// three fields and five bytes the compiler inserts where nobody can see them.
+	std::uint8_t Reserved[5]{};
 
 	[[nodiscard]] constexpr bool IsHidden() const noexcept { return (Flags & Hidden) != 0; }
 
 	[[nodiscard]] constexpr bool IsGroup() const noexcept { return (Flags & Group) != 0; }
+
+	[[nodiscard]] constexpr bool IsContainer() const noexcept { return Kind == NodeKind::Container; }
+
+	[[nodiscard]] constexpr bool IsReference() const noexcept { return Kind == NodeKind::Reference; }
+
+	// A leaf that draws: the two kinds whose `Content` is a position in a content run rather than a
+	// node index or nothing. Named because that is the distinction the walk actually makes — it emits
+	// a draw item for these and for neither of the others.
+	[[nodiscard]] constexpr bool IsDrawn() const noexcept { return Kind == NodeKind::Image || Kind == NodeKind::Solid; }
+
+	[[nodiscard]] constexpr bool IsDressed() const noexcept { return Dress != Material::None; }
+
+	[[nodiscard]] constexpr bool IsLifted() const noexcept { return Lift != Elevation::None; }
 
 	[[nodiscard]] constexpr bool IsTranslating() const noexcept { return TranslationSpring != NoCoefficient; }
 
@@ -161,9 +263,14 @@ struct Node
 };
 
 static_assert(std::is_trivially_copyable_v<Node> && std::is_standard_layout_v<Node>);
+// 128 exactly, and the eight decision 95 added are worth what they cost: two cache lines where 120
+// straddled, so the walk's indexing becomes a shift rather than a multiply and a node never spans a
+// third line. There is no implicit padding in the layout — the three one-byte fields sit together and
+// the five spelled ones finish them.
 static_assert(
-	sizeof(Node) == 120,
-	"A transform, an extent, two model scalars, a length, a flag word, five slots, and the spelled tail"
+	sizeof(Node) == 128,
+	"A transform, an extent, two model scalars, a length, a flag word, five slots, a content index, "
+	"three one-byte fields, and the spelled tail"
 );
 static_assert(alignof(Node) == 8, "The widest member is a global-space coordinate, and nothing here is wider");
 
@@ -175,9 +282,15 @@ static_assert(Node{}.SubtreeLength == 0 && Node{}.Past(7) == 8, "A leaf's subtre
 static_assert(!Node{}.IsTranslating() && !Node{}.IsScaling() && !Node{}.IsRotating());
 static_assert(!Node{}.IsFading() && !Node{}.IsDriven());
 static_assert(!Node{}.IsHidden() && !Node{}.IsGroup());
+static_assert(Node{}.IsContainer() && !Node{}.IsReference() && !Node{}.IsDrawn(), "Nothing drawn is nothing named");
+static_assert(Node{}.Content == NoContent && !Node{}.IsDressed() && !Node{}.IsLifted());
 static_assert(Node{}.Opacity == 1.0F && Node{}.TimeScale == 1.0F);
 static_assert(Node{}.Transform.Rotation == Quaternion{}, "The chart's base point, and it crosses always");
 
 static_assert(Node{ .Flags = Node::Hidden | Node::Group }.IsHidden());
 static_assert(Node{ .Flags = Node::Hidden | Node::Group }.IsGroup());
 static_assert(Node{ .Flags = Node::Group }.IsGroup() && !Node{ .Flags = Node::Group }.IsHidden());
+
+static_assert(Node{ .Content = 0, .Kind = NodeKind::Image }.IsDrawn());
+static_assert(Node{ .Content = 3, .Kind = NodeKind::Reference }.IsReference());
+static_assert(!Node{ .Content = 3, .Kind = NodeKind::Reference }.IsDrawn(), "A reference names a node, not a run");
