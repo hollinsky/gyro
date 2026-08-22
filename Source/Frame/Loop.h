@@ -205,6 +205,17 @@ private:
 	// clock re-anchors from what was achieved rather than from what was asked for, and the record is
 	// invalidated because a cost measured under the old mode is a cost from another configuration —
 	// which is what `Budget`'s generation exists to say.
+	//
+	// **The whole output is damaged again, after the adoption rather than before it, and the ordering is
+	// the entire content of the line.** `TargetsInvalidated` has already damaged the whole output — but
+	// it ran while this held the *old* configuration, so what it accumulated was the old mode's extent.
+	// Seam/Presenter.h fixes that order: the images go first and the transition completes second, since
+	// the old target descriptors stop being valid before the new set exists. So a mode that grew leaves
+	// the difference between the two extents outside the damage region, and the first frame after the
+	// mode set scissors everything past the old resolution away — on a target that was just reallocated
+	// and holds nothing. Re-damaging here costs one rectangle on a path that already invalidated
+	// everything, and the alternative is a band of undefined pixels that appears only on a resolution
+	// increase.
 	void OnReconfigured(const OutputConfiguration& achieved) noexcept
 	{
 		Adopt(achieved);
@@ -212,6 +223,7 @@ private:
 		m_Clock.Configure(achieved);
 		m_Cost.Invalidate();
 		Discard();
+		DamageWholeOutput();
 	}
 
 	// The targets are gone, so anything recorded against one is gone with it. The output owes a whole

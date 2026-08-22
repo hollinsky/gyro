@@ -470,6 +470,29 @@ GYRO_TEST(FrameLoop, AReconfigurationReanchorsTheClockAndInvalidatesTheRecord)
 	GYRO_CHECK_EQ(harness.Output().Configuration().Generation, std::uint64_t{ 4 });
 }
 
+// The pair above, run in the order Seam/Presenter.h fixes, against a mode that grew.
+//
+// Found by building a backend that performs a transition rather than a fake that reports one: the
+// damage `TargetsInvalidated` accumulates is in the extent the output had *at the time*, and a mode set
+// that raised the resolution left everything past the old extent outside the region the next frame
+// scissors to — on a target that had just been reallocated.
+GYRO_TEST(FrameLoop, AModeSetThatGrewTheOutputDamagesTheWholeNewMode)
+{
+	Harness harness;
+
+	harness.Anchor();
+
+	harness.Presenter.TargetsInvalidated.Emit();
+	GYRO_CHECK_EQ(harness.Output().Damage().Bounds(), (PixelRect<DeviceSpace>{ {}, { 2560, 1440 } }));
+
+	OutputConfiguration achieved = Panel();
+	achieved.Generation = 4;
+	achieved.Resolution = { 3840, 2160 };
+	harness.Presenter.Reconfigured.Emit(achieved);
+
+	GYRO_CHECK_EQ(harness.Output().Damage().Bounds(), (PixelRect<DeviceSpace>{ {}, { 3840, 2160 } }));
+}
+
 GYRO_TEST(FrameLoop, GpuCostsAreCollectedBeforeAnythingIsAssessed)
 {
 	Harness harness;
