@@ -112,9 +112,12 @@ enum class Material : std::uint8_t
 // The weight here is the accumulated divisor for that corner — the product along the chain, exactly
 // one for an orthographic node — and it is the `w` a perspective-correct interpolation divides by.
 //
-// **Culling has already happened.** Decision 55 culls back faces unconditionally and
-// `NodeTransform::FacesViewer` is what answers it, on the side that still has the transform. A quad
-// that reaches a renderer is one that faces the viewer.
+// **Culling has already happened.** Decision 55 culls back faces unconditionally, and what answers
+// it is the sign of *this quad's* area — the shoelace sum over the four corners below, which is the
+// composed chain's orientation and the projection's together. *(Revised 2026-08-22.)* It was
+// `NodeTransform::FacesViewer` until decision 93, which does not compose: that predicate reads one
+// node's rotation and scale signs, and two nodes each turned eighty degrees both face front while
+// their composition does not. A quad that reaches a renderer is one that faces the viewer.
 struct Quad
 {
 	// Top-left, top-right, bottom-right, bottom-left of the node's own extent — the winding of a
@@ -123,8 +126,13 @@ struct Quad
 	// orders and a renderer that assumed the other one produces a diagonal tear rather than an error.
 	Point<DeviceSpace> Corners[4]{};
 
-	// Per corner, positionally. One is orthographic; Geometry/NodeTransform.h's `Perspective` is
-	// bounded so this is positive everywhere, which is what makes dividing by it unconditional.
+	// Per corner, positionally. One is orthographic, and dividing by this is unconditional because
+	// the producer has already culled every node with a corner at or below
+	// `Geometry/NodeTransform.h`'s `Projected::MinimumWeight`. *(Revised 2026-08-22.)* That used to
+	// rest on `Perspective` being bounded, which decision 92 found was the artefact rather than the
+	// guarantee: the bound held over a node's own quad and not over a descendant of one, and what
+	// enforced it was the clamp whose saturation made a quad stop being a projective image of a
+	// rectangle — the exact warp this array exists to remove.
 	float Weights[4]{ 1.0F, 1.0F, 1.0F, 1.0F };
 
 	// The quad an axis-aligned rectangle makes. The group item below is the caller that matters: a

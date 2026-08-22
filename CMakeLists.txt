@@ -276,6 +276,7 @@ gyro_add_module(Frame PORTABLE
 		Budget.Test.cpp
 		FrameClock.Test.cpp
 		Loop.Test.cpp
+		Projection.Test.cpp
 		Timing.Test.cpp
 )
 

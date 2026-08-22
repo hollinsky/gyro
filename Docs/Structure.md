@@ -246,6 +246,23 @@ Which also keeps the two waists from touching. `Publication` and `Seam` both res
 from one to the other, added for the benefit of a single interface, is the kind that is never removed
 afterwards. See [decision 82](Decisions.md#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene).
 
+### The quad builder is in Frame, and neither type it joins could take it
+
+`Seam/Renderer.h`'s `Quad` and `Geometry/NodeTransform.h`'s `ComposedTransform` are the two ends of
+one short function — four corners projected out of a composed chain — and it lives in neither. It
+cannot live in `Geometry`, which may not say `Seam`. It could compile in `Seam`, and the waist's own
+definition is what refuses it: *every interface with more than one implementation and the data
+crossing it*. A quad builder is not an interface, has one caller and one implementation, and no
+backend is ever on the far end of it — the same test that keeps
+[the evaluator](#frame-is-portable) inside `Frame` rather than at the waist.
+
+So it is `Frame/Projection.h`, beside the loop that will call it. Note which rule did *not* decide
+this: [the rule below](#region-is-in-geometry-and-reachability-is-why) is about types both halves of
+the world must name, and nothing dispatch-side has ever built a quad. What it takes as the output's
+placement is `Geometry`'s own output adapter, which is where the origin folds against a global
+translation while both are still double. See
+[decision 93](Decisions.md#93-the-quad-is-assembled-in-frame-and-the-back-face-test-is-the-signed-area).
+
 **The list is at the waist; two of the fields in it are not, and the split is by producer rather than
 by awkwardness.** A quad, its sampling, its opacity, and its corner radius are frame-derived, which is
 what the decision above is for. A `TextureId` is an import's identity and a `ColorState` is what the

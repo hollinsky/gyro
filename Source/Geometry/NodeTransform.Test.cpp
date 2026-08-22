@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <format>
 #include <limits>
 #include <numbers>
@@ -9,6 +10,8 @@
 #include <string>
 #include <string_view>
 
+#include "Geometry/AxisTransform.h"
+#include "Geometry/Space.h"
 #include "Testing/Test.h"
 
 // The runtime half of NodeTransform.h's contract. The compile-time half is the static_assert block
@@ -817,6 +820,70 @@ GYRO_TEST(NodeTransform, BackFacesAreVisibleToTheCuller)
 	const NodeTransform flipped{ .Rotation = Quaternion::FromAxisAngle({ 0.0F, 1.0F, 0.0F }, Radians(135.0F)) };
 
 	GYRO_CHECK(!flipped.FacesViewer());
+}
+
+GYRO_TEST(NodeTransform, TheOutputViewAgreesWithTheAdapterItCameFrom)
+{
+	// ForView exists so that an output's origin folds against a global translation in double, and the
+	// thing it must not do on the way is disagree with the adapter about where a point goes. All
+	// sixty-four sign combinations of the eight orientations against a non-uniform scale, because a
+	// quarter turn in a Y-down space is where a hand-written matrix goes wrong and it goes wrong on
+	// exactly the outputs nobody has to hand.
+	for (std::uint8_t index = 0; index < OrientationCount; ++index)
+	{
+		AxisTransform<GlobalSpace, DeviceSpace> placement{ .Orientation = static_cast<AxisOrientation>(index),
+			                                               .ScaleX = 1.5,
+			                                               .ScaleY = 2.0 };
+		placement.Translation = { 300.0, -700.0 };
+
+		const ComposedTransform view = ComposedTransform::ForView(placement);
+
+		for (const Vector3<float> point : { Vector3<float>{ 0.0F, 0.0F, 0.0F },
+		                                    Vector3<float>{ 40.0F, 0.0F, 0.0F },
+		                                    Vector3<float>{ 0.0F, 90.0F, 0.0F },
+		                                    Vector3<float>{ -25.0F, 60.0F, 0.0F } })
+		{
+			const Point<DeviceSpace> mapped = placement.Map(Point<GlobalSpace>{ point.X, point.Y });
+			const Projected projected = view.Project(point);
+
+			CheckNear(
+				projected.Position,
+				{ static_cast<double>(mapped.X), static_cast<double>(mapped.Y), 0.0 },
+				PositionTolerance,
+				"the view matrix is the output adapter"
+			);
+
+			// A view divides by one: an output is where the world is looked at from and not another
+			// level of the projection, so nothing here may perturb a weight.
+			GYRO_CHECK_EQ(projected.Weight, 1.0F);
+		}
+	}
+}
+
+GYRO_TEST(NodeTransform, TheOutputOriginFoldsInDouble)
+{
+	// The claim ForView is for. Global space is double because single resolves 1/256 of a pixel around
+	// 32768, which is exactly what wl_fixed delivers — so a window there has no room left underneath
+	// it for the subpixel offset every snap and every fractional scale is about.
+	constexpr double Far = 32768.0;
+	constexpr double Offset = 3.0 / 1024.0;
+
+	AxisTransform<GlobalSpace, DeviceSpace> placement;
+	placement.Translation = { -Far, 0.0 };
+
+	const NodeTransform node{ .Translation = { Far + Offset, 0.0, 0.0 } };
+	const ComposedTransform chain = ComposedTransform::ForView(placement).Push(node, 0.0F);
+
+	// Exactly, and not nearly: the composition is one subtraction of one double from another, and
+	// three 1024ths is representable on both sides of it.
+	GYRO_CHECK_EQ(chain.Project({}).Position.X, Offset);
+
+	// What the other route gives, asserted so that the number in the comment is checked rather than
+	// remembered: taken to global space and narrowed there, the corner lands a 1024th of a pixel past
+	// where it was asked for, which is four times what the wire can express.
+	const float narrowed = static_cast<float>(Far + Offset) - static_cast<float>(Far);
+
+	GYRO_CHECK_EQ(narrowed, 1.0F / 256.0F);
 }
 
 GYRO_TEST(NodeTransform, FormatsForALogReader)

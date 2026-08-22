@@ -77,7 +77,7 @@ standard, say so and we will talk about it.
 | How does a mechanism work — seam, backends, timing, color, sessions, protocol? | [Docs/Architecture.md](Docs/Architecture.md) |
 | How does animation work — springs, catalog, commits, transforms, identity? | [Docs/Animation.md](Docs/Animation.md) |
 | Where does code live, what may depend on what, which thread runs it? | [Docs/Structure.md](Docs/Structure.md) |
-| Why not X? What was rejected? | [Docs/Decisions.md](Docs/Decisions.md), 92 entries, anchored `### N.` |
+| Why not X? What was rejected? | [Docs/Decisions.md](Docs/Decisions.md), 93 entries, anchored `### N.` |
 | What is still unsettled? | [Docs/Open.md](Docs/Open.md) |
 | What does gyro want from the kernel and cannot have? | [Docs/KernelWishlist.md](Docs/KernelWishlist.md) |
 
@@ -101,7 +101,7 @@ Source layout and the invariant each module carries. The *why* is in the cited d
 | `Animation` | portable | both | Split by direction: `Solve/` is the closed forms the frame thread evaluates, `Author/` produces coefficients and is dispatch-side (11, 12, 72) |
 | `Publication` | portable | both | The data waist. `Snapshot` the offset-addressed layout, `Ring` the newest-wins forward channel, `Return` the per-frame report carrying the watermark; `Reader/` frame-side, `Publisher/` dispatch-side (45, 50, 74, 75, 86, 90) |
 | `Seam` | portable | both | The control waist: every interface with more than one implementation and the data crossing it. `IPresenter`, `IEventSource`, `IRenderer`, `ISession`, `IInput`, `RenderTarget`, `SyncPoint`, `PresentationInfo`, `OutputConfiguration`, `RenderMode` (73, 78, 79, 80, 82) |
-| `Frame` | portable | frame | `FrameClock` the per-output prediction, `Budget` the cost figures, `Timing` the one runtime timing decision, `Loop` the step, `Admission` the processor-demand test read backwards. `IEvaluator` is internal because `Scene` does not exist yet (29, 30, 35, 61, 80) |
+| `Frame` | portable | frame | `FrameClock` the per-output prediction, `Budget` the cost figures, `Timing` the one runtime timing decision, `Loop` the step, `Admission` the processor-demand test read backwards, `Projection` the composed chain turned into a `Quad` — it is here because `Geometry` may not name `Seam` and a quad builder is not an interface (93). `IEvaluator` is internal because `Scene` does not exist yet (29, 30, 35, 61, 80) |
 | `Headless` | **portable** | split | The instrument the schedulability sweep runs against, so it must work on a machine with no GPU. Simulated vblanks, an `IPresenter` over them, one `IEventSource` for all of them, a synthetic plane catalog, a renderer that charges a cost and draws nothing (85) |
 | `Compositor` | platform | constructs | The composition root and the first non-portable module. `io_uring`, `SCHED_FIFO`, `mlockall`, `RLIMIT_RTTIME` live here *because* `Frame` and `Headless` may not say those words. `Uring`, `Schedule`, `RealTime`, `Options` (80, 83) |
 | `Integration` | portable | — | The tests that name both `Publication` and `Animation`, which no module may |

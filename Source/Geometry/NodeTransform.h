@@ -10,6 +10,9 @@
 #include <numbers>
 #include <type_traits>
 
+#include "Geometry/AxisTransform.h"
+#include "Geometry/Space.h"
+
 // The node transform: three dimensions, decomposed, about an explicit anchor.
 //
 // A scene node stores translation, rotation, and scale about an anchor point, and a matrix is a
@@ -44,6 +47,11 @@
 // separate type belonging to the output and panel adapters, and the classification that decides
 // which rung a composed transform sits on lives with that type rather than here. See
 // Docs/Architecture.md#resample-once-and-know-when-it-is-zero.
+//
+// **The edge to that header runs one way and only at the bottom of this one.** `ComposedTransform`
+// below is seeded with the output adapter, because that is where an output's origin folds against a
+// global-space translation while both are still double — so this file names `AxisTransform` to build
+// a matrix out of one, and never to classify anything as one.
 //
 // Precision follows Geometry/Space.h: positions cross the publication boundary at double and
 // everything else at single, so translation is a double triple and every other channel is float.
@@ -615,6 +623,13 @@ struct NodeTransform
 	// which is what the rasterizer will do with it in any case and is the same artefact by a
 	// different route. The projection cannot change the answer: Perspective's weight is positive
 	// everywhere, so it scales the quad about the anchor without ever turning it inside out.
+	//
+	// **This is the one-node statement of the rule and the walk does not use it.** *(Noted
+	// 2026-08-22.)* Decision 93 culls on the signed area of the projected quad instead, because these
+	// answers do not multiply: two nodes each turned eighty degrees about X both face front and their
+	// composition, at a hundred and sixty, does not. A chain has one orientation and it is the
+	// composed one, so asking each level separately is not a cheaper form of the same question — it
+	// is a different and wrong one.
 	[[nodiscard]] constexpr bool FacesViewer() const noexcept
 	{
 		// (R * Z).z for a unit quaternion, and the mirroring factor of the two in-plane axes.
@@ -767,6 +782,49 @@ struct ComposedTransform
 		composed.M[3][1] = eye * basis[2][1];
 		composed.M[3][2] = eye * basis[2][2];
 		composed.M[3][3] = constant;
+
+		return composed;
+	}
+
+	// One output's view of the world, which is what a walk over that output's scene starts from:
+	// global space onto its device grid, from Geometry/AxisTransform.h's output adapter.
+	//
+	// **The whole of why this is a matrix is where the origin gets subtracted.** A node's translation
+	// column reaches global space, where a desk of monitors puts a window's corner some hundreds of
+	// thousands of units from the origin and single precision has 1/256 of a pixel left underneath it
+	// (Geometry/Space.h). Composing the view in *front* of the chain folds the output's origin into
+	// that column once, in double, at the push — so the four corners are already small numbers by the
+	// time anything narrows, and the difference is exact where projecting to global and converting
+	// four corners loses a sixteenth of a pixel per corner. It is what Seam/Renderer.h means by "the
+	// precision at which translation folds against the output origin belongs to the render path", and
+	// the fold happens here rather than being a subtraction somebody remembers to write.
+	//
+	// **Depth ends here, and the row is zeroed rather than passed through.** Decision 55 composites
+	// in strict tree order with no depth buffer, so an output's grid is two-dimensional and there is
+	// no such thing as a device-space Z. Zeroing loses nothing downstream — this is the outermost
+	// factor, so its third row reaches only the third row of any product and never a corner's X, Y,
+	// or weight — and it makes the value a reader takes out obviously not a depth, rather than a
+	// plausible one in the wrong units.
+	[[nodiscard]] static constexpr ComposedTransform ForView(AxisTransform<GlobalSpace, DeviceSpace> output) noexcept
+	{
+		// The eight orientations, read off the images of the two axes rather than written out again.
+		// Geometry/AxisTransform.h holds the one table of them and states the Y-down convention it is
+		// written under; a second copy here is a second chance to get a quarter turn's signs wrong,
+		// on the rotated output nobody has to hand.
+		const Detail::Axes<double> alongX = Detail::Orient(output.Orientation, 1.0, 0.0);
+		const Detail::Axes<double> alongY = Detail::Orient(output.Orientation, 0.0, 1.0);
+
+		ComposedTransform composed{};
+
+		composed.M[0][0] = output.ScaleX * alongX.X;
+		composed.M[0][1] = output.ScaleX * alongY.X;
+		composed.M[0][3] = output.Translation.X;
+
+		composed.M[1][0] = output.ScaleY * alongX.Y;
+		composed.M[1][1] = output.ScaleY * alongY.Y;
+		composed.M[1][3] = output.Translation.Y;
+
+		composed.M[2][2] = 0.0;
 
 		return composed;
 	}

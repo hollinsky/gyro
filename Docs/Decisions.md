@@ -1233,8 +1233,10 @@ decision, taken four decisions later because nothing needed it until there was a
 **The flat alternative is not merely worse; it is unauthorable, and one field proves it.**
 [Decision 82](#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene)'s `DrawGroup::Count` is
 a run length over *emitted* items, and the emitted list is post-cull: back faces go by
-`NodeTransform::FacesViewer` over the composed chain, and anything wholly outside the target is gone
-before the list is built. Both tests are post-evaluation and per instance. So emission depends on
+`NodeTransform::FacesViewer` over the composed chain — **the signed area of the projected quad, per
+[decision 93](#93-the-quad-is-assembled-in-frame-and-the-back-face-test-is-the-signed-area), because
+that predicate reads one node and the answers do not multiply** *(revised 2026-08-22)* — and anything
+wholly outside the target is gone before the list is built. Both tests are post-evaluation and per instance. So emission depends on
 evaluation, `Count` depends on emission, and the dispatch thread — which by decision 50 evaluates
 nothing — cannot compute it. The repair is to publish skeletons and let the frame thread fix the
 counts up after culling, at which point dispatch has published a tree with extra steps *and* a second
@@ -6318,3 +6320,83 @@ probe can only partly supply, since it measures the machine and this one belongs
 probe can seed an empty session; everything after that is measurement. The
 schedulability sweep gains a real number here the day the real evaluator is bound, which is the
 first figure in that sweep that is not one a test chose.
+
+### 93. The quad is assembled in `Frame`, and the back face is the signed area
+
+*(Decided 2026-08-22, producing the `Quad` that
+[decision 92](#92-the-transform-chain-composes-into-one-matrix-the-perspective-clamp-was-the-artefact-it-guarded-against)
+composed the chain for. Amends a sentence in
+[decision 86](#86-the-published-scene-is-a-preorder-tree-model-values-inline-coefficients-by-reference)
+and one in [Seam/Renderer.h](../Source/Seam/Renderer.h).)*
+
+**Turning a composed chain into four corners lives in `Frame`, as
+[Projection.h](../Source/Frame/Projection.h).** `Quad` is in `Seam` and `ComposedTransform` is in
+`Geometry`, and `Geometry` may not say `Seam`, so it cannot sit with either type it joins. `Seam` is
+wrong for it on that waist's own terms — "every interface with more than one implementation and the
+data crossing it" — and this is one caller, one implementation, and no backend on the far end.
+[Decision 82](#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene) already has `Frame`
+building the draw list into its own arena; this is the arithmetic that fills one item of it.
+
+**The back-face test is the sign of the projected quad's area, not `NodeTransform::FacesViewer`.**
+Decision 86 said back faces go by that predicate "over the composed chain", and there is no composed
+chain to ask: it reads one node's rotation and scale signs, and **the answers do not multiply**. Two
+nodes each turned eighty degrees about the same axis both face front; their composition, at a hundred
+and sixty, does not. The shoelace sum over the four corners already computed is six multiplies, needs
+no transform, and accounts for the perspective as well — which a decomposed answer cannot see at all.
+The predicate stays as the one-node statement of decision 55's rule and has no caller.
+
+**A mirrored output is a configuration and not a screen of back faces.** The output adapter carries
+[decision 52](#52-coordinate-spaces-are-three-and-quantization-belongs-to-the-output)'s eight
+orientations and four of them are reflections, so on a mirrored panel every quad's signed area is
+negative and a fixed comparison would cull the entire desktop rather than the two or three nodes
+anybody meant. `OutputView` reads the sign a front face carries off the seed matrix's own
+determinant, which also keeps the fact from coming loose from the transform it describes. What the
+correction is *not* is a blanket flip: a node with a negative scale on one axis is still showing its
+back on a mirrored output, because the two mirrors cancelling is exactly the reading decision 55
+refuses.
+
+**The output's origin folds inside the matrix, not into the corners.** The walk is seeded with
+`ComposedTransform::ForView(adapter)`, so the first push subtracts the output's origin from a global
+translation once, in double. Projecting to global and converting four corners instead loses 1/256 of
+a logical pixel each at the far edge of a large desk, which is precisely `wl_fixed`'s resolution —
+so a client's stated subpixel position would not survive the trip, on the arrangement
+[Geometry/Space.h](../Source/Geometry/Space.h) makes global space double for. It is
+[Seam/Renderer.h](../Source/Seam/Renderer.h)'s "the precision at which translation folds against the
+output origin belongs to the render path", made a property of the seed rather than a subtraction
+somebody remembers to write.
+
+**All three culls are all-or-nothing, and absence is the return value.** A corner behind an
+ancestor's eye takes the node (decision 92 rejects near-plane clipping); a back face takes the node
+(decision 55, no per-node override); a quad that misses the target takes the node. `Project` returns
+`std::optional<Quad>`, because a quad beside a separate flag is a quad a caller can emit without
+consulting the flag.
+
+**The placement arrives as the adapter that already exists**, `AxisTransform<GlobalSpace,
+DeviceSpace>` — decision 52's output adapter, "global onto an output's device grid, from output
+configuration". No output-layout record was invented for it: what an output *is* moves at hotplug
+rate and is dispatch-side, which is
+[decision 87](#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)'s axis
+exactly. `OutputConfiguration` supplies the other half, `Resolution`, and still deliberately carries
+no scale.
+
+**Rejected: the target cull left to the caller.** It is one rectangle overlap and it looked like the
+walk's business rather than the quad's. But [decision 82](#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene)'s
+`DrawItem` states the three culls as one contract — "back faces are culled, and anything entirely
+outside the target is gone" — and splitting them across two places is how a caller comes to apply
+two of the three.
+
+**Rejected: rounding the bound outward before testing it.** `Quad::PixelBounds` exists and is the
+obvious thing to reach for. Its outward rounding is for damage, where keeping too much is the safe
+direction; here it would keep a quad that misses the target by a third of a pixel, which is the
+opposite. The exact real bound is what the test wants, and `Quad::Bounds` is already the unrounded
+one for this reason.
+
+**Rejected: carrying the view's handedness as a parameter.** One `bool` at the call site, passed by
+whoever built the seed. It is the same fact in two places and the disagreement is silent — a screen
+with nothing on it, on the one configuration nobody has to hand to notice.
+
+**Left open: `DrawItem::Sampling`.** [Seam/Renderer.h](../Source/Seam/Renderer.h) insists the
+producer derives the `TransformClass` because a renderer cannot recover it from four floats, and that
+is still owed. Nothing here forecloses it: the reduction reads the *chain*, which `Project` takes by
+reference and does not consume, and it needs the surface adapter that does not exist yet. It is a
+function beside this one when there is something to reduce.
