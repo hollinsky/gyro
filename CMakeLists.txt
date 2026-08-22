@@ -197,6 +197,7 @@ gyro_add_module(Seam PORTABLE
 		PresentationInfo.Test.cpp
 		Presenter.Test.cpp
 		RenderTarget.Test.cpp
+		Renderer.Test.cpp
 		SyncPoint.Test.cpp
 )
 

@@ -990,6 +990,97 @@ frame thread, which is the whole of what
 [decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) removed, and it makes input latency a
 function of the frame thread's timer cadence.
 
+### 82. The renderer is handed an evaluated draw list, not a scene
+
+*(Decided 2026-08-21, while asking what `IRenderer::Record` could take that both a Vulkan device and
+[decision 79](#79-the-console-is-a-renderer-not-a-presenter)'s `Blit` could be handed, given that the
+scene and material vocabularies are [open](Open.md).)*
+
+**What crosses the render seam is a flat span of evaluated draw items, produced by `Frame` into its
+own arena and consumed by whichever renderer is bound.** Not a scene, not a snapshot view, and not a
+node vocabulary — a list of quads, each with a source, a colour state, an opacity, and a material
+name.
+
+**The argument that settles it is that the values have to be evaluated by somebody.**
+[Decision 50](#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients)
+puts spring *coefficients* in the snapshot and evaluation on the frame thread, so a renderer reading
+the snapshot directly would either evaluate a second time or read values that are not there. Once
+`Frame` is the evaluator, something has to carry what it evaluated, and that something is this.
+
+**It also keeps the two waists independent, which is the part that would have been expensive to
+undo.** [Structure.md](Structure.md#two-waists) has `Publication` and `Seam` resting on `Core` and
+`Geometry` alone, with the composition root the only thing that knows both sides of either. Routing
+frame content through `Publication` types would have given `Seam` an edge to the other waist for the
+benefit of one interface, and the edge is the kind that is never removed afterwards.
+
+**The list is a preorder tree in disguise, and the disguise is one integer.** A group item names the
+`Count` items following it, which composite into an offscreen and are then drawn as one — which is
+[decision 60](#60-group-opacity-requires-flattening-per-node-alpha-is-not-a-group-fade)'s flattening,
+and a flat list cannot express it at all. `Count` is the length of the run rather than a child count,
+so a renderer finds the members by arithmetic and a nested group's own run sits inside its parent's.
+Preorder is free: [decision 55](#55-transforms-are-3d-the-scene-is-a-painters-algorithm) composites
+in strict tree order, so the painter's order and the traversal order are the same order.
+
+**A node's transform crosses as its projected quad, with a weight per corner.** The chain that
+produced it is a product of decomposed TRS transforms and is not itself one, so it cannot cross as a
+`NodeTransform`; [Geometry/NodeTransform.h](../Source/Geometry/NodeTransform.h) says it should not
+cross as a matrix either, because the layout and the precision at which translation folds against the
+output origin belong to the render path. Four corners is what survives both, it is what
+`NodeTransform::Apply` already produces a point at a time, and it is where the double-to-float fold
+between global and device space happens. The weights are the accumulated perspective divisors that
+`Apply` computes and discards, carried because interpolating a texture across a projected quad
+without them is the affine warp early 3D consoles are remembered for.
+
+**One derived fact travels with the quad**: `TransformClass`, the classification of the composed
+buffer-to-device map. [Decision 56](#56-clients-render-at-the-ceiling-and-gyro-downscales) makes
+minification ordinary and [decision 67](#67-the-settled-snap-is-unconditional) puts settled geometry
+on the device grid, so the common case is resample-free and has to take the sharp path. Recovering
+that from four floats means comparing floats for equality, which is a guess; the producer knows
+because it held the transform that reduced. It is the same reasoning
+[Structure.md](Structure.md#geometry-is-not-part-of-core) gives for the predicate having one home at
+all — three independently derived answers is how they drift apart.
+
+**What this does not settle, deliberately.** The material catalogue stays empty and the item carries a
+name with no parameters beside it, which is
+[decision 33](#33-effects-are-named-materials-not-parameterized-filter-calls) held rather than
+extended. And nothing here mints a texture: import is dispatch-side, because a `wl_buffer` arrives on
+the dispatch thread and must not become a device image inside the frame section, so it belongs to the
+renderer's *other* half in the sense `Publication` and `Animation` already split — `Reader` and
+`Publisher`, `Solve` and `Author`. That half is written when there is a protocol layer to call it.
+
+**What it costs.** `Frame` walks the scene to build a list a renderer then walks again, and the
+renderer cannot see anything above an item — no parent, no subtree except a group's own run. Both are
+the price of the item being flat bytes with no lifetime, which is what lets it sit in an arena on the
+frame thread and be read by a device that did not build it.
+
+**Rejected: the renderer reads the published snapshot.** The reading
+[Structure.md](Structure.md#the-modules) invites, since `Render` already has a `Publication` edge. It
+fails on the evaluation argument above before the layering one is reached: the snapshot carries
+coefficients, and a renderer that resolved them would be the second evaluator of the same spring.
+
+**Rejected: `Frame` hands over a scene subtree in the shell's node vocabulary.** It would let the
+renderer decide grouping and culling for itself. Rejected twice over — `Frame` may not name `Scene`
+and the edge is the one [Structure.md](Structure.md#the-modules) says must never be added, and the
+vocabulary is [open](Open.md) and wants designing with the material catalogue and the motion
+catalogue together. A header written against it now would settle by accident what three documents say
+should be settled on purpose.
+
+**Rejected: a flat list, with grouping added when flattening is built.** The cheap version, and it is
+[decision 78](#78-present-takes-a-layer-list-and-the-composite-is-one-member-of-it)'s rejected
+alternative arriving a second time on the neighbouring interface. Decision 60 is already taken;
+widening a flat list into a structured one afterwards touches the frame loop, both renderers, and the
+damage path at once, which is every consumer there is.
+
+**Rejected: a blend mode on the item, matching `PresentLayer`.** Symmetry, and wrong here. A presenter
+needs one because KMS has a property to program; a renderer has every input the flag would carry — the
+alpha mode in the colour state, the opacity, whether the source format has alpha — so the flag would
+be a fourth answer able to disagree with the three it came from.
+
+**Rejected: a capability query beside the refusal.** `BindTargets` refuses memory it cannot import,
+which is [decision 79](#79-the-console-is-a-renderer-not-a-presenter)'s branch-somebody-wrote. A
+`Capabilities()` accessor beside it would answer the same question a second way, and two answers that
+can disagree is how a composition root ends up trusting the wrong one.
+
 ---
 
 ## Animation

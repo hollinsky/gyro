@@ -7,7 +7,13 @@
 #include <format>
 
 #include "Core/Time.h"
+#include "Seam/Renderer.h"
 // See Docs/Architecture.md#budgets, Docs/Architecture.md#the-floor-tier, and decisions 29, 34, and 35.
+//
+// The Seam edge is one enum. `RenderMode` was declared here while there was nowhere better and now
+// lives with the interface that is told which composite to draw, which is where the observations
+// below come from: a renderer reports its record cost and its resolved GPU costs, and this is what
+// files them.
 
 // What an output's frames have been costing, which is the other half of the pair the frame loop
 // schedules with.
@@ -67,21 +73,6 @@
 // systematic overrun is that it steps the quality tier down (decision 34), and **that step has to
 // reach `Invalidate()`** or the output holds at the floor tier for as long as it runs. The floor tier
 // is the terminal case and needs no escape, since there is nothing below it to be held out of.
-
-// Which composite ran. The axis a cost is split along before it is split by device.
-//
-// Architecture.md#the-floor-tier calls the effect-free composite a first-class render mode rather than
-// an emergency fallback, and it is a parameter here rather than a second set of methods because the
-// caller already holds it: the record-time check chooses the mode, and the thing that chose it is the
-// thing that reports what it cost.
-//
-// It belongs at the seam once `IRenderer` is written, since the renderer is what is told which one to
-// draw. It is here until there is somewhere better rather than in a header holding one enum.
-enum class RenderMode
-{
-	Planned,
-	Floor,
-};
 
 // The numbers this record needs and nobody has measured, `// SPEC:` throughout for the reason
 // `FrameClockPolicy` is. See Open.md, *`C_min` as a number*, *the capability probe*, and *scheduling

@@ -318,6 +318,17 @@ been waiting on a question that could not be answered until the rule behind it w
   composition root owns the import as it owns migration, which is a third party in a per-frame
   decision. This blocks nothing today and blocks plane assignment entirely, so it wants answering
   before that is written rather than during.
+- **How a texture is minted, and who holds it.** [Decision 82](Decisions.md#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene)
+  has a draw item name a `TextureId` and nothing in `IRenderer` creates one, on the grounds that a
+  `wl_buffer` arrives on the dispatch thread and turning it into a device image must not happen inside
+  the frame section — so import is the renderer's dispatch half, written when there is a protocol
+  layer to call it. What that half looks like is genuinely open and it is the promoted-buffer entry
+  above wearing different clothes: the import verb, the release that has to be safe while the frame
+  thread may still hold the id in a list it is recording from, and whether a failed import is a frame
+  that draws nothing there or a surface that is refused at commit. The snapshot atlas is the case that
+  says it cannot simply be deferred to whoever writes `Protocol` — an exit snapshot is minted by the
+  *renderer* from pixels that are about to stop existing, which is an import with no client on the
+  other end of it. It blocks nothing until the first surface is drawn, and blocks that entirely.
 - **The cursor is a commit that is not a frame.** [Decision 29](Decisions.md#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)
   exempts the cursor plane from the budget on the grounds that it updates independently of the
   composite. That is a claim about the *rate* — the pointer moves at the input device's rate and not

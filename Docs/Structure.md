@@ -18,8 +18,9 @@ splitting, or being renamed changes this file and nothing else. If a change here
 [Architecture.md](Architecture.md), the change was not structural.
 
 > **Most of this does not exist yet.** `Core`, `Geometry`, `Animation`, `Publication`, `Seam`, and
-> `Testing` are built — `Seam` in its presentation half only, which is `IPresenter`, the data its
-> two verbs take and report, and the source its completions arrive on. The rest is a
+> `Testing` are built — `Seam` in its two frame-side halves, which is `IPresenter` and `IRenderer`,
+> the data their verbs take and report, and the source the presenter's completions arrive on. The
+> rest is a
 > declaration of
 > where code goes when it is written. What is worth writing down this early is the *graph* rather
 > than the file list, because the graph is enforced from the first module and the edge that must not
@@ -51,6 +52,15 @@ That is what lets the frame loop's schedulability sweep run against a fake prese
 with no GPU. It also declares no dispatch half — both threads name these types and neither owns
 them, since the frame thread calls both verbs and dispatch authors the configuration one of them
 takes.
+
+The render half is built beside it and is written against it: `IRenderer::Record` fills a target the
+presenter owns and yields the `SyncPoint` that presenter's `Present` waits on. It is a second
+interface rather than more of the first because
+[decision 40](Decisions.md#40-software-rendering-is-a-device-not-a-backend-and-it-is-the-floor-tier)
+and [decision 79](Decisions.md#79-the-console-is-a-renderer-not-a-presenter) make the writer vary
+independently of where the pixels go — one DRM presenter is paired with `Blit` at boot and with a
+Vulkan device a moment later. It added the evaluated draw list to the waist's data, for the reason
+under [The draw list is in Seam](#the-draw-list-is-in-seam).
 
 It added `IEventSource` on the same grounds and at a different granularity, which is the part worth
 noticing. A presenter is one output's; the descriptor its completions arrive on is one *device's* —
@@ -165,6 +175,26 @@ therefore the loop that ships.
 [Decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait) has why
 the alternatives — a wait interface in `Seam`, a readiness set passed into the step — both put a
 correctness ordering in the one place nothing exercises it.
+
+### The draw list is in Seam
+
+What `IRenderer::Record` takes is a flat span of evaluated draw items — quads with a source, a colour
+state, an opacity, and a material name — built by `Frame` into its own arena and read by whichever
+renderer is bound. It sits at the control waist for the reason everything else here does: both sides
+name it and neither owns it.
+
+The alternative was to route it through the *other* waist, since
+[the table above](#the-modules) already gives `Render` a `Publication` edge and the snapshot is
+already the thing that crosses between threads. It does not work, and the reason is one tier up:
+[decision 50](Decisions.md#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients)
+puts coefficients in the snapshot and evaluation on the frame thread, so a renderer reading it would
+be the second evaluator of the same spring. Once `Frame` is what evaluates, something has to carry
+what it evaluated, and that something belongs beside the interface that consumes it.
+
+Which also keeps the two waists from touching. `Publication` and `Seam` both rest on `Core` and
+`Geometry` alone and the composition root is the only thing that knows both sides of either; an edge
+from one to the other, added for the benefit of a single interface, is the kind that is never removed
+afterwards. See [decision 82](Decisions.md#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene).
 
 ### Geometry is not part of Core
 

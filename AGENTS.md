@@ -50,8 +50,8 @@ Codebase Structure:
 		                        Publisher/ the dispatch half that serialises, owns, and reclaims. See
 		                        decisions 45, 50, 74, and 75
 		Seam/                 - Portable tier, the control waist: every interface with more than one
-		                        implementation and the plain data that crosses them. The presentation
-		                        half is built — Presenter.h is IPresenter and its two verbs with
+		                        implementation and the plain data that crosses them. Both frame-side
+		                        halves are built — Presenter.h is IPresenter and its two verbs with
 		                        opposite contracts (decisions 73 and 78), Present taking a layer list
 		                        and returning a Result, Reconfigure initiating a transition it never
 		                        performs; EventSource.h is IEventSource, the descriptor a loop waits on
@@ -65,7 +65,17 @@ Codebase Structure:
 		                        flip reports and the sole input to every deadline;
 		                        OutputConfiguration.h is what Reconfigure asks for and Reconfigured
 		                        achieved, including the variable-refresh range that can only be
-		                        learned. IRenderer, ISession and IInput join it where they are
+		                        learned. Renderer.h is IRenderer and the evaluated draw list it takes:
+		                        the seam is written against Presenter.h — Record fills a target the
+		                        presenter owns and yields the point its Present waits on — and what
+		                        crosses is a flat span of quads rather than a scene, because Frame is
+		                        the evaluator and the snapshot carries coefficients (decision 82). A
+		                        group item names the run that flattens into it, which is the only
+		                        structure the list has and is decision 60's; a node's transform crosses
+		                        as its projected corners with a weight each, because a chain of TRS
+		                        transforms is not one and a matrix belongs to the render path. It is
+		                        also where RenderMode now lives, next to the interface that is told
+		                        which composite to draw. ISession and IInput join it where they are
 		                        written
 
 		Frame/                - Portable tier, the frame thread's own. FrameClock.h is the per-output
@@ -123,7 +133,7 @@ Codebase Structure:
 		                  it hangs off, which thread each piece runs on, the composition root, and
 		                  what the build checks enforce
 		Decisions.md    - Cross-cutting. Decision log with rejected alternatives and rationale
-		                  (81 decisions). Append-mostly: a revised decision keeps its superseded
+		                  (82 decisions). Append-mostly: a revised decision keeps its superseded
 		                  position as a rejected alternative, and carries its revision history
 		                  inline and dated rather than in any global ledger
 		Open.md         - Cross-cutting. The questions not yet settled, roughly in the order they
