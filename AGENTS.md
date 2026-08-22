@@ -107,7 +107,17 @@ Codebase Structure:
 		                        deadline order, and returns the Wake the composition root arms. What it
 		                        has no producer for yet is draw items, so IEvaluator is an interface
 		                        inside the module rather than at either waist and NullEvaluator is the
-		                        floor case rather than a stub. Admission control joins it here
+		                        floor case rather than a stub. Admission.h is the other half of the
+		                        schedule, and the one solved rather than decided: decision 29's
+		                        processor-demand test read backwards, so its answer is an allocation
+		                        per output rather than a verdict and `Admit` returns a degraded plan
+		                        and never a refusal. `U` is fixed point rounded up at every term and
+		                        everything else is integer nanoseconds, so the floors are exact; two
+		                        rungs of decision 30's ladder are built — a variable-refresh period
+		                        lengthened minimally, then an allocation taken from the output that
+		                        can least afford it — and the gap at 3 and 4 in `Rung` is the doc's
+		                        own gate on chunking and early rendering. It owns `MaxOutputs`,
+		                        because the capacity is the admission set's size
 
 		Headless/             - Portable tier, and the tier is the point (decision 85). The instrument the
 		                        schedulability sweep runs against, so it has to keep working on a machine

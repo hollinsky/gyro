@@ -220,6 +220,7 @@ gyro_add_module(Frame PORTABLE
 		Publication
 		Seam
 	TESTS
+		Admission.Test.cpp
 		Budget.Test.cpp
 		FrameClock.Test.cpp
 		Loop.Test.cpp

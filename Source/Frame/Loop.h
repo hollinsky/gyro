@@ -10,6 +10,7 @@
 #include "Core/FrameSection.h"
 #include "Core/Signal.h"
 #include "Core/Wake.h"
+#include "Frame/Admission.h"
 #include "Frame/Budget.h"
 #include "Frame/FrameClock.h"
 #include "Frame/Timing.h"
@@ -66,10 +67,10 @@
 // publish, `Frame` will evaluate, and no backend is ever on the other end of it. Until there is a
 // scene to evaluate, `NullEvaluator` draws nothing and every ordering above is still exercised.
 
-// SPEC: sized rather than measured. Sixteen outputs and four rendering devices are past any
-// configuration gyro has been pointed at, and both are here as fixed capacity because the frame
-// section forbids growing either.
-inline constexpr std::size_t MaxOutputs = 16;
+// SPEC: sized rather than measured. Four rendering devices is past any configuration gyro has been
+// pointed at, and it is fixed capacity because the frame section forbids growing it. Its counterpart
+// `MaxOutputs` is Admission.h's, because the capacity is the admission set's size and these outputs
+// are that set.
 inline constexpr std::size_t MaxDevices = 4;
 
 // What one output's frame is, once the snapshot has been evaluated at its predicted presentation.
