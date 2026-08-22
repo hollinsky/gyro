@@ -6790,3 +6790,189 @@ producer derives the `TransformClass` because a renderer cannot recover it from 
 is still owed. Nothing here forecloses it: the reduction reads the *chain*, which `Project` takes by
 reference and does not consume, and it needs the surface adapter that does not exist yet. It is a
 function beside this one when there is something to reduce.
+
+### 97. An output's placement is published; the mode's half of the view meets it in the walk
+
+*(Decided 2026-08-22, on writing the evaluator and finding it had no way to know where an output
+sits. [Frame/Projection.h](../Source/Frame/Projection.h) took the composed adapter and said the
+carrier was unsettled; this settles it.)*
+
+**The placement crosses in the snapshot, as one adapter per output beside the wake schedule.**
+[Decision 52](#52-coordinate-spaces-are-three-and-quantization-belongs-to-the-output)'s output
+adapter — global space onto one output's device grid — is authored by the same side that authors the
+scene and read by the same side that walks it, so it travels the way everything else in that
+direction travels. [Decision 84](#84-the-snapshots-per-output-run-is-indexed-under-a-set-generation)
+governs it unchanged: it crosses positionally, and a run whose length is not the output set's is no
+information rather than partial information.
+
+**Rejected: `OutputConfiguration`.** It is the obvious home — the mode is already there, and an
+output's placement feels like part of how it is configured. It is the wrong one twice over. That
+record is what the *hardware is programmed to*, and it travels through
+[decision 73](#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it)'s reconfigure
+path, which completes as an event some milliseconds later; an origin that moves at pointer rate for
+as long as somebody drags a monitor around a settings panel would then be routed through a verb whose
+own comment says it must never enter the frame thread's non-preemptible chunk. And the scale half is
+layout policy that no backend programs at all, which is the argument that file already makes for
+keeping `Scale` out of it.
+
+**The two halves of a view are authored at rates far apart, so the walk composes them rather than
+either side carrying both.** The extent is the achieved mode's and is the frame side's; the placement
+is the world's and is dispatch's. `Frame/Projection.h` takes them already composed and declines to
+know which came from where, which is what leaves this decision free to put each one where it is
+actually produced — the evaluator holds them together for the length of one call and nothing stores
+the pair.
+
+**Consequence.** The snapshot header gains three named entries rather than one: `Views` beside
+`Wakes`, and `Images` and `Solids` for
+[decision 95](#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind)'s per-kind
+content runs, which had nowhere to live either. All three are resolved through templates, so
+`Publication` still names neither a coordinate nor a world record and a field added to any of them
+does not touch the waist. The version does not move, for the reason
+[decision 45](#45-protocol-dispatch-is-a-thread-not-a-task)'s
+element size and alignment already give.
+
+### 98. A node is at rest when it names no coefficient
+
+*(Decided 2026-08-22, on asking how the frame thread knows a spring has settled, expecting to have
+to publish thresholds and finding they are already unnecessary.)*
+
+**The frame side needs no settling thresholds, because a settled channel does not cross as a
+spring.** [Decision 86](#86-the-published-scene-is-a-preorder-tree-model-values-inline-coefficients-by-reference)
+has a node carry its model value inline and a coefficient by reference, and
+[decision 90](#90-the-snapshots-runs-are-one-per-channel-and-the-frame-side-validates-the-tree-it-walks)
+states the rule as *a node carries whatever reconstitutes its value*. Dispatch drops the reference
+when the spring comes to rest. So `TranslationSpring == NoCoefficient` **is** the statement that the
+channel is at rest, and the walk reads it as one — no thresholds crossed the waist, and
+[Animation/Solve/Spring.h](../Source/Animation/Solve/Spring.h)'s insistence that neither half of a
+`SettleThresholds` is its own module's to know stays true on both sides of the boundary.
+
+**That is what [decision 67](#67-the-settled-snap-is-unconditional)'s snap tests**, and it makes the
+snap a comparison against a sentinel rather than an evaluation. A node is snapped when it and every
+ancestor name no moving channel, and the correction goes into the composed chain's translation
+column — the position and not the extent, which is what the tiling promise actually rests on.
+
+**It lags by the republication and that is the honest cost.** Between the instant a spring settles and
+the commit that inlines its value, the node is still animating as far as the walk can see, so the snap
+arrives a frame or two after the motion stops. What lands on screen is a window that stops and then
+crisps, where the alternative — the frame side evaluating a settle predicate per node per frame — is
+the per-node cost decision 90 refused, to buy an instant nobody watching can distinguish.
+
+**Rejected: publishing the settle instant per channel.** It is exact, it is one `Instant` per active
+coefficient, and it makes the frame side's test a comparison instead of a sentinel. It also puts a
+second answer to *is this channel moving* in the record beside the first, and the two disagree exactly
+when dispatch is late — which is the case the field was added for. One fact, one spelling.
+
+**A driven ramp counts as moving and nothing more.** [Decision 72](#72-the-driven-regime-is-a-distinct-record-the-snapshots-arrays-stay-homogeneous)'s
+regime says which channel it drives and the regime is not built, so the walk knows something is in
+flight and cannot yet know what it moves. That is enough for the snap and for the damage rule, and it
+is not enough to place anything, which is where it stops.
+
+### 99. A dressing draws over the node's own extent, whatever the node's kind
+
+*(Decided 2026-08-22, answering [Open.md](Open.md)'s *what a dressing means on a reference node* the
+way that entry asked for — with the walk, since that is the code obliged to have an answer.)*
+
+**Every kind is dressed the same way: the item is placed on the node's own extent, and the dressing
+is not inherited by anything.** A dressed image is its texture and its material. A dressed container
+is its material alone, which is the case
+[decision 95](#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind) makes a
+material a field for. A dressed reference is its material over the reference's extent, drawn *before*
+the expansion because preorder is the painter's order — so an overview thumbnail with a shadow is the
+tile's shadow with the window on top of it, which is the thing a shell was going to ask for.
+
+**Rejected: the dressing applies to the expansion.** It reads as the generous interpretation and it
+is the one that cannot be drawn. The expansion is a subtree with a screen-space bound, so dressing it
+means either an offscreen — a render target on every thumbnail in an overview — or dressing each
+drawn node inside it, which is one shadow per subsurface and a seam down the middle of every window
+that has one.
+
+**Rejected: a dressed reference is malformed.** The encoding permits it, a shell will write it, and a
+frame is not where that gets reported. Refusing it in the walk means an overview tile that silently
+loses its shadow on the day somebody adds one.
+
+**So an item can have no content, and the draw list says so rather than encoding it.**
+[Seam/Renderer.h](../Source/Seam/Renderer.h) gains a `DrawDressing` alternative: a quad, an extent, an
+opacity, and a material, with nothing of the node's own underneath. **Rejected: a fully transparent
+`DrawSolid`**, which is the same picture and a worse contract — a renderer would be inferring *this
+item is only its dressing* from an alpha of zero, which is also what a solid animating to invisible
+looks like on the frame before it is dropped. One of those wants the effect pass and the other wants
+to be skipped. It takes the variant's first position so that a default-constructed item draws nothing
+rather than opaque black, which is the direction [World/Node.h](../Source/World/Node.h) defaults every
+field in.
+
+**A group takes the node's dressing along with its opacity**, which follows from the same place group
+opacity does: both belong to the flattened result. A glass window that declares a group blurs what is
+behind the *group*, and leaving the material on the member as well blurs it twice — visibly, at the
+one moment the window is also fading, which is the only moment a group exists for.
+
+**`DrawItem` gains `Elevation` beside `Material`**, for the reason
+[World/Elevation.h](../Source/World/Elevation.h) gives about the node: a glass panel casts a shadow
+too, so it is a second field rather than more enumerators in the first. Both enums carry one
+enumerator today, so what is settled here is where a dressing lands rather than what any of them look
+like — which is still [Open.md](Open.md)'s review with a screen.
+
+### 100. The walk drops a subtree rather than a frame, and it does so three times over
+
+*(Decided 2026-08-22, writing the evaluator's three bounded failures. Each one is a rule about what a
+person sees when the walk cannot finish, which is the only reading that separates them.)*
+
+**A malformed subtree length abandons its level.**
+[Decision 90](#90-the-snapshots-runs-are-one-per-channel-and-the-frame-side-validates-the-tree-it-walks)
+puts the check on the walk; what it does after the check is this decision. A length that overruns the
+run has left the walk with no way to find that subtree's end, so the level stops and its outer levels
+close normally: the siblings already emitted survive, and what is lost is the tail of one run rather
+than the screen.
+
+**Past the depth cap the subtree is dropped whole.** References nest
+([decision 88](#88-an-instance-is-a-node-the-published-scene-is-a-dag)), the backwards rule makes a
+cycle unrepresentable but not a deep tree, and the walk is on a `SCHED_FIFO` thread where an unbounded
+traversal ends with `RLIMIT_RTTIME` taking every session's UI at once. A `// SPEC:` thirty-two is an
+order of magnitude past any arrangement a shell has been asked for.
+
+**Exhausting the item arena rolls back to the last top-level subtree.** This is the one that is not
+obvious. Truncating where the arena happens to end leaves a group whose offscreen is missing half its
+members — a window drawn with its menu gone and the fade applied to what is left — where dropping the
+whole subtree loses one window and leaves everything else exactly right. Neither is good; only one of
+them is legible, and only one of them is a picture somebody can report. The rollback is a mark taken
+at each top-level node and restored on exhaustion, which costs one assignment per window.
+
+**All three are silent to the loop and visible to a sweep.** A frame is not where a scene bug gets
+reported ([decision 45](#45-protocol-dispatch-is-a-thread-not-a-task)'s
+rule, one level up), so none of them refuses a frame or returns an error; the evaluator reports
+truncation as a flag a log line or the schedulability sweep can read.
+
+**Rejected: growing the arena.** It is the natural answer and it is unavailable —
+[decision 36](#36-frame-path-discipline-is-enforced-mechanically-not-by-review) forbids allocating
+inside the frame section, and a capacity chosen at a configuration change is what
+[decision 82](#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene) already asks for. The
+number is a `// SPEC:` and it wants measuring against a real desktop rather than arguing about here.
+
+### 101. Damage is the whole output while anything moves, and per-node damage needs an identity the record does not carry
+
+*(Decided 2026-08-22, on the evaluator having to report something for `DrawList::Damage` and finding
+that the honest answer is a coarse one.)*
+
+**An output owes a whole frame when anything in the walk was moving, or when the snapshot it was
+drawn from is newer than the one that output last drew from. Otherwise it owes nothing.** Both
+conditions are cheap, both are exact in the conservative direction, and together they keep
+[Architecture.md](Architecture.md#doing-nothing-must-cost-nothing)'s promise from the evaluator's
+side: a still desktop on an unchanged publication reports an empty region and the compositor idles.
+
+**Per-node damage is what everyone wants and it is not derivable from what crosses.** Damaging where a
+node *was* and where it *is* requires the two frames' nodes to be the same node — a published identity
+rather than a position in a run dispatch is free to reorder between publications. `Core/Handle.h`
+exists and the node record does not carry one. Client surface damage is the other half and has no
+carrier either, since there is no protocol layer to mint it. Both are worth having; neither is
+inventable from the wire as it stands, so this reports the honest bound rather than a plausible one.
+[Open.md](Open.md) carries what it would take.
+
+**Rejected: the union of the moving nodes' bounds, this frame and last.** It is the version that needs
+no identity — keep the previous evaluation's union per output, report it with the current one, and a
+node that stops contributes nothing. It fails on the frame a node settles: the settled snap moves it
+by up to half a pixel *after* it stopped being counted as moving, so the last position it occupied can
+sit a pixel outside everything the rule reported. A trail one pixel wide, on exactly the frame the
+window came to rest, is the artefact this whole area exists to prevent.
+
+**What it costs today is bandwidth on animating frames and nothing on still ones**, which is the trade
+worth taking while the scissor is the only consumer of the region. It stops being worth taking when
+there is a partial-composite path to feed, and the entry above is what has to land first.

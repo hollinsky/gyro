@@ -25,8 +25,9 @@
 //
 // Every case runs against the same output: a 100 Hz panel whose fake presenter holds two targets, so
 // frame 8 is owed at 1010ms and each frame after it is ten milliseconds later. The renderer draws
-// nothing, which is `NullEvaluator` standing in for a `Scene` that does not exist yet and is also the
-// floor case the loop has to schedule correctly regardless.
+// nothing, which is `NullEvaluator`: the loop's questions are about ordering and timing rather than
+// about what a walk produces, and an output with nothing to draw is the floor case it has to
+// schedule, present, and idle correctly anyway. The walk itself is Frame/Evaluator.Test.cpp's.
 
 namespace
 {

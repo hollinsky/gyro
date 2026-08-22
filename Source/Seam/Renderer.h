@@ -18,6 +18,7 @@
 #include "Geometry/Space.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/SyncPoint.h"
+#include "World/Elevation.h"
 #include "World/Material.h"
 
 // The render half of the seam: what produces the pixels a presenter puts on the glass.
@@ -222,7 +223,28 @@ struct DrawGroup
 	friend constexpr bool operator==(DrawGroup, DrawGroup) noexcept = default;
 };
 
-using DrawContent = std::variant<DrawSolid, DrawTexture, DrawGroup>;
+// An item with no content of its own: what it draws is its dressing, and there is nothing underneath
+// it belonging to the node.
+//
+// **A container dressed `Glass` is the case, and it is the reason a material is a field rather than a
+// kind.** Decision 95 puts a `Material` on every node including the ones that name no content run, so
+// the walk emits for a node that has content *or* is dressed — and the second of those has a quad, an
+// extent, an opacity, and a material, and nothing to sample or fill. A blurred backdrop and nothing
+// else is exactly what that item is.
+//
+// **Spelled rather than encoded as a fully transparent `DrawSolid`**, which is the same picture and a
+// worse contract: a renderer would be inferring "this item is only its dressing" from an alpha of
+// zero, which is also what a solid animating to invisible looks like on the frame before it is
+// dropped. One of those wants the effect pass and the other wants to be skipped.
+struct DrawDressing
+{
+	friend constexpr bool operator==(DrawDressing, DrawDressing) noexcept = default;
+};
+
+// The alternatives, with `DrawDressing` first so that a default-constructed item draws nothing rather
+// than opaque black — the same direction World/Node.h defaults every field in: a record nobody
+// finished is a still node, not a black rectangle over somebody's screen.
+using DrawContent = std::variant<DrawDressing, DrawSolid, DrawTexture, DrawGroup>;
 
 // One thing drawn, in a list that is bottom-first preorder.
 //
@@ -258,6 +280,19 @@ struct DrawItem
 	float Radius = 0.0F;
 
 	Material Dress = Material::None;
+
+	// How far the item sits off what is behind it, which the renderer draws as a shadow around this
+	// item's quad. It is a field beside `Dress` rather than more enumerators inside it for
+	// World/Elevation.h's reason: a glass panel casts a shadow too.
+	//
+	// **It is the emitting node's own, and a node that emits nothing carries none.** A container and
+	// a reference draw no item, so a dressing on one of those reaches no renderer — which is
+	// Docs/Open.md's *what a dressing means on a reference node*, still open, and deliberately not
+	// answered by the walk emitting something extra. Answering it means a shadow around a *subtree's*
+	// screen-space bound, which is an item with no content and a second population in this list; both
+	// enums carry one enumerator today, so nothing can be dressed and there is nothing yet to check
+	// such an answer against.
+	Elevation Lift = Elevation::None;
 
 	// What the item's texels or components mean as light. Per item rather than per request because a
 	// composite mixes content that arrived in different states — decision 47 is that untagged content
@@ -492,10 +527,14 @@ static_assert(std::is_trivially_copyable_v<DrawContent>, "The variant is only as
 static_assert(std::is_trivially_copyable_v<GpuCost> && std::is_trivially_copyable_v<Submission>);
 static_assert(std::formattable<Quad, char>);
 
-// The default item draws a black solid, which is nothing anybody wants and everything a half-built
-// one should be: an empty quad, no extent, and the identity colour state.
-static_assert(std::holds_alternative<DrawSolid>(DrawContent{}));
+// The default item draws nothing at all — an empty quad, no extent, no content, and the identity
+// colour state — which is what a half-built one should be. *(Revised 2026-08-22.)* It was an opaque
+// black solid until `DrawDressing` took the variant's first position, and the direction is the one
+// World/Node.h defaults every field in: a record nobody finished is invisible rather than a black
+// rectangle over somebody's screen.
+static_assert(std::holds_alternative<DrawDressing>(DrawContent{}));
 static_assert(DrawItem{}.Shape.Bounds().IsEmpty());
+static_assert(DrawItem{}.Dress == Material::None && DrawItem{}.Lift == Elevation::None);
 static_assert(!DrawItem{}.Sampling.MapsRectangles(), "A transform that did not reduce classifies as nothing");
 
 // A rectangle round-trips through the quad, which is the group item's whole path.

@@ -19,6 +19,12 @@ a user in front of it.** The third also showed that an entry can be well-formed 
 unanswerable — the signal it asked for does not exist — in which case the rule upstream of it is
 what to suspect. [AGENTS.md](../AGENTS.md#how-decisions-get-made) carries these as working rules.
 
+A fourth has now left by the other route the rule names. *What a dressing means on a reference node*
+said to settle it with the walk, and
+[decision 99](Decisions.md#99-a-dressing-draws-over-the-nodes-own-extent-whatever-the-nodes-kind) is
+that walk having been written: the question turned out to have a cheap answer and two expensive ones,
+which is legible from the code and was not legible from the entry.
+
 - **The two client-reachable `wl_abort` sites**, which
   [decision 2](Decisions.md#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)
   closes with a wrapper that refuses to publish a resource id before its implementation is set, and
@@ -119,15 +125,31 @@ what to suspect. [AGENTS.md](../AGENTS.md#how-decisions-get-made) carries these 
   without animating it, and whether that case is real decides whether the rule is worth having. This
   is decision 51's falsifiable test with a mechanism attached, so it should be settled before a shell
   exists to violate it.
-- **What a dressing means on a reference node.**
-  [Decision 95](Decisions.md#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind)
-  puts a material and an elevation on *every* node and makes a reference a kind like any other, which
-  leaves it unsaid whether a dressed reference dresses the subtree it expands, is ignored, or is a
-  malformed record. The case is real rather than hypothetical: an overview thumbnail is a reference,
-  and giving the whole tile a shadow is the obvious thing a shell would ask for — while dressing each
-  window *inside* the expansion with the same material is the obvious thing the encoding would do.
-  Settle it with the walk, since that is the code that has to answer it, and the same question
-  decides whether a dressed container's emission and a reference's expansion can nest.
+- **Per-node damage, which needs an identity the node record does not carry.**
+  [Decision 101](Decisions.md#101-damage-is-the-whole-output-while-anything-moves-and-per-node-damage-needs-an-identity-the-record-does-not-carry)
+  reports the whole output while anything is moving, because damaging where a node *was* against
+  where it *is* requires the two frames' nodes to be the same node — a published `Handle` rather than
+  a position in a run dispatch may reorder between publications. Client surface damage is the other
+  half and has no carrier either until there is a protocol layer to mint it. What decides the shape is
+  whether identity is a field on the node or a parallel run, and whether a node that gains one still
+  costs 128 bytes. It is worth doing when there is a partial-composite path to feed; until then the
+  coarse rule costs bandwidth on animating frames and nothing on still ones.
+- **The corner radius and the layout state that zeroes it have no carrier.**
+  [Decision 96](Decisions.md#96-the-frame-is-the-compositors-and-the-header-is-the-apps) rounds the
+  window geometry rect to a floor radius and takes the radius to zero for a window that is fullscreen
+  or tiled edge to edge. `ImageContent` carries the frame rect and nothing carries the radius or the
+  state that zeroes it, so the walk emits a radius of zero and the rect reaches no draw item. The
+  question is not where to put a float: it is whether the radius is authored per node by window
+  management or decided by the frame side from a rule, and the fullscreen case is the one that says
+  the *shell* holds the fact while *gyro* holds the number.
+- **The buffer-to-surface adapter is not published, so nothing can classify a resample.**
+  [Seam/Renderer.h](../Source/Seam/Renderer.h) requires the producer to derive `DrawItem::Sampling`
+  because a renderer cannot recover it from four floats, and deriving it means composing the surface
+  adapter — buffer scale, buffer transform, `wp_viewport` — with the node's chain. None of that
+  crosses yet. Until it does, every item reports the all-false class, which is the honest default and
+  which puts a still window on the resampling path that
+  [decision 56](Decisions.md#56-clients-render-at-the-ceiling-and-gyro-downscales)'s sharpness rule
+  exists to keep it off. It arrives with the protocol layer rather than being decidable now.
 - **Clipping and masking.**
   [Decision 95](Decisions.md#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind)
   leaves both out and says so rather than assuming them away. A node's children are not clipped to

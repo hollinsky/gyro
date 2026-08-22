@@ -118,6 +118,51 @@ public:
 		return m_Valid ? Resolve<T>(m_Header.Nodes) : std::span<const T>{};
 	}
 
+	// The per-output placement: where the world sits on each output's device grid, one adapter per
+	// output in output order. Decision 84's rule governs it exactly as it governs `Wakes` — a run
+	// whose length is not the output set's is no information rather than partial information, and the
+	// caller tests that rather than indexing into it.
+	//
+	// **It is published rather than configured, because it moves at pointer rate.** An output's origin
+	// in the world is dragged around a settings panel and its scale is layout policy; neither is
+	// anything a backend programs, so neither belongs on `Seam/OutputConfiguration.h` with the mode.
+	// The half that *is* the hardware's — the target's extent — reaches the walk from the frame side
+	// instead, and the two are composed where both are known.
+	template<typename T>
+	[[nodiscard]] std::span<const T> Views() const noexcept
+	{
+		static_assert(
+			std::is_trivially_copyable_v<T> && std::is_standard_layout_v<T>,
+			"A view is reconstituted from bytes at an offset, so it must be one"
+		);
+
+		return m_Valid ? Resolve<T>(m_Header.Views) : std::span<const T>{};
+	}
+
+	// What an image node draws, indexed by the node's `Content`. Decision 95's per-kind run.
+	template<typename T>
+	[[nodiscard]] std::span<const T> Images() const noexcept
+	{
+		static_assert(
+			std::is_trivially_copyable_v<T> && std::is_standard_layout_v<T>,
+			"A content record is reconstituted from bytes at an offset, so it must be one"
+		);
+
+		return m_Valid ? Resolve<T>(m_Header.Images) : std::span<const T>{};
+	}
+
+	// What a solid node draws, indexed by the node's `Content`. The other half of decision 95's split.
+	template<typename T>
+	[[nodiscard]] std::span<const T> Solids() const noexcept
+	{
+		static_assert(
+			std::is_trivially_copyable_v<T> && std::is_standard_layout_v<T>,
+			"A content record is reconstituted from bytes at an offset, so it must be one"
+		);
+
+		return m_Valid ? Resolve<T>(m_Header.Solids) : std::span<const T>{};
+	}
+
 private:
 	// Whether the span's base meets the alignment every element depends on. Checked against the actual
 	// address rather than assumed, so that a reader handed an under-aligned mapping refuses it rather

@@ -511,6 +511,12 @@ template<SpaceTag A, SpaceTag B, SpaceTag C>
 		       Detail::ScalarCast<Scalar>(second.Translation.Y) + scaleY * turned.Y } };
 }
 
+// The adapter decision 52 names: the world's global space onto one output's device grid. It is one
+// fact assembled from two — the *grid* is the mode's and the *origin* is the world's — and it is
+// spelled once here so that the party that composes them, the party that publishes them, and the
+// walk that starts a chain from them all say the same word.
+using OutputAdapter = AxisTransform<GlobalSpace, DeviceSpace>;
+
 // Prints as flipped-90, which is `wl_output_transform`'s own name for it minus the prefix — so a
 // log line and a protocol dump say the same word about the same value. No format spec is accepted.
 //

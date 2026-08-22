@@ -13,6 +13,7 @@
 #include "Core/Wake.h"
 #include "Frame/Admission.h"
 #include "Frame/Budget.h"
+#include "Frame/Evaluator.h"
 #include "Frame/FrameClock.h"
 #include "Frame/Timing.h"
 #include "Geometry/Region.h"
@@ -61,12 +62,10 @@
 // so the region is cleared where the present succeeded and nowhere else — including on a refused
 // record and on a refused present, both of which leave the output owing exactly what it owed before.
 //
-// **What the loop does not have yet is anything to draw.** Decision 82 settles what crosses the render
-// seam — a flat span of evaluated draw items produced by `Frame` into its own arena — and the thing
-// that turns a snapshot into that span is the evaluator below. It is an interface inside this module
-// rather than at the seam because it has no second implementation that is not a test: `Scene` will
-// publish, `Frame` will evaluate, and no backend is ever on the other end of it. Until there is a
-// scene to evaluate, `NullEvaluator` draws nothing and every ordering above is still exercised.
+// **What turns a snapshot into something to draw is Frame/Evaluator.h**, which decision 82 puts on
+// this side of the render seam and which this loop calls once per output it serves. The interface is
+// inside this module rather than at the seam because it has no second implementation that is not a
+// test: `Scene` publishes, `Frame` evaluates, and no backend is ever on the other end of it.
 //
 // **An evaluator reports what it cost, and the loop files it where no tier can take it away.**
 // Decision 94 puts the walk in `Budget::IrreducibleCpu()` rather than in either mode's figure, and
@@ -80,67 +79,6 @@
 // `MaxOutputs` is Admission.h's, because the capacity is the admission set's size and these outputs
 // are that set.
 inline constexpr std::size_t MaxDevices = 4;
-
-// What one output's frame is, once the snapshot has been evaluated at its predicted presentation.
-//
-// Damage is the new damage this evaluation produced, in device space; the loop unions it into what the
-// output has been accumulating rather than replacing it, for the reason in this file's header.
-struct DrawList
-{
-	std::span<const DrawItem> Items;
-	Region<DeviceSpace> Damage;
-
-	// What building this list cost on the frame thread, measured by the evaluator across its own walk.
-	//
-	// It is filed whether or not the composite that follows is recorded or presented, because the walk
-	// happened either way — where `Submission::RecordCost` is filed only against a submission that
-	// succeeded, since a refused record is not a frame's cost. The two differ on purpose.
-	Duration EvaluateCost{};
-};
-
-struct EvaluateRequest
-{
-	const SnapshotReader& Snapshot;
-
-	// Which output, as an index into the loop's outputs. It is the snapshot's index too — decision 84
-	// has per-output runs cross positionally under a set generation — so this is what an evaluator
-	// resolves the output's runs with.
-	std::size_t Output = 0;
-
-	// Decision 36 in one parameter: animations are evaluated at a named instant and never against an
-	// ambient now. It is the predicted presentation of the frame being drawn, which is per output
-	// because there is no global clock to make it anything else.
-	Instant Presentation{};
-
-	RenderMode Mode = RenderMode::Planned;
-};
-
-class IEvaluator
-{
-public:
-	IEvaluator() = default;
-
-	virtual ~IEvaluator() = default;
-
-	IEvaluator(const IEvaluator&) = delete;
-	IEvaluator& operator=(const IEvaluator&) = delete;
-	IEvaluator(IEvaluator&&) = delete;
-	IEvaluator& operator=(IEvaluator&&) = delete;
-
-	// Called inside the frame section, so the items must come from storage the evaluator already holds.
-	// The span is read before the next call and never after it.
-	[[nodiscard]] virtual DrawList Evaluate(const EvaluateRequest& request) = 0;
-};
-
-// Draws nothing, which is what this module's own tests want and what the composition root binds until
-// there is a `Scene`. It is not a stub in the sense that it is waiting to be replaced by a real
-// implementation of the same thing — it is the floor case, and an output with nothing to draw is one
-// the loop must still schedule, present, and idle correctly.
-class NullEvaluator final : public IEvaluator
-{
-public:
-	[[nodiscard]] DrawList Evaluate(const EvaluateRequest&) override { return {}; }
-};
 
 // One output's frame-thread state: the two figures `Timing` composes, and the three facts about this
 // output that neither of them can see.
@@ -467,7 +405,12 @@ private:
 		}
 
 		const DrawList list = m_Evaluator->Evaluate(
-			{ .Snapshot = m_Snapshot, .Output = index, .Presentation = decision.Presentation, .Mode = decision.Mode() }
+			{ .Snapshot = m_Snapshot,
+		      .Output = index,
+		      .Outputs = m_Outputs.size(),
+		      .Resolution = output.m_Configuration.Resolution,
+		      .Presentation = decision.Presentation,
+		      .Mode = decision.Mode() }
 		);
 
 		(void)output.m_Cost.ObserveIrreducibleCpu(list.EvaluateCost);

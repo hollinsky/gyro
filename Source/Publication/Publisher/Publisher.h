@@ -182,6 +182,32 @@ public:
 		return *this;
 	}
 
+	// Stage the per-output placement, one adapter per output in output order. A template for
+	// `PutNodes`' reason: the adapter is `Geometry`'s, the frame half of this module may not name a
+	// coordinate, and the waist carries it as bytes either way.
+	template<typename T>
+	SnapshotPublisher& PutViews(std::span<const T> views)
+	{
+		Stage(m_Views, views);
+		return *this;
+	}
+
+	// Stage what the image nodes draw, indexed by a node's `Content`.
+	template<typename T>
+	SnapshotPublisher& PutImages(std::span<const T> images)
+	{
+		Stage(m_Images, images);
+		return *this;
+	}
+
+	// Stage what the solid nodes draw, indexed by a node's `Content`.
+	template<typename T>
+	SnapshotPublisher& PutSolids(std::span<const T> solids)
+	{
+		Stage(m_Solids, solids);
+		return *this;
+	}
+
 	// Assemble the staged runs into one contiguous offset-addressed snapshot, in a buffer the caller
 	// owns. The header goes first, then each non-empty run at an offset aligned for its element, then
 	// the wake schedule; the directory records where each landed. The result is self-describing: its
@@ -214,6 +240,15 @@ public:
 		std::uint32_t nodeOffset = 0;
 		cursor = Place(m_Nodes, cursor, nodeOffset);
 
+		std::uint32_t viewOffset = 0;
+		cursor = Place(m_Views, cursor, viewOffset);
+
+		std::uint32_t imageOffset = 0;
+		cursor = Place(m_Images, cursor, imageOffset);
+
+		std::uint32_t solidOffset = 0;
+		cursor = Place(m_Solids, cursor, solidOffset);
+
 		const std::size_t byteSize = cursor;
 
 		SnapshotHeader header{};
@@ -225,6 +260,9 @@ public:
 		}
 		header.Wakes = Entry(m_Wakes, wakeOffset);
 		header.Nodes = Entry(m_Nodes, nodeOffset);
+		header.Views = Entry(m_Views, viewOffset);
+		header.Images = Entry(m_Images, imageOffset);
+		header.Solids = Entry(m_Solids, solidOffset);
 
 		into.Reset(byteSize);
 		const std::span<std::byte> bytes = into.Bytes();
@@ -236,6 +274,9 @@ public:
 		}
 		CopyInto(bytes, wakeOffset, m_Wakes);
 		CopyInto(bytes, nodeOffset, m_Nodes);
+		CopyInto(bytes, viewOffset, m_Views);
+		CopyInto(bytes, imageOffset, m_Images);
+		CopyInto(bytes, solidOffset, m_Solids);
 	}
 
 	// The same assembly into a buffer nobody had yet. The outbox never takes this path — it always has
@@ -312,4 +353,7 @@ private:
 	std::array<Staged, SnapshotRunCount> m_Runs;
 	Staged m_Wakes;
 	Staged m_Nodes;
+	Staged m_Views;
+	Staged m_Images;
+	Staged m_Solids;
 };

@@ -25,6 +25,7 @@
 #include "Core/Clock.h"
 #include "Core/Signal.h"
 #include "Core/Time.h"
+#include "Frame/Evaluator.h"
 #include "Frame/Loop.h"
 #include "Geometry/Space.h"
 #include "Headless/Device.h"
@@ -435,7 +436,10 @@ private:
 	SnapshotRing m_Snapshots;
 	ReturnChannel m_Returns;
 
-	NullEvaluator m_Evaluator;
+	// The real walk, bound from the day it exists. The ring above is empty until dispatch is written,
+	// so what it evaluates every iteration is an empty scene — which is the floor case rather than a
+	// stub, and the one that has to cost nothing.
+	SceneEvaluator m_Evaluator{ m_Clock };
 
 	HeadlessDevice m_Device{ m_Clock };
 	std::array<BoundOutput, MaxOutputs> m_Bound{};

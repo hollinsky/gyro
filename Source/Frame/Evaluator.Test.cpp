@@ -1,0 +1,904 @@
+#include "Frame/Evaluator.h"
+
+#include <array>
+#include <cstddef>
+#include <cstring>
+#include <span>
+#include <vector>
+
+#include "Animation/Solve/Spring.h"
+#include "Core/Clock.h"
+#include "Core/FrameSection.h"
+#include "Core/Time.h"
+#include "Geometry/AxisTransform.h"
+#include "Geometry/NodeTransform.h"
+#include "Geometry/Space.h"
+#include "Publication/Snapshot.h"
+#include "Testing/Test.h"
+#include "World/Content.h"
+#include "World/Node.h"
+
+// The walk, asserted by what each failure looks like on a screen rather than by what it does to an
+// array.
+//
+// A subtree walked in the wrong order is a menu behind the window that opened it. A group whose count
+// is off by its nesting is a fade that leaves half a submenu at full opacity. A settled node that does
+// not snap is a hairline of wallpaper between two tiled windows. A malformed length that is trusted is
+// an unbounded traversal on a `SCHED_FIFO` thread, which is every session's UI at once. Those are the
+// assertions below; the arithmetic ones belong to Frame/Projection.Test.cpp and
+// Geometry/NodeTransform.Test.cpp, which this deliberately does not repeat.
+//
+// **The snapshot is assembled here rather than published**, and that is the layering rather than a
+// shortcut: `SnapshotPublisher` is a dispatch half and the frame side may not name it, which
+// `CheckLayering.cmake` enforces. So this file writes the bytes the way the wire has them and reads
+// them back through `SnapshotReader`, which is what the walk actually consumes.
+// Source/Integration/SceneRoundTrip.Test.cpp is where the two sides are proved to agree.
+
+namespace
+{
+// One published snapshot, laid out by hand. The store must outlive every reader taken from it, which
+// is why these live on the stack of the test that builds one.
+class Wire
+{
+public:
+	template<typename T>
+	void Put(SnapshotRun which, std::span<const T> elements)
+	{
+		Stage(m_Runs[RunIndex(which)], elements);
+	}
+
+	template<typename T>
+	void PutNodes(std::span<const T> elements)
+	{
+		Stage(m_Named[0], elements);
+	}
+
+	template<typename T>
+	void PutViews(std::span<const T> elements)
+	{
+		Stage(m_Named[1], elements);
+	}
+
+	template<typename T>
+	void PutImages(std::span<const T> elements)
+	{
+		Stage(m_Named[2], elements);
+	}
+
+	template<typename T>
+	void PutSolids(std::span<const T> elements)
+	{
+		Stage(m_Named[3], elements);
+	}
+
+	[[nodiscard]] SnapshotReader Read(std::uint64_t sequence = 1)
+	{
+		std::size_t cursor = sizeof(SnapshotHeader);
+
+		for (Staged& run : m_Runs)
+		{
+			cursor = Place(run, cursor);
+		}
+
+		for (Staged& run : m_Named)
+		{
+			cursor = Place(run, cursor);
+		}
+
+		SnapshotHeader header{};
+		header.Sequence = sequence;
+		header.ByteSize = static_cast<std::uint32_t>(cursor);
+
+		for (std::size_t index = 0; index < SnapshotRunCount; ++index)
+		{
+			header.Runs[index] = m_Runs[index].Entry;
+		}
+
+		header.Nodes = m_Named[0].Entry;
+		header.Views = m_Named[1].Entry;
+		header.Images = m_Named[2].Entry;
+		header.Solids = m_Named[3].Entry;
+
+		m_Store.assign((cursor + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t), std::max_align_t{});
+
+		std::byte* const base = reinterpret_cast<std::byte*>(m_Store.data());
+		std::memcpy(base, &header, sizeof(SnapshotHeader));
+
+		for (const Staged& run : m_Runs)
+		{
+			Copy(base, run);
+		}
+
+		for (const Staged& run : m_Named)
+		{
+			Copy(base, run);
+		}
+
+		return SnapshotReader{ std::span<const std::byte>{ base, cursor } };
+	}
+
+private:
+	struct Staged
+	{
+		std::vector<std::byte> Bytes;
+		RunEntry Entry;
+	};
+
+	template<typename T>
+	static void Stage(Staged& run, std::span<const T> elements)
+	{
+		run.Bytes.resize(elements.size() * sizeof(T));
+
+		if (!elements.empty())
+		{
+			std::memcpy(run.Bytes.data(), elements.data(), run.Bytes.size());
+		}
+
+		run.Entry = { 0, static_cast<std::uint32_t>(elements.size()), sizeof(T), alignof(T) };
+	}
+
+	[[nodiscard]] static std::size_t Place(Staged& run, std::size_t cursor) noexcept
+	{
+		if (run.Entry.Count == 0)
+		{
+			return cursor;
+		}
+
+		const std::size_t at = Detail::AlignUp(cursor, run.Entry.ElementAlign);
+		run.Entry.Offset = static_cast<std::uint32_t>(at);
+
+		return at + run.Bytes.size();
+	}
+
+	static void Copy(std::byte* base, const Staged& run) noexcept
+	{
+		if (run.Entry.Count != 0)
+		{
+			std::memcpy(base + run.Entry.Offset, run.Bytes.data(), run.Bytes.size());
+		}
+	}
+
+	std::array<Staged, SnapshotRunCount> m_Runs{};
+	std::array<Staged, 4> m_Named{};
+	std::vector<std::max_align_t> m_Store;
+};
+
+// A clock that moves by a fixed amount every time it is read, so that a walk which reads it twice
+// reports exactly one tick. `ManualClock` would report zero, which is indistinguishable from an
+// evaluator that never measured itself.
+class TickingClock final : public IClock
+{
+public:
+	static constexpr Duration Tick = std::chrono::microseconds{ 7 };
+
+	[[nodiscard]] Instant Now() const noexcept override
+	{
+		m_Now = Advanced(m_Now, Tick);
+
+		return m_Now;
+	}
+
+private:
+	mutable Instant m_Now{};
+};
+
+constexpr PixelSize<DeviceSpace> Screen{ 1920, 1080 };
+
+// The world shown one-to-one from the global origin, which every test below varies from rather than
+// happens to have.
+[[nodiscard]] OutputAdapter Placement()
+{
+	return OutputAdapter::Identity();
+}
+
+[[nodiscard]] Node Leaf(NodeKind kind, std::uint32_t content, double x, double y, float width, float height)
+{
+	Node node{};
+
+	node.Kind = kind;
+	node.Content = content;
+	node.Transform.Translation = { x, y, 0.0 };
+	node.Extent = { width, height };
+
+	return node;
+}
+
+[[nodiscard]] Node Image(std::uint32_t content, double x, double y, float width = 100.0F, float height = 50.0F)
+{
+	return Leaf(NodeKind::Image, content, x, y, width, height);
+}
+
+[[nodiscard]] Node Container(std::uint32_t subtree, double x = 0.0, double y = 0.0)
+{
+	Node node{};
+
+	node.SubtreeLength = subtree;
+	node.Transform.Translation = { x, y, 0.0 };
+
+	return node;
+}
+
+[[nodiscard]] ImageContent Texel(std::uint32_t id)
+{
+	ImageContent content{};
+
+	content.Texture = TextureId{ id, 1 };
+
+	return content;
+}
+
+// One evaluation of one scene on one output, which is what every test here asks for.
+[[nodiscard]] EvaluateRequest Frame(const SnapshotReader& snapshot, Instant at = {})
+{
+	return { .Snapshot = snapshot, .Output = 0, .Outputs = 1, .Resolution = Screen, .Presentation = at };
+}
+
+[[nodiscard]] const DrawGroup* AsGroup(const DrawItem& item)
+{
+	return std::get_if<DrawGroup>(&item.Content);
+}
+
+[[nodiscard]] const DrawTexture* AsTexture(const DrawItem& item)
+{
+	return std::get_if<DrawTexture>(&item.Content);
+}
+} // namespace
+
+GYRO_TEST(Evaluator, OneImageNodeIsOneItem)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.0, 20.0) };
+	const std::array images{ Texel(7) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+
+	const DrawItem& item = list.Items[0];
+	const DrawTexture* const texture = AsTexture(item);
+
+	GYRO_REQUIRE(texture != nullptr);
+	GYRO_CHECK_EQ(texture->Texture, TextureId{ 7, 1 });
+	GYRO_CHECK_EQ(item.Extent, Size<SurfaceSpace>{ 100.0F, 50.0F });
+	GYRO_CHECK_EQ(item.Shape.Bounds(), Rect<DeviceSpace>::FromEdges({ 10.0F, 20.0F }, { 110.0F, 70.0F }));
+	GYRO_CHECK_EQ(item.Opacity, 1.0F);
+
+	// Decision 94's figure, and the reason the evaluator holds a clock at all.
+	GYRO_CHECK_EQ(list.EvaluateCost, TickingClock::Tick);
+}
+
+GYRO_TEST(Evaluator, AHiddenSubtreeIsNotWalked)
+{
+	Wire wire;
+	std::array nodes{ Container(2), Image(0, 0.0, 0.0), Image(0, 0.0, 0.0), Image(0, 300.0, 0.0) };
+	nodes[0].Flags = Node::Hidden;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// The two nodes under the hidden container are gone and the sibling after it is not, which is the
+	// whole of what nine workspaces with one visible costs.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Left(), 300.0F);
+}
+
+GYRO_TEST(Evaluator, AParentsPixelsAreBeneathItsChildren)
+{
+	Wire wire;
+	// A node with subnodes is a container in decision 95's vocabulary, but the ordering being asserted
+	// is the one that matters for a parent that draws: preorder is the painter's order, so the parent
+	// lands first and the child composites over it.
+	std::array nodes{ Image(0, 0.0, 0.0), Image(1, 5.0, 5.0) };
+	nodes[0].SubtreeLength = 1;
+
+	const std::array images{ Texel(1), Texel(2) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(AsTexture(list.Items[0])->Texture, TextureId{ 1, 1 });
+	GYRO_CHECK_EQ(AsTexture(list.Items[1])->Texture, TextureId{ 2, 1 });
+
+	// The child's transform is in the parent's space, so its five units are five more than the
+	// parent's rather than five from the output's origin.
+	GYRO_CHECK_EQ(list.Items[1].Shape.Bounds().Left(), 5.0F);
+}
+
+GYRO_TEST(Evaluator, AChildComposesWithItsParentsTransform)
+{
+	Wire wire;
+	std::array nodes{ Container(1, 40.0, 60.0), Image(0, 5.0, 5.0) };
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds(), Rect<DeviceSpace>::FromEdges({ 45.0F, 65.0F }, { 145.0F, 115.0F }));
+}
+
+GYRO_TEST(Evaluator, AGroupCountsItsWholeRunAndSitsOnItsSubtreesBound)
+{
+	Wire wire;
+	std::array nodes{ Container(2), Image(0, 0.0, 0.0), Image(0, 300.0, 200.0) };
+	nodes[0].Flags = Node::Group;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 3 });
+
+	const DrawGroup* const group = AsGroup(list.Items[0]);
+
+	GYRO_REQUIRE(group != nullptr);
+	GYRO_CHECK_EQ(group->Count, std::uint32_t{ 2 });
+
+	// The offscreen sits at the subtree's screen-space bound, which is a fact about the members and
+	// therefore not knowable when the item was emitted. A group placed at anything smaller clips the
+	// window it was supposed to fade.
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds(), Rect<DeviceSpace>::FromEdges({ 0.0F, 0.0F }, { 400.0F, 250.0F }));
+}
+
+GYRO_TEST(Evaluator, ANestedGroupIsInsideItsParentsRun)
+{
+	Wire wire;
+	// A menu, its panel, its open submenu, and that submenu's panel — the worked example decision 86
+	// is written against, with both menus declaring a group.
+	std::array nodes{ Container(3), Image(0, 0.0, 0.0), Container(1, 20.0, 20.0), Image(0, 0.0, 0.0) };
+	nodes[0].Flags = Node::Group;
+	nodes[2].Flags = Node::Group;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// outer group, the menu's panel, inner group, the submenu's panel.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 4 });
+
+	// `Count` is the length of the run and not a child count, so the outer group holds three items
+	// where it has two children. The two readings differ the moment anything nests, and the child
+	// count is the reading that leaves a submenu at full opacity through its parent's fade.
+	GYRO_CHECK_EQ(AsGroup(list.Items[0])->Count, std::uint32_t{ 3 });
+	GYRO_CHECK_EQ(AsGroup(list.Items[2])->Count, std::uint32_t{ 1 });
+}
+
+GYRO_TEST(Evaluator, AGroupSpendsItsOpacityOnceAndAContainerSpendsItPerNode)
+{
+	Wire wire;
+	std::array grouped{ Container(1), Image(0, 0.0, 0.0) };
+	grouped[0].Flags = Node::Group;
+	grouped[0].Opacity = 0.5F;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ grouped });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 2 });
+
+	// Decision 60 in two numbers: the fade is spent at the offscreen and the member is drawn opaque
+	// into it. A member also at 0.5 is the double-dimming that makes a cross-fade look wrong at both
+	// ends of the transition.
+	GYRO_CHECK_EQ(list.Items[0].Opacity, 0.5F);
+	GYRO_CHECK_EQ(list.Items[1].Opacity, 1.0F);
+
+	Wire plain;
+	std::array ungrouped{ Container(1), Image(0, 0.0, 0.0) };
+	ungrouped[0].Opacity = 0.5F;
+	ungrouped[1].Opacity = 0.5F;
+
+	plain.PutNodes(std::span<const Node>{ ungrouped });
+	plain.PutImages(std::span<const ImageContent>{ images });
+	plain.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader second = plain.Read();
+	SceneEvaluator other{ clock };
+	const DrawList flat = other.Evaluate(Frame(second));
+
+	// Without a group there is no offscreen to spend it at, so the alpha multiplies down the tree —
+	// which is exactly the reading decision 60 says a shell wanting a correct fade must avoid by
+	// declaring a group.
+	GYRO_REQUIRE_EQ(flat.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(flat.Items[0].Opacity, 0.25F);
+}
+
+GYRO_TEST(Evaluator, AReferenceExpandsTheSubtreeItNamesUnderItsOwnTransform)
+{
+	Wire wire;
+	// The overview arrangement decision 88 describes: the real window near the top of the run under a
+	// hidden container, and the thumbnail below it pointing back.
+	std::array nodes{ Container(1), Image(0, 0.0, 0.0), Leaf(NodeKind::Reference, 1, 500.0, 400.0, 0.0F, 0.0F) };
+	nodes[0].Flags = Node::Hidden;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// One item: the original is hidden by hiding its parent, and the reference draws it again where
+	// the thumbnail is. A reference that expanded the flags rather than the node would draw nothing,
+	// which is an empty overview.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds(), Rect<DeviceSpace>::FromEdges({ 500.0F, 400.0F }, { 600.0F, 450.0F }));
+}
+
+GYRO_TEST(Evaluator, AReferenceThatPointsForwardIsNotExpanded)
+{
+	Wire wire;
+	// The rule decision 95 states as an authoring order: a target index below the reference's own is
+	// what makes a cycle unrepresentable rather than something this walk has to detect.
+	const std::array nodes{ Leaf(NodeKind::Reference, 1, 0.0, 0.0, 0.0F, 0.0F), Image(0, 0.0, 0.0) };
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// The image is still drawn once, as itself. The reference contributes nothing.
+	GYRO_CHECK_EQ(list.Items.size(), std::size_t{ 1 });
+}
+
+GYRO_TEST(Evaluator, ASubtreeLengthThatOverrunsItsRunAbandonsThatLevel)
+{
+	Wire wire;
+	std::array nodes{ Image(0, 0.0, 0.0), Container(9), Image(0, 300.0, 0.0) };
+	nodes[1].SubtreeLength = 9; // claims nine nodes where one is left
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// Decision 90's check, and what survives it: the sibling emitted before the malformed record is
+	// still there, the walk terminates, and nothing past the run is read. The alternative is an
+	// unbounded traversal inside the frame section, whose survivable outcome is RLIMIT_RTTIME taking
+	// every session's UI at once.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Left(), 0.0F);
+}
+
+GYRO_TEST(Evaluator, PastTheDepthCapTheSubtreeIsDroppedAndTheFrameIsNot)
+{
+	Wire wire;
+	std::vector<Node> nodes;
+	constexpr std::size_t Depth = MaxWalkDepth + 4;
+
+	// A chain of containers one deeper than the walk will follow, with a drawn leaf at the bottom.
+	for (std::size_t level = 0; level < Depth; ++level)
+	{
+		nodes.push_back(Container(static_cast<std::uint32_t>(Depth - level), 1.0, 0.0));
+	}
+
+	nodes.push_back(Image(0, 0.0, 0.0));
+	nodes.push_back(Image(0, 700.0, 0.0)); // a sibling of the whole chain, at the top level
+
+	nodes[0].SubtreeLength = static_cast<std::uint32_t>(Depth);
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// The leaf at the bottom of the too-deep chain is gone; the sibling beside the chain is not. A cap
+	// that ended the walk would take the rest of the screen with it.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Left(), 700.0F);
+}
+
+GYRO_TEST(Evaluator, ASpringIsEvaluatedAtThePredictedPresentation)
+{
+	Wire wire;
+	std::array nodes{ Image(0, 0.0, 0.0) };
+	nodes[0].TranslationSpring = 0;
+
+	const Instant origin = Monotonic::FromNanoseconds(1'000'000);
+	const Spring<Vector3<double>> spring{ .Origin = origin,
+		                                  .Parameters = { .Frequency = 20.0, .Damping = 1.0 },
+		                                  .Target = { 400.0, 0.0, 0.0 },
+		                                  .Offset = { -400.0, 0.0, 0.0 },
+		                                  .Velocity = {} };
+
+	const std::array springs{ spring };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.Put(SnapshotRun::Translation, std::span<const Spring<Vector3<double>>>{ springs });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	// At the spring's own origin the node is where the offset says, which is also the check that the
+	// inline value was *not* used: the record still carries a translation of zero.
+	const DrawList first = evaluator.Evaluate(Frame(snapshot, origin));
+
+	GYRO_REQUIRE_EQ(first.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(first.Items[0].Shape.Bounds().Left(), 0.0F);
+
+	// A hundred milliseconds later it is well on its way. The value is the spring's, so what is
+	// asserted is that the walk asked it at the instant it was handed rather than at an ambient now.
+	const Instant later = Advanced(origin, std::chrono::milliseconds{ 100 });
+	const float expected =
+		static_cast<float>(spring.Evaluate(later).Position.X) + 0.0F; // the node's own translation is zero
+	const DrawList second = evaluator.Evaluate(Frame(snapshot, later));
+
+	GYRO_REQUIRE_EQ(second.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(second.Items[0].Shape.Bounds().Left(), expected);
+	GYRO_CHECK(expected > 0.0F && expected < 400.0F);
+}
+
+GYRO_TEST(Evaluator, ATimeScaleSlowsTheSubtreesOwnClock)
+{
+	const Instant origin = Monotonic::FromNanoseconds(1'000'000);
+	const Instant at = Advanced(origin, std::chrono::milliseconds{ 100 });
+	const Instant half = Advanced(origin, std::chrono::milliseconds{ 50 });
+
+	const Spring<Vector3<double>> spring{ .Origin = origin,
+		                                  .Parameters = { .Frequency = 20.0, .Damping = 1.0 },
+		                                  .Target = { 400.0, 0.0, 0.0 },
+		                                  .Offset = { -400.0, 0.0, 0.0 },
+		                                  .Velocity = {} };
+
+	Wire wire;
+	std::array nodes{ Container(1), Image(0, 0.0, 0.0) };
+	nodes[0].TimeScale = 0.5F;
+	nodes[1].TranslationSpring = 0;
+
+	const std::array springs{ spring };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.Put(SnapshotRun::Translation, std::span<const Spring<Vector3<double>>>{ springs });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot, at));
+
+	// Decision 19's whole content: a subtree at half speed is a hundred milliseconds of wall clock
+	// reaching the spring as fifty. Composed down the tree rather than per property, which is why the
+	// scale is on the container and the coefficient is on its child.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Left(), static_cast<float>(spring.Evaluate(half).Position.X));
+}
+
+GYRO_TEST(Evaluator, SettledGeometryLandsOnTheGridAndMovingGeometryDoesNot)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.4, 20.6) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// Decision 67: a node that names no coefficient is at rest, and a rect whose boundary lands
+	// between pixels has a partially covered perimeter — which is a halo under a light window and a
+	// hairline of wallpaper between two tiled ones.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Left(), 10.0F);
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Top(), 21.0F);
+
+	Wire moving;
+	std::array flight{ Image(0, 10.4, 20.6) };
+	flight[0].TranslationSpring = 0;
+
+	const Spring<Vector3<double>> spring{ .Origin = {},
+		                                  .Parameters = { .Frequency = 20.0, .Damping = 1.0 },
+		                                  .Target = { 10.4, 20.6, 0.0 },
+		                                  .Offset = {},
+		                                  .Velocity = {} };
+	const std::array springs{ spring };
+
+	moving.PutNodes(std::span<const Node>{ flight });
+	moving.Put(SnapshotRun::Translation, std::span<const Spring<Vector3<double>>>{ springs });
+	moving.PutImages(std::span<const ImageContent>{ images });
+	moving.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader second = moving.Read();
+	SceneEvaluator other{ clock };
+	const DrawList flying = other.Evaluate(Frame(second));
+
+	// A node in flight is left where the spring put it. Snapping it would quantize the trajectory and
+	// show as a window arriving in steps.
+	GYRO_REQUIRE_EQ(flying.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(flying.Items[0].Shape.Bounds().Left(), 10.4F);
+}
+
+GYRO_TEST(Evaluator, ADressedContainerDrawsItsDressingAndNamesNoContent)
+{
+	Wire wire;
+	std::array nodes{ Container(0) };
+	nodes[0].Extent = { 200.0F, 100.0F };
+	nodes[0].Dress = Material::None;
+
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	// Undressed, a container has no pixels at all — which is the whole reason decision 95 gives it a
+	// kind rather than making it a fully transparent solid.
+	GYRO_CHECK_EQ(evaluator.Evaluate(Frame(snapshot)).Items.size(), std::size_t{ 0 });
+
+	// The material set carries one enumerator today, so this is the shape of the rule rather than a
+	// picture: a dressed container emits an item that names no content and draws its dressing over its
+	// own extent. World/Node.h states it as HasContent() || IsDressed().
+	static_assert(std::is_same_v<decltype(Node{}.Dress), Material>);
+	static_assert(std::holds_alternative<DrawDressing>(DrawContent{}));
+}
+
+GYRO_TEST(Evaluator, AContentIndexPastItsRunDrawsNothing)
+{
+	Wire wire;
+	const std::array nodes{ Image(4, 0.0, 0.0), Image(0, 300.0, 0.0) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// A node pointing past its run is a bug on the other side of the waist, and a frame is not where
+	// it gets reported: the node draws nothing and everything else on the screen is untouched.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Left(), 300.0F);
+}
+
+GYRO_TEST(Evaluator, AnOutputRunThatIsNotThisSetsIsNoInformation)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 0.0, 0.0) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement(), Placement() }; // two outputs' worth
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	// Decision 84: a per-output run from another output set is not partial information, and indexing
+	// into it would put one output's placement on another one's glass — a window jumping to a
+	// neighbouring monitor for one frame after a hotplug.
+	GYRO_CHECK_EQ(evaluator.Evaluate(Frame(snapshot)).Items.size(), std::size_t{ 0 });
+}
+
+GYRO_TEST(Evaluator, TheArenaDropsWholeTopLevelSubtrees)
+{
+	Wire wire;
+	std::vector<Node> nodes;
+
+	// Two top-level subtrees, each a group of enough leaves that the second cannot fit.
+	for (std::size_t subtree = 0; subtree < 2; ++subtree)
+	{
+		Node root = Container(static_cast<std::uint32_t>(MaxDrawItems - 8));
+		root.Flags = Node::Group;
+		nodes.push_back(root);
+
+		for (std::size_t leaf = 0; leaf < MaxDrawItems - 8; ++leaf)
+		{
+			nodes.push_back(Image(0, 0.0, 0.0));
+		}
+	}
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// The first subtree is whole and the second is absent entirely. A list truncated where the arena
+	// happened to end would hand a renderer a group whose offscreen is missing half its members —
+	// a window drawn with its menu gone and its fade applied to what is left.
+	GYRO_CHECK(evaluator.Truncated());
+	GYRO_CHECK_EQ(list.Items.size(), MaxDrawItems - 7);
+	GYRO_REQUIRE(!list.Items.empty());
+	GYRO_CHECK_EQ(AsGroup(list.Items[0])->Count, static_cast<std::uint32_t>(MaxDrawItems - 8));
+}
+
+GYRO_TEST(Evaluator, DamageIsOwedByAMovingSceneAndByANewPublicationAndByNothingElse)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.0, 20.0) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read(4);
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	// A publication this output has not drawn from is a whole frame owed, first time included.
+	GYRO_CHECK(!evaluator.Evaluate(Frame(snapshot)).Damage.IsEmpty());
+
+	// Architecture.md#doing-nothing-must-cost-nothing, from the evaluator's side: the same settled
+	// scene, drawn again, owes nothing. A damage rule that reported the whole output every time would
+	// keep a still desktop compositing forever.
+	GYRO_CHECK(evaluator.Evaluate(Frame(snapshot)).Damage.IsEmpty());
+
+	Wire moving;
+	std::array flight{ Image(0, 10.0, 20.0) };
+	flight[0].TranslationSpring = 0;
+
+	const std::array springs{ Spring<Vector3<double>>{} };
+
+	moving.PutNodes(std::span<const Node>{ flight });
+	moving.Put(SnapshotRun::Translation, std::span<const Spring<Vector3<double>>>{ springs });
+	moving.PutImages(std::span<const ImageContent>{ images });
+	moving.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader second = moving.Read(4);
+	SceneEvaluator other{ clock };
+
+	GYRO_CHECK(!other.Evaluate(Frame(second)).Damage.IsEmpty());
+	GYRO_CHECK(!other.Evaluate(Frame(second)).Damage.IsEmpty());
+}
+
+GYRO_TEST(Evaluator, TheWalkAllocatesNothing)
+{
+	Wire wire;
+	std::vector<Node> nodes;
+
+	nodes.push_back(Container(6));
+	nodes[0].Flags = Node::Group;
+	nodes.push_back(Image(0, 0.0, 0.0));
+	nodes.push_back(Container(2, 30.0, 30.0));
+	nodes.push_back(Image(0, 0.0, 0.0));
+	nodes.push_back(Leaf(NodeKind::Solid, 0, 40.0, 40.0, 20.0F, 20.0F));
+	nodes.push_back(Leaf(NodeKind::Reference, 1, 600.0, 0.0, 0.0F, 0.0F));
+	nodes.push_back(Image(0, 900.0, 0.0));
+
+	const std::array images{ Texel(1) };
+	const std::array solids{ SolidContent{} };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutSolids(std::span<const SolidContent>{ solids });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	// Core/DebugAllocator.cpp aborts on an allocation inside this guard, which is decision 36 as a
+	// check rather than a convention. Every kind, a group, and a reference in one scene, so the walk
+	// takes every branch that could have wanted storage.
+	const FrameSection guard;
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_CHECK(!list.Items.empty());
+}

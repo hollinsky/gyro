@@ -141,6 +141,20 @@ static_assert(sizeof(RunEntry) == 16, "Four uint32s, and no padding to leave uni
 // by `RunIndex`. See decision 86 for the record it holds and the preorder-plus-subtree-length shape
 // the frame thread walks it in.
 //
+// **`Views`, `Images`, and `Solids` join it on the same terms, and for the same reason none of them
+// is a channel.** A view is one output's placement — where the world sits on that output's grid —
+// and it crosses positionally under decision 84's rule, exactly as `Wakes` does: one entry per
+// output, in output order, meaningless unless the run's length is the output set's. The other two
+// are what a leaf draws, which decision 95 keeps in per-kind runs beside the node run rather than
+// in a union inside the record, so that the common node — a container with nothing to draw — does
+// not drag a payload through cache in order not to use it. A node names a position in whichever of
+// them its kind selects.
+//
+// All three are addressed by name and resolved through templates, so this module still names
+// neither the world's records nor a coordinate: `World/Content.h` holds the two content records and
+// `Geometry/AxisTransform.h` holds the adapter, and a field added to any of them touches the waist
+// not at all.
+//
 // **`Sequence` is the snapshot's identity, and it is here for shape rather than for use this cut.**
 // Decision 45's deferred reclamation has the frame thread publish the sequence it last consumed and
 // the dispatch thread free below that. The watermark and the ring that carry it are a later part of
@@ -159,14 +173,17 @@ struct SnapshotHeader
 	std::uint32_t ByteSize = 0; // total bytes of the whole snapshot, header included
 	std::uint32_t Reserved = 0;
 	RunEntry Runs[SnapshotRunCount] = {};
-	RunEntry Wakes = {}; // the per-output wake schedule, one Wake per output
-	RunEntry Nodes = {}; // the scene, in preorder, one record per node
+	RunEntry Wakes = {};  // the per-output wake schedule, one Wake per output
+	RunEntry Nodes = {};  // the scene, in preorder, one record per node
+	RunEntry Views = {};  // the per-output placement, one adapter per output
+	RunEntry Images = {}; // what an image node draws
+	RunEntry Solids = {}; // what a solid node draws
 };
 
 static_assert(std::is_trivially_copyable_v<SnapshotHeader> && std::is_standard_layout_v<SnapshotHeader>);
 static_assert(
-	sizeof(SnapshotHeader) == 136,
-	"One uint64, four uint32, five coefficient run entries, and the wake and node entries, exactly"
+	sizeof(SnapshotHeader) == 184,
+	"One uint64, four uint32, five coefficient run entries, and the five named ones, exactly"
 );
 static_assert(
 	alignof(SnapshotHeader) == 8,

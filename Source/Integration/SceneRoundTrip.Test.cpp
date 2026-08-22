@@ -1,16 +1,19 @@
-#include <array>
 #include <cstddef>
 #include <span>
 #include <vector>
 
 #include "Animation/Author/Animatable.h"
 #include "Animation/Solve/Spring.h"
+#include "Core/Clock.h"
 #include "Core/FrameSection.h"
 #include "Core/Time.h"
+#include "Frame/Evaluator.h"
+#include "Geometry/AxisTransform.h"
 #include "Geometry/NodeTransform.h"
 #include "Publication/Publisher/Publisher.h"
 #include "Publication/Reader/Reader.h"
 #include "Testing/Test.h"
+#include "World/Content.h"
 #include "World/Node.h"
 
 // The structural half of the crossing, and it stands on both sides for the same reason the spring
@@ -27,6 +30,13 @@
 // channel slot is an index into a run the node does not point at — the direction decision 90 fixes,
 // the node reaching for the spring and never the other way round — and a walk that gets that
 // indirection wrong produces a plausible wrong picture rather than a failure.
+//
+// **The walk is `Frame`'s own and not a model of it.** *(Revised 2026-08-22.)* This file carried a
+// reduced traversal until the evaluator existed, which proved the indirection against a walk that
+// could drift from the one that draws. `SceneEvaluator` is now what runs here, so what is checked is
+// the pair a frame actually depends on: the publisher's layout and the reader's, over records neither
+// module names. Frame/Evaluator.Test.cpp is where the walk's own behaviour is asserted, against bytes
+// it assembles itself — because the frame half may not name the publisher.
 
 namespace
 {
@@ -41,68 +51,18 @@ enum Index : std::size_t
 	SubmenuPanel = 3,
 };
 
-// The preorder walk, reduced to what this test asserts: compose Docs/Decisions.md decision 19's time
-// scale down the tree, skip a hidden subtree whole, and evaluate a node's translation where it names
-// a coefficient. Everything a real walk also does — the transform chain, culling, emission — is
-// Frame's and does not exist yet.
-struct Visited
+constexpr PixelSize<DeviceSpace> Screen{ 1920, 1080 };
+
+// A leaf that draws, so that what the walk reaches shows up as an item rather than only as a visit.
+[[nodiscard]] Node Panel(float width, float height)
 {
-	std::size_t Index = 0;
-	float TimeScale = 1.0F;
-	Vector3<double> Translation{};
-};
+	Node node{};
 
-void Walk(
-	std::span<const Node> nodes,
-	std::span<const Spring<Vector3<double>>> translations,
-	Instant at,
-	std::span<Visited> into,
-	std::size_t& count
-)
-{
-	// An explicit stack of (past, scale) rather than recursion, which is the shape decision 86 chose
-	// preorder-plus-subtree-length for: descending is ++index and skipping is arithmetic.
-	std::array<std::pair<std::size_t, float>, 8> stack{};
-	std::size_t depth = 0;
-	float scale = 1.0F;
+	node.Kind = NodeKind::Image;
+	node.Content = 0;
+	node.Extent = { width, height };
 
-	std::size_t index = 0;
-	while (index < nodes.size())
-	{
-		while (depth != 0 && index >= stack[depth - 1].first)
-		{
-			--depth;
-			scale = stack[depth].second;
-		}
-
-		const Node& node = nodes[index];
-
-		if (node.IsHidden())
-		{
-			index = node.Past(index);
-			continue;
-		}
-
-		const float composed = scale * node.TimeScale;
-
-		Vector3<double> translation = node.Transform.Translation;
-		if (node.IsTranslating() && node.TranslationSpring < translations.size())
-		{
-			translation = translations[node.TranslationSpring].Evaluate(at).Position;
-		}
-
-		into[count] = Visited{ index, composed, translation };
-		++count;
-
-		if (node.SubtreeLength != 0 && depth < stack.size())
-		{
-			stack[depth] = { node.Past(index), scale };
-			++depth;
-			scale = composed;
-		}
-
-		++index;
-	}
+	return node;
 }
 } // namespace
 
@@ -116,80 +76,93 @@ GYRO_TEST(SceneRoundTrip, TheWalkReachesTheCoefficientTheNodeNames)
 
 	std::vector<Node> scene(4);
 	scene[Menu].SubtreeLength = 3;
-	scene[Menu].TimeScale = 0.5F;
-	scene[MenuPanel].SubtreeLength = 0;
+	scene[MenuPanel] = Panel(100.0F, 40.0F);
 	scene[Submenu].SubtreeLength = 1;
 	scene[Submenu].TranslationSpring = 0;
-	scene[SubmenuPanel].SubtreeLength = 0;
+	scene[SubmenuPanel] = Panel(80.0F, 30.0F);
 
 	// The settled model value the submenu also carries. It is redundant while the spring is active,
 	// which is the point: the walk must take the coefficient and not this.
 	scene[Submenu].Transform.Translation = Vector3<double>{ -1.0, -1.0, -1.0 };
 
+	const ImageContent content{};
+	const OutputAdapter placement = OutputAdapter::Identity();
+
 	const SnapshotBuffer buffer = SnapshotPublisher{}
 	                                  .Put<Spring<Vector3<double>>>(SnapshotRun::Translation, { &coefficients, 1 })
 	                                  .PutNodes<Node>(scene)
+	                                  .PutImages<ImageContent>({ &content, 1 })
+	                                  .PutViews<OutputAdapter>({ &placement, 1 })
 	                                  .Build(1);
 
 	const SnapshotReader reader{ buffer.Bytes() };
 	GYRO_REQUIRE(reader.IsValid());
-
-	const std::span<const Node> nodes = reader.Nodes<Node>();
-	const std::span<const Spring<Vector3<double>>> translations =
-		reader.Run<Spring<Vector3<double>>>(SnapshotRun::Translation);
-	GYRO_REQUIRE_EQ(nodes.size(), std::size_t{ 4 });
-	GYRO_REQUIRE_EQ(translations.size(), std::size_t{ 1 });
+	GYRO_REQUIRE_EQ(reader.Nodes<Node>().size(), std::size_t{ 4 });
 
 	constexpr Instant Probe = Monotonic::FromNanoseconds(120'000'000);
 
+	MonotonicClock clock;
+	SceneEvaluator evaluator{ clock };
+
 	// The walk runs inside the frame section, so decision 36's allocator aborts if any part of it
 	// touches the heap. The comparisons come after, because a failed check formats its operands.
-	std::array<Visited, 4> visited{};
-	std::size_t count = 0;
+	DrawList list{};
 	{
 		const FrameSection guard;
-		Walk(nodes, translations, Probe, visited, count);
+		list = evaluator.Evaluate(
+			{ .Snapshot = reader, .Output = 0, .Outputs = 1, .Resolution = Screen, .Presentation = Probe }
+		);
 	}
 
-	GYRO_REQUIRE_EQ(count, std::size_t{ 4 });
+	// The menu's panel and the submenu's, in preorder. The two containers draw nothing, which is what
+	// decision 95 gives the kind for.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 2 });
 
-	// The coefficient the submenu's slot named, evaluated on the frame side, is bit-identical to the
-	// model's own evaluation — decision 50's promise, reached through the node rather than by index.
+	// The coefficient the submenu's slot named, evaluated on the frame side, placed the panel under it
+	// — decision 50's promise, reached through the node rather than by index, and arriving as pixels.
 	const Vector3<double> fromModel = position.PresentationState(Probe).Position;
-	GYRO_CHECK_EQ(visited[Submenu].Translation.X, fromModel.X);
-	GYRO_CHECK_EQ(visited[Submenu].Translation.Y, fromModel.Y);
 
-	// And a node at rest reads its inline value, which for these three is the identity.
-	GYRO_CHECK_EQ(visited[MenuPanel].Translation.X, 0.0);
+	GYRO_CHECK_EQ(list.Items[1].Shape.Bounds().Left(), static_cast<float>(fromModel.X));
+	GYRO_CHECK_EQ(list.Items[1].Shape.Bounds().Top(), static_cast<float>(fromModel.Y));
 
-	// Decision 19's scale composes down the tree and not across siblings: the menu's half applies to
-	// everything under it, and the menu itself keeps its own.
-	GYRO_CHECK_EQ(visited[Menu].TimeScale, 0.5F);
-	GYRO_CHECK_EQ(visited[MenuPanel].TimeScale, 0.5F);
-	GYRO_CHECK_EQ(visited[SubmenuPanel].TimeScale, 0.5F);
+	// And a node at rest reads its inline value, which for the menu's panel is the identity — where
+	// the submenu's model value, had the walk taken it, would have put this one at -1 as well.
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Left(), 0.0F);
+	GYRO_CHECK_EQ(list.Items[0].Extent, Size<SurfaceSpace>{ 100.0F, 40.0F });
 }
 
 GYRO_TEST(SceneRoundTrip, AHiddenSubtreeCostsOneStep)
 {
 	std::vector<Node> scene(4);
 	scene[Menu].SubtreeLength = 3;
+	scene[MenuPanel] = Panel(100.0F, 40.0F);
 	scene[Submenu].SubtreeLength = 1;
 	scene[Submenu].Flags |= Node::Hidden;
+	scene[SubmenuPanel] = Panel(80.0F, 30.0F);
 
-	const SnapshotBuffer buffer = SnapshotPublisher{}.PutNodes<Node>(scene).Build(1);
+	const ImageContent content{};
+	const OutputAdapter placement = OutputAdapter::Identity();
+
+	const SnapshotBuffer buffer = SnapshotPublisher{}
+	                                  .PutNodes<Node>(scene)
+	                                  .PutImages<ImageContent>({ &content, 1 })
+	                                  .PutViews<OutputAdapter>({ &placement, 1 })
+	                                  .Build(1);
+
 	const SnapshotReader reader{ buffer.Bytes() };
 	GYRO_REQUIRE(reader.IsValid());
 
-	std::array<Visited, 4> visited{};
-	std::size_t count = 0;
+	MonotonicClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	DrawList list{};
 	{
 		const FrameSection guard;
-		Walk(reader.Nodes<Node>(), {}, Instant{}, visited, count);
+		list = evaluator.Evaluate({ .Snapshot = reader, .Output = 0, .Outputs = 1, .Resolution = Screen });
 	}
 
 	// The submenu's panel is never visited, and finding that out was an addition rather than a test —
 	// which is what nine workspaces with one visible costs on every frame.
-	GYRO_REQUIRE_EQ(count, std::size_t{ 2 });
-	GYRO_CHECK_EQ(visited[0].Index, std::size_t{ Menu });
-	GYRO_CHECK_EQ(visited[1].Index, std::size_t{ MenuPanel });
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Extent, Size<SurfaceSpace>{ 100.0F, 40.0F });
 }

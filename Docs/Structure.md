@@ -22,8 +22,8 @@ splitting, or being renamed changes this file and nothing else. If a change here
 > the content records, which are there because `Frame` walks them and `Scene` writes them and neither
 > may name the other, and `Seam` in its two frame-side halves, which is `IPresenter` and `IRenderer`,
 > the data their verbs take and report, and the source the presenter's completions arrive on — and
-> `Frame` now holds the step those interfaces are driven from, against a `NullEvaluator` standing in
-> for the `Scene` that will produce its draw items. `Headless` is the first thing behind either seam:
+> `Frame` now holds the step those interfaces are driven from and the walk that turns a published
+> scene into draw items, which runs against an empty ring until `Scene` exists to fill one. `Headless` is the first thing behind either seam:
 > a simulated panel whose vblanks are arithmetic, a device that is the one source for all of them, a
 > synthetic plane catalog, and a renderer that charges a cost and draws nothing. `Compositor` closes
 > the circuit: it is the first module in the tree that is not portable, and it holds the `while`, the
@@ -182,12 +182,13 @@ becomes falsifiable rather than argued.
 If those interfaces lived in `Render` instead, `Frame` would be platform code and the sweep would be
 testing a reimplementation of the loop — which is the thing that rots.
 
-The table above is where `Frame` lands rather than what it declares today. `gyro_add_module` names the
-edges the code actually has — `Core`, `Geometry`, `Publication`, and `Seam`, the last two arriving
-with the loop that reads a snapshot and posts a watermark — because `CheckLayering.cmake` denies what
-is not declared, so the narrower declaration is the stronger rule and the rest arrive with the
-includes that need them. `Animation` is the edge still missing, and it arrives with the evaluator:
-`NullEvaluator` draws nothing, so nothing in `Frame` has yet had a coefficient to solve.
+The table above is what `Frame` declares. `gyro_add_module` names the edges the code actually has,
+because `CheckLayering.cmake` denies what is not declared, so the narrower declaration is the stronger
+rule — `Publication` and `Seam` arrived with the loop that reads a snapshot and posts a watermark, and
+`World` and `Animation` with the evaluator, which reads the node and content records and evaluates the
+coefficients they name. What it reaches of `Animation` is the frame half: `Solve` is the default and
+`Author` is a dispatch half, which the check denies from outside it without the declaration having to
+say so.
 
 **The evaluator is an interface inside `Frame` and not at either waist**, which is the one place this
 module has a seam of its own. It has no second implementation that is not a test — `Scene` publishes,

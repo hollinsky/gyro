@@ -260,13 +260,17 @@ gyro_add_module(Seam PORTABLE
 		SyncPoint.Test.cpp
 )
 
-# The frame side, and for now the one piece of it that has no dependency on the rest: the per-output
-# prediction every deadline in the system is derived from. The frame loop, admission control, and the
-# timing policy join it here, which is what makes Structure.md's table read wider than this does.
+# The frame side: the per-output prediction every deadline in the system is derived from, the loop
+# that steps it, admission control, the timing policy, and the walk that turns a published scene into
+# a draw list.
 #
 # DEPENDS names what the code has rather than where the module is going. Declaring the eventual set
 # early would spend the check that matters — CheckLayering denies what is not declared, so a narrower
-# declaration is a stronger rule, and the edges arrive with the includes that need them.
+# declaration is a stronger rule, and the edges arrive with the includes that need them. The World
+# and Animation edges arrived with the evaluator, and both are the walk's: it reads the node record
+# and the content records, and it evaluates the coefficients they name. Animation's frame half is
+# what it reaches — Solve is the default and Author is a dispatch half, which CheckLayering denies
+# from outside it without this file having to say so.
 #
 # Portable, and the clock is where that stops being an aspiration: it is fed by PresentationInfo and
 # OutputConfiguration rather than by a drm_event, so decision 29's schedulability sweep can drive it
@@ -276,11 +280,14 @@ gyro_add_module(Frame PORTABLE
 	DEPENDS
 		Core
 		Geometry
+		World
+		Animation
 		Publication
 		Seam
 	TESTS
 		Admission.Test.cpp
 		Budget.Test.cpp
+		Evaluator.Test.cpp
 		FrameClock.Test.cpp
 		Loop.Test.cpp
 		Projection.Test.cpp
