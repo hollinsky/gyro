@@ -160,6 +160,7 @@ gyro_add_module(Geometry PORTABLE
 gyro_add_module(World PORTABLE
 	DEPENDS
 		Geometry
+		Core
 	TESTS
 		Node.Test.cpp
 )
@@ -239,10 +240,15 @@ gyro_add_module(Publication PORTABLE
 # No DISPATCH_HALF. Both threads touch these types and neither owns them — the frame thread calls both
 # verbs, dispatch authors the configuration one of them takes — so there is no half to name and the
 # module is deliberately the same on both sides of the boundary.
+#
+# The World edge is the dressing a draw item carries. A material is named by the shell and consumed by
+# the renderer, so decision 87 puts it below both waists rather than here, and the seam reaches down
+# for it — which is the direction that stays legal as the scene vocabulary grows.
 gyro_add_module(Seam PORTABLE
 	DEPENDS
 		Core
 		Geometry
+		World
 	TESTS
 		EventSource.Test.cpp
 		OutputConfiguration.Test.cpp

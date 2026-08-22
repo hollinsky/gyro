@@ -18,10 +18,10 @@ splitting, or being renamed changes this file and nothing else. If a change here
 [Architecture.md](Architecture.md), the change was not structural.
 
 > **Most of this does not exist yet.** `Core`, `Geometry`, `World`, `Animation`, `Publication`,
-> `Seam`, and `Testing` are built — `World` so far being the published node record alone, which is
-> there because `Frame` walks it and `Scene` writes it and neither may name the other, and `Seam` in
-> its two frame-side halves, which is `IPresenter` and `IRenderer`, the data their verbs take and
-> report, and the source the presenter's completions arrive on — and
+> `Seam`, and `Testing` are built — `World` being the published node record, the dressing enums, and
+> the content records, which are there because `Frame` walks them and `Scene` writes them and neither
+> may name the other, and `Seam` in its two frame-side halves, which is `IPresenter` and `IRenderer`,
+> the data their verbs take and report, and the source the presenter's completions arrive on — and
 > `Frame` now holds the step those interfaces are driven from, against a `NullEvaluator` standing in
 > for the `Scene` that will produce its draw items. `Headless` is the first thing behind either seam:
 > a simulated panel whose vblanks are arithmetic, a device that is the one source for all of them, a
@@ -129,6 +129,7 @@ flowchart TB
     Frame --> Seam
     Dispatch --> World
     Frame --> World
+    Seam --> World
     Publication --> Base["Core · Geometry"]
     Seam --> Base
     World --> Base
@@ -136,7 +137,10 @@ flowchart TB
 
 `World` is not a third waist. Nothing crosses *through* it — it is the vocabulary both halves of the
 world spell their nodes in, placed below both waists for the reason
-[the rule below](#region-is-in-geometry-and-reachability-is-why) gives and neither waist names it.
+[the rule below](#region-is-in-geometry-and-reachability-is-why) gives. `Seam` reaches down into it,
+which is the one direction a waist may go: a draw item carries the material the shell asked for, so
+the enum is *below* the seam rather than declared in it, and `Protocol` and `Scene` can name a
+material without either of them naming `Seam`.
 
 **The frame side does not depend on `Scene`, `Protocol`, or `Session`, and that edge must never be
 added.** It is the one thing in this document worth enforcing rather than describing: an include of
@@ -150,7 +154,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `World` | portable | **both** | `Geometry` |
 | `Animation` | portable | **both** | `Core`, `Geometry` |
 | `Publication` | portable | **both** | `Core`, `Geometry` |
-| `Seam` | portable | **both** | `Core`, `Geometry` |
+| `Seam` | portable | **both** | `Core`, `Geometry`, `World` |
 | `Scene` | portable | dispatch | `Core`, `Geometry`, `World`, `Animation`, `Publication` |
 | `Frame` | portable | frame | `Core`, `Geometry`, `World`, `Animation`, `Publication`, `Seam` |
 | `Render` | platform | **both** | `Core`, `Geometry`, `Publication`, `Seam` |

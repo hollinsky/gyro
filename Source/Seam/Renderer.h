@@ -18,6 +18,7 @@
 #include "Geometry/Space.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/SyncPoint.h"
+#include "World/Material.h"
 
 // The render half of the seam: what produces the pixels a presenter puts on the glass.
 //
@@ -72,25 +73,6 @@ enum class RenderMode : std::uint8_t
 {
 	Planned,
 	Floor,
-};
-
-// How an item is dressed. Decision 33's closed set, named rather than parameterized.
-//
-// **It has one member and that is the honest state of it.** The vocabulary is open — Docs/Open.md's
-// *material vocabulary* entry wants designing with the motion catalog, because a material and the
-// transitions that reveal it are one problem — and inventing entries here would be inventing the
-// storage for a decision nobody has taken. What is fixed now is the shape decision 78 says cannot be
-// widened later: a material is a *name on an item*, so adding one is an enumerator and reaches no
-// call site that does not switch on it.
-//
-// **No parameters, and their absence is the same decision.** Decision 33 is that the shell names a
-// material and gyro decides what it costs; a radius or an amount beside this field would be the
-// parameterized filter call that decision refuses, arriving by the back door. The snapshot does carry
-// an animated blur channel, and what that channel drives is a property of whichever material claims
-// it — which is a question for the catalog rather than for this field.
-enum class Material : std::uint8_t
-{
-	None,
 };
 
 // A node's quad, projected into the output's device grid.
@@ -466,17 +448,6 @@ public:
 	return "unknown";
 }
 
-[[nodiscard]] constexpr std::string_view Name(Material material) noexcept
-{
-	switch (material)
-	{
-		case Material::None:
-			return "none";
-	}
-
-	return "unknown";
-}
-
 // Prints as device[(0, 0) (64, 0) (64, 32) (0, 32)], and a projected one carries its weights. The
 // bound is not printed: a reader chasing a misplaced window wants the corners, and the bound is what
 // they would compute from them anyway.
@@ -534,7 +505,6 @@ static_assert(
 );
 static_assert(Quad::FromRect({ { 10.0F, 20.0F }, { 64.0F, 32.0F } }).Corners[2] == Point<DeviceSpace>{ 74.0F, 52.0F });
 
-// Two materials are two dressings even where neither is populated, which is the assertion that fails
-// first if the enum is ever widened into a bitfield.
-static_assert(Name(Material::None) == "none");
+// Two composites are two names, which is the assertion that fails first if the mode is ever widened
+// into a flag set.
 static_assert(Name(RenderMode::Planned) != Name(RenderMode::Floor));
