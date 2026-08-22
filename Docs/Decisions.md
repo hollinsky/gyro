@@ -1081,6 +1081,149 @@ which is [decision 79](#79-the-console-is-a-renderer-not-a-presenter)'s branch-s
 `Capabilities()` accessor beside it would answer the same question a second way, and two answers that
 can disagree is how a composition root ends up trusting the wrong one.
 
+### 83. Dispatch's publication is an event source
+
+*(Decided 2026-08-21, while writing `Frame`'s step signature and asking what wakes an idle frame
+thread. Neither [decision 80](#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait) nor
+Architecture.md's inventory of the frame ring answers it, and the invariant it belongs to had assumed
+it.)*
+
+**Dispatch signals a new publication on a descriptor the composition root registers as an
+`IEventSource`, beside the backend's.**
+[Decision 58](#58-idle-is-a-ladder-gyro-executes-and-does-not-choose)'s invariant is *when nothing is
+animating and nothing has committed, no timer is armed and the frame thread blocks indefinitely*, and
+the second clause names a commit as the thing that ends the block. But the scene's contribution to the
+fold arrives *inside the snapshot*, which only a running frame thread reads, and
+[Architecture.md](Architecture.md#the-frame-loop) inventories that thread's ring as timers and KMS. So
+a frame thread that folded to `Settled` has nothing to wake it, and the first commit after an idle
+output is composited whenever some unrelated wakeup next happens — on a genuinely idle machine, never.
+The invariant was stated as though a commit reached the frame thread, and nothing carried it.
+
+**It is a source rather than a mechanism, and that is the whole of the argument.** Decision 80 already
+has the shim register descriptors it knows nothing about and the step drain every source on every
+iteration, so a nudge fits that shape with no new verb, no new ordering, and no change to the step's
+signature. `Descriptor()` is an eventfd, `Drain()` reads the counter, and the snapshot acquire that
+already follows the drain is what picks up the publication. The drain-before-evaluate ordering
+decision 80 makes load-bearing for `Presented` is the same ordering this needs, for the same reason
+and at no additional cost.
+
+**The direction of the descriptor is what keeps
+[decision 61](#61-the-frame-thread-is-sched_fifo-the-earliest-deadline-first-schedule-is-gyros-not-the-kernels)'s
+priority order intact.** Dispatch writes and the frame thread reads. An `eventfd` write is a counter
+increment that never blocks on the reader, so the higher-priority thread never waits on the lower one
+— the property [decision 81](#81-a-source-is-pumped-by-one-thread-nested-opens-two-connections)
+rejected a shared connection for violating, arriving here for free because this channel carries no
+data at all. Nothing is read back across it: the descriptor says *something was published* and the
+ring says what. It is therefore not the third channel
+[the publication boundary](Architecture.md#the-publication-boundary) forbids, which carries state; it
+is the doorbell on a channel that already exists.
+
+**Signalling unconditionally is correct, and it costs nothing where the cost would matter.** A nudge
+arriving while the frame thread is already running wakes it ahead of its timer, and the step then
+assesses and skips — which decision 80 licenses in as many words, since the shim is permitted to wake
+spuriously and the timing decision belongs to `Assess` rather than to the wakeup. The waste is bounded
+by dispatch's own iteration rate, and it is *zero* in the case the invariant is about: an idle machine
+publishes nothing, so it writes nothing, so it wakes nothing. **The invariant survives verbatim**,
+which is why the conditional form below is an optimisation rather than the design.
+
+**Deferred: signalling only when the frame thread would not otherwise hear it.** The return channel
+already runs frame → dispatch and `FrameReport` already carries a spare word, so the step could report
+the `Wake` it returned and dispatch could write only against a `Settled` one. It is a real saving on a
+busy system, and it introduces a lost wakeup: dispatch may read *not idle*, publish, and decline to
+signal, all inside the window before the frame thread posts its idle report and sleeps. Closing it
+means the step re-checking the ring after posting and before returning `Never()` — the ordinary
+double-check, wait-free here, and cheap. Worth doing when the waste has been measured rather than
+assumed, and recorded now because the hazard is invisible from the optimisation. Carried in
+[Open.md](Open.md).
+
+**Rejected: the frame thread polls the ring on a floor cadence.** A minimum wakeup rate — ten hertz,
+one hertz — needs no descriptor at all, and is what a system with no idle ambitions does. It does not
+serve decision 58's invariant, it abandons it: *no timer armed* becomes *a timer always armed*, and
+every idle machine pays that forever to save one descriptor on the busy ones.
+
+**Rejected: dispatch arms the frame thread's timer directly.** Dispatch authored the wake, so it could
+set the timeout. That puts a frame-thread scheduling decision on the dispatch thread, which is where
+decision 80 refuses to put the drain ordering and for the same reason — and it requires the shim to
+expose an arm-from-elsewhere verb, which is the wait interface that decision rejected, reached from
+the other end.
+
+**Rejected: folding the nudge into the backend's source.** One descriptor fewer, by having the backend
+own an eventfd dispatch also writes. It breaks
+[decision 81](#81-a-source-is-pumped-by-one-thread-nested-opens-two-connections)'s rule that a source
+has one writer as surely as one reader, and it makes a headless backend — whose flips are a function
+of a `ManualClock` — the owner of a channel that has nothing to do with presentation.
+
+### 84. The snapshot's per-output run is indexed under a set generation
+
+*(Decided 2026-08-21, while asking what binds the snapshot's positional wake schedule to an output
+set.)*
+
+**The snapshot header carries the generation of the output set it was authored against, and the frame
+loop indexes no per-output run whose generation is not its own.** Per-output data crosses positionally
+— [Snapshot.h](../Source/Publication/Snapshot.h) already spells the wake schedule as one `Wake` per
+output in output order — and position is the right identity: the fold
+[decision 69](#69-settling-answers-with-a-wake-idleness-folds-a-monoid-not-an-or) describes happens on
+the dispatch side, per output, before publication, so `Wake` needs no output field and `Sooner` stays
+a reduction over values that carry none. What position lacks is any statement that the two sides mean
+the same outputs by it.
+
+**The failure this prevents is the silent one, which is why it is a decision rather than a bounds
+check.** A run that is too short is caught by `span::size()`, and one that is too long is harmless. A
+run that is *the same length* against a different set is neither: `Wakes()[2]` is then another
+output's schedule, and the result is an output that arms nothing and never repaints, or one that never
+folds to settled and never idles — the two failures
+[decision 58](#58-idle-is-a-ladder-gyro-executes-and-does-not-choose)'s invariant exists to prevent,
+arriving by the one path the invariant cannot see. Hotplug produces exactly that shape, since one
+output replacing another leaves the count alone.
+
+**Generation is already this codebase's answer to this class, and this is a third instance rather than
+a third mechanism.** [Budget](../Source/Frame/Budget.h) drops a GPU cost whose generation has moved,
+because a timestamp outlives the configuration it was taken under;
+`OutputConfiguration::Generation` makes a late reconfiguration completion legible for
+[decision 73](#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it), because two
+requests can be outstanding at once. Both are authored by the side that changes and checked by the
+side that consumes, and both are cheap because the check is an integer comparison at the point of use.
+
+**The two generations answer different questions and both are wanted.** The set generation is the
+header's and answers *do these runs mean my outputs at all*; decision 73's is per output and answers
+*is this output's mode request newer than what I have achieved*. Merging them would have every mode
+change renumber the world, and keeping only the per-output one would leave the index unguarded — a
+generation attached to slot 2 is a statement about slot 2's occupant and not about who occupies it. So
+the per-output run carries the wake and the reconfiguration generation together, one record rather
+than two runs indexed the same way and kept in agreement by hand, and the header carries the set
+generation above both.
+
+**`SnapshotHeader::Reserved` is where the set generation goes**, which is the four bytes that header
+already spells out rather than leaves as implicit padding — reserved for the reason reserved fields
+exist, and spendable without moving a field or bumping `SnapshotVersion`, since nothing reads it today
+and both halves of the boundary ship together.
+
+**A mismatch is no information, not partial information.** The loop treats the scene as contributing
+nothing for every output — arms nothing from the scene side, renders nothing new — rather than
+indexing as far as the shorter run allows. The asymmetry is the argument. An output that misses one
+iteration's animation is invisible, because the window is the interval between dispatch renumbering
+and the loop adopting the matching set, decision 73's handshake is what closes it, and
+[decision 83](#83-dispatchs-publication-is-an-event-source)'s source guarantees the loop is awake to
+see the snapshot that matches. An output that reads its neighbour's schedule is a bug that survives
+review.
+
+**Rejected: an output identity on `Wake`.** It puts the identity in the element, gives one fact two
+spellings, and widens a `Core` type for a single consumer. `Sooner` folds wakes; identity does not
+fold, so it would be a field every reduction in the system has to drop.
+
+**Rejected: a stable per-output handle in each record, matched rather than indexed.** The stronger
+form, and `Handle` is already in `Core` with the generational checking to do it. It answers no more
+than the set generation does — a record whose handle the loop does not recognise leaves it exactly
+where a mismatch does, holding nothing it can use — and it pays per element what a generation pays per
+snapshot, turning every index into a lookup on the frame path. Worth revisiting if the run ever needs
+to be sparse, which today it does not: every output the loop holds has a slot.
+
+**Rejected: publishing the output set itself and diffing it.** Fully self-describing, and it removes
+the shared numbering rather than guarding it. It puts a comparison shaped like an allocation inside the
+frame section to serve a fact that changes on hotplug, which makes every iteration pay for the rare
+one — the trade [decision 50](#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients)
+already refuses when it puts coefficients rather than values on the wire.
+
 ---
 
 ## Animation

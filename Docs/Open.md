@@ -96,6 +96,16 @@ been waiting on a question that could not be answered until the rule behind it w
   case that made this sharpest — a driven gesture republishes one coefficient tuple rather than
   re-serializing a scene per input event — which lowers the stakes without settling the question,
   since ordinary commits at device rate remain.
+- **Whether the publication nudge should be conditional.**
+  [Decision 83](Decisions.md#83-dispatchs-publication-is-an-event-source) has dispatch write its
+  descriptor on every publication, which is correct and which wakes the frame thread ahead of its
+  timer whenever both threads are busy. The saving is to write only when the frame thread last
+  reported a `Settled` wake, which the return channel can carry and `FrameReport` has a spare word
+  for. What makes it a question rather than a patch is the lost wakeup it opens — dispatch may read
+  *not idle*, publish, and decline to signal, all inside the window before the frame thread posts its
+  report and sleeps — so the conditional form is correct only with the step re-checking the ring after
+  posting and before it returns `Never()`. Settle it by measuring the waste on a busy system rather
+  than before.
 - **The shell's scene vocabulary.** Decision 51 commits to a closed set of node kinds — surface
   reference, snapshot reference, solid, effect layer — and that list is a sketch rather than a
   design. It is the same problem as the material vocabulary below and wants solving with it and with

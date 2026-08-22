@@ -19,8 +19,9 @@ splitting, or being renamed changes this file and nothing else. If a change here
 
 > **Most of this does not exist yet.** `Core`, `Geometry`, `Animation`, `Publication`, `Seam`, and
 > `Testing` are built — `Seam` in its two frame-side halves, which is `IPresenter` and `IRenderer`,
-> the data their verbs take and report, and the source the presenter's completions arrive on. The
-> rest is a
+> the data their verbs take and report, and the source the presenter's completions arrive on — and
+> `Frame` now holds the step those interfaces are driven from, against a `NullEvaluator` standing in
+> for the `Scene` that will produce its draw items. The rest is a
 > declaration of
 > where code goes when it is written. What is worth writing down this early is the *graph* rather
 > than the file list, because the graph is enforced from the first module and the edge that must not
@@ -162,16 +163,27 @@ If those interfaces lived in `Render` instead, `Frame` would be platform code an
 testing a reimplementation of the loop — which is the thing that rots.
 
 The table above is where `Frame` lands rather than what it declares today. `gyro_add_module` names the
-edges the code actually has — `Core` and `Seam` while `FrameClock`, `Budget`, and `Timing` are the
-only things in it — because `CheckLayering.cmake` denies what is not declared, so the narrower
-declaration is the stronger rule and the rest arrive with the includes that need them.
+edges the code actually has — `Core`, `Geometry`, `Publication`, and `Seam`, the last two arriving
+with the loop that reads a snapshot and posts a watermark — because `CheckLayering.cmake` denies what
+is not declared, so the narrower declaration is the stronger rule and the rest arrive with the
+includes that need them. `Animation` is the edge still missing, and it arrives with the evaluator:
+`NullEvaluator` draws nothing, so nothing in `Frame` has yet had a coefficient to solve.
+
+**The evaluator is an interface inside `Frame` and not at either waist**, which is the one place this
+module has a seam of its own. It has no second implementation that is not a test — `Scene` publishes,
+`Frame` evaluates, and no backend is ever on the other end of it — so putting it in `Seam` would widen
+the control waist for something with one caller and one callee. What crosses *out* of it is
+[the draw list](#the-draw-list-is-in-seam), which is at the waist because a renderer does read it.
 
 **Which is also why `Frame` does not wait.** It exposes one iteration, returning the
 [`Wake`](../Source/Core/Wake.h) the next one is owed at; the `while` above it and the `io_uring`
 timeout under it are the composition root's, because the root already constructs the threads. The
 shim's whole contract is *wake at or after this instant, or earlier when a registered descriptor is
 readable* — it may wake spuriously, it is handed no say in ordering, and the loop the sweep runs is
-therefore the loop that ships.
+therefore the loop that ships. One of the descriptors it registers is dispatch's, per
+[decision 83](Decisions.md#83-dispatchs-publication-is-an-event-source): a publication has to reach a
+frame thread that folded to idle, and making that an `IEventSource` like any other is what keeps the
+step's signature from growing a case for it.
 [Decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait) has why
 the alternatives — a wait interface in `Seam`, a readiness set passed into the step — both put a
 correctness ordering in the one place nothing exercises it.

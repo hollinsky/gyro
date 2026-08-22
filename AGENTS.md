@@ -99,8 +99,15 @@ Codebase Structure:
 		                        last the clock saw *presented*, because those differ between a submit and
 		                        its vblank and a target derived from the anchor draws a frame twice — and
 		                        because that one number is also decision 30's early rendering, a pipeline
-		                        k + 1 deep being committed = anchor + k. The frame loop and admission
-		                        control join it here
+		                        k + 1 deep being committed = anchor + k. Loop.h is the iteration those two
+		                        are read from, and decision 80's shape: it takes no now and no readiness
+		                        set, drains every source before it reads a clock because a late Presented
+		                        is a stale deadline, acquires once per iteration rather than once per
+		                        output, threads decision 29's device instant through the outputs in
+		                        deadline order, and returns the Wake the composition root arms. What it
+		                        has no producer for yet is draw items, so IEvaluator is an interface
+		                        inside the module rather than at either waist and NullEvaluator is the
+		                        floor case rather than a stub. Admission control joins it here
 
 		Integration/          - The tests that name both Publication and Animation, which no module may:
 		                        the coefficient round trip, and the two-thread soak that proves the
@@ -133,7 +140,7 @@ Codebase Structure:
 		                  it hangs off, which thread each piece runs on, the composition root, and
 		                  what the build checks enforce
 		Decisions.md    - Cross-cutting. Decision log with rejected alternatives and rationale
-		                  (82 decisions). Append-mostly: a revised decision keeps its superseded
+		                  (84 decisions). Append-mostly: a revised decision keeps its superseded
 		                  position as a rejected alternative, and carries its revision history
 		                  inline and dated rather than in any global ledger
 		Open.md         - Cross-cutting. The questions not yet settled, roughly in the order they

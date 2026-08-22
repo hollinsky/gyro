@@ -216,10 +216,13 @@ gyro_add_module(Seam PORTABLE
 gyro_add_module(Frame PORTABLE
 	DEPENDS
 		Core
+		Geometry
+		Publication
 		Seam
 	TESTS
 		Budget.Test.cpp
 		FrameClock.Test.cpp
+		Loop.Test.cpp
 		Timing.Test.cpp
 )
 

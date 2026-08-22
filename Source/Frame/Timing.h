@@ -214,6 +214,16 @@ struct FrameDecision
 	// line that explains a skip is the difference between this and the deadline and nothing else.
 	Instant Finish = FrameClock::Unscheduled;
 
+	// When the device is predicted to be free, which is `Finish` without the margin over it. It is here
+	// because it is the *next* output's input: decision 29 has GPU work from two outputs serialise on
+	// one queue however it was recorded, so a loop admitting outputs in deadline order threads this
+	// forward and hands it to the following `Assess` as its `deviceFreeAt`. Recovering it by subtracting
+	// `Policy().Safety` back off `Finish` would be the same number reached by arithmetic beside the call
+	// that already had it, and it would silently stop being the same number the moment the composition
+	// below stops being addition. The margin is not subtracted because it was never the device's: it is
+	// a margin on gyro's own wakeups, so a second output that inherited it would pay it twice.
+	Instant DeviceFreeAt = FrameClock::Unscheduled;
+
 	[[nodiscard]] constexpr bool Renders() const noexcept { return Verdict != Admission::Skip; }
 
 	// Which composite to draw, and which population its cost is filed into afterwards. Meaningful only
@@ -228,6 +238,17 @@ struct FrameDecision
 	// figure a schedulability sweep reports and the one an assertion is written against, which is why
 	// it is a subtraction here rather than at each of them.
 	[[nodiscard]] constexpr Duration Slack() const noexcept { return Elapsed(Finish, Deadline); }
+};
+
+// What `Finish` computes on the way to its answer, returned whole because both halves have callers.
+//
+// The pipeline has two ends that mean different things — when the *device* stops being busy, and when
+// *this frame* is safely done — and `Assess` needs both in the same breath: the second decides the
+// verdict, the first is what the next output on the same queue starts from.
+struct Projection
+{
+	Instant DeviceFreeAt{};
+	Instant Finish{};
 };
 
 class Timing
@@ -258,7 +279,7 @@ public:
 		Instant deviceFreeAt = Instant{}
 	) const noexcept
 	{
-		const Instant planned = Finish(now, deviceFreeAt, budget, RenderMode::Planned);
+		const Projection planned = Project(now, deviceFreeAt, budget, RenderMode::Planned);
 
 		if (!clock.IsValid())
 		{
@@ -266,21 +287,22 @@ public:
 			// instant is the finish rather than the sentinel beside it.
 			return { .Verdict = Admission::Planned,
 				     .Sequence = FrameClock::NoSequence,
-				     .Presentation = planned,
+				     .Presentation = planned.Finish,
 				     .Deadline = FrameClock::Unscheduled,
-				     .Finish = planned };
+				     .Finish = planned.Finish,
+				     .DeviceFreeAt = planned.DeviceFreeAt };
 		}
 
 		const std::uint64_t owed = Owed(clock, committed);
-		const std::uint64_t plannedReach = clock.SequenceAfter(planned);
+		const std::uint64_t plannedReach = clock.SequenceAfter(planned.Finish);
 
 		if (plannedReach == owed)
 		{
 			return Decide(clock, Admission::Planned, owed, planned);
 		}
 
-		const Instant floor = Finish(now, deviceFreeAt, budget, RenderMode::Floor);
-		const std::uint64_t floorReach = clock.SequenceAfter(floor);
+		const Projection floor = Project(now, deviceFreeAt, budget, RenderMode::Floor);
+		const std::uint64_t floorReach = clock.SequenceAfter(floor.Finish);
 
 		if (floorReach == owed)
 		{
@@ -316,7 +338,7 @@ public:
 		Instant deviceFreeAt = Instant{}
 	) const noexcept
 	{
-		const std::uint64_t reach = clock.SequenceAfter(Finish(now, deviceFreeAt, budget, RenderMode::Planned));
+		const std::uint64_t reach = clock.SequenceAfter(Project(now, deviceFreeAt, budget, RenderMode::Planned).Finish);
 
 		if (reach == FrameClock::NoSequence)
 		{
@@ -347,10 +369,19 @@ public:
 	[[nodiscard]] constexpr Instant
 	Finish(Instant now, Instant deviceFreeAt, const Budget& budget, RenderMode mode) const noexcept
 	{
+		return Project(now, deviceFreeAt, budget, mode).Finish;
+	}
+
+	// The same pipeline with both ends kept. `Finish` above is this with one of them dropped, so the two
+	// cannot disagree by construction — which is the property worth having, since the loop reads one and
+	// the verdict reads the other.
+	[[nodiscard]] constexpr Projection
+	Project(Instant now, Instant deviceFreeAt, const Budget& budget, RenderMode mode) const noexcept
+	{
 		const Instant recorded = Advanced(now, Cpu(budget, mode));
 		const Instant executed = Advanced(std::max(recorded, deviceFreeAt), Gpu(budget, mode));
 
-		return Advanced(executed, m_Policy.Safety);
+		return { .DeviceFreeAt = executed, .Finish = Advanced(executed, m_Policy.Safety) };
 	}
 
 	[[nodiscard]] constexpr const TimingPolicy& Policy() const noexcept { return m_Policy; }
@@ -379,13 +410,14 @@ private:
 	// The two instants come from the clock and never from the caller, so that a decision cannot name a
 	// presentation the output was never going to make.
 	[[nodiscard]] constexpr FrameDecision
-	Decide(const FrameClock& clock, Admission verdict, std::uint64_t sequence, Instant finish) const noexcept
+	Decide(const FrameClock& clock, Admission verdict, std::uint64_t sequence, Projection projected) const noexcept
 	{
 		return { .Verdict = verdict,
 			     .Sequence = sequence,
 			     .Presentation = clock.PresentationAt(sequence),
 			     .Deadline = clock.DeadlineAt(sequence),
-			     .Finish = finish };
+			     .Finish = projected.Finish,
+			     .DeviceFreeAt = projected.DeviceFreeAt };
 	}
 
 	TimingPolicy m_Policy{};
