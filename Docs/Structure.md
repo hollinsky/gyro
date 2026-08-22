@@ -21,7 +21,9 @@ splitting, or being renamed changes this file and nothing else. If a change here
 > `Testing` are built — `Seam` in its two frame-side halves, which is `IPresenter` and `IRenderer`,
 > the data their verbs take and report, and the source the presenter's completions arrive on — and
 > `Frame` now holds the step those interfaces are driven from, against a `NullEvaluator` standing in
-> for the `Scene` that will produce its draw items. The rest is a
+> for the `Scene` that will produce its draw items. `Headless` is the first thing behind either seam:
+> a simulated panel whose vblanks are arithmetic, a device that is the one source for all of them, a
+> synthetic plane catalog, and a renderer that charges a cost and draws nothing. The rest is a
 > declaration of
 > where code goes when it is written. What is worth writing down this early is the *graph* rather
 > than the file list, because the graph is enforced from the first module and the edge that must not
@@ -141,7 +143,8 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Render` | platform | **both** | `Core`, `Geometry`, `Publication`, `Seam` |
 | `Protocol` | platform | dispatch | `Core`, `Geometry`, `Scene` |
 | `Session` | platform | dispatch | `Core`, `Protocol`, `Scene`, `Seam` |
-| `Headless`, `Nested`, `Drm` | platform | split | `Core`, `Geometry`, `Seam` |
+| `Headless` | **portable** | split | `Core`, `Geometry`, `Seam` |
+| `Nested`, `Drm` | platform | split | `Core`, `Geometry`, `Seam` |
 | `Console` | platform | own | `Core`, `Geometry`, `Seam` |
 | `Compositor` | platform | constructs | everything |
 | `Testing` | portable | — | — |
@@ -187,6 +190,28 @@ step's signature from growing a case for it.
 [Decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait) has why
 the alternatives — a wait interface in `Seam`, a readiness set passed into the step — both put a
 correctness ordering in the one place nothing exercises it.
+
+### Headless is portable, and it is the instrument
+
+`Headless` sits in the tier with `Frame` rather than with the two backends it shares a job title with,
+and the reason is the same one [Frame is portable](#frame-is-portable) gives. It is what the
+schedulability sweep runs *against*: the fake clock that takes arbitrary rates and phases, the
+simulated panel that does not run at its nominal rate, the deliberately injected miss. That sweep has
+to run on a machine with no GPU, no seat, and no compositor, and a module that is merely *incidentally*
+portable stops being so the first time a platform header is convenient — silently, since nothing fails
+until CI is the environment that no longer has what it acquired.
+
+Nothing in it needs the platform. A vblank is a phase and a period; the images are heap pages behind
+`RenderTarget`'s `MappedImage`; and the descriptor a backend would ordinarily wake on is *invalid*
+here, which [Seam/EventSource.h](../Source/Seam/EventSource.h) had already settled as the ordinary
+answer rather than a gap — a headless flip is a function of the clock, so there is no file to poll. The
+null renderer that charges a simulated `C` is here for the same reason and not in `Render`, which is
+platform code holding Vulkan. See
+[decision 85](Decisions.md#85-the-headless-backend-is-portable-and-the-instrument-is-the-reason),
+including what would take it back out of the tier and why the build would say so.
+
+It has no dispatch half yet. Presentation is all that is built; scripted input is dispatch-side and
+arrives with the input seam, at which point the module names one.
 
 ### The draw list is in Seam
 

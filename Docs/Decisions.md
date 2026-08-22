@@ -5447,3 +5447,61 @@ fractional-scale layout, and it is not guaranteed. A client that floored interna
 hole at texel 1 while gyro snapped the child to 2 — a full device pixel of disagreement, and worse
 than leaving the offset alone. It is measurable rather than arguable, and the measurement is carried
 in [Open.md](Open.md).
+
+### 85. The headless backend is portable, and the instrument is the reason
+
+*(Decided 2026-08-21, on building `Headless` against the loop that had just landed.
+[Structure.md](Structure.md#the-modules)'s table had already placed it, and placing it turned out to
+have been an assumption rather than a reading.)*
+
+**`Headless` is in the portable tier: ISO C++ and POSIX, enrolled in
+`CMake/CheckPortability.cmake` beside `Core`, `Geometry`, `Animation`, `Publication`, `Seam`, and
+`Frame`.** The table had it as platform code alongside `Nested` and `Drm`, on the entirely reasonable
+ground that a backend is where the platform lives. Written out, it has no platform in it. A simulated
+panel is arithmetic over [Core/Time.h](../Source/Core/Time.h) — a phase, a period, and which vblank a
+commit at a given instant makes. Its images are heap pages rather than dumb buffers, so
+`RenderTarget`'s `MappedImage` is satisfied by an allocation. And the one place a backend would
+ordinarily reach for a Linux header is a descriptor to wake on, which
+[Seam/EventSource.h](../Source/Seam/EventSource.h) had already settled in the other direction: a
+headless source reports an *invalid* descriptor, because its flips are a function of the clock the
+test drives and no file becomes readable when one falls due. There is nothing to open.
+
+**The tier is not a label on that observation; it is what holds it.** `Headless` is the instrument
+[decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)'s
+schedulability claim is falsified with — the fake clock that takes arbitrary rates and *phases*, the
+deliberately injected miss, the panel that does not run at its nominal rate — and
+[Structure.md](Structure.md#frame-is-portable) already turns on that sweep running "on a machine with
+no GPU, no seat, and no compositor". A module that merely *happens* to be portable acquires a platform
+dependency the first time one is convenient, and the failure is silent: the sweep stops running in the
+environment it was built for, and nobody notices until it is the environment CI has. Declaring the
+tier makes that a build failure naming the include.
+
+**Rejected: platform, for consistency with `Nested` and `Drm`.** The row would read more evenly and
+the check exists to catch a dependency nobody meant to add — so declining to enrol the one module
+whose entire job is to run where there is no hardware gives up the rule exactly where it pays. The two
+neighbours are platform because they *are*: a Wayland connection and a DRM file. Sharing a table row
+is not sharing a reason.
+
+**Rejected: a self-notification descriptor, which would have decided the tier by itself.** The
+question was `eventfd` against `pipe` — one fd against two, kernel-side coalescing against a drain
+that reads to empty, a counter that cannot fill against a 64 KiB buffer that can, and `pipe2`'s flags
+being Linux's while `pipe`'s are POSIX's. It is moot here and stays decided where it actually lands:
+[decision 83](#83-dispatchs-publication-is-an-event-source) has dispatch's nudge as an `eventfd`, in a
+module that is platform code for other reasons. Headless needs neither, and reaching for one to look
+like the other backends would have bought the platform tier for a descriptor nothing waits on.
+
+**The simulated renderer lives here too, and it is the same argument one seam over.** The sweep needs
+"a null renderer that merely charges a simulated `C`", and the obvious home is `Render` — which is
+platform, holds Vulkan, and would drag the tier back. It is not a Vulkan device with the drawing
+removed; it is the second thing headless simulates, and it belongs beside the panel. What it produces
+is durations, which is the whole of what decision 29's test consumes, and its `SyncPoint`s are
+immediate because [Seam/SyncPoint.h](../Source/Seam/SyncPoint.h)'s null point already means *finished
+on the CPU before the call* — a fabricated descriptor number would be a lie a presenter written to
+honour it could hand to a real syscall.
+
+**What would overturn this, and what it would cost.** Two things headless is expected to grow reach
+for the platform: frame dumps that want a mapping rather than a copy, and scripted input shaped like
+what `libinput` delivers. The first is additive and can stay a copy; the second is dispatch-side and
+arrives with the input seam, at which point the module gains a `DISPATCH_HALF` and the question is
+asked again — for that half, and not for the panel. Either way the check reports it as a build failure
+with the include named, which is the whole reason to declare the tier while the answer is still cheap.

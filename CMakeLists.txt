@@ -226,6 +226,27 @@ gyro_add_module(Frame PORTABLE
 		Timing.Test.cpp
 )
 
+# The instrument, and PORTABLE is the load-bearing word.
+#
+# Docs/Structure.md's table has the three backends as platform code, and this one turns out not to be:
+# a simulated panel is arithmetic over Core/Time.h, its images are heap pages rather than dumb buffers,
+# and Seam/EventSource.h already settles that a headless source has no descriptor at all — its flips
+# are a function of the clock the test drives, so there is no file to poll and nothing to open. What
+# the tier buys is that CheckPortability.cmake holds it there: the one place decision 29's
+# schedulability claim is falsified cannot acquire a platform dependency without the build saying so,
+# and it keeps running on a machine with no GPU, no seat, and no compositor.
+#
+# No DISPATCH_HALF yet. Scripted input is dispatch-side and arrives with the input seam; presentation
+# is all that is here, and Docs/Structure.md's thread table already has that on the frame side.
+gyro_add_module(Headless PORTABLE
+	DEPENDS
+		Core
+		Geometry
+		Seam
+	TESTS
+		Vblank.Test.cpp
+)
+
 # Declared after the modules, because the module list is what they check. ALL for the same reason as
 # the clock check above.
 #
