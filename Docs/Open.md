@@ -94,20 +94,40 @@ what to suspect. [AGENTS.md](../AGENTS.md#how-decisions-get-made) carries these 
   report and sleeps — so the conditional form is correct only with the step re-checking the ring after
   posting and before it returns `Never()`. Settle it by measuring the waste on a busy system rather
   than before.
-- **The shell's scene vocabulary.** *(Narrowed 2026-08-22.)* Decision 51 commits to a closed set of
-  node kinds — surface reference, snapshot reference, solid, effect layer — and that list is a sketch
-  rather than a design. It is the same problem as the material vocabulary below and wants solving
-  with it and with the motion catalog, since a node, the material that dresses it, and the transition
-  that reveals it are one design problem seen three ways. The test named in decision 51 is the
-  constraint: a shell must not be able to produce motion that does not match the catalog.
+- **The shell's scene vocabulary.** *(Kinds answered 2026-08-22; the dressings remain.)*
+  [Decision 95](Decisions.md#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind)
+  settles the node kinds — container, image, solid, reference — and finds decision 51's sketch wrong
+  on its axis rather than merely short. What it deliberately does not settle is the *contents* of the
+  two enums that dress a node, and both are still one design problem with the motion catalog, since a
+  node, the material that dresses it, and the transition that reveals it are three views of one
+  thing. The test named in decision 51 is still the constraint: a shell must not be able to produce
+  motion that does not match the catalog.
 
-  **The sketch is known wrong rather than merely undesigned, which raises the priority.** Decision 88
-  added a node kind the list does not contain — a node referencing another subtree — so anything
-  built against the four would be built against a set already superseded once. Decision 91 is why
-  this now blocks something concrete: `World/Node.h` exists and carries what the frame side's walk
-  needs, and the fields that wait on this entry are absent from it. A node kind, a material, a
-  texture, a color state, and the encoding of decision 88's reference all arrive together when this
-  is settled, and `SnapshotVersion` is what absorbs them.
+  **What is left is the material set below, the elevation set, and the gesture vocabulary.** Each
+  ships today with the single enumerator its own design already names, which is enough to land the
+  structure and not enough to check anything, and each wants a review with a screen rather than an
+  argument.
+- **The scene vocabulary closes arrangement and not trajectory.**
+  [Decision 89](Decisions.md#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete)
+  makes setting a model value *be* a retarget, so a shell that republishes a node's position every
+  frame gets a catalog spring chasing a moving target — which is
+  [decision 65](Decisions.md#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)'s
+  rejected model reached from the authoring side, and reads as lag rather than as the catalog.
+  Decision 95's closed set does not close it, because the hole is in *when* a value may change rather
+  than in what may be said. The candidate rule is that every mutation names a `Transition`, which is
+  roughly the shape a commit already has; what it costs is a shell that wants to place a window
+  without animating it, and whether that case is real decides whether the rule is worth having. This
+  is decision 51's falsifiable test with a mechanism attached, so it should be settled before a shell
+  exists to violate it.
+- **Clipping and masking.**
+  [Decision 95](Decisions.md#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind)
+  leaves both out and says so rather than assuming them away. A node's children are not clipped to
+  its extent, and a group is not a substitute — its offscreen sits at the subtree's own screen-space
+  bound, so it contains the overflow rather than cutting it. What that costs is an overview tile that
+  cannot crop a window with a popup hanging off it, and a shell's scrolling list of live surfaces
+  spilling past its container. Both are recoverable by the shell clipping in its own surface, which
+  is why this is an entry rather than a defect; what decides it is whether the recoverable version
+  costs a round trip on something being dragged.
 - **Which transitions declare an opacity group.** *(Narrowed 2026-08-17.)* Decision 60 settles that
   a group fade flattens and what it costs; it does not settle which bundles ask for one, and "every
   fade" is the wrong answer — paying for an offscreen on a single window fading out would put a
@@ -180,16 +200,33 @@ what to suspect. [AGENTS.md](../AGENTS.md#how-decisions-get-made) carries these 
   and the answer sizes decision 62's variant lattice. It wants doing *with* the vocabulary rather
   than after it: a set designed without the question in mind produces a gathering material where a
   pointwise one would have done, and each of those is a pass boundary that can never be fused away.
-- **Where `Material` lives.** *(Answered 2026-08-22; what remains is the move.)*
-  [Decision 87](Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)
-  moved `TextureId` and `ColorState` out of `Seam` because the world authors them and the frame side
-  consumes them, and could not place the third field of a `DrawItem` that has the same shape.
-  [Decision 91](Decisions.md#91-the-worlds-vocabulary-is-a-module-of-its-own-below-both-waists)
-  creates the fourth base module that entry said would resolve it, on the strength of the node record
-  rather than of `Material`. So `Material` goes to `World` and `Seam` gains a `World` edge, and the
-  two halves of this question come apart: *where* is settled, *what is in the set* is the entry above.
-  It moves with the vocabulary rather than before it, because a move made while the set is one
-  enumerator is a move nothing can check.
+- **The elevation set.**
+  [Decision 96](Decisions.md#96-the-frame-is-the-compositors-and-the-header-is-the-apps) puts window
+  shadows on named levels rather than on a blur and an offset, which is decision 33's rule on a third
+  axis and inherits its cost: the set has to be designed before the first shadow is drawn. It is the
+  material vocabulary's twin and wants deciding beside it — how many levels, what each is for, and
+  what a level does at the floor tier, where decision 34 has to spend less without the picture
+  visibly changing.
+- **Where the minimum corner radius sits.** Decision 96 rounds every window to at least a floor, and
+  the floor is a number nobody has looked at. Too high and it cuts inside toolkits that already round
+  generously, which costs an antialiased edge and produces the corner artefact that entry names; too
+  low and it does nothing for the square-cornered population it exists to serve. It wants a screen
+  with GTK, Qt, and an Xwayland application on it at once.
+- **The frame-parameters protocol, and what gyro proposes rather than works around.**
+  [Decision 96](Decisions.md#96-the-frame-is-the-compositors-and-the-header-is-the-apps) says the
+  exit from decision 48's residue is a hint that lets a client declare it has stopped drawing its own
+  shadow, and publishes gyro's frame parameters the other way — radius, focus treatment, control set
+  and order. Nothing about it is designed: not the interface, not whether it extends
+  `xdg_decoration` or replaces it, and not whether it is worth proposing before gyro can demonstrate
+  the result. The last of those is the real question, since a protocol argued from a design nobody
+  has run is the kind that gets one implementation and no adopters.
+- **Whether the crop comes back.** Decision 96 rejects cropping a client's buffer to its window
+  geometry because the verification that would make it safe — refuse to crop a margin holding opaque
+  texels — is a GPU readback on the dmabuf import path. Two things would reopen it: a client that has
+  *said* it draws no shadow, at which point there is nothing to crop and the question dissolves; or a
+  cheap way to characterise a dmabuf's margin at import, which is a rendering question rather than a
+  protocol one. Worth re-reading when the import half of the renderer is written, since that is where
+  the cost would actually land.
 - **The intermediate format for unfused effect passes.** Decision 62 requires the fused and unfused
   paths to agree below the perceptual threshold, and the whole of the difference is rounding at pass
   boundaries — registers at full precision against whatever the intermediate stores. `fp16` is
@@ -325,6 +362,12 @@ what to suspect. [AGENTS.md](../AGENTS.md#how-decisions-get-made) carries these 
   where it lives, and how a client is judged worthy of it are all unspecified. Decision 51 promotes
   this from speculative to load-bearing: the shell is its motivating occupant, and "which process
   gets to be the shell" is exactly the judgement this listener has to encode.
+- **Whether Xwayland forwards `_GTK_FRAME_EXTENTS` into window geometry.**
+  [Decision 96](Decisions.md#96-the-frame-is-the-compositors-and-the-header-is-the-apps) applies the
+  corner radius to the window geometry rect rather than to the buffer, so for an X11 client that
+  draws its own shadow the answer decides whether the radius lands on the window or on the shadow
+  margin. This is an afternoon of reading Xwayland rather than a decision, and it is the shape the
+  triage rule above says to retire that way: the argument names the source it rests on.
 - **Xwayland has no owner.** It must run as the user, so gyro cannot spawn it, which means decision
   24's session agent is a persistent agent rather than a one-shot fd donor. gyro can own the X
   sockets — `/tmp/.X11-unix` is world-writable — and allocate display numbers, which a

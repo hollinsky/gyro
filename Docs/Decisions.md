@@ -1234,7 +1234,7 @@ decision, taken four decisions later because nothing needed it until there was a
 [Decision 82](#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene)'s `DrawGroup::Count` is
 a run length over *emitted* items, and the emitted list is post-cull: back faces go by
 `NodeTransform::FacesViewer` over the composed chain — **the signed area of the projected quad, per
-[decision 93](#93-the-quad-is-assembled-in-frame-and-the-back-face-test-is-the-signed-area), because
+[decision 93](#93-the-quad-is-assembled-in-frame-and-the-back-face-is-the-signed-area), because
 that predicate reads one node and the answers do not multiply** *(revised 2026-08-22)* — and anything
 wholly outside the target is gone before the list is built. Both tests are post-evaluation and per instance. So emission depends on
 evaluation, `Count` depends on emission, and the dispatch thread — which by decision 50 evaluates
@@ -1465,6 +1465,15 @@ A malformed tree then draws nothing where the bad subtree was — a missing thum
 session, which is the same conservative direction as every other ingest in the codebase. Decision 88's
 dispatch-side guarantee stays; it stops being the only thing standing between a bug and the machine.
 
+**The depth counter is not the bound, and the arena is.** *(Revised 2026-08-22.)*
+[Decision 95](#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind) found the hole
+while encoding the reference node: depth bounds a *tree* and the scene is a DAG, so sixty-four
+containers each holding two references to the one before them sit at depth sixty-four and emit 2⁶⁴
+items — this paragraph's own failure, reached through breadth rather than through a cycle and reached
+inside the cap rather than by exceeding it. What actually bounds the walk is decision 82's arena,
+sized by the admitted plan, and the walk stopping when it is full. The depth counter and the
+subtree-length check stay; they were never the whole of it.
+
 **Rejected: springs inline in the node record**, the denormalized form, which needs no indices at all.
 Four springs inline is about two hundred and forty bytes per node, always, where a settled node needs
 about fifty-six — half a megabyte per snapshot against a couple hundred kilobytes on a scene of a few
@@ -1560,6 +1569,14 @@ wrong: [decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism)'
 reference node decision 88 added. So the kind enum follows `Material` rather than shipping beside the
 record, on the same reasoning: a set nobody has designed is a set that will be replaced, and both are
 one field in a record that has no callers.
+
+**The vocabulary landed and the record is complete.** *(Revised 2026-08-22.)*
+[Decision 95](#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind) settles the
+set the paragraph above defers to, so the four fields it names arrive: a kind, a material, an
+elevation, and one content index whose run the kind selects. The reasoning here holds — the enum did
+wait for a design rather than shipping as a placeholder — and what changed is that decision 51's list
+turned out to be wrong on its axis rather than merely short, which is what made settling it urgent
+instead of tidy.
 
 **The channel slots are named rather than an array indexed by `SnapshotRun`.** That enum is the
 waist's schema, which [Snapshot.h](../Source/Publication/Snapshot.h) argues belongs at the waist, and
@@ -2939,6 +2956,13 @@ shell be replaced is the same one that lets gyro run without one, which is
 [decision 34](#34-effect-quality-is-a-tier-gyro-chooses-and-the-floor-tier-is-the-recovery-path)'s
 argument arriving in a second place.
 
+**The four kinds above were a sketch and are superseded.** *(Revised 2026-08-22.)*
+[Decision 95](#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind) settles the
+set, and it is four again and a different four: surface reference and snapshot reference are one
+kind, an effect layer turns out to be a *field* rather than a kind, and a container — a node with
+subnodes and no content of its own — is missing here and is the one kind the encoding cannot do
+without. Everything this section argues survives that unchanged; what changes is only the list.
+
 #### gyro owns the background
 
 The background is gyro's, not a client's, and it does more work than it appears to. Blur always has
@@ -3017,6 +3041,346 @@ one place — and it makes resize worse than every compositor gyro is trying to 
 
 **Rejected: a background supplied as a file path.** Simpler for the shell and it puts an image
 decoder in gyro. **Rejected: showing a cached background before authentication**, above.
+
+### 95. The scene vocabulary is four kinds; a material is a field, not a kind
+
+*(Decided 2026-08-22, settling [Open.md](Open.md)'s *the shell's scene vocabulary* and filling the
+fields [decision 91](#91-the-worlds-vocabulary-is-a-module-of-its-own-below-both-waists) left out of
+the node record. Corrects the sketch in decision 51 above.)*
+
+**A node is a `Container`, an `Image`, a `Solid`, or a `Reference`; what dresses it is a field on
+every one of them.** Decision 51 sketched surface reference, snapshot reference, solid, and effect
+layer, and [Open.md](Open.md) has carried that list as a sketch rather than a design ever since. The
+replacement is four again and a different four, which is why the corrections are worth more than the
+count: two of the sketch's entries are one kind, one of them is not a kind at all, and the kind that
+is missing is the one the tree cannot be encoded without.
+
+#### A surface reference and a snapshot reference are one kind
+
+[Texture.h](../Source/Core/Texture.h) already made this argument for the id space and decision 82's
+`DrawTexture` for the seam, both from the same case: [exit pixels](Animation.md#exit-pixels) turn a
+closing window's live surface into a compositor-owned snapshot *while the exit is running*. As two
+kinds, the node changes kind under a running spring — so either it is destroyed and rebuilt, which is
+the failure [decision 18](#18-matched-geometry-is-in-the-first-cut) is in the first cut to prevent, or the
+kind is mutable, which gives up what the closed set is for, since decision 51's floor policy is gyro
+interpreting its own scene while the shell restarts.
+
+What that costs on screen is the transition [Animation.md](Animation.md#exit-pixels) builds around: a
+menu collapsing back toward the control that opened it, restarting its collapse at the moment the
+client released its buffer, dozens of times a minute inside one application. So it is one kind, and
+who owns the pixels is a question for the half of the renderer that imported them.
+
+#### An effect layer is a field, and so is an elevation
+
+Decision 33's material is a *dressing*, and decision 82's `DrawItem` already carries `Dress` beside
+`Content`. As a kind, a glass window is not sayable: it becomes an effect-layer node stacked over a
+surface node, which is two transforms and two corner radii that agree only while nothing moves, and
+every frame in which they disagree is a bright seam around a translucent panel. As a field, the
+sketch's intent survives untouched — a container dressed `Glass` draws the blurred backdrop and
+nothing else, which is what an effect layer was.
+
+The same slot takes the second dressing.
+[Decision 96](#96-the-frame-is-the-compositors-and-the-header-is-the-apps) puts window shadows on an
+`Elevation` — named levels rather than a blur and an offset, which is decision 33's argument applied
+to a third axis. Two bytes, each orthogonal to the kind and to the other, because a glass panel casts
+a shadow too.
+
+#### A container is a node with subnodes and no content
+
+The kind the sketch has no room for, and it is forced rather than convenient.
+`wl_subsurface.place_below` names the *parent surface itself* as a legal reference, so a subsurface
+may sit beneath its parent's own pixels. Decision 55 makes z the list order, so the only encoding of
+that in a preorder run is a container whose children are the below-subsurfaces, the parent's own
+surface, and the above-subsurfaces, in that order. An ordinary toplevel is therefore already a
+container, alongside every opacity group (decision 60), every workspace, and every overview grid.
+
+Without the kind, a container is a fully transparent `Solid`: one draw item per container per frame,
+sampling nothing and covering nothing, on a node whose whole purpose is to hold a transform.
+
+#### `Solid` is mostly gyro's own, and the boot path is why it survives
+
+It is the thinnest of the four, so it is worth saying what it is for: the background before or without
+a wallpaper, the firmware background colour
+[decision 37](#37-gyro-owns-the-display-from-firmware-handoff-onward-there-are-no-vts)'s continuous
+image continues into, the letterbox fill when a wallpaper's aspect does not match the mode, and the
+dimming overlay [Open.md](Open.md)'s *backlight without a backlight* contemplates. A shell wanting a
+coloured rectangle uses its own surface; this is not really shell vocabulary.
+
+The alternative is a 1×1 texture stretched, and it loses in one place, which happens to be the place
+that matters: `Blit` ([decision 79](#79-the-console-is-a-renderer-not-a-presenter)) paints a fill with
+no device, no import, and no texture lifetime, and `Blit` is the renderer running at the moment the
+handoff from firmware has to stay continuous.
+
+#### Content rides in per-kind runs
+
+Decision 90's rule one level over. A node carries a kind and one index-or-sentinel; the kind says
+which run the index is a position in, and a container names nothing. `Image` is a texture id, the
+texels to sample, the rect the frame treatment applies to
+([decision 96](#96-the-frame-is-the-compositors-and-the-header-is-the-apps)), and a colour state —
+forty-eight bytes. `Solid` is four components and a colour state — twenty-four.
+
+**A colour state belongs in those runs rather than on the node.** A container has no pixels and so has
+nothing that means anything as light; eight bytes on every node in the tree to say so is the padding
+decision 90 refused for springs, arriving on a different field.
+
+**A reference needs no run at all**, because its whole payload is one node index — so `Content` *is*
+the target when the kind is `Reference`. One field with two readings, and they are the same reading: a
+reference's content is a node.
+
+#### A reference points backwards, and a cycle stops being expressible
+
+Decision 88 owes acyclicity and a bounded reference depth to the frame side, and decision 90 declines
+to let that promise be the only thing between a bug and the machine. Requiring the target's index to
+be *lower* than the referencing node's discharges the first half structurally: a cycle cannot be
+written down, so there is nothing to detect and nothing to trust.
+
+What it costs is an authoring order — a subtree is published before every presentation of it — which
+is how an overview is written anyway: the real windows near the top of the run under a hidden
+container, the thumbnails below pointing back at them. A reference expands the referenced root's flags
+as authored, which is why the originals are hidden by hiding their *parent* rather than each of them.
+
+#### Decision 90's depth counter is not the work bound, and the arena is
+
+*(A reading that changes decision 90 rather than restating it.)* That entry bounds the walk with a
+depth counter and a subtree-length check, against an unbounded traversal at `SCHED_FIFO` whose
+survivable outcome is [decision 22](#22-gyro-runs-as-a-dedicated-unprivileged-uid-with-cap_sys_nice-and-nothing-else)'s
+`RLIMIT_RTTIME` taking every session's UI at once. **Depth is not that bound once the scene is a DAG.**
+Sixty-four nodes, each a container holding two references to the one before it, is a depth of
+sixty-four and 2⁶⁴ emissions — the exact failure that entry was written to prevent, reached through
+breadth rather than through a cycle, and reached *inside* the depth cap rather than by exceeding it.
+
+The bound that does hold is one the design already has and had not been asked to carry: decision 82's
+draw list is built into `Frame`'s own arena, sized by the admitted plan, because
+[decision 36](#36-frame-path-discipline-is-enforced-mechanically-not-by-review) forbids allocating
+there. **The walk stops when the arena is full**, stated here as behaviour rather than left as a
+property of the storage. A malformed or hostile tree then draws a short frame — the same conservative
+direction as decision 90's missing thumbnail, and as every other ingest in the codebase.
+
+#### Rejected
+
+**Rejected: a union inline in the node record.** The obvious shape, and it charges every container and
+every group twenty-four bytes to carry what only a leaf has. It is decision 90's rejected inline
+spring at a smaller scale and it loses the same way — the common node is the one with nothing in the
+union, and the walk drags the payload through cache in order not to use it.
+
+**Rejected: keeping surface and snapshot apart, per decision 51.** The honest reading of where pixels
+come from, and the render seam had already collapsed it. Two kinds is a kind that changes while a
+spring is running.
+
+**Rejected: `EntityId` as the reference target**, resolved through a side table.
+[Decision 15](#15-identity-is-a-generational-handle)'s handle is what identity is everywhere else, so
+it reads as the safer choice. It costs a lookup per reference inside the frame section and a table
+published beside the run, and it buys nothing an index does not: decision 88 is explicit that a
+reference is *not* a second identity, so the target is a position in a tree rather than a thing to
+name.
+
+**Rejected: forward references with a cycle check.** More expressive by exactly the cases nobody has,
+and the check is what the backward rule removes. A rule that makes the bad state unrepresentable beats
+a test that catches it, on a walk where the test would run per node per frame.
+
+**Rejected: a node kind that knows what a window is.** The set says nothing about toplevels, popups,
+or thumbnails, which is decision 51's fisheye-dock test holding: the moment the scene knows what a
+window is, the arrangements that are not windows stop being expressible.
+
+**Rejected: clipping and masking** — an omission rather than a refutation, recorded so it is not
+assumed away. A node's children are not clipped to its extent, and `Group` is not a substitute, since
+its offscreen sits at the subtree's own screen-space bound and therefore *contains* the overflow
+rather than cutting it. What that costs is an overview tile that cannot crop a window with a popup
+hanging off it. Recoverable by a shell clipping in its own surface, and carried in
+[Open.md](Open.md).
+
+**Rejected: blend modes beyond `over`**, which is not yet a question anybody has asked and is cheaper
+to answer before they do. Multiply and screen are defined in the encoding their operands arrived in,
+so one node over two backdrops in different colour states would mean two different things — decision
+47's arithmetic giving way at the one place a screenshot would not show it.
+
+#### Consequences
+
+`World/Node.h` gains `Kind`, `Material`, `Elevation`, and `Content`, taking the record from 120 bytes
+to 128 — two cache lines exactly, where 120 straddled, so the walk's indexing becomes a shift.
+`Material` moves from `Seam` to `World` as decision 91 said it would, and `Seam` gains its `World`
+edge. `SnapshotRun` gains a run per content kind, and `SnapshotVersion` bumps to 3, which is free
+while both halves of the boundary still ship together.
+
+What stays open is the *contents* of the two dressing enums rather than their shape: which materials
+exist and which of them are pointwise (decision 33), and where the elevation levels sit. Both ship
+with the one enumerator the design already names for itself and are filled in at a review with a
+screen, the way [Catalog.h](../Source/Animation/Author/Catalog.h) says its own entries will be.
+
+### 96. The frame is the compositor's and the header is the app's
+
+*(Decided 2026-08-22, on asking how a shadow reaches a node. Revises
+[decision 48](#48-linear-blending-is-a-visible-ecosystem-change-and-gyro-takes-it)'s stated exit,
+which cannot be reached.)*
+
+**Decoration is not one thing, and `xdg_decoration`'s single client-or-server choice is a category
+error rather than a coarse approximation.** It bundles six things that have three different owners:
+
+| Part                  | Owner              | Why                                                                                              |
+| --------------------- | ------------------ | ------------------------------------------------------------------------------------------------ |
+| Shadow                | the compositor     | It depends on what is behind the window and on the blending model, neither of which a client sees |
+| Corner and silhouette | the compositor     | At every window edge in every screenshot, which makes it the most cohesion-critical pixel there is |
+| Border, focus outline | the compositor     | Focus is state the compositor already owns                                                        |
+| Resize region         | the compositor     | Decision 51 already keeps resize out of the round trip                                            |
+| **Header contents**   | **the app**        | Firefox's tab strip, a terminal's tabs, an IDE's toolbar — a compositor cannot lay out a tab bar  |
+| Window controls       | negotiated         | The compositor knows which buttons the user configured and in what order; the app may place them   |
+
+A toolkit that refuses server-side decorations is refusing row five, and the protocol makes it refuse
+rows one through four along with it. That is the whole defect, and it is why the system that gets this
+right does not offer the choice at all.
+
+**Cohesion lives in the frame and the motion, not in the header — which is decision 51's own argument
+one level down.** That decision says the shell may invent any arrangement and cannot invent a spring.
+The same claim for applications: an app may invent any header and cannot invent a shadow, a
+silhouette, or the way its window opens. Safari, Xcode, and Finder share nothing above the content
+area and read as one machine, which is the evidence the split is in the right place; a system title
+bar forced above Firefox's own tab strip is the evidence that the other one is not.
+
+**macOS's consistency comes from one shared toolkit rather than from server-side drawing, and that is
+the half that does not transfer.** `WindowServer` computes a window's shadow from its alpha channel —
+`-[NSWindow invalidateShadow]` exists because the server caches a silhouette and has to be told when
+the shape changed — but the rounded corner is drawn by AppKit's frame view, in process, and it is
+identical everywhere because every application links the same AppKit. Linux has no such toolkit. So on
+Wayland the frame is the compositor's or it is nobody's, and *nobody's* is the status quo.
+
+#### A server-side frame is shell chrome, parented into the window's subtree
+
+gyro cannot draw a title.
+[Decision 25](#25-the-lock-screen-is-a-client-the-compositor-owns-lock-state-not-lock-ui) keeps text
+shaping and layout out of a `SCHED_FIFO` process, and decision 51 already makes panels, switchers, and
+notifications the shell's; a decoration frame is that category. So an application that wants a frame
+gets one from the shell, and gyro places it as a **child node of the window's own node**.
+
+**That arrangement is only available here.** Every other compositor draws the frame in process
+precisely because a separate one cannot keep up with a window being dragged. Under decision 95's tree
+the frame composes under the same transform in the same frame as the window it decorates, so it cannot
+shear or lag by construction — and a maximize animates the window and its frame as one object because
+they *are* one object. Cross-process cohesion is free here for the reason decision 51 gives about
+shared `t₀`, arriving a second time through the transform.
+
+**The floor is no title bar rather than no window.** With no shell — boot, restart, a wedged one — a
+window that asked for a frame is drawn without one and stays usable, since gyro owns move, resize, and
+close as mechanism. The negotiated mode is *held* across the gap rather than flipped to client-side,
+which would force a redraw in every affected client twice per restart to buy a few hundred
+milliseconds of title bar on a machine that is visibly recovering anyway.
+
+#### Elevation is a field the compositor may decline to draw
+
+Decision 95 puts an `Elevation` on every node — named levels, with the shell declaring which windows
+are lifted and gyro deciding what a level costs, which is decision 33's rule on a third axis. **Under
+client decoration gyro sets it to none and draws nothing**, because the client has already drawn a
+shadow into its buffer and two shadows are worse than either one.
+
+The vocabulary carries no notion of client-side decoration in order to do that. Window management
+knows the negotiated mode and sets the field; the scene stays a scene. It is the same separation that
+keeps a blur radius out of `Material`.
+
+#### A minimum corner radius, applied to the window geometry rect
+
+gyro rounds every window to at least a floor radius, and *minimum* is what makes that safe. Against a
+client's own radius `r`:
+
+- gyro's `R` greater than `r` — gyro's cut lies inside the client's curve and removes it whole, so the
+  corner is gyro's.
+- gyro's `R` smaller than `r` — gyro's cut lies outside the curve and removes nothing visible, so the
+  corner is the client's.
+
+There is no value at which the two blend into a corner belonging to neither, which is exactly what a
+*fixed* radius produces and is why the floor is stated as one. Set at the low end of where toolkits
+already cluster, it does nothing to GTK, Qt, or Firefox and squares up the outliers — Xwayland, SDL,
+Java — which is also the population with no client-drawn shadow to conflict with.
+
+**It applies to the window geometry rect rather than to the buffer**, which is the one thing this
+needs from a client and the reason `Image` content carries a frame rect. A client that draws a shadow
+sets `xdg_surface.set_window_geometry` to its visible bounds — it must, or every compositor tiles it
+with gaps — so rounding the node's whole extent would round a corner of the shadow margin that nobody
+can see. For a client that never sets it, which is most of Xwayland, the frame rect is the whole
+extent and the rounding is simply right.
+
+**And it applies without discarding the margin.** The rounded-rect test is bounded to the frame rect,
+and fragments outside it pass through untouched, so nothing a client drew outside its declared bounds
+is ever thrown away. The failure mode is gyro rounding a rect that was not the window — visible and
+local — rather than gyro silently deleting content.
+
+**Radius goes to zero when a window is fullscreen or tiled edge to edge**, from gyro's own layout state
+rather than from anything a client says. Black corners on video is the failure that rule exists to
+prevent, and [decision 67](#67-the-settled-snap-is-unconditional)'s settled snap is what makes the
+tiled case exact rather than nearly so.
+
+**One artefact, named rather than discovered.** A client that both draws a generous shadow and rounds
+more tightly than the floor shows a light crescent at each corner, where gyro's cut pulls the window
+back past where that client's shadow begins. It needs both conditions at once, and it is the argument
+for setting the floor at the low end rather than at whatever looks best on gyro's own windows.
+
+#### Rejected: cropping the buffer to the window geometry rect
+
+The complete answer, and what would make decision 48's residue reducible in principle: sample only the
+visible bounds, and a client's shadow never reaches the composite at all. Rejected because the safe
+version of it is not available.
+
+Trusting the hint means discarding whatever a client drew outside its declared bounds, unseen, on
+every frame forever. The verifier that would fix that — scan the inset at import and refuse to crop a
+margin holding opaque texels, which is
+[decision 63](#63-effects-declare-their-kind-and-their-damage-the-verifier-keeps-them-honest)'s rule
+applied to a second hint — works for `wl_shm` and does not work for dmabuf, where it is a GPU readback
+on the import path. So the check is unavailable for exactly the buffers that carry the case, and what
+is left is trust.
+
+It stays available, and it is worth revisiting the moment a client can *tell* us it has stopped
+drawing a shadow — at which point there is nothing left to crop.
+
+#### Rejected: server-side decorations as the answer, which is decision 48 as written
+
+That entry answers the flattened-shadow problem with "the answer is that gyro draws the shadows",
+reduces the exposure to clients insisting on CSD, and accepts the residue *"until it adopts
+server-side decorations"*. GTK has declined server-side decorations as a matter of policy, so as
+written that is not a horizon: it is a permanent cost, on most of what an ordinary user runs.
+
+The correction is that CSD-insisting and shadow-insisting are not the same refusal. A toolkit wants
+row five of the table above and has no position on rows one through four — and it already publishes
+the extent of its shadow to every compositor on the wire. **The exit is a protocol that lets it say
+so.**
+
+#### The ecosystem move, and it asks for nothing
+
+`xdg_decoration`'s all-or-nothing shape is why it was not adopted, so proposing a broader version of
+it fails the same way. What is missing is smaller and points the other direction: **the compositor
+publishes its frame parameters — corner radius, focus treatment, control set and order, and whether it
+draws shadows — and clients draw their own to match.** Informational, nothing surrendered, no header
+bar given up, and the same shape as `wp_fractional_scale` or `xdg_toplevel.configure_bounds`, both
+adopted quickly for that reason.
+
+A protocol that asks GTK to give up its header bar will not be adopted. One that tells GTK what radius
+to use, and that gyro will draw the shadow if it stops, might be — and it retires the corner residue
+rather than relocating it, which the crop does not.
+
+**What gyro draws once a client stops.** The shadow is derived from the window's own alpha silhouette,
+which is `WindowServer`'s mechanism above and needs no radius agreement, no shape protocol, and no
+special case for a tooltip with a tail or a terminal at eighty percent opacity. Cached and invalidated
+on shape change, which is
+[decision 46](#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)'s
+per-output atlas doing a second job.
+
+#### Rejected: gyro drawing the title bar itself
+
+The obvious shortcut, and it wants a text shaper, a font stack, and a layout engine inside the process
+[decision 49](#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot)
+prices as ruinous to restart — which decision 25 already refused once, for lock screens, on exactly
+these grounds. It also has to be *configurable*, since button order and title formatting are
+per-desktop taste, and that is policy inside the system layer, which is decision 51's whole objection.
+
+#### Rejected: a fixed corner radius rather than a floor
+
+Stronger cohesion on paper. It requires gyro to cut *inside* a client's curve wherever that client
+rounds more than gyro does, discarding an antialiased edge and replacing it with one at a different
+radius — and to know the client's radius in order to tell when that is happening, which nothing on the
+wire says. The floor needs neither, and has no value at which it produces a corner belonging to
+neither party.
+
+**Left open.** Where the floor radius sits is a number and wants a screen rather than an argument, as
+does the elevation set. Whether Xwayland forwards `_GTK_FRAME_EXTENTS` into window geometry decides
+whether the frame rect means anything for X11 clients, and that is an afternoon of reading rather than
+a decision. All three are in [Open.md](Open.md).
 
 ---
 
@@ -5399,6 +5763,21 @@ just one of them is correct and extends to HDR.
 shadow under gyro than under any other compositor, most visibly on light backgrounds, until it
 adopts server-side decorations. This will be reported as a bug. It is not one, and this entry is the
 reply.
+
+**The exit is not server-side decoration adoption.** *(Revised 2026-08-22.)*
+[Decision 96](#96-the-frame-is-the-compositors-and-the-header-is-the-apps) reads the cost-accepted
+paragraph above against what GTK has actually said, which is that it will not adopt server-side
+decorations. So *until it adopts server-side decorations* is not a horizon. It is a permanent cost on
+most of what an ordinary person runs, which makes this a different entry from the one it was written
+as.
+
+What that decision changes is the shape of the ask rather than the arithmetic. This entry treats
+client-side decoration as one refusal and it is not: a toolkit wants its own header bar, has no
+position at all on the shadow, and already publishes that shadow's extent to every compositor on the
+wire through `xdg_surface.set_window_geometry`. The exit is a hint that lets a client say it has
+stopped drawing one — after which gyro's own shadow, derived from the window's alpha silhouette,
+needs no further cooperation. The residue stands until then, and what it is waiting on changes from a
+toolkit's decoration policy to a protocol nobody has written.
 
 **To be confirmed by looking, not by arguing.** The composite pass is one place and the toggle is a
 build flag, and [decision 4](#4-all-three-backends-are-in-scope-nested-headless-drm) makes nested

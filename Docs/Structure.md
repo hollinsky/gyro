@@ -261,7 +261,7 @@ this: [the rule below](#region-is-in-geometry-and-reachability-is-why) is about 
 the world must name, and nothing dispatch-side has ever built a quad. What it takes as the output's
 placement is `Geometry`'s own output adapter, which is where the origin folds against a global
 translation while both are still double. See
-[decision 93](Decisions.md#93-the-quad-is-assembled-in-frame-and-the-back-face-test-is-the-signed-area).
+[decision 93](Decisions.md#93-the-quad-is-assembled-in-frame-and-the-back-face-is-the-signed-area).
 
 **The list is at the waist; two of the fields in it are not, and the split is by producer rather than
 by awkwardness.** A quad, its sampling, its opacity, and its corner radius are frame-derived, which is
