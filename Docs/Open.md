@@ -25,6 +25,14 @@ said to settle it with the walk, and
 that walk having been written: the question turned out to have a cheap answer and two expensive ones,
 which is legible from the code and was not legible from the entry.
 
+A fifth left by the first route and took the entry's premise with it. *Whether Xwayland forwards
+`_GTK_FRAME_EXTENTS` into window geometry* became
+[decision 106](Decisions.md#106-an-x11-client-has-no-window-geometry-gyros-window-manager-computes-the-frame-rect):
+the answer is no, because Xwayland gives an X11 client no window geometry for anything to be
+forwarded into. An entry can name its source correctly and still ask after a mechanism that is not
+there, and what settles that is enumerating everything the source *does* do — a grep that finds
+nothing only proves the grep.
+
 - **The two client-reachable `wl_abort` sites**, which
   [decision 2](Decisions.md#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)
   closes with a wrapper that refuses to publish a resource id before its implementation is set, and
@@ -393,12 +401,15 @@ which is legible from the code and was not legible from the entry.
   where it lives, and how a client is judged worthy of it are all unspecified. Decision 51 promotes
   this from speculative to load-bearing: the shell is its motivating occupant, and "which process
   gets to be the shell" is exactly the judgement this listener has to encode.
-- **Whether Xwayland forwards `_GTK_FRAME_EXTENTS` into window geometry.**
-  [Decision 96](Decisions.md#96-the-frame-is-the-compositors-and-the-header-is-the-apps) applies the
-  corner radius to the window geometry rect rather than to the buffer, so for an X11 client that
-  draws its own shadow the answer decides whether the radius lands on the window or on the shadow
-  margin. This is an afternoon of reading Xwayland rather than a decision, and it is the shape the
-  triage rule above says to retire that way: the argument names the source it rests on.
+- **When gyro reads an X11 client's frame extents, relative to the buffer they describe.**
+  [Decision 106](Decisions.md#106-an-x11-client-has-no-window-geometry-gyros-window-manager-computes-the-frame-rect)
+  found that no window geometry crosses from Xwayland at all, so gyro's own window manager reads
+  `_GTK_FRAME_EXTENTS` off the X connection while the buffer arrives on the Wayland one, with
+  nothing ordering the two. A resizing GTK window can therefore present a frame whose corners and
+  shadow are cut at the previous extents — wrong for a frame or two, at the moment the eye is on the
+  window edge. `_XWAYLAND_ALLOW_COMMITS` is the lever, since gyro is one of the two clients allowed
+  to write it and clearing it holds Xwayland's commit until the property has been read; whether a
+  stall per resize frame is worth paying is the question. Wants the X11 half to exist first.
 - **Xwayland has no owner.** It must run as the user, so gyro cannot spawn it, which means decision
   24's session agent is a persistent agent rather than a one-shot fd donor. gyro can own the X
   sockets — `/tmp/.X11-unix` is world-writable — and allocate display numbers, which a

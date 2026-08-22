@@ -25,13 +25,15 @@ transition down* — which is the argument for building the motion catalog early
 69 is the first to change a type rather than a rule, and the argument for making it then was that
 the type had one caller.
 
-Four entries were settled by going and reading the source an argument rested on — 2, 49, 73, and
-76 — and each carries that reading in its own text. The rules they taught are in
+Five entries were settled by going and reading the source an argument rested on — 2, 49, 73, 76,
+and 106 — and each carries that reading in its own text. The rules they taught are in
 [AGENTS.md](../AGENTS.md#how-decisions-get-made), because they are instructions to whoever works
 this list next rather than history. In short: an argument that names its source can be retired by an
 afternoon of reading; read even when you expect to be confirmed, since a right answer on a wrong
 argument survives review and fails in the field; and a question that resists the reading may be
-malformed, in which case suspect the rule upstream of it.
+malformed, in which case suspect the rule upstream of it; and a question of the form *does X forward
+Y* is answered by enumerating everything X does send, since a grep that finds nothing only proves
+the grep.
 
 Detail lives in [Architecture.md](Architecture.md) and [Animation.md](Animation.md); this file is
 the short answer to "why didn't we do X".
@@ -3305,8 +3307,15 @@ Java — which is also the population with no client-drawn shadow to conflict wi
 needs from a client and the reason `Image` content carries a frame rect. A client that draws a shadow
 sets `xdg_surface.set_window_geometry` to its visible bounds — it must, or every compositor tiles it
 with gaps — so rounding the node's whole extent would round a corner of the shadow margin that nobody
-can see. For a client that never sets it, which is most of Xwayland, the frame rect is the whole
-extent and the rounding is simply right.
+can see. For a client that never sets it, the frame rect is the whole extent and the rounding is
+simply right.
+
+**The X11 half of that was wrong, and the frame rect for an X11 client is one gyro computes.**
+*(Revised 2026-08-22.)* This paragraph read "for a client that never sets it, which is most of
+Xwayland". No X11 client ever sets it, because Xwayland gives a rootless client no window geometry to
+set — so the whole extent is right only where the client draws no shadow, and where it draws one
+gyro's own window manager reads `_GTK_FRAME_EXTENTS` off the X connection and computes the rect. See
+[decision 106](#106-an-x11-client-has-no-window-geometry-gyros-window-manager-computes-the-frame-rect).
 
 **And it applies without discarding the margin.** The rounded-rect test is bounded to the frame rect,
 and fragments outside it pass through untouched, so nothing a client drew outside its declared bounds
@@ -3389,9 +3398,84 @@ wire says. The floor needs neither, and has no value at which it produces a corn
 neither party.
 
 **Left open.** Where the floor radius sits is a number and wants a screen rather than an argument, as
-does the elevation set. Whether Xwayland forwards `_GTK_FRAME_EXTENTS` into window geometry decides
-whether the frame rect means anything for X11 clients, and that is an afternoon of reading rather than
-a decision. All three are in [Open.md](Open.md).
+does the elevation set. Both are in [Open.md](Open.md). What the frame rect means for an X11 client
+was the third, and reading Xwayland settled it in
+[decision 106](#106-an-x11-client-has-no-window-geometry-gyros-window-manager-computes-the-frame-rect).
+
+### 106. An X11 client has no window geometry; gyro's window manager computes the frame rect
+
+*(Decided 2026-08-22, on reading Xwayland to settle what
+[decision 96](#96-the-frame-is-the-compositors-and-the-header-is-the-apps) left open. The reading
+answered a different question than the one asked, and revises 96's fallback rule.)*
+
+**Xwayland does not forward `_GTK_FRAME_EXTENTS` into window geometry, because a rootless X11 client
+has no window geometry to forward it into.** The question assumed a translation that was missing;
+what is missing is the destination. The reading, against upstream `867976b` of 2026-08-20:
+
+- **`_GTK_FRAME_EXTENTS` appears nowhere in the X server tree.** Neither does any spelling of frame
+  extents. Xwayland watches exactly one X property — `_XWAYLAND_ALLOW_COMMITS`, whose writes XACE
+  restricts to the window-manager client and the server itself.
+- **`xdg_surface.set_window_geometry` is never called.** The sole `set_window_geometry` in the whole
+  repository is Xephyr's XCB host code, which is a different thing entirely.
+- **There is no `xdg_surface` on a rootless client surface at all.** `xwl_create_root_surface` is
+  guarded by `!rootless` and wraps the *root* window, for the nested and `-rootful` cases. A
+  rootless client gets a bare `wl_surface` plus `xwayland_surface_v1`, bound at version 1, whose one
+  request is `set_serial`. There is no role object on it carrying a geometry field.
+- **The complete per-surface state Xwayland sends is six requests**: `attach`, `damage`, `commit`,
+  `set_buffer_scale`, `set_input_region`, and `set_serial`. `set_opaque_region` and the viewport
+  requests exist only on the rootful path. Enumerating what does cross is what makes this
+  conclusive; a grep that finds nothing only proves the grep.
+
+**So the frame rect for an X11 client is gyro's to compute, in gyro's own X11 window manager, over
+the X connection.** The property is read off the client window and subtracted from the window's
+bounds, and the result is what decision 96's radius applies to. This is not a workaround: it is
+where the property has always been consumed. On this machine the atom is present in `libmutter-18`,
+`libgtk-3`, `libgtk-4`, `libKF5WindowSystem`, and `libwnck-3` — every toolkit that draws a shadow
+and every window manager that has to account for one — and absent from the shipped `Xwayland`
+binary and from all of libwayland. It is a window-manager protocol that never had a Wayland leg.
+
+**What breaks if gyro skips it.** A GTK or Qt application under X11 draws its own shadow into a
+buffer larger than the window, so rounding the buffer's extent puts gyro's corners on the outer edge
+of the shadow — a rounded rectangle hanging in empty space several pixels outside where the window
+visibly ends, on every X11 window on the screen. That is more conspicuous than not rounding at all,
+and it is the artefact decision 96 rounds the frame rect specifically to avoid. The same rect is
+what [decision 104](#104-an-elevation-is-a-height-under-one-light-and-the-shadow-is-analytic)'s
+analytic shadow is cast from, so getting it wrong offsets gyro's shadow from the window as well as
+its corners — and on a client already drawing its own, offsets it from that one too.
+
+**Revises decision 96's fallback.** That entry said the frame rect is the whole extent "for a client
+that never sets it, which is most of Xwayland". No X11 client ever sets it, and the whole extent is
+right only for the ones that draw no shadow — `xterm`, an SDL game, anything pre-CSD. Those are
+still the majority and the fallback still holds for them; it is now the fallback for a client with
+no `_GTK_FRAME_EXTENTS` on it rather than for X11 generally.
+
+#### Rejected: taking the visible rect from the input region
+
+`wl_surface.set_input_region` is the one geometry-adjacent thing that does cross, fed from the X
+input shape by `xwl_window_set_input_region`. If a toolkit excluded its shadow from the input shape,
+gyro would have the visible rect on the Wayland connection already, with no X round trip and no
+property to track. It does not: GTK's `update_shadow_width` calls `gdk_x11_window_set_shadow_width`,
+which does one `XChangeProperty` of `_GTK_FRAME_EXTENTS` and nothing else, and `gtkwindow.c` never
+combines an input shape for the shadow. The input region is unset for the windows this matters for,
+and where a client does set one it is answering a different question — where clicks land, not where
+the window is.
+
+#### Rejected: asking for the forwarding to be added upstream
+
+`xwayland_surface_v1` could carry the extents, and Xwayland already parses X properties for
+`_XWAYLAND_ALLOW_COMMITS`. It would be the wrong place: the compositor running Xwayland is by
+construction the X11 window manager as well, so it already has the connection, already reads the
+property for the other things a window manager needs it for, and would be receiving over Wayland
+something it can read directly. The forwarding buys a round trip's latency for a second source of
+truth to disagree with.
+
+**Left open.** The extents arrive on the X connection and the buffer arrives on the Wayland
+connection with no ordering between them, so a resizing GTK window can present a frame cut at the
+previous extents — corners in the wrong place for a frame or two, exactly when the eye is on the
+window. `_XWAYLAND_ALLOW_COMMITS` is the lever, since gyro is the window-manager client permitted to
+write it and clearing it holds Xwayland's commit until the new property has been read. Whether a
+stall per resize frame is worth paying is a question for when the X11 half exists; it is in
+[Open.md](Open.md).
 
 ---
 

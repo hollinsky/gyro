@@ -77,7 +77,7 @@ standard, say so and we will talk about it.
 | How does a mechanism work — seam, backends, timing, color, sessions, protocol? | [Docs/Architecture.md](Docs/Architecture.md) |
 | How does animation work — springs, catalog, commits, transforms, identity? | [Docs/Animation.md](Docs/Animation.md) |
 | Where does code live, what may depend on what, which thread runs it? | [Docs/Structure.md](Docs/Structure.md) |
-| Why not X? What was rejected? | [Docs/Decisions.md](Docs/Decisions.md), 101 entries, anchored `### N.` |
+| Why not X? What was rejected? | [Docs/Decisions.md](Docs/Decisions.md), 106 entries, anchored `### N.` |
 | What is still unsettled? | [Docs/Open.md](Docs/Open.md) |
 | What does gyro want from the kernel and cannot have? | [Docs/KernelWishlist.md](Docs/KernelWishlist.md) |
 
@@ -143,8 +143,8 @@ is no global ledger of what revised what.
 for making it then was that the type had one caller. The trigger is not the size of the question, it
 is the size of what has been built on top of the current answer.
 
-Four entries have been settled by going and reading the source an argument rested on, and they taught
-three rules worth applying before the fifth:
+Five entries have been settled by going and reading the source an argument rested on, and they taught
+four rules worth applying before the sixth:
 
 - **An entry that names the source its argument rests on can be retired by an afternoon of reading.**
   An entry that names no source needs a frame loop, a panel, or a user in front of it.
@@ -153,6 +153,9 @@ three rules worth applying before the fifth:
 - **A question that resists the reading may be malformed rather than hard, and the thing to suspect
   is the rule upstream of it.** Decision 76's question was circular, and reading found an absence
   rather than an answer.
+- **A *does X forward Y* question is settled by enumerating everything X does send, not by searching
+  for Y.** Decision 106's answer was that the destination did not exist, which no amount of grepping
+  for the source would have shown: a grep that finds nothing only proves the grep.
 
 When a reading changes something, the narrative belongs in the decision it changed rather than in a
 preamble that accretes one paragraph per event.
