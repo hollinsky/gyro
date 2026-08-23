@@ -104,7 +104,7 @@ flowchart TB
     end
 
     Publisher --> Snapshot --> Reader
-    Evaluate --> Return --> Protocol
+    Evaluate --> Return --> Scene
 ```
 
 The shape is a cycle, and the two crossings are the whole of the traffic between the threads. Down
@@ -112,6 +112,15 @@ the right goes the snapshot: offset-addressed POD, spring coefficients rather th
 acquired once per iteration. Up the left goes the return channel: frame callbacks,
 `wp_presentation_feedback`, `wl_buffer.release`, the exit-blit hold, and the measured costs that
 feed [budgets](Architecture.md#budgets).
+
+**The return leg lands on `Scene` rather than on `Protocol`**, which is
+[decision 115](Decisions.md#115-scene-drains-the-return-channel-and-protocol-observes-what-it-derives)
+and is not where it reads: the report names a presented *sequence*, and turning that into per-surface
+consequences needs what dispatch authored. Three quarters of what it carries never reaches a client
+at all — the watermark that frees snapshots, the exit-blit hold, the damage clear — and gyro drains
+it during boot with no protocol in the process. What `Protocol` needs of it arrives as an ordinary
+intra-thread signal, which is why no arrow is drawn for it: the graph is about the two channels, and
+a signal is not one.
 
 A third channel would be a design error rather than an addition, which is why the return channel is
 one bounded queue and not four ad-hoc mechanisms — see
@@ -444,6 +453,39 @@ designed. Note what did *not* have to change: `Publication` still names none of 
 `PutNodes` and `Nodes<T>()` are templates for the same reason `Put` and `Run<T>` are — the exemption
 two paragraphs up, working. See
 [decision 91](Decisions.md#91-the-worlds-vocabulary-is-a-module-of-its-own-below-both-waists).
+
+### Scene is one tree, and the entity is the record's authoring side
+
+`World` holds what a node *is*; `Scene` holds what writes one. The shape is settled by
+[decision 111](Decisions.md#111-an-entity-is-a-nodes-authoring-side-the-store-is-one-tree) and it is
+one kind of object rather than two: an entity is the dispatch side's record, a `World::Node` is what
+it publishes, and the two are one to one. The store is
+[`SlotAllocator`](../Source/Core/SlotAllocator.h) for identity and intrusive parent / first-child /
+next-sibling links for the tree, with a top level that is a list rather than a root — matching the
+node run, which [`Evaluator`](../Source/Frame/Evaluator.h) already walks as siblings from index zero.
+
+Four things live here and each is a decision above rather than a new choice. The **store** and its
+handles. The **differ**, which
+[decision 89](Decisions.md#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete)
+placed here so that `Animation` stays a pure library. The **commit**, which
+[decision 112](Decisions.md#112-a-commit-is-a-scope-with-an-origin-and-the-wire-says-when-it-closes)
+makes a scope with an author and an origin rather than an object with a lifetime, so it is a member
+of the scene with reusable work lists. And the **return channel's reader**, which is
+[decision 115](Decisions.md#115-scene-drains-the-return-channel-and-protocol-observes-what-it-derives):
+`Protocol` depends on `Scene` and not the reverse, so what `Protocol` needs of a presented sequence
+arrives as a `Signal<>` it owns the link to — [decision 77](Decisions.md#77-a-signals-observers-are-links-the-observers-own)'s
+shape, legal because both are the dispatch thread and a signal is intra-thread by rule.
+
+**Its dependency row does not change, and that is the check that the placements above are right.**
+`Scene` was already declared on `Core`, `Geometry`, `World`, `Animation`, and `Publication`. A commit
+scope needs the timebase; the store needs `SlotAllocator` and `Handle`; client damage needs
+`Region<BufferSpace>`, which is in `Geometry` for
+[the reason above](#region-is-in-geometry-and-reachability-is-why); the return drain needs `Signal`
+and the report record. Every one of those is already reachable, and nothing here wants `Seam`.
+
+**`Scene` is `DISPATCH` whole rather than a straddler**, which is what makes the frame side's
+inability to reach it a graph property instead of a directory one. Nothing in it runs on the frame
+thread — the walk that consumes what it publishes is `Frame`'s, and the two never meet.
 
 ## Threads are a second partition
 

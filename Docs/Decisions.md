@@ -1619,6 +1619,256 @@ move: the header already reserved `Nodes`, and what changed is that something no
 [Open.md](Open.md)'s *where `Material` lives* is answered and its *what is in the set* is not, which is
 the untying decision 87 could not do because there was no home to untie it from.
 
+### 111. An entity is a node's authoring side; the store is one tree
+
+*(Decided 2026-08-22, on asking what `Scene` **is** rather than what it produces. Decisions 86, 87,
+and 88 were one commit and they settled the published form; none of them said what holds it.)*
+
+**There is one kind of object. An entity is what the dispatch side holds, a
+[`Node`](../Source/World/Node.h) is the record it publishes, and the two are one to one.**
+[Decision 86](#86-the-published-scene-is-a-preorder-tree-model-values-inline-coefficients-by-reference)
+made the published scene a preorder run and
+[decision 95](#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind) fixed what a
+record carries; neither said whether the thing that writes them is a tree of the same shape, a set of
+entities each owning a little subtree, or something else. It is the first, and what settles it is
+asking what needs identity rather than what looks like an object.
+
+**The shape you reach for is entities owning subtrees, and what kills it is that the parts need
+identity too.** A window looks like one thing with an internal structure, and decision 95 already
+forces that structure:
+`wl_subsurface.place_below` names the parent surface itself as a legal reference, so a toplevel is a
+container holding its below-subsurfaces, its own surface, and its above-subsurfaces. So make the
+container the entity and the three children its parts. Except that each of those parts has a
+`wl_buffer` to release, a `wl_surface.frame` callback to fire, and damage of its own, and
+[decision 75](#75-the-return-channel-is-one-report-per-frame-per-surface-facts-are-derived-not-sent)
+requires dispatch to *derive* all three from a presented sequence — which means every one of them has
+to be addressable in what was published. The parts need identity for reasons that have nothing to do
+with animation, so they become entities anyway, and the two-level shape has a level nobody uses.
+
+**One to one is also what makes `SubtreeLength` a single pass.** The length is a run length over
+nodes, so an entity that emitted several records would need a second accounting to know what its own
+subtree contributed before its children's could be added to it — a second count maintained beside
+the recursion that already computes it, which is
+[decision 16](#16-nodes-own-their-properties-the-active-set-is-mirrored)'s *derived, never
+maintained* given away for no gain. One to one makes the length fall out of the walk.
+
+**Identity is on every entity, including the structural ones nobody names.**
+[Decision 15](#15-identity-is-a-generational-handle) already says *for every animatable entity
+whether protocol-backed or compositor-invented*, and a container forced by `place_below` is
+compositor-invented. It also pays forward: [Open.md](Open.md)'s per-node damage entry wants a stable
+identity on the record, and an identity that already exists on the authoring side is a field to
+publish rather than a mechanism to invent afterwards. The lifetime
+[decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) and
+[decision 20](#20-exit-animations-use-full-resolution-snapshots) require — *an entity outlives its
+protocol object* — is then the slot's and not the resource's, which is decision 15 already working
+rather than anything this decision adds.
+
+**The store is a slot map and intrusive links.** [`SlotAllocator`](../Source/Core/SlotAllocator.h)
+owns the entities and mints decision 15's handle; the tree is parent, first child, and next sibling
+held as handles rather than pointers, so a stale link compares unequal rather than naming whatever
+occupies the slot now. Links rather than a contiguous child array because the commonest structural
+change in a desktop is a sibling reorder — clicking a window raises it, and
+[decision 55](#55-transforms-are-3d-the-scene-is-a-painters-algorithm) makes z the list order — which
+is a pointer swap here and a move of everything above it there. The publisher chases those links, on
+the thread that is allowed to.
+
+**The top level is a list rather than a root**, which is what
+[`Evaluator`](../Source/Frame/Evaluator.h) already walks: it starts at index zero and runs to the end
+of the node run treating that span as siblings. A distinguished root would be a node every walk pays
+for and no reader needs, and it would have to carry a transform that is always the identity.
+
+**The per-kind payload is held out of line on this side too, for a different reason than on the
+wire.** Decision 95 keeps what a leaf draws in per-kind runs so that the frame walk does not drag a
+payload through cache; here the argument is only that most entities have none — a container has no
+texture, no damage, and no colour state, and
+[`Region`](../Source/Geometry/Region.h) alone is a quarter of a kilobyte at its fixed capacity. The
+two arguments are unrelated and they produce the same layout, which is worth noticing because it
+means the publisher's per-kind emission copies a record rather than building one.
+
+**Rejected: entities owning subtrees of nodes**, above. It is the intuitive shape and it dissolves
+under decision 75.
+
+**Rejected: the store *is* the published run** — dispatch mutates the preorder array in place and
+publication becomes a `memcpy`. Genuinely attractive, and it fails on insertion: a node added in the
+middle shifts every index above it, every enclosing `SubtreeLength`, and every backward reference
+target decision 95 requires, so opening a window is an O(world) move. It also makes a handle a
+position, which decision 15 refuses in one sentence — *independent of tree position*, because
+position is a property that animates.
+
+**Rejected: a scene per output.** The obvious way to make each output's walk cheap, and it makes a
+window straddling two outputs into two entities with two sets of springs — which is the configuration
+[decision 32](#32-a-surfaces-frame-cadence-follows-its-fastest-output) makes first class and the
+duplication [decision 88](#88-an-instance-is-a-node-the-published-scene-is-a-dag) refuses for
+thumbnails on exactly the same grounds. One world in global space, viewed through
+[decision 97](#97-an-outputs-placement-is-published-the-modes-half-of-the-view-meets-it-in-the-walk)'s
+per-output adapter, is what the published form already assumes.
+
+**Rejected: identity only where something asks for it**, as a sparse side map from handle to node.
+It saves eight bytes on a structural container and it makes the per-node damage decision 101 wants
+unbuildable in the direction it wants it, since the identity has to exist *before* the frame that
+would use it to compare two publications.
+
+**Consequences.** Publication is a full re-serialisation of the node run, and the copy-on-write
+repair [decision 50](#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients)'s
+open pacing question proposes does not reach it: any insertion renumbers indices and lengths, so
+there is no patch smaller than the run. What survives is narrower and more useful — the node run
+changes only when topology, flags, content, or the *active set* changes, and a retarget inside an
+already-active channel changes none of those, so the common case during a gesture is a fresh
+coefficient run beside a byte-identical node run. Whether copying those bytes beats re-walking to
+produce them is a measurement, and it is [open](Open.md) with the pacing question it narrows.
+
+### 113. Client damage is a region on the entity, in buffer space, and it is cumulative
+
+*(Decided 2026-08-22. [Structure.md](Structure.md#region-is-in-geometry-and-reachability-is-why)
+says `Protocol` receives a client's rectangles, `Scene` stores them, and the publisher serialises
+them in `BufferSpace`. It does not say in what, or when they clear, and the second has a wrong answer
+that looks right.)*
+
+**It is a [`Region<BufferSpace>`](../Source/Geometry/Region.h) on the image entity, unioned across
+commits, published whole with every snapshot, and cleared against the presented sequence.**
+
+**The region type rather than a rectangle list of its own**, because the collapse rule is already
+written and is already the right one: past sixteen rectangles the set becomes its own bounding box,
+which costs bandwidth, where a set that dropped a rectangle would leave stale pixels on glass. That
+is the only direction that is not a defect, and it is the same argument whether the producer is a
+client or the frame side.
+
+**In buffer space, and the conversion happens at ingest.** `wl_surface.damage_buffer` is already in
+buffer coordinates; `wl_surface.damage` is in surface coordinates, deprecated and still emitted by
+live toolkits, and the two are related by a buffer scale and transform the client may change in the
+same commit. So the surface-space form is converted where it arrives and nothing downstream carries
+two spellings — [decision 57](#57-one-timebase-clock_monotonic-converted-at-ingest-and-nowhere-else)'s
+rule about the timebase, applied to a coordinate. Buffer space is also the only one that survives the
+change: rectangles banked in surface space before a `set_buffer_scale` would have to be reinterpreted
+after it, against a scale that is no longer the one they were recorded under.
+
+**Cumulative, because the ring may skip.** The obvious form is a delta — publish what changed since
+the last publication, then clear — and
+[decision 74](#74-the-forward-ring-recycles-only-below-the-watermark-and-a-full-ring-defers) forbids
+it in one sentence: the frame thread takes the *newest* snapshot and skips whatever it passed, so
+**nothing may be owed once per published snapshot — only once per rendered frame.** A delta is owed
+per snapshot. Two publications inside one frame — ordinary, since dispatch publishes per resolved
+commit and a client can commit twice in 16 ms — would lose the first one's rectangles, and the
+failure is the one the region type exists to prevent, arriving through the channel instead of through
+the capacity. So the snapshot carries the accumulation, which is complete state like everything else
+that crosses.
+
+**Cleared against the presented sequence, which is the same derivation that releases the buffer.**
+Decision 75 has dispatch derive per-surface consequences from *sequence S was presented at T*, and a
+surface's damage is one more of them: it may be dropped once every output showing that surface has
+presented a sequence at or after the one that carried it. The multi-output case is why the rule has
+to name every output rather than any — a window straddling a 60 Hz panel and a 144 Hz one is
+presented at different moments, and clearing on the first would leave the second compositing a
+region it never saw. The accepted cost is that on a mixed-rate configuration the faster output
+recomposites a surface's rectangles once or twice more than it needed to, which is a superset and
+therefore correct by the same argument as the collapse.
+
+**On the wire it is a run of its own and the image names a span of it.** `ImageContent` goes from
+forty-eight bytes to fifty-six, and the header gains a `Damage` entry beside `Images` and `Solids`
+for [decision 97](#97-an-outputs-placement-is-published-the-modes-half-of-the-view-meets-it-in-the-walk)'s
+reason: it is not a channel, so it is named rather than indexed by `RunIndex`. Decision 86's
+consequences promised client damage by name and put it in `SnapshotRun`; decisions 90 and 97 have
+since moved everything that is not a channel out of that array, so the promise is kept in the place
+those two left for it rather than in the one 86 named.
+
+**Rejected: a delta per publication**, above. Recorded rather than omitted because it is what every
+compositor with a single-threaded loop does, correctly, and the thing that makes it wrong here is a
+property of the ring rather than of damage.
+
+**Rejected: the region inline in `ImageContent`.** `Region` is fixed capacity, so it is trivially
+copyable and would cross with no run at all — at sixteen rectangles and a count on *every* image,
+which is a quarter of a kilobyte per window to say that one caret blinked. The run costs an offset
+and a count and carries what is used.
+
+**Rejected: damage on the node record.** It is per surface and not per node: a container has none, a
+reference has its target's, and a solid's damage is the fact that it changed at all. Eight bytes on
+every node in the tree to say so is decision 95's colour-state argument arriving on a second field.
+
+**Rejected: no client damage at all, on the strength of
+[decision 101](#101-damage-is-the-whole-output-while-anything-moves-and-per-node-damage-needs-an-identity-the-record-does-not-carry).**
+Tempting today and would stay tempting forever: damage is the whole output while anything moves, so a
+client's rectangles change nothing until there is a partial-composite path to feed. That is the state
+that never ends — the coarse rule stays because nothing produced the fine one, and decision 101 says
+in its own words that client surface damage *has no carrier* until there is a protocol layer to mint
+it. This is the carrier, and the run lands when `Protocol` mints the first rectangle rather than now.
+
+**Consequences.** Decision 101's open entry narrows to its second half: the client's damage has a
+home and a space, and what is still undecided is per-*node* damage, which needs an identity on the
+record and a partial-composite path to spend it on.
+
+### 115. `Scene` drains the return channel, and `Protocol` observes what it derives
+
+*(Decided 2026-08-22. [Structure.md](Structure.md#the-runtime)'s runtime graph drew
+`Return --> Protocol`, which is where the facts end up rather than where the channel is read.)*
+
+**`Scene` drains the return channel at the top of each dispatch iteration and emits what it derives
+as a signal `Protocol` observes.** Decision 75 collapsed the channel to one fixed-size report per
+frame precisely because dispatch authored the snapshot and can derive the per-surface consequences
+itself. Which module on that side does the deriving was left open, and three things decide it the
+same way.
+
+**gyro runs before any client exists.** The boot splash publishes a scene and the frame thread
+presents it, and the snapshots have to be reclaimed against decision 74's watermark with no
+`Protocol` in the process at all —
+[decision 37](#37-gyro-owns-the-display-from-firmware-handoff-onward-there-are-no-vts)'s continuous
+image is gyro-to-gyro the whole way, and
+[decision 79](#79-the-console-is-a-renderer-not-a-presenter)'s recovery console has no protocol
+behind it either. A drain that lives in `Protocol` stops the ring the moment there is nothing to talk
+to, and the symptom is a compositor that runs out of snapshot slots on the screen it exists to keep
+showing.
+
+**The derivation needs what dispatch authored.** Decision 75's accepted cost — *keeping the
+authoring side of a snapshot addressable until that sequence is reported* — is concretely a run of
+[handles](../Source/Core/Handle.h) retained beside each in-flight snapshot and freed at the watermark
+with the arena it sits next to. A handle is a `Core` type rather than a world record, so it rides in
+`Publication`'s dispatch half without that module naming `World`, exactly as the node run does. What
+turns a handle into a `wl_surface` is `Protocol`'s; what turns a presented sequence into a set of
+handles is not.
+
+**And the edge runs the wrong way for the arrangement that reads most naturally.** `Protocol`
+depends on `Scene` and `Scene` may not say `Protocol`, so `Scene` cannot hand anybody a frame
+callback. What it can do is declare a `Signal<>` and let the observer own the link, which is
+[decision 77](#77-a-signals-observers-are-links-the-observers-own)'s shape and is legal because both
+modules are the dispatch thread and a signal is intra-thread by rule. `Session` connects to the same
+signal rather than a second one.
+
+**Four consumers, one drain, and only one of them is `Protocol`'s.** The watermark goes to the
+publisher, where it frees everything below it (74). The exit-blit hold's release is the atlas's (46)
+and never leaves `Scene`. Client damage cleared by a presented sequence is
+[decision 113](#113-client-damage-is-a-region-on-the-entity-in-buffer-space-and-it-is-cumulative)'s,
+also `Scene`'s. Only the frame callbacks, `wp_presentation_feedback`, and `wl_buffer.release` cross
+to `Protocol` at all — which is the sharpest form of the argument above, since three quarters of what
+the report carries never leaves the module that drains it.
+
+**Draining first is an addition to [decision 45](#45-protocol-dispatch-is-a-thread-not-a-task)'s
+ordering rather than a change to it.** That decision drains input, then client traffic under a
+budget. The return report is fixed-size and bounded, and it is the thing a client is *waiting* on: a
+`wl_surface.frame` callback delivered at the top of the iteration gives the client the whole of that
+iteration to render into, where the same callback at the bottom gives it the next one. Input keeps
+its place immediately after, and nothing about `t₀` depends on the order, since it is the event's own
+timestamp and not the moment of handling.
+
+**Rejected: `Protocol` drains and asks `Scene` which surfaces sequence *S* contained.** Legal by the
+graph and the natural reading, since the facts are protocol facts. It fails on the boot path above,
+and it makes reclamation — a memory-safety property of the ring — conditional on somebody having a
+client to notify.
+
+**Rejected: a second return channel for `Scene`'s own facts**, so that the atlas hold and the damage
+clear travel separately from the protocol ones.
+[Architecture.md](Architecture.md#the-publication-boundary)'s *a third channel would be a design
+error rather than an addition* is the whole answer, and decision 75 already declined to template the
+queue for exactly this reason: the friction of extending one record is the feature.
+
+**Rejected: `Scene` writing the facts onto the entities and `Protocol` scanning for them.** A pull,
+with no signal and no edge problem, and its cost is proportional to the world rather than to what was
+presented — which is what decision 16's *derived, never maintained* and decision 89's *neither phase
+walks the world* both refuse, arriving on the return path.
+
+**Consequences.** Structure.md's runtime graph gains `Scene` on the return leg, and the arrow from
+`Scene` to `Protocol` is deliberately not drawn there, because it is an intra-thread observer call
+and the graph is about the two channels. `Scene`'s dependency row does not change: `Signal` and
+`Handle` are `Core`'s and it already has them.
+
 ---
 
 ## Animation
@@ -2398,6 +2648,192 @@ which nodes to re-serialize — which is decision 50's open pacing question and 
 `Publication` rather than to the differ. `Animation` stays a pure library. Structure.md's open entry
 closes, and Animation.md's *dirty tracking, not snapshot diffing* section is rewritten around the two
 phases, since the heading now names a publication concern rather than a resolve queue.
+
+### 112. A commit is a scope with an origin, and the wire says when it closes
+
+*(Decided 2026-08-22.
+[Decision 89](#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete)
+settled *when* a mutation becomes motion and left the transaction itself undescribed: where `t₀`
+comes from once a commit is a wire request, and what "close" means when the caller is `Protocol`
+handling `wl_surface.commit` rather than a shell making one call.)*
+
+**A commit is a scope on the dispatch thread rather than an object with a lifetime. One is open at a
+time, it carries an author and an origin, and it closes when the wire request that opened it
+completes.** Everything below follows from noticing that three different things open one and only two
+of them start motion.
+
+**The three authors.** The shell, over the protocol, responding to an input event. gyro itself,
+handling input it routes — a driven gesture's republished tuple under
+[decision 65](#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)
+is a mutation like any other. And a client, at `wl_surface.commit`. The first two carry the input
+event's timestamp, which is what
+[decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) needs so that two shell
+processes reacting to one event compose into a single gesture with no coordination between them. The
+third carries no timestamp at all, and that is not an omission.
+
+**A client commit starts no motion, and three cases have to be checked rather than one.** The
+channels that spring are translation, scale, rotation, opacity, and the driven ramp, and what a
+client authors is content, an extent, damage, and subsurface order. A client resizing itself changes
+`Extent`, which has no coefficient slot and never had one. `wl_subsurface.set_position` does write a
+translation, and [decision 68](#68-a-subsurface-snaps-like-any-other-settled-node) already says what
+happens to it: it snaps to the grid the client rasterized against, because a spring between a video
+player's controls and the screen would make them lag the video underneath. And a resize from a
+window's left or top edge writes a translation too — gyro derives the origin from the acked geometry
+and the resize edge, so the node moves on the client's commit — which is the interaction decision 51
+says users judge most harshly, and interposing a spring there is the rubber-banding every shipping
+compositor has. In all three the value is *set*; none of them starts a motion.
+
+**So the rule is about motion rather than about writes, and an origin is required exactly where one
+starts.** Decision 89 makes setting a model value *be* a retarget, so *set this without starting
+anything* has to be sayable at all — which is [Open.md](Open.md)'s trajectory question arriving with
+a case attached, and the reason a transition meaning *none* has to exist whatever is decided there.
+Given that, a commit that starts motion and carries no origin is a bug, and the only alternative to
+failing on it is stamping `now` — which adds a frame of lag to whatever it started, invisibly, on the
+one axis [Animation.md](Animation.md#timing-and-rates) calls most of what makes a system feel like it
+is tracking a finger rather than following it. A shell commit that omits an origin is a protocol
+error for the same reason. If a client-driven change ever does want motion, it is given an origin
+deliberately rather than acquiring one by default.
+
+**The origin is clamped forward to the dispatch thread's own `now`, and nothing else needs clamping.**
+A `t₀` in the future is not a late start: a closed-form spring evaluated before its origin is a
+growing exponential, so a client that stamps a commit ten seconds ahead publishes coefficients that
+reach the frame thread as unbounded coordinates and a quad with no finite extent. Clamping forward
+makes the elapsed time non-negative by construction, because dispatch's `now` is at or before the
+frame thread's read of the clock, which is at or before the presentation instant it evaluates for —
+which is why the frame side needs no second check here, having plenty of its own under
+[decision 90](#90-the-snapshots-runs-are-one-per-channel-and-the-frame-side-validates-the-tree-it-walks).
+The backward direction is self-limiting: a stale origin reads as a motion that has already finished,
+and a decaying exponential evaluated far along is settled rather than wrong.
+
+**Close is per wire transaction, and phase two runs there.** `wl_surface.commit` is atomic for one
+surface by Wayland's own definition, so it closes one commit; a shell's commit request closes
+another. Batching an iteration's traffic into one transaction is cheaper and wrong twice: it mixes
+origins, and it puts two unrelated clients' commits into one phase two, where a match key declared by
+one could pair with the other's. The cost of not batching is small for the reason decision 89 gives —
+phase two costs what the commit *touched*, and what a client commit touches is a lifetime and
+sometimes an extent.
+
+**Commits do not nest, and the double buffering Wayland requires is `Protocol`'s.** A synchronized
+subsurface's state is held until its parent commits, and `xdg_surface.ack_configure` pairs a
+configure with the commit that satisfies it. Both are staging in *wire* vocabulary and both resolve
+before anything reaches the entity store, so the scene never sees a partially applied surface and
+never needs a nested scope. That is what lets the commit be a member of the scene with reusable work
+lists rather than an allocation per transaction, on a path a client can drive at its own rate.
+
+**Rejected: `t₀` from the dispatch thread's clock**, which is the shape that arrives by accident the
+first time a commit has no timestamp to inherit. It is the failure the rule above exists to make
+impossible rather than to discourage.
+
+**Rejected: one commit per dispatch iteration**, above. It is the arrangement a single-threaded
+compositor has for free, and what it costs here is the origin and the match-key isolation.
+
+**Rejected: a commit as a queued object resolved later.** Decision 89 already rejects deferral on its
+own grounds; this is recorded separately because the *object* form is what invites deferral back —
+something with a lifetime is something that can be held, and phase one is eager.
+
+**Consequences.** [Open.md](Open.md)'s *the scene vocabulary closes arrangement and not trajectory*
+narrows. Its candidate rule is that every mutation names a `Transition`, and it asks whether "a shell
+that wants to place a window without animating it" is a real enough case to be worth the rule's cost.
+The case is real and it is not the shell: three client-authored writes above are mutations that must
+not animate, so the vocabulary needs a transition meaning *none* whatever is decided for shells. What
+stays open is whether a shell may name it freely, which is the half that decides whether the catalog
+is enforceable.
+
+### 114. Retirement is the author going away, and resurrection is the author's alone
+
+*(Decided 2026-08-22. Two thirds of this was already answered elsewhere, and one of the answers has
+an example that is wrong.)*
+
+**What was already settled, said once so it is not decided twice.** *Who drains the retiring set* is
+[Architecture.md](Architecture.md#the-publication-boundary)'s and
+[Animation.md](Animation.md#storage)'s: the settle time is analytic, so the dispatch thread schedules
+entity destruction, retiring-set drainage, and atlas release without anything observing an
+evaluation, and the wake it arms is a term in
+[decision 69](#69-settling-answers-with-a-wake-idleness-folds-a-monoid-not-an-or)'s fold rather than a
+timer of its own. *What resurrection buys* is [Animation.md](Animation.md#lifetime)'s: the id stays
+live, the spring retargets from its current `(x, v)` and reverses smoothly, and the atlas rectangle
+comes back. What is new is what the retiring set *is*, what puts an entity into it, and who may take
+one out.
+
+**The retiring set is a flag on the entity and a term in the wake fold, not a second container.**
+Animation.md says an entity "moves to a **retiring** set — still evaluated and rendered, but
+invisible to layout, focus, and hit-testing", and *moves to* is a figure of speech that a store would
+implement literally and wrongly. A retiring entity is still drawn, so it is still published, so it is
+still in the tree at the position it had — a separate container would have to be spliced back into
+the preorder run to be serialised at all, and where it spliced would be a second answer to a question
+the tree already answers. What the rest of that sentence describes is a predicate three readers
+apply, not a place the entity is kept.
+
+**An entity has exactly one author, and it retires when that author goes away.** The author is the
+connection that created it — a client for its surfaces, the shell for the arrangement it builds, gyro
+for what gyro invents. The rule matters because the alternative is a round trip: a client destroys a
+surface, gyro tells the shell, the shell removes the node, and the exit starts a frame or two late
+under an origin the shell had to invent because no input event caused it.
+[Animation.md](Animation.md#exit-pixels) sets the bar that forbids that — **an exit animation is
+never conditional on resource state** — and a shell busy indexing a filesystem is the worst version
+of the same conditionality, since the window would not leave the screen at all. So a client's destroy
+request retires the subtree that client authored, in place, under whatever container it was parented
+into, and the shell learns about it whenever it next reads.
+
+**Retirement is not removal, and the distinction is what keeps a workspace switch cheap.** A window
+moved between workspaces, hidden, or reparented is not retiring — it is a link change or a flag, and
+the entity is untouched. Only destruction by the author retires. Without the distinction, decision
+95's overview — the real windows under a hidden container, the thumbnails below referencing them —
+would retire nine workspaces' worth of windows every time the arrangement changed.
+
+**It gives [decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism)'s floor policy
+its mechanism for free.** The shell disconnecting takes down everything the shell authored and
+nothing any client did, which is *gyro keeps showing windows under default policy while the shell
+restarts*, obtained from the lifetime rule rather than built beside it. Whether those nodes exit or
+simply vanish is [open](Open.md), and the pull is toward vanish: a desktop's entire chrome animating
+gracefully out is a statement about a crash that the user should probably not be shown.
+
+**Resurrection belongs to the author, which takes it away in the case Animation.md leads with.** Only
+an author can name an entity in order to re-create it, and the author of an entity that retired
+*because its author disappeared* is by definition gone. That is right for everything the shell and
+gyro invent — a workspace hidden and re-shown, a switcher tile, a drag placeholder — and it removes
+**the menu**, which is the headline example: dismissing a menu destroys an `xdg_popup` and normally
+its `wl_surface` with it, so reopening it produces a *new* surface and a new entity, and there is
+nothing to resurrect. Fast repeated open-close is therefore served by
+[decision 18](#18-matched-geometry-is-in-the-first-cut)'s matching rather than by resurrection, and
+the two are different mechanisms with different prices: resurrection keeps one entity's springs,
+while matching hands geometry from one entity to another and needs a key that nobody currently mints
+— a client does not declare match keys and the shell does not know a popup was reopened. That is
+[open](Open.md), and the correction is worth more than the answer, because the sentence it corrects
+claims that behaviour is *entirely* what makes fast repeated actions feel right.
+
+**Resurrection costs nothing inside the commit that retired the entity, and that is why lifetime is
+phase two.** Decision 89 puts lifetime and atlas reservation at close so that a retire and a
+re-create in one transaction cancel before anything is spent: no exit launched, no rectangle taken,
+no blit queued. The case that makes this load-bearing rather than tidy is a shell that rebuilds its
+arrangement declaratively, since remove-then-add is what a declarative rebuild looks like from the
+store's side — resolved at the write it would reserve an atlas rectangle per node per commit, which
+is [decision 46](#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)'s
+pressure arriving from the authoring side and finishing *other* connections' exits early. Later
+resurrection costs what decision 46 already prices: the rectangle if one was taken, and the blit if
+it was recorded, which the frame thread may still be holding and which releases through the return
+channel.
+
+**Rejected: retirement on removal from the tree**, above. It is the reading Animation.md's "model
+state removes the entity" invites, written when the model was gyro's own window management rather
+than a shell's arrangement, and it cannot survive a workspace switch.
+
+**Rejected: a separate retiring container**, above.
+
+**Rejected: the shell retiring client-authored entities**, above — the round trip, and the exit that
+does not happen when the shell is wedged.
+
+**Rejected: invalidating the handle at retirement rather than at destruction.** Considered because
+identity stops being *authorable* the moment the author is gone, which would make "resurrection is
+the author's alone" true by construction rather than by rule. It breaks matching: decision 18 needs a
+retiring entity to still be nameable so that a key-`K` enter can pair with it, and the pairing
+happens after retirement by definition. Recorded because it is the tidy version and it removes the
+mechanism the paragraph above just leaned on.
+
+**Consequences.** Animation.md's *Lifetime* section needs the menu example corrected and the retiring
+set restated as a flag; its *Declarative commits* section already reads correctly under
+[decision 112](#112-a-commit-is-a-scope-with-an-origin-and-the-wire-says-when-it-closes). Open.md
+gains the match-key question and the shell-disconnect one.
 
 ---
 

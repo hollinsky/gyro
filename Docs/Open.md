@@ -98,6 +98,18 @@ nothing only proves the grep.
   case that made this sharpest — a driven gesture republishes one coefficient tuple rather than
   re-serializing a scene per input event — which lowers the stakes without settling the question,
   since ordinary commits at device rate remain.
+
+  **The copy-on-write repair does not reach the node run, and what replaces it is more specific.**
+  *(Narrowed 2026-08-22 by
+  [decision 111](Decisions.md#111-an-entity-is-a-nodes-authoring-side-the-store-is-one-tree).)* An
+  arena whose cost is the dirty set works for a per-entity record and not for a preorder run: an
+  insertion renumbers every index above it, every enclosing subtree length, and every backward
+  reference target, so there is no patch smaller than the run. What is left is the observation that
+  the node run changes only when topology, flags, content, or the *active set* changes — a retarget
+  inside an already-active channel changes none of them — so the saving on offer is copying the
+  previous run's bytes rather than walking the store to rebuild them. Whether that copy beats the
+  walk is a memcpy against a pointer chase over the same node count, which is the kind of thing to
+  measure rather than argue.
 - **Whether the publication nudge should be conditional.**
   [Decision 83](Decisions.md#83-dispatchs-publication-is-an-event-source) has dispatch write its
   descriptor on every publication, which is correct and which wakes the frame thread ahead of its
@@ -135,14 +147,25 @@ nothing only proves the grep.
   without animating it, and whether that case is real decides whether the rule is worth having. This
   is decision 51's falsifiable test with a mechanism attached, so it should be settled before a shell
   exists to violate it.
+
+  **Half of it is answered and the answer is not the shell.** *(Narrowed 2026-08-22 by
+  [decision 112](Decisions.md#112-a-commit-is-a-scope-with-an-origin-and-the-wire-says-when-it-closes).)*
+  The cost this entry weighs the rule against — a caller that wants to place something without
+  animating it — is not hypothetical and does not belong to a shell: every `wl_surface.commit` is a
+  mutation that must not animate, since nothing a client authors is a sprung channel. So a transition
+  meaning *none* has to exist whatever is decided here, and what stays open is only whether a
+  **shell** may name it freely, which is the half that decides whether the catalog is enforceable.
 - **Per-node damage, which needs an identity the node record does not carry.**
   [Decision 101](Decisions.md#101-damage-is-the-whole-output-while-anything-moves-and-per-node-damage-needs-an-identity-the-record-does-not-carry)
   reports the whole output while anything is moving, because damaging where a node *was* against
   where it *is* requires the two frames' nodes to be the same node — a published `Handle` rather than
   a position in a run dispatch may reorder between publications. Client surface damage is the other
-  half and has no carrier either until there is a protocol layer to mint it. What decides the shape is
-  whether identity is a field on the node or a parallel run, and whether a node that gains one still
-  costs 128 bytes. It is worth doing when there is a partial-composite path to feed; until then the
+  half and now has a carrier —
+  [decision 113](Decisions.md#113-client-damage-is-a-region-on-the-entity-in-buffer-space-and-it-is-cumulative)
+  puts it on the image entity as a `Region<BufferSpace>`, cumulative because the ring may skip, and
+  gives it a run of its own beside the content runs *(2026-08-22)*. What decides the shape of the
+  node half is whether identity is a field on the node or a parallel run, and whether a node that
+  gains one still costs 128 bytes. It is worth doing when there is a partial-composite path to feed; until then the
   coarse rule costs bandwidth on animating frames and nothing on still ones.
 - **The corner radius and the layout state that zeroes it.** *(Carrier answered 2026-08-22; the
   number remains, below.)*
@@ -169,6 +192,34 @@ nothing only proves the grep.
   spilling past its container. Both are recoverable by the shell clipping in its own surface, which
   is why this is an entry rather than a defect; what decides it is whether the recoverable version
   costs a round trip on something being dragged.
+- **Where a client's entity is parented, before and without a shell.**
+  [Decision 111](Decisions.md#111-an-entity-is-a-nodes-authoring-side-the-store-is-one-tree) has every
+  entity authored by exactly one connection, and a client's surface therefore appears in the store the
+  moment the client commits it — under nothing, because the shell has not been told the window exists
+  and decision 51 lets placement of a new window round trip. So there is a window between the commit
+  and the shell's answer where a window is real and unparented, and there is a longer one during a
+  shell restart where nothing will answer at all. Decision 51's floor policy says gyro keeps showing
+  windows under default policy, which requires a default parent to show them under. Deferred with
+  layout below because it is the same question asked at a different moment, and because getting it
+  wrong is a black screen with a running desktop behind it rather than a subtle artefact.
+- **A match key for a surface a client re-created.**
+  [Decision 114](Decisions.md#114-retirement-is-the-author-going-away-and-resurrection-is-the-authors-alone)
+  found that Animation.md's headline resurrection case is not resurrection: dismissing a menu destroys
+  the `xdg_popup` and normally its `wl_surface`, so reopening it is a new entity and the smoothness has
+  to come from decision 18's matching instead. Nobody mints the key that would make that work — a
+  client does not declare match keys and the shell does not know a popup was reopened — and the
+  obvious repair, gyro deriving one from the parent surface and the positioner, is a heuristic about
+  what a toolkit meant. What decides it is whether the artefact is real: menus reopened fast enough
+  to overlap their own dismissal are common, and the failure is a popup that pops rather than
+  reverses. Wants a toolkit in front of it, not an argument.
+- **Layout, and how little of it is gyro's.** Decision 89 puts layout in phase two and calls it a
+  pass at close, which reads as though gyro has a layout engine. It should not: decision 51 makes
+  window-management policy the shell's, so what runs at close is only *derived geometry* — an anchor
+  coordinate resolved against a node's extent, and whatever else turns out to have the same shape.
+  Tiling, stacking, snapping, and where a new window goes are the shell's, with gyro holding the
+  constraints decision 51 says the shell declares ahead of time. Deliberately deferred: the boundary
+  is stated here so that the first derived quantity does not quietly become the second, and settling
+  it properly wants the constraint set that entry already owes and the gesture vocabulary below.
 - **Which transitions declare an opacity group.** *(Narrowed 2026-08-17.)* Decision 60 settles that
   a group fade flattens and what it costs; it does not settle which bundles ask for one, and "every
   fade" is the wrong answer — paying for an offscreen on a single window fading out would put a
@@ -281,13 +332,23 @@ nothing only proves the grep.
   its enclosing bound. One of the few numbers in this list that is cheap to obtain, and it wants
   obtaining before the region implementation is tuned around a guess.
 - **What may instantiate what.** Decision 64 puts the capture permission on the primitive and does
-  not say how the check is expressed. It is the same question as the System tier's listener below —
+  not say how the check is expressed. *(Placed but not designed, 2026-08-22, and deliberately
+  deferred with the rest of the scene's shape.)* Decision 88 moved the check to commit time on the
+  dispatch side, and
+  [decision 111](Decisions.md#111-an-entity-is-a-nodes-authoring-side-the-store-is-one-tree) gives it
+  what it checks against — every entity has exactly one author, so a `Reference` whose target was
+  authored by another session is a comparison rather than a lookup. What is still missing is how a
+  connection's trust level is *expressed*, which is the System-tier listener question below rather
+  than a scene one. It is the same question as the System tier's listener below —
   a trust level per connection deciding an operation — and the two want answering together, because
   a thumbnail of another session and an output moved between sessions are one bypass at two sizes.
-- **Instance count in the budget and in the atlas.** Decision 64 makes instances an axis of decision
-  29's allocation and of decision 46's sizing, and overview entry is the worst case for both at once
-  — a subtree instantiated per window, in a frame that may also be retiring surfaces. It belongs in
-  the same derivation as the atlas multiple above rather than in one of its own.
+- **Instance count in the atlas.** *(Halved 2026-08-22.)* Decision 64 made instances an axis of
+  decision 29's allocation and of decision 46's sizing;
+  [decision 88](Decisions.md#88-an-instance-is-a-node-the-published-scene-is-a-dag) **withdraws the
+  budget half** — a reference node is area, which `Admit` already prices — and leaves the atlas half
+  standing. Overview entry is still the worst case for it: a thumbnail per window, in a frame that
+  may also be retiring surfaces. It belongs in the same derivation as the atlas multiple above rather
+  than in one of its own.
 - **The floor composite must not flicker, and the ladder as written says it will.** Decision 34's
   rung 3 is *the material is not rendered — an opaque or simply tinted fill*, and decision 35's
   record-time check picks the floor tier **per frame**. So a one-frame excursion is a blurred
@@ -481,6 +542,16 @@ nothing only proves the grep.
   radii — the thing that gets you back to work is itself crashing — and want one answer, covering
   the rate limits, what the output shows meanwhile (decision 51's floor policy and background, for
   the shell), and whether a crash loop should escalate the way gyro's own does.
+
+  **The shell's half now has a mechanism and needs a policy.** *(2026-08-22.)*
+  [Decision 114](Decisions.md#114-retirement-is-the-author-going-away-and-resurrection-is-the-authors-alone)
+  makes the shell disconnecting retire everything the shell authored and nothing any client did,
+  which is decision 51's floor policy falling out of the lifetime rule rather than being built beside
+  it. What it does not decide is whether those nodes run their exit transitions or simply vanish, and
+  the pull is toward vanish: a desktop's whole chrome animating gracefully out is a statement about a
+  crash the user should probably not be shown, and it spends a screen's worth of atlas at the moment
+  the machine is least well. Nor does it say where the client windows go, since the container they
+  were parented into was the shell's — which is *where a client's entity is parented* above.
 - **What `SysRq-V` actually restores under `fbcon=off`.** Decision 37 now leans on it as the last
   key that can put a picture on a panel whose owner is wedged, and the DRM core registers it for
   every device — but it forces an *in-kernel client* to restore, so it does nothing unless one is on
