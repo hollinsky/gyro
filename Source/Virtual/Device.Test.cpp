@@ -89,6 +89,20 @@ public:
 	std::vector<Arrival> Arrivals;
 };
 
+// A sink that keeps what it was handed, so a test can say *which* frame arrived rather than only how
+// many did.
+class RecordingSink final : public IFrameSink
+{
+public:
+	void OnFrame(VirtualOutput& output, const VirtualFrame& frame) override
+	{
+		Frames.push_back(frame);
+		output.Release(frame.Target);
+	}
+
+	std::vector<VirtualFrame> Frames;
+};
+
 // Acquire, present, and leave it to the device to advance and deliver.
 void Submit(VirtualOutput& output, SyncPoint acquire = SyncPoint::Immediate())
 {
@@ -215,6 +229,56 @@ GYRO_TEST(VirtualDevice, WithoutARendererAFrameIsDeliveredAtOnce)
 	clock.Advance(Slow * 2);
 	GYRO_REQUIRE_EQ(device.Drain().has_value(), true);
 	GYRO_CHECK_EQ(sink.Frames(), std::uint64_t{ 1 });
+}
+
+// A sequence number is only unique within one target set, and a reconfiguration is where that stops
+// being obvious.
+//
+// `VirtualOutput::Adopt` re-epochs the timeline on every reconfiguration, so the first commit after a
+// mode set is latched to a sequence the previous set already used. A device that remembered only the
+// number read that frame as one it had already handed over — and the half that does not heal is not
+// the frame the consumer missed, it is the image the consumer therefore never released. The output
+// holds it for good and the ring comes back one short, on and on with every mode set, until an output
+// bound to a single target stops drawing entirely. Nothing reports an error anywhere along the way,
+// including `Awaiting()`, which agrees there is nothing outstanding.
+GYRO_TEST(VirtualDevice, AReconfigurationDoesNotMakeTheNextFrameLookAlreadyDelivered)
+{
+	ManualClock clock;
+	HeapAllocator allocator;
+	VirtualDevice device{ clock };
+	RecordingSink sink;
+
+	VirtualOutput* const output = device.Add(Configured(Slow), allocator, sink);
+	GYRO_REQUIRE(output != nullptr);
+	GYRO_REQUIRE(output->Status().has_value());
+
+	Submit(*output);
+	clock.Advance(Slow * 2);
+	GYRO_REQUIRE_EQ(device.Drain().has_value(), true);
+	GYRO_REQUIRE_EQ(sink.Frames.size(), std::size_t{ 1 });
+
+	// A mode set, which drops the images and builds a new set on a timeline starting from now.
+	output->Reconfigure(Configured(Fast));
+	output->Advance(clock.Now());
+	GYRO_REQUIRE(output->Status().has_value());
+
+	Submit(*output);
+	clock.Advance(Slow * 2);
+	GYRO_REQUIRE_EQ(device.Drain().has_value(), true);
+
+	GYRO_REQUIRE_EQ(sink.Frames.size(), std::size_t{ 2 });
+
+	// The premise, asserted rather than assumed. If the two frames stopped colliding the delivery
+	// below would pass for a reason that has nothing to do with what this test is about, so a
+	// timeline that started counting from where it left off should fail here and be read as a
+	// question about this test rather than as a regression.
+	GYRO_REQUIRE_EQ(sink.Frames[1].Sequence, sink.Frames[0].Sequence);
+
+	// Given back, which is the half a frame counter cannot see: an image the consumer was never
+	// shown is an image nobody releases.
+	GYRO_CHECK(!output->PresentedFrame().has_value());
+	GYRO_CHECK_EQ(output->FreeTargets(), DefaultVirtualTargets);
+	GYRO_CHECK_EQ(device.Awaiting(), std::size_t{ 0 });
 }
 
 // Seam/EventSource.h's ordinary answer: nothing becomes readable when a virtual boundary falls due.
