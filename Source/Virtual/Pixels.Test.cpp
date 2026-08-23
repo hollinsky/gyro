@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Geometry/Space.h"
+#include "Seam/Pixel.h"
 #include "Seam/RenderTarget.h"
 #include "Testing/Test.h"
 
@@ -16,13 +17,14 @@
 // device, no gate. That is deliberate: the thing an integration test leans on hardest is the
 // decoder, and a decoder whose own tests only ran where there was a GPU would be the one part of the
 // pixel path nobody could check when it broke.
+//
+// What the bytes *mean* is Seam/Pixel.Test.cpp's, one module down. What is here is the shape: a
+// stride, an extent, a rectangle the image does not contain, and the padding a fill must not touch.
 
 namespace
 {
 constexpr PixelFormat Xrgb8{ FormatXrgb8888, 0, ModifierLinear };
 constexpr PixelFormat Argb8{ FormatArgb8888, 0, ModifierLinear };
-constexpr PixelFormat Xrgb10{ FormatXrgb2101010, 0, ModifierLinear };
-constexpr PixelFormat Argb10{ FormatArgb2101010, 0, ModifierLinear };
 
 constexpr PixelSize<DeviceSpace> Small{ 4, 3 };
 
@@ -38,90 +40,31 @@ constexpr std::uint32_t PaddedStride = 4 * 4 + 8;
 }
 } // namespace
 
-// The channel order, which is the bug this whole file exists to prevent. `XR24` is
-// `DRM_FORMAT_XRGB8888` — the letters are the bits of a little-endian word, so red sits in byte two.
-GYRO_TEST(Pixels, ChannelOrderFollowsTheLittleEndianWord)
+// The views carry the codec through unchanged, which is the one thing left to check about it here:
+// a `Set` at a padded stride and an `At` over the same memory agree, and both agree with what
+// Seam/Pixel.Test.cpp says the bytes mean. The channel order, the depth conversions, and the refusal
+// of a planar format are that file's, beside the fourccs they decode.
+GYRO_TEST(Pixels, AViewCarriesTheCodecThroughUntouched)
 {
 	std::vector<std::byte> bytes = Canvas();
 
-	// Opaque red, spelled as the four bytes a driver would actually leave in memory.
-	bytes[0] = std::byte{ 0x00 }; // Blue
-	bytes[1] = std::byte{ 0x00 }; // Green
-	bytes[2] = std::byte{ 0xFF }; // Red
-	bytes[3] = std::byte{ 0x00 }; // Ignored
-
-	const Result<ImageView> view = ImageView::Over(bytes, Small, PaddedStride, Xrgb8);
-	GYRO_REQUIRE_EQ(view.has_value(), true);
-
-	// Opaque despite the X byte being zero, because `XR24` has no alpha and reporting the ignored
-	// bits would make every test of a solid an assertion about the format.
-	GYRO_CHECK_EQ(view->At(0, 0), Rgb8(255, 0, 0));
-
-	// The same bytes read as `AR24` are transparent red, which is the whole difference between the
-	// two formats and the reason they are not interchangeable.
-	const Result<ImageView> alpha = ImageView::Over(bytes, Small, PaddedStride, Argb8);
-	GYRO_REQUIRE_EQ(alpha.has_value(), true);
-	GYRO_CHECK_EQ(alpha->At(0, 0), Rgba8(255, 0, 0, 0));
-}
-
-// Ten bits decode to the same value eight bits do at the ends of the range, which is what lets one
-// expectation serve both formats.
-GYRO_TEST(Pixels, TenBitDecodesToTheSameFullRangeAsEight)
-{
-	std::vector<std::byte> bytes = Canvas();
-
-	const Result<MutableImageView> canvas = MutableImageView::Over(bytes, Small, PaddedStride, Xrgb10);
+	const Result<MutableImageView> canvas = MutableImageView::Over(bytes, Small, PaddedStride, Xrgb8);
 	GYRO_REQUIRE_EQ(canvas.has_value(), true);
 
 	canvas->Set(1, 1, Rgb8(255, 0, 0));
-	canvas->Set(2, 1, Rgb8(0, 255, 0));
-	canvas->Set(3, 1, Rgb8(0, 0, 255));
 
+	// Through the view, and through the bytes underneath it at the offset the stride puts them at —
+	// which is what catches a view that indexed rows by width rather than by stride.
 	GYRO_CHECK_EQ(canvas->Read().At(1, 1), Rgb8(255, 0, 0));
-	GYRO_CHECK_EQ(canvas->Read().At(2, 1), Rgb8(0, 255, 0));
-	GYRO_CHECK_EQ(canvas->Read().At(3, 1), Rgb8(0, 0, 255));
+	GYRO_CHECK_EQ(LoadWord(bytes.data() + PaddedStride + 4), EncodePixel(Rgb8(255, 0, 0), FormatXrgb8888));
 
-	// And the value that only ten bits can hold survives the round trip, which eight bits would have
-	// quantized away — the point of decoding into sixteen rather than into eight.
-	const Rgba16 fine{ FromTenBit(513), FromTenBit(514), FromTenBit(515), 65535 };
-	canvas->Set(0, 2, fine);
-	GYRO_CHECK_EQ(canvas->Read().At(0, 2), fine);
-	GYRO_CHECK(canvas->Read().At(0, 2) != Rgba16{ FromTenBit(512), FromTenBit(514), FromTenBit(515), 65535 });
-}
-
-// Two bits of alpha is all `AR30` has, and a writer that assumed eight would put opaque where the
-// caller asked for half.
-GYRO_TEST(Pixels, TenBitAlphaIsTwoBitsAndSaysSo)
-{
-	std::vector<std::byte> bytes = Canvas();
-
-	const Result<MutableImageView> canvas = MutableImageView::Over(bytes, Small, PaddedStride, Argb10);
-	GYRO_REQUIRE_EQ(canvas.has_value(), true);
-
-	canvas->Set(0, 0, Rgba8(255, 255, 255, 0));
-	GYRO_CHECK_EQ(canvas->Read().At(0, 0).Alpha, std::uint16_t{ 0 });
-
-	canvas->Set(1, 0, Rgba8(255, 255, 255, 255));
-	GYRO_CHECK_EQ(canvas->Read().At(1, 0).Alpha, std::uint16_t{ 65535 });
-
-	// One of the two values in between, which is what a caller asking for half actually gets.
-	canvas->Set(2, 0, Rgba16{ 65535, 65535, 65535, FromTwoBit(1) });
-	GYRO_CHECK_EQ(canvas->Read().At(2, 0).Alpha, FromTwoBit(1));
-}
-
-// The widening and the narrowing are inverses across the whole of both ranges. A single off-by-one
-// here would make every fill-then-check test a test of the rounding instead of the composite.
-GYRO_TEST(Pixels, DepthConversionRoundTripsExactly)
-{
-	for (std::uint32_t value = 0; value <= 255; ++value)
-	{
-		GYRO_REQUIRE_EQ(ToEightBit(FromEightBit(static_cast<std::uint8_t>(value))), static_cast<std::uint8_t>(value));
-	}
-
-	for (std::uint32_t value = 0; value <= 1023; ++value)
-	{
-		GYRO_REQUIRE_EQ(ToTenBit(FromTenBit(static_cast<std::uint16_t>(value))), static_cast<std::uint16_t>(value));
-	}
+	// The same memory read as `AR24` is *opaque* red, because the write went out through `XR24` and
+	// that format sends its ignored channel as all ones. The view is carrying the format it was
+	// handed rather than normalising one, which is the half of Seam/Pixel.h's contract that only
+	// shows up when two views disagree about the same bytes.
+	const Result<ImageView> alpha = ImageView::Over(bytes, Small, PaddedStride, Argb8);
+	GYRO_REQUIRE_EQ(alpha.has_value(), true);
+	GYRO_CHECK_EQ(alpha->At(1, 1), Rgba8(255, 0, 0, 255));
 }
 
 // A view that would read past its memory is refused rather than constructed, which is the whole of

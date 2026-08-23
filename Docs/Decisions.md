@@ -8158,8 +8158,9 @@ damage rectangle is full overdraw, which is the one thing a CPU compositor canno
 resolution, and what replaces it is spans.
 
 **The boot scene is authored to what `Blit` draws, rather than `Blit` grown to meet a scene it never
-sees.** No material, no elevation, no `Reference`, and quads that are axis-aligned with subpixel
-edges — a scaled and translated logo needs coverage on the boundary spans and nothing more, so a
+sees.** No material, no elevation, no `Reference`, no corner radius *(added 2026-08-22 — the coverage
+arithmetic a subpixel edge already needs is most of what an analytic corner wants, so this one is
+refused for now rather than foreclosed)*, and quads that are axis-aligned with subpixel edges — a scaled and translated logo needs coverage on the boundary spans and nothing more, so a
 rotated or projective quad is refused. `DrawGroup` is kept, because
 [decision 60](#60-group-opacity-requires-flattening-per-node-alpha-is-not-a-group-fade)'s offscreen
 is the one thing a flat list cannot be widened into later and because the scratch below supplies it
@@ -8176,14 +8177,30 @@ will not initialize at all, so a refusal is a dark machine that cannot say why. 
 that `Blit` only ever composites gyro's own scene — the console's, never a client's — and that has to
 stay true by construction rather than by habit.
 
-**`Blit` never reads its target, and the reason differs by driver.** A dumb buffer from a real KMS
-driver is write-combined: writes stream, reads are one to two orders slower, and blending a
-translucent item over what is beneath it is a read-modify-write of the framebuffer. So the composite
-happens in cached memory and the damage is copied out. On `simpledrm` the buffer gyro maps is
-`drm_gem_shmem` — ordinary cached pages — so the composite happens in place and the write-combined
-cost is paid inside the driver's own copy instead. One renderer either way, and the difference is a
-property of the mapping, so `RenderTarget`'s `MappedImage` carries one field saying whether reading
-it is cheap. The presenter allocated it and is the only party that knows.
+**`Blit` never reads its target, and the reason does not differ by driver.** *(Revised 2026-08-22,
+on writing it.)* A dumb buffer from a real KMS driver is write-combined: writes stream, reads are one
+to two orders slower, and blending a translucent item over what is beneath it is a read-modify-write
+of the framebuffer. So the composite happens in cached memory and the damage is copied out. That much
+holds. What does not is the driver split this entry originally drew — that on `simpledrm` the mapping
+is `drm_gem_shmem` and therefore cached, so the composite could happen in place, and that
+`RenderTarget`'s `MappedImage` should carry a field saying which. **There is nothing for that field to
+enable.** *What is beneath* a translucent item inside the damage region is always something `Blit`
+itself just wrote — the bottom of every composite is an opaque clear — and outside the damage region
+nothing is written at all, which is the whole of what `LOAD` semantics ask for. So the backdrop lives
+in the scratch on every driver and the target is write-only on every driver. The only thing the field
+could have bought is skipping the scratch-to-target copy on `simpledrm`, and it cannot buy that
+either: compositing straight into the target means blending in the target's own encoding, which is
+[decision 47](#47-compositing-happens-in-linear-light-at-wide-primaries)'s linear-light blend given
+up. Keep the scratch and the copy comes back; drop it and the boot logo's antialiased edge is where it
+shows — half the light encodes to sRGB 188 and a blend in the encoding puts 128 there, a dark rim
+around everything `Blit` draws.
+
+**The scratch is a band rather than a second framebuffer**, which this entry did not say and should
+have. Full-size is 66 MB per 4K target and drags every pixel through the cache twice; a few dozen rows
+sized to a core's private cache keeps the composite in cache, makes the copy out the sequential write
+that write-combining wants, and keeps the size of the panel out of the renderer's memory footprint
+entirely. It holds nothing between frames — for the paragraph above's reason — so there is one for the
+whole target set rather than one per target.
 
 #### What the reading found
 

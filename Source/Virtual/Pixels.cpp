@@ -2,86 +2,11 @@
 
 #include <algorithm>
 #include <cerrno>
-#include <cstring>
 
 namespace
 {
 // The one place a format's memory layout is written down.
 //
-// **Little-endian words rather than byte offsets, because that is what DRM's names mean.** `XR24` is
-// `DRM_FORMAT_XRGB8888`, and the `XRGB` is the order of the *bits in a 32-bit little-endian word* —
-// so the bytes in memory run `B, G, R, X`. Spelling it as a word and shifting is the reading that
-// matches the kernel's own definition; spelling it as `bytes[2], bytes[1], bytes[0]` is the same
-// answer arrived at by a coincidence that stops holding for the ten-bit formats, where no channel is
-// byte-aligned at all.
-[[nodiscard]] std::uint32_t LoadWord(const std::byte* at) noexcept
-{
-	std::uint32_t word = 0;
-	std::memcpy(&word, at, sizeof word);
-
-	return word;
-}
-
-void StoreWord(std::byte* at, std::uint32_t word) noexcept
-{
-	std::memcpy(at, &word, sizeof word);
-}
-
-[[nodiscard]] Rgba16 Decode(std::uint32_t word, std::uint32_t code) noexcept
-{
-	switch (code)
-	{
-		case FormatXrgb8888:
-		case FormatArgb8888:
-			return { FromEightBit(static_cast<std::uint8_t>((word >> 16) & 0xFFU)),
-				     FromEightBit(static_cast<std::uint8_t>((word >> 8) & 0xFFU)),
-				     FromEightBit(static_cast<std::uint8_t>(word & 0xFFU)),
-				     HasAlpha(code) ? FromEightBit(static_cast<std::uint8_t>((word >> 24) & 0xFFU)) :
-				                      std::uint16_t{ 0xFFFF } };
-
-		case FormatXrgb2101010:
-		case FormatArgb2101010:
-			return { FromTenBit(static_cast<std::uint16_t>((word >> 20) & 0x3FFU)),
-				     FromTenBit(static_cast<std::uint16_t>((word >> 10) & 0x3FFU)),
-				     FromTenBit(static_cast<std::uint16_t>(word & 0x3FFU)),
-				     HasAlpha(code) ? FromTwoBit(static_cast<std::uint8_t>((word >> 30) & 0x3U)) :
-				                      std::uint16_t{ 0xFFFF } };
-
-		default:
-			return {};
-	}
-}
-
-// The inverse. An `X` channel is written as all ones rather than as zero: the bits are ignored by
-// definition, and a scanout path that a driver decided to read anyway should find opaque rather than
-// transparent.
-[[nodiscard]] std::uint32_t Encode(Rgba16 pixel, std::uint32_t code) noexcept
-{
-	switch (code)
-	{
-		case FormatXrgb8888:
-		case FormatArgb8888:
-		{
-			const std::uint32_t alpha = HasAlpha(code) ? ToEightBit(pixel.Alpha) : 0xFFU;
-
-			return (alpha << 24) | (static_cast<std::uint32_t>(ToEightBit(pixel.Red)) << 16) |
-			       (static_cast<std::uint32_t>(ToEightBit(pixel.Green)) << 8) | ToEightBit(pixel.Blue);
-		}
-
-		case FormatXrgb2101010:
-		case FormatArgb2101010:
-		{
-			const std::uint32_t alpha = HasAlpha(code) ? ToTwoBit(pixel.Alpha) : 0x3U;
-
-			return (alpha << 30) | (static_cast<std::uint32_t>(ToTenBit(pixel.Red)) << 20) |
-			       (static_cast<std::uint32_t>(ToTenBit(pixel.Green)) << 10) | ToTenBit(pixel.Blue);
-		}
-
-		default:
-			return 0;
-	}
-}
-
 // What `Over` checks, for both views, so that the mutable one cannot drift from the read-only one.
 //
 // The last row is the interesting bound: a buffer holds `stride * (height - 1) + width * bytes` and
@@ -153,7 +78,7 @@ Rgba16 ImageView::At(std::int32_t x, std::int32_t y) const noexcept
 	const std::size_t offset =
 		static_cast<std::size_t>(y) * m_Stride + static_cast<std::size_t>(x) * DecodableBytesPerPixel(m_Format.Code);
 
-	return Decode(LoadWord(m_Bytes.data() + offset), m_Format.Code);
+	return DecodePixel(LoadWord(m_Bytes.data() + offset), m_Format.Code);
 }
 
 bool ImageView::IsUniform(PixelRect<DeviceSpace> rect, Rgba16 colour, std::uint16_t tolerance) const noexcept
@@ -260,7 +185,7 @@ void MutableImageView::Set(std::int32_t x, std::int32_t y, Rgba16 colour) const 
 	const std::size_t offset = static_cast<std::size_t>(y) * m_Read.Stride() +
 	                           static_cast<std::size_t>(x) * DecodableBytesPerPixel(m_Read.Format().Code);
 
-	StoreWord(m_Bytes.data() + offset, Encode(colour, m_Read.Format().Code));
+	StoreWord(m_Bytes.data() + offset, EncodePixel(colour, m_Read.Format().Code));
 }
 
 std::size_t MutableImageView::Fill(PixelRect<DeviceSpace> rect, Rgba16 colour) const noexcept
@@ -280,7 +205,7 @@ std::size_t MutableImageView::Fill(PixelRect<DeviceSpace> rect, Rgba16 colour) c
 	// Encoded once and stored per pixel, which is the shape a `Blit` fill wants too: the arithmetic
 	// is per colour and the loop is per pixel, and doing it the other way round is how a solid fill
 	// becomes the most expensive thing in a composite.
-	const std::uint32_t word = Encode(colour, m_Read.Format().Code);
+	const std::uint32_t word = EncodePixel(colour, m_Read.Format().Code);
 	const std::uint32_t bytesPerPixel = DecodableBytesPerPixel(m_Read.Format().Code);
 
 	for (std::int32_t y = top; y < bottom; ++y)

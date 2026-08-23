@@ -308,11 +308,42 @@ gyro_add_module(Seam PORTABLE
 	TESTS
 		EventSource.Test.cpp
 		OutputConfiguration.Test.cpp
+		Pixel.Test.cpp
 		PresentationInfo.Test.cpp
 		Presenter.Test.cpp
 		RenderTarget.Test.cpp
 		Renderer.Test.cpp
 		SyncPoint.Test.cpp
+)
+
+# The CPU renderer, and PORTABLE is the load-bearing word here for a stronger reason than it is
+# anywhere else.
+#
+# Decision 79 makes the pre-Vulkan console a renderer rather than a second presentation path, and
+# decision 40 makes software rendering a device rather than a backend — so this is the floor beneath
+# lavapipe, reached before any GPU driver has loaded on every boot and permanently on a machine where
+# Vulkan will not initialize at all. A composite into a mapped pointer names no platform header, so
+# CheckPortability.cmake can hold it there, and what that buys is that the renderer which runs when
+# there is nothing else to run cannot acquire a platform dependency without the build saying so. Every
+# assertion about where an edge landed runs on a machine with no GPU, which is the only kind of
+# machine this code is for.
+#
+# It is not inside Console: the console is a text grid with its own thread, and this is an IRenderer
+# on the frame thread that the boot splash reaches before any console exists. Console will depend on
+# this rather than contain it. No DISPATCH_HALF — the whole module is frame-side.
+gyro_add_module(Blit PORTABLE
+	DEPENDS
+		Core
+		Geometry
+		Seam
+	SOURCES
+		Band.cpp
+		Blit.cpp
+		Transfer.cpp
+	TESTS
+		Band.Test.cpp
+		Blit.Test.cpp
+		Transfer.Test.cpp
 )
 
 # The frame side: the per-output prediction every deadline in the system is derived from, the loop

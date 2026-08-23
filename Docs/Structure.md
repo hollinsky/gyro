@@ -165,6 +165,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Publication` | portable | **both** | `Core`, `Geometry` |
 | `Seam` | portable | **both** | `Core`, `Geometry`, `World` |
 | `Scene` | portable | dispatch | `Core`, `Geometry`, `World`, `Animation`, `Publication` |
+| `Blit` | **portable** | frame | `Core`, `Geometry`, `Seam` |
 | `Frame` | portable | frame | `Core`, `Geometry`, `World`, `Animation`, `Publication`, `Seam` |
 | `Render` | platform | **both** | `Core`, `Geometry`, `Publication`, `Seam` |
 | `Protocol` | platform | dispatch | `Core`, `Geometry`, `Scene` |
@@ -172,13 +173,27 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Headless` | **portable** | split | `Core`, `Geometry`, `Seam` |
 | `Virtual` | platform | frame | `Core`, `Geometry`, `Seam`, `Headless` |
 | `Nested`, `Drm` | platform | split | `Core`, `Geometry`, `Seam` |
-| `Console` | platform | own | `Core`, `Geometry`, `Seam` |
+| `Console` | platform | own | `Core`, `Geometry`, `Seam`, `Blit` |
 | `Compositor` | platform | constructs | everything |
 | `Testing` | portable | — | — |
 
 Portable means what [decision 6](Decisions.md#6-no-macos-port-development-continues-over-ssh) means:
 ISO C++ and POSIX, no Linux-only or platform-stack headers, so the tests build and run on a machine
 with no GPU, no seat, and no compositor. `CMake/CheckPortability.cmake` enforces it.
+
+### Blit is portable, and it is the module where that matters most
+
+The CPU renderer [decision 79](Decisions.md#79-the-console-is-a-renderer-not-a-presenter) names lives
+in its own module rather than inside `Console`, and it is `PORTABLE` for a stronger reason than the
+others are: a composite into a mapped pointer is arithmetic, so there is no platform header to
+name, and `CheckPortability.cmake` holding it to that is what keeps the renderer that runs *when
+there is no GPU* testable on a machine that has none. Every assertion about where an edge landed and
+what a half-covered pixel is worth runs in CI, on the one path a failure cannot be diagnosed from —
+by the time `Blit` is what is drawing, there is nothing else left to draw with.
+
+It is not inside `Console` because the console is a text grid with its own thread and its own input,
+and the blitter is an `IRenderer` on the frame thread that the boot splash reaches before any console
+exists. `Console` depends on it; the reverse would put a glyph cache below the seam.
 
 ### Frame is portable
 
