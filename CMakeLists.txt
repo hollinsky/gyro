@@ -662,6 +662,7 @@ target_link_libraries(VulkanProbe
 # libraries, and an object library's members reach only the targets that name it.
 
 add_executable(IntegrationTests
+	Source/Integration/BlitPresent.Test.cpp
 	Source/Integration/PublicationRoundTrip.Test.cpp
 	Source/Integration/PublicationSoak.Test.cpp
 	Source/Integration/RenderImport.Test.cpp
@@ -678,6 +679,7 @@ target_link_libraries(IntegrationTests
 		Publication
 		Animation
 		Render
+		Blit
 		Virtual
 		World
 		Seam

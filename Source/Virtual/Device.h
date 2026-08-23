@@ -8,6 +8,7 @@
 #include "Core/Clock.h"
 #include "Core/Fd.h"
 #include "Core/Result.h"
+#include "Core/Signal.h"
 #include "Core/Time.h"
 #include "Seam/EventSource.h"
 #include "Seam/OutputConfiguration.h"
@@ -89,6 +90,7 @@ public:
 		slot.Sink = &sink;
 		slot.Completion = completion;
 		slot.Delivered.reset();
+		slot.OnInvalidated.ConnectTo<&Slot::Forget>(slot.Output->TargetsInvalidated, slot);
 		++m_Count;
 
 		return &*slot.Output;
@@ -196,6 +198,23 @@ private:
 		// The sequence last handed to the sink. An optional rather than a sentinel because a
 		// timeline's first frame is sequence zero, and a sentinel of zero would silently drop it.
 		std::optional<std::uint64_t> Delivered{};
+
+		// Forget it when the images go, because **a sequence is only unique within one target set**
+		// and this used to assume it was unique for the life of the output.
+		//
+		// `Adopt` re-epochs the timeline on every reconfiguration, so the first commit after a mode
+		// set is latched to a sequence the previous set already used — and a device comparing against
+		// the old number reads that frame as one it has already delivered. The consumer never sees it
+		// and, worse, never releases it: the output holds the image for good, so the ring comes back
+		// one short. On decision 110's single-target no-vblank presenter that is an output which
+		// never draws again, from a mode set that reported no error anywhere.
+		//
+		// It hangs off `TargetsInvalidated` rather than `Reconfigured` because what went stale is the
+		// images: what this remembers is a frame naming a target index into a set that has been
+		// dropped, and it stops being meaningful the moment the set does.
+		void Forget() noexcept { Delivered.reset(); }
+
+		Connection<> OnInvalidated{};
 	};
 
 	[[nodiscard]] static bool Awaiting(const Slot& slot) noexcept
