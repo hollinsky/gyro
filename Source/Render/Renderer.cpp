@@ -7,12 +7,18 @@
 #include <array>
 #include <bit>
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
+#include <variant>
 
+#include "Core/ColorState.h"
 #include "Core/Result.h"
 #include "Core/Time.h"
 #include "Geometry/Region.h"
+#include "Render/Pipeline.h"
 #include "Render/Vulkan.h"
+#include "World/Elevation.h"
+#include "World/Material.h"
 
 namespace
 {
@@ -69,6 +75,93 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 		.image = image,
 		.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
 	};
+}
+
+// Whether two colour states describe the same light, alpha aside.
+//
+// **The alpha mode is excluded because it is the one difference this renderer can absorb.** A solid
+// is four numbers, so a straight-alpha fill becomes a premultiplied one with three multiplies on the
+// CPU and nothing lost. Everything else — the primaries, the transfer function, what the content
+// calls its own 1.0 — is a conversion the fragment stage would have to perform, and none of it is
+// written yet.
+[[nodiscard]] constexpr bool SameLight(ColorState item, ColorState output) noexcept
+{
+	return item.Primaries == output.Primaries && item.Transfer == output.Transfer &&
+	       item.ReferenceLuminance == output.ReferenceLuminance;
+}
+
+// What the quad pipeline can express, asked of one item.
+//
+// **Every branch here is a picture somebody would otherwise have to notice was wrong.** A texture
+// drawn as nothing is a window that disappears; a group drawn unflattened is a menu whose overlap
+// shows through mid-fade; a dressing drawn as nothing is a panel that stops being glass; an elevation
+// drawn as nothing is a dialog that stops looking lifted. Each of those composites successfully and
+// is not what the scene said, which is the failure Seam/Renderer.h's *an item the renderer cannot
+// express* exists to keep out of the tree.
+[[nodiscard]] Result<void> Expressible(const DrawItem& item, ColorState output) noexcept
+{
+	if (std::holds_alternative<DrawTexture>(item.Content))
+	{
+		return Failure(EINVAL, "this renderer samples no textures yet");
+	}
+
+	if (std::holds_alternative<DrawGroup>(item.Content))
+	{
+		return Failure(EINVAL, "this renderer flattens no groups yet; decision 60's offscreen is not built");
+	}
+
+	if (item.Dress != Material::None)
+	{
+		return Failure(EINVAL, "this renderer draws no materials yet");
+	}
+
+	if (item.Lift != Elevation::None)
+	{
+		return Failure(EINVAL, "this renderer draws no shadows yet");
+	}
+
+	if (!SameLight(item.Color, output))
+	{
+		return Failure(EINVAL, "this renderer converts no colour states yet; the item's light is not the target's");
+	}
+
+	return {};
+}
+
+// One item's push constant block.
+//
+// The corners and their weights travel positionally, which is the winding Seam/Renderer.h states and
+// the order the vertex stage indexes. The fill is premultiplied here rather than in the shader
+// because it is three multiplies on the CPU against one per fragment, and because
+// `AlphaMode::Straight` is a property of the item rather than of the draw.
+[[nodiscard]] QuadConstants Constants(const DrawItem& item, DrawSolid solid, PixelSize<DeviceSpace> target) noexcept
+{
+	QuadConstants constants{};
+
+	for (std::size_t corner = 0; corner < 4; ++corner)
+	{
+		constants.Corner[corner][0] = item.Shape.Corners[corner].X;
+		constants.Corner[corner][1] = item.Shape.Corners[corner].Y;
+		constants.Corner[corner][2] = item.Shape.Weights[corner];
+		constants.Corner[corner][3] = 0.0F;
+	}
+
+	const float premultiply = item.Color.Alpha == AlphaMode::Straight ? solid.Alpha : 1.0F;
+
+	constants.Fill[0] = solid.Red * premultiply;
+	constants.Fill[1] = solid.Green * premultiply;
+	constants.Fill[2] = solid.Blue * premultiply;
+	constants.Fill[3] = solid.Alpha;
+
+	constants.Shape[0] = item.Extent.Width;
+	constants.Shape[1] = item.Extent.Height;
+	constants.Shape[2] = item.Radius;
+	constants.Shape[3] = item.Opacity;
+
+	constants.Target[0] = static_cast<float>(target.Width);
+	constants.Target[1] = static_cast<float>(target.Height);
+
+	return constants;
 }
 } // namespace
 
@@ -160,6 +253,18 @@ VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device) : m_Cl
 		}
 
 		m_TimelineFd = Fd{ descriptor };
+	}
+
+	// Last, and it is the step that can fail on a driver that took everything above: a device which
+	// refuses the SPIR-V says so at startup rather than at the first frame with a window in it. The
+	// per-format pipelines are not built here — a format is a target's property and no target is
+	// bound yet — which is why `BindTargets` is where `Prepare` runs.
+	if (Result<void> created = m_Pipeline.Create(device); !created)
+	{
+		m_Status = created;
+		Destroy();
+
+		return;
 	}
 }
 
@@ -377,8 +482,14 @@ Result<void> VulkanRenderer::Import(const RenderTarget& target, Slot& slot)
 
 	slot.Size = target.Size;
 	slot.LastSubmit = 0;
+	slot.Format = VulkanFormat(target.Format.Code);
 
-	return {};
+	// **Here rather than at the first `Record`, because a bind is where building one is legal.** The
+	// seam declares this call unbounded and allocating and says in as many words that it may build
+	// pipelines against a format it has not seen; `Record` may do neither. A driver that cannot build
+	// the pipeline is an output that cannot be drawn, reported now, rather than a frame that fails
+	// during a transition.
+	return m_Pipeline.Prepare(slot.Format);
 }
 
 Result<void> VulkanRenderer::Settle()
@@ -514,17 +625,30 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		return Failure(EINVAL, "record names an unbound target");
 	}
 
-	// **The refusal that keeps this commit honest.** There is no pipeline here, so an item is
-	// something this renderer cannot express — Seam/Renderer.h's own words for it — and saying so is
-	// what stops a scene with windows in it from composing to a silent black screen. A frame is not
-	// where a defect is reported, but a renderer that cannot draw what it was handed is not a frame's
-	// problem: it is a renderer bound where a complete one was expected.
-	if (!request.Items.empty())
+	Slot& slot = m_Slots[request.Target];
+
+	// **Every item is checked before anything is recorded, and that ordering is the point.** A
+	// refusal discovered half way through a command buffer leaves a buffer that has been begun and
+	// not ended, and the caller has no way to know how much of its frame reached the queue. Walking
+	// the list first costs one pass over an array the caller just built, and makes the failure the
+	// same shape as `BindTargets`'s: nothing happened.
+	for (const DrawItem& item : request.Items)
 	{
-		return Failure(EINVAL, "this renderer draws no items yet; the quad pipeline is not built");
+		if (Result<void> expressible = Expressible(item, request.Output); !expressible)
+		{
+			return std::unexpected{ expressible.error() };
+		}
 	}
 
-	Slot& slot = m_Slots[request.Target];
+	// A pipeline this target's format has none of is a bind that failed and a `Record` that followed
+	// it. `For` is a lookup and never a build, because decision 62 is explicit that no frame blocks
+	// on compilation.
+	const VkPipeline pipeline = m_Pipeline.For(slot.Format);
+
+	if (!request.Items.empty() && pipeline == VK_NULL_HANDLE)
+	{
+		return Failure(EINVAL, "no pipeline was built for this target's format");
+	}
 
 	// Nothing to redraw. The seam is explicit that this is not the same as the caller skipping the
 	// frame — a target stale by age still wants the composite — so it is the caller's judgement that
@@ -628,6 +752,60 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 			                           .colorAttachment = 0,
 			                           .clearValue = Nothing };
 		vkCmdClearAttachments(command, 1, &clear, count, rects.data());
+	}
+
+	if (count > 0 && !request.Items.empty())
+	{
+		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+		// The whole target, not the damage. The vertex stage divides a device-space corner by
+		// `Target` to reach clip space, so the viewport has to be the grid those corners are measured
+		// on; damage is the scissor's job and is set per rectangle below.
+		const VkViewport viewport{ .x = 0.0F,
+			                       .y = 0.0F,
+			                       .width = static_cast<float>(slot.Size.Width),
+			                       .height = static_cast<float>(slot.Size.Height),
+			                       .minDepth = 0.0F,
+			                       .maxDepth = 1.0F };
+		vkCmdSetViewport(command, 0, 1, &viewport);
+
+		// **Rectangles outside and items inside, which is the ordering that costs the least of
+		// what is scarce.** The damage rectangles are disjoint, so drawing the whole list into each
+		// of them preserves the painter's order within every pixel — and the alternative, one scissor
+		// per item, is the per-item set intersection Seam/Renderer.h declines. It is a draw per item
+		// per rectangle, which is the honest first cut: a region holds at most sixteen rectangles and
+		// a frame's damage is usually one, and narrowing it means testing each item's bound against
+		// each rectangle, which is arithmetic worth adding when there is a scene large enough to
+		// measure it on.
+		for (std::uint32_t index = 0; index < count; ++index)
+		{
+			vkCmdSetScissor(command, 0, 1, &rects[index].rect);
+
+			for (const DrawItem& item : request.Items)
+			{
+				const DrawSolid* solid = std::get_if<DrawSolid>(&item.Content);
+
+				// A dressing with nothing to draw. `Expressible` has already refused the ones that
+				// carry a material or an elevation, so what is left is an item whose whole content was
+				// a dressing nobody set — a caller's bug that draws nothing, which is the same answer
+				// Seam/Renderer.h gives an empty `DrawGroup`.
+				if (solid == nullptr)
+				{
+					continue;
+				}
+
+				const QuadConstants constants = Constants(item, *solid, slot.Size);
+				vkCmdPushConstants(
+					command,
+					m_Pipeline.Layout(),
+					VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+					0,
+					sizeof constants,
+					&constants
+				);
+				vkCmdDraw(command, 6, 1, 0, 0);
+			}
+		}
 	}
 
 	vkCmdEndRendering(command);
@@ -752,6 +930,8 @@ void VulkanRenderer::Destroy() noexcept
 	{
 		return;
 	}
+
+	m_Pipeline.Destroy();
 
 	m_TimelineFd = Fd{};
 

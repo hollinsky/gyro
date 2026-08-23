@@ -10,6 +10,7 @@
 #include "Core/Result.h"
 #include "Geometry/Space.h"
 #include "Render/Device.h"
+#include "Render/Pipeline.h"
 #include "Render/Vulkan.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/Renderer.h"
@@ -17,18 +18,27 @@
 
 // The Vulkan renderer: `Seam/Renderer.h`'s `Record` half, against images the presenter allocated.
 //
-// **What it draws today is the composite of an empty scene, and it refuses to pretend otherwise.**
-// There is no pipeline here yet, so a request that carries draw items is `EINVAL` — Seam/Renderer.h's
-// *an item the renderer cannot express* — rather than a frame that quietly comes out black. That
-// choice is the whole of what makes this commit safe to have in the tree: the failure mode of the
-// alternative is a user's screen going blank with nothing in any log saying why, which is worse than
-// any build error. The quad pipeline is the next cut and it is what deletes the refusal.
+// **It draws solids, and it still refuses what it cannot express.** Render/Pipeline.h is the quad
+// pipeline and it covers one alternative of `DrawContent`: a fill, over a projected quad, with a
+// corner radius and a per-node opacity. A `DrawTexture`, a `DrawGroup`, a node dressed in a material
+// or lifted to an elevation is `EINVAL` — Seam/Renderer.h's *an item the renderer cannot express* —
+// rather than a window that silently comes out as a flat rectangle or vanishes. The refusal is the
+// half of this file worth keeping as the pipeline set grows: the alternative failure mode is a
+// screen that is subtly wrong with nothing in any log saying why, which nobody can report and nobody
+// can bisect.
 //
-// **What it does exercise is the three things that actually break**, none of which a pipeline would
-// have made more true: a dmabuf the renderer did not allocate becoming a `VkImage` under an explicit
-// DRM modifier, the damage region reaching the driver as a scissor rather than as a whole-target
-// repaint, and the frame's completion being something the caller can act on. Those were each
-// measured against lavapipe and against a real driver before this file was written.
+// **The colour-state conversion is the next thing owed, and it is why a mismatch is refused.**
+// Decision 47 composites in linear light at wide primaries; nothing here converts anything yet, so an
+// item whose light differs from the target's is refused rather than written through as if the numbers
+// meant the same thing. What that leaves standing is a blend performed in the target's own encoding,
+// which is wrong wherever an item is not opaque and which the conversion element of decision 62's
+// pointwise chain is what fixes.
+//
+// **What it exercises beyond the drawing is the three things that actually break**: a dmabuf the
+// renderer did not allocate becoming a `VkImage` under an explicit DRM modifier, the damage region
+// reaching the driver as a scissor rather than as a whole-target repaint, and the frame's completion
+// being something the caller can act on. Those were each measured against lavapipe and against a real
+// driver before this file was written.
 //
 // **The device is held by reference and never owned**, which is Docs/Structure.md#ownership on
 // device migration: `Render` tears down and rebuilds whole while `Frame` keeps running, so the
@@ -99,6 +109,11 @@ private:
 		VkImageView View = VK_NULL_HANDLE;
 		PixelSize<DeviceSpace> Size{};
 
+		// What the pipeline for this target was built against. Kept here rather than re-derived from
+		// the `RenderTarget` at record time because the target set is the presenter's and this slot
+		// outlives the span `BindTargets` was handed.
+		VkFormat Format = VK_FORMAT_UNDEFINED;
+
 		// The timeline value the last submission against this image signals. A record into an image
 		// whose previous submission has not landed is `EBUSY` rather than a wait, because a wait
 		// here would put the GPU's schedule on the `SCHED_FIFO` thread — which is the inversion
@@ -124,6 +139,11 @@ private:
 
 	VkCommandPool m_Pool = VK_NULL_HANDLE;
 	std::array<VkCommandBuffer, MaxRenderTargets> m_Commands{};
+
+	// Built at construction and populated per format at `BindTargets`, so that nothing inside a
+	// recording ever creates one — decision 62's *no frame blocks on compilation*, holding at the one
+	// place it is currently possible to break it.
+	QuadPipeline m_Pipeline;
 
 	// One timeline for the device's whole life, which is what Seam/SyncPoint.h's borrowed descriptor
 	// requires: *the timeline outlives every point on it*. The descriptor is invalid on a device that

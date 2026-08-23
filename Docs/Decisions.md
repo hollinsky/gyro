@@ -7614,3 +7614,89 @@ a real panel pays software rasterization inside the frame section, and whether t
 prediction absorbs that gracefully is a question for the first time gyro drives a real display on
 lavapipe. Nothing is blocked meanwhile: the virtual output never waits on a point, so the path is
 exercised end to end without a panel.
+
+### 109. Shaders compile at build time; runtime compilation is a development option
+
+*(Decided 2026-08-22, on writing the quad pipeline —
+[decision 107](#107-vulkan-arrives-through-cpm-and-gyro-never-links-the-loader) deferred this until
+there was a shader to compile, and now there is. Revises
+[decision 9](#9-volk-and-runtime-shader-compilation-in-vma-and-a-test-framework-out)'s 2026-08-16
+addition and sharpens what
+[decision 62](#62-effect-composition-is-an-optimization-and-the-unfused-path-is-the-reference) means
+by "compiled off the frame path".)*
+
+**Every SPIR-V module gyro can ever need exists before it boots, embedded in the binary. Nothing in
+the shipped process turns text into SPIR-V.** What happens at runtime is
+`vkCreateGraphicsPipelines` against a module that is already there.
+
+**The two readings of decision 62 are not the same thing, and only one of them needs a compiler in
+the address space.** That entry says "pipeline creation is milliseconds of CPU", "the lattice is
+built at startup and persisted", and "a variant that is nevertheless absent is drawn unfused that
+frame and compiled off the frame path". Every one of those is satisfied by creating a pipeline from
+an existing module with the run selected by specialization constants. Decision 9's addition reads
+the same sentence as glslang running in the compositor, and that is the reading this entry drops.
+
+**What makes it possible is that the set is closed.** Decision 103 counts the lattice — four ordered
+pointwise elements make ten contiguous runs, a gather splits a chain into at most two of them, and
+there is at most one gather per item because `Dress` is one field — over a vocabulary
+[decision 33](#33-effects-are-named-materials-not-parameterized-filter-calls) closed for cohesion.
+An enumerable set can be compiled before boot. Compiz is the instructive contrast and the reason the
+comparison keeps coming up: it composed plugin-supplied fragment snippets into one program in 2007
+because *any* plugin could contribute one, so the set of combinations was unknowable until the user's
+plugin list loaded and the only place left to assemble a program was at runtime. gyro gets the same
+fusion out of a table, and it gets it because of a decision taken for an unrelated reason.
+
+**What reopens this is the vocabulary opening.** If a shell ever supplies its own material, the set
+stops being enumerable and Compiz's problem returns whole. Decision 33 forbids exactly that, so the
+two decisions stand or fall together — worth saying out loud, because a proposal for shell-authored
+effects is also a proposal for glslang in a `SCHED_FIFO` process, and it will not arrive announcing
+itself that way.
+
+#### glslang rather than shaderc, and the difference is three dependencies
+
+shaderc is the incumbent name in [Architecture.md](Architecture.md#dependencies)'s table and in
+decision 9. It is a *library* wrapper whose value is the runtime compilation above, and taking it
+costs SPIRV-Tools, SPIRV-Headers and glslang underneath it. Asked for the one thing wanted here — a
+`.vert` in and a header out — `glslang -V` is the same SPIR-V from one CPM package. `ENABLE_OPT=OFF`
+is what keeps SPIRV-Tools out; HLSL and the SPIR-V remapper are off for the same reason, and what is
+left builds in about twenty-five seconds. It is pinned to the SDK Vulkan-Headers and volk are pinned
+to, for decision 107's reason: a front end generating for one header revision and a dispatch table
+built from another disagree about what a structure contains.
+
+`--vn` emits the header directly, so there is no `bin2c` step and no intermediate `.spv` in the
+build. `CMake/Shaders.cmake` is the rule.
+
+#### Rejected: linking shaderc into gyro, which decision 9 had already taken
+
+gyro calls `mlockall(MCL_CURRENT | MCL_FUTURE)`, so glslang and SPIRV-Tools become roughly ten
+megabytes of compiler text pinned into RAM that never comes back — on every machine, including the
+sc7180 tablet [decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)
+protects, so that one person can tune a blur once. It also buys no machinery: compilation and
+pipeline creation both allocate and both take tens of milliseconds, so either way they need a worker
+thread and an atomic swap at a frame boundary, which decision 62 already requires.
+
+**The development case decision 9 took it for survives without it: watch the `.spv`, not the GLSL.**
+A single shader recompiles in tens of milliseconds, so the file has already changed by the time the
+eye is back on the screen — the same loop, with the compiler outside the process. The embedded array
+stays the fallback, which matters because
+[decision 41](#41-device-migration-is-exercised-on-every-boot) has gyro running before the real
+driver has loaded: a shader that must be *found* on a filesystem is a black screen with a path in a
+log nobody can read yet.
+
+**And most of what "tune a blur by looking at it" means is not a source edit at all.** Decisions 33
+and 103 make the radius, the tint, `Smoke`'s contrast floor and the shadow's falloff constants *of
+the material* rather than parameters of a call site, so a live loop for those is a reloadable
+constant block and no recompile of anything. Source edits — kernel shape, sample pattern — are the
+rarer half and are what the `.spv` watch covers.
+
+#### Rejected: SPIR-V compiled offline and checked in
+
+Decision 107 named this as the alternative and it is worse than it looks. Nobody reviewing a diff can
+tell whether the binary matches the source sitting beside it, and the failure is silent in the
+direction that matters: a shader edit that was never recompiled ships the old picture.
+
+#### Rejected: `find_program(glslangValidator)`
+
+No dependency at all, and it makes the SPIR-V depend on whichever SDK the build machine happens to
+have — which is decision 107's rejected *distribution headers where they exist* arriving one tool
+over, with the same consequence that a build is reproducible only by accident.

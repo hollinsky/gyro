@@ -30,6 +30,7 @@
 #include "Testing/Test.h"
 #include "Virtual/Buffer.h"
 #include "Virtual/Output.h"
+#include "Virtual/Pixels.h"
 #include "Virtual/Udmabuf.h"
 #include "World/Elevation.h"
 #include "World/Material.h"
@@ -48,6 +49,12 @@
 // allocator chose, and the pixels coming back out through a mapping the driver never saw. Decision
 // 102 is the entry that put a real buffer within reach of the renderer, and this is the test it was
 // for.
+//
+// **It is also where the quad pipeline is read rather than described.** A shader is the one part of
+// this codebase a compiler cannot check: the push constant block's layout, the winding of the six
+// vertices, the perspective weight going back into `w`, and the corner field are each a picture that
+// comes out plausible and wrong. What answers them is Virtual/Pixels.h's predicates over a real
+// composite — where the fill landed, to the pixel, and what the corner cut away.
 //
 // **Both gates are skips rather than failures**, for the reasons Virtual/Udmabuf.Test.cpp and
 // Render/Device.Test.cpp each give: `/dev/udmabuf` is behind a `uaccess` ACL a container will not
@@ -193,6 +200,46 @@ Composite(std::uint32_t target, const Region<DeviceSpace>& damage = {}, std::spa
 // failure prints legibly.
 constexpr std::uint32_t Black = 0xFF000000;
 constexpr std::uint32_t Filled = 0xABABABAB;
+
+// A solid over a rectangle, every field named for the same reason `Composite` names its own: an
+// item with a default nobody chose is how a node ends up invisible or opaque by accident.
+[[nodiscard]] DrawItem Solid(Rect<DeviceSpace> where, DrawSolid fill, float opacity = 1.0F, float radius = 0.0F)
+{
+	return DrawItem{ .Content = fill,
+		             .Shape = Quad::FromRect(where),
+		             .Extent = { where.Extent.Width, where.Extent.Height },
+		             .Opacity = opacity,
+		             .Radius = radius,
+		             .Dress = Material::None,
+		             .Lift = Elevation::None,
+		             .Color = ColorState::Srgb(),
+		             .Sampling = {} };
+}
+
+// Everything the target holds, decoded. `BufferReader` is what holds the kernel's cache maintenance
+// open across the look, which is why the view is never taken over `Pixels()` directly.
+constexpr Rgba16 Red = Rgb8(255, 0, 0);
+constexpr Rgba16 Blue = Rgb8(0, 0, 255);
+constexpr Rgba16 Prefilled = Rgb8(0xAB, 0xAB, 0xAB);
+
+// Where the fill in the two placement tests below has to have landed. Shared so that the floor tier
+// and a real driver are held to one claim rather than to two that can drift apart.
+void CheckThePlacement(const ImageView& image)
+{
+	const PixelRect<DeviceSpace> expected{ { 16, 8 }, { 24, 12 } };
+
+	// Opaque, and to the bit. An item at full opacity with no radius has coverage of exactly one at
+	// every pixel it covers, which is what makes this an equality rather than a tolerance.
+	GYRO_CHECK(image.IsUniform(expected, Red));
+	GYRO_CHECK_EQ(image.BoundsOfDiffering(OpaqueBlack), std::optional{ expected });
+
+	// One pixel outside each edge, because an off-by-one in the projection is exactly what a bound
+	// computed from a shape that is one pixel wrong would still report correctly if the fill bled.
+	GYRO_CHECK_EQ(image.At(15, 12), OpaqueBlack);
+	GYRO_CHECK_EQ(image.At(40, 12), OpaqueBlack);
+	GYRO_CHECK_EQ(image.At(28, 7), OpaqueBlack);
+	GYRO_CHECK_EQ(image.At(28, 20), OpaqueBlack);
+}
 } // namespace
 
 // The whole path, in one test: allocate, import, draw the damage, read the bytes back.
@@ -313,12 +360,198 @@ GYRO_TEST(RenderImport, ACompositedFrameReachesTheConsumer)
 	GYRO_CHECK(!fixture->Output().PresentedFrame().has_value());
 }
 
-// The refusal that keeps this commit honest, asserted rather than described. A renderer with no
-// pipeline that quietly composited an empty frame would put a black screen in front of somebody with
-// nothing anywhere saying why.
-GYRO_TEST(RenderImport, DrawItemsAreRefusedRatherThanIgnored)
+// **Where a fill lands, to the pixel.** The quad is axis-aligned on the device grid, which decision
+// 67 makes the settled case and therefore the one that has to be exact: the interior is uniformly
+// the fill, everything else in the damage is the empty-scene black, and the bound of what differs is
+// the rectangle the caller asked for and not one pixel more.
+//
+// A bound rather than a golden image, for Virtual/Pixels.h's reason — this is the assertion a driver
+// that rounds a filtered edge differently still passes, and a renderer that placed the quad half a
+// pixel off still fails.
+GYRO_TEST(RenderImport, ASolidLandsExactlyWhereItsCornersSay)
 {
-	std::optional<Fixture> fixture = Available("DrawItemsAreRefusedRatherThanIgnored");
+	std::optional<Fixture> fixture = Available("ASolidLandsExactlyWhereItsCornersSay");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	fixture->Prefill();
+
+	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+	GYRO_REQUIRE(acquired.has_value());
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	const DrawItem item = Solid({ { 16.0F, 8.0F }, { 24.0F, 12.0F } }, DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F });
+	const Result<Submission> submission = fixture->Renderer().Record(Composite(*acquired, damage, { &item, 1 }));
+	GYRO_REQUIRE_EQ(submission.has_value(), true);
+	GYRO_REQUIRE(fixture->Renderer().IsComplete(submission->Point));
+
+	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+	GYRO_REQUIRE(buffer != nullptr);
+
+	const BufferReader reader{ *buffer };
+	GYRO_REQUIRE(reader.IsValid());
+
+	CheckThePlacement(reader.Image());
+}
+
+// **The same claim on a real driver.** Everything above runs on lavapipe, which is decision 40's
+// floor tier and is the device this suite defaults to; a shader is the one thing in the tree whose
+// answer can differ between a software rasterizer and hardware — pixel centres, the rounding of a
+// unorm write, whether a derivative is taken at all. Skipped where there is no GPU, which is the
+// same shape `AnExportingDeviceHandsOutAWaitablePoint` already has and for the same reason.
+GYRO_TEST(RenderImport, ASolidLandsInTheSamePlaceOnHardware)
+{
+	std::optional<Fixture> fixture = Available("ASolidLandsInTheSamePlaceOnHardware", DeviceClass::Hardware);
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	std::println("  {}", fixture->Device().Description());
+
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	fixture->Prefill();
+
+	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+	GYRO_REQUIRE(acquired.has_value());
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	const DrawItem item = Solid({ { 16.0F, 8.0F }, { 24.0F, 12.0F } }, DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F });
+	const Result<Submission> submission = fixture->Renderer().Record(Composite(*acquired, damage, { &item, 1 }));
+	GYRO_REQUIRE_EQ(submission.has_value(), true);
+
+	while (!fixture->Renderer().IsComplete(submission->Point))
+	{
+		// Deliberately empty, for the reason the timeline test below gives: a poll rather than a
+		// wait is what the frame loop does, and here the point is only that it eventually flips.
+	}
+
+	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+	GYRO_REQUIRE(buffer != nullptr);
+
+	const BufferReader reader{ *buffer };
+	GYRO_REQUIRE(reader.IsValid());
+
+	CheckThePlacement(reader.Image());
+}
+
+// **The corner cut, and the two things about it that are easy to get backwards.** A radius removes
+// the corners and leaves the middle of every edge alone; an inverted field does the opposite and
+// looks, at a glance, like a rounded rectangle too. So the assertions are the extreme corner gone,
+// the centre present, and the midpoint of an edge present — the third being what separates a corner
+// radius from a shrunken quad.
+GYRO_TEST(RenderImport, ARadiusCutsTheCornersAndNothingElse)
+{
+	std::optional<Fixture> fixture = Available("ARadiusCutsTheCornersAndNothingElse");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	fixture->Prefill();
+
+	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+	GYRO_REQUIRE(acquired.has_value());
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	const DrawItem item = Solid({ { 8.0F, 4.0F }, { 24.0F, 24.0F } }, DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F }, 1.0F, 8.0F);
+	GYRO_REQUIRE_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &item, 1 })).has_value(), true);
+
+	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+	GYRO_REQUIRE(buffer != nullptr);
+
+	const BufferReader reader{ *buffer };
+	GYRO_REQUIRE(reader.IsValid());
+
+	// The four extreme corners, which a radius of eight puts well outside the arc.
+	GYRO_CHECK_EQ(reader.Image().At(8, 4), OpaqueBlack);
+	GYRO_CHECK_EQ(reader.Image().At(31, 4), OpaqueBlack);
+	GYRO_CHECK_EQ(reader.Image().At(8, 27), OpaqueBlack);
+	GYRO_CHECK_EQ(reader.Image().At(31, 27), OpaqueBlack);
+
+	// The centre and the middle of each edge, which it does not touch.
+	GYRO_CHECK_EQ(reader.Image().At(20, 16), Red);
+	GYRO_CHECK_EQ(reader.Image().At(20, 4), Red);
+	GYRO_CHECK_EQ(reader.Image().At(20, 27), Red);
+	GYRO_CHECK_EQ(reader.Image().At(8, 16), Red);
+	GYRO_CHECK_EQ(reader.Image().At(31, 16), Red);
+
+	// And the bound is still the whole quad, because the arcs meet the edges at their ends. A field
+	// that had eaten the edges as well would report a smaller one and pass every check above.
+	GYRO_CHECK_EQ(
+		reader.Image().BoundsOfDiffering(OpaqueBlack), std::optional{ PixelRect<DeviceSpace>{ { 8, 4 }, { 24, 24 } } }
+	);
+}
+
+// **The list is the painter's order, and opacity is `over`.** Two items that overlap: the later one
+// wins where they meet, which is decision 55's strict tree order arriving at the renderer as nothing
+// more than the order of a span. The half-opaque third is what says the blend is `over` with a
+// premultiplied source rather than a replace — a source factor of one on components that were not
+// premultiplied comes out saturated instead of half.
+GYRO_TEST(RenderImport, ItemsPaintInListOrderAndOpacityBlends)
+{
+	std::optional<Fixture> fixture = Available("ItemsPaintInListOrderAndOpacityBlends");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	fixture->Prefill();
+
+	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+	GYRO_REQUIRE(acquired.has_value());
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	const std::array<DrawItem, 3> items{
+		Solid({ { 0.0F, 0.0F }, { 32.0F, 32.0F } }, DrawSolid{ 0.0F, 0.0F, 1.0F, 1.0F }),
+		Solid({ { 16.0F, 0.0F }, { 16.0F, 32.0F } }, DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F }),
+		// Premultiplied at half: the components are already scaled by the alpha they carry, which is
+		// what `ColorState::Srgb()` says of them.
+		Solid({ { 40.0F, 0.0F }, { 16.0F, 32.0F } }, DrawSolid{ 0.5F, 0.0F, 0.0F, 0.5F }),
+	};
+
+	GYRO_REQUIRE_EQ(fixture->Renderer().Record(Composite(*acquired, damage, items)).has_value(), true);
+
+	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+	GYRO_REQUIRE(buffer != nullptr);
+
+	const BufferReader reader{ *buffer };
+	GYRO_REQUIRE(reader.IsValid());
+
+	// Blue where only the first reached, red where the second covered it. Reversed order would pass
+	// the first of these and fail the second.
+	GYRO_CHECK_EQ(reader.Image().At(8, 16), Blue);
+	GYRO_CHECK_EQ(reader.Image().At(24, 16), Red);
+
+	// Half red over the empty scene's black. One least-significant bit of tolerance, because the
+	// rounding of 0.5 into eight bits is the driver's and both answers are correct.
+	GYRO_CHECK(reader.Image().IsUniform(PixelRect<DeviceSpace>{ { 44, 8 }, { 8, 16 } }, Rgb8(128, 0, 0), 300));
+}
+
+// **The refusals, which are what keep a half-built renderer from lying about a scene.** Each of these
+// composites successfully under a renderer that ignored what it could not draw, and each is a
+// different picture from the one the scene described — so the seam's `EINVAL` is the only honest
+// answer until the pipeline covering it exists.
+GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
+{
+	std::optional<Fixture> fixture = Available("WhatTheQuadPipelineCannotExpressIsRefused");
 
 	if (!fixture)
 	{
@@ -333,19 +566,41 @@ GYRO_TEST(RenderImport, DrawItemsAreRefusedRatherThanIgnored)
 	Region<DeviceSpace> damage;
 	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
 
-	const DrawItem item{ .Content = DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F },
-		                 .Shape = Quad::FromRect({ {}, { 16.0F, 16.0F } }),
-		                 .Extent = { 16.0F, 16.0F },
-		                 .Opacity = 1.0F,
-		                 .Radius = 0.0F,
-		                 .Dress = Material::None,
-		                 .Lift = Elevation::None,
-		                 .Color = ColorState::Srgb(),
-		                 .Sampling = {} };
+	const Rect<DeviceSpace> where{ { 8.0F, 8.0F }, { 16.0F, 16.0F } };
+	const DrawItem drawable = Solid(where, DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F });
 
-	const Result<Submission> refused = fixture->Renderer().Record(Composite(*acquired, damage, { &item, 1 }));
-	GYRO_REQUIRE_EQ(refused.has_value(), false);
-	GYRO_CHECK_EQ(refused.error().Code(), EINVAL);
+	// The baseline, so that the refusals below are about what changed rather than about the fixture.
+	GYRO_REQUIRE_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &drawable, 1 })).has_value(), true);
+
+	std::array<DrawItem, 5> refused{ drawable, drawable, drawable, drawable, drawable };
+	refused[0].Content = DrawTexture{};
+	refused[1].Content = DrawGroup{ .Count = 0 };
+	refused[2].Dress = Material::Glass;
+	refused[3].Lift = Elevation::Resting;
+	refused[4].Color = ColorState::Composite();
+
+	for (const DrawItem& item : refused)
+	{
+		const Result<Submission> answer = fixture->Renderer().Record(Composite(*acquired, damage, { &item, 1 }));
+		GYRO_REQUIRE_EQ(answer.has_value(), false);
+		GYRO_CHECK_EQ(answer.error().Code(), EINVAL);
+	}
+
+	// **A list whose last item is refused records none of the ones in front of it.** The check runs
+	// before anything is recorded, so a refusal leaves the target exactly as it was rather than
+	// half-composited — which is the same shape `BindTargets` already has and the only one a caller
+	// can reason about.
+	fixture->Prefill();
+
+	const std::array<DrawItem, 2> mixed{ drawable, refused[0] };
+	GYRO_REQUIRE_EQ(fixture->Renderer().Record(Composite(*acquired, damage, mixed)).has_value(), false);
+
+	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+	GYRO_REQUIRE(buffer != nullptr);
+
+	const BufferReader reader{ *buffer };
+	GYRO_REQUIRE(reader.IsValid());
+	GYRO_CHECK_EQ(reader.Image().At(16, 16), Prefilled);
 }
 
 // The miswirings Seam/RenderTarget.h names, each one a branch somebody wrote rather than a cast that

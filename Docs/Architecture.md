@@ -2503,7 +2503,7 @@ flow. That is what disqualified basu.
 | spdlog                         | CPM        | logging — async sink only              |
 | `Vulkan-Headers`               | CPM        | renderer — headers only, version pinned |
 | volk                           | CPM        | Vulkan meta-loader; `dlopen`s the loader |
-| shaderc / glslang              | CPM        | runtime shader compilation, hot reload — not taken yet |
+| glslang                        | CPM        | GLSL to SPIR-V at build time; not linked into gyro |
 
 Not used: `libwayland-client` (the client codec is gyro's, per
 [decision 1](Decisions.md#1-the-nested-backend-drives-raw-wayland-protocol-not-vulkan-wsi)),

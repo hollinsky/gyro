@@ -23,6 +23,7 @@ include(CMake/CPM.cmake)
 
 include(CMake/BuildFlags.cmake)
 include(CMake/Module.cmake)
+include(CMake/Shaders.cmake)
 
 enable_testing()
 
@@ -123,6 +124,29 @@ set(VULKAN_HEADERS_INSTALL_DIR "${Vulkan-Headers_SOURCE_DIR}" CACHE PATH "The he
 CPMAddPackage(
 	NAME volk
 	GITHUB_REPOSITORY zeux/volk
+	GIT_TAG vulkan-sdk-1.4.357.0
+	SYSTEM YES
+	EXCLUDE_FROM_ALL YES
+)
+
+# The GLSL front end, and it is a build tool rather than a library gyro links. CMake/Shaders.cmake is
+# the argument; the short of it is that decision 103's variant lattice is enumerable, so every module
+# exists before gyro boots and nothing at runtime turns text into SPIR-V. Pinned to the same SDK as
+# the two above for their reason.
+#
+# Three options turn off three quarters of the build. ENABLE_OPT is the one that matters: it is what
+# pulls in SPIRV-Tools, and the optimizer is not wanted on shaders this small. HLSL is a front end
+# gyro will never speak and is deprecated upstream; the SPIR-V remapper is a size tool for platforms
+# that ship uncompressed shader blobs.
+set(ENABLE_OPT OFF CACHE BOOL "No SPIRV-Tools; gyro does not optimize its own shaders" FORCE)
+set(ENABLE_HLSL OFF CACHE BOOL "gyro writes GLSL" FORCE)
+set(ENABLE_SPVREMAPPER OFF CACHE BOOL "Nothing here remaps SPIR-V" FORCE)
+set(GLSLANG_TESTS OFF CACHE BOOL "glslang's own suite is not gyro's" FORCE)
+set(GLSLANG_ENABLE_INSTALL OFF CACHE BOOL "Nothing here is installed" FORCE)
+
+CPMAddPackage(
+	NAME glslang
+	GITHUB_REPOSITORY KhronosGroup/glslang
 	GIT_TAG vulkan-sdk-1.4.357.0
 	SYSTEM YES
 	EXCLUDE_FROM_ALL YES
@@ -409,9 +433,16 @@ gyro_add_module(Render
 		Seam
 	SOURCES
 		Device.cpp
+		Pipeline.cpp
 		Renderer.cpp
 	TESTS
 		Device.Test.cpp
+)
+
+gyro_add_shaders(Render
+	SOURCES
+		Quad.vert
+		Quad.frag
 )
 
 # PUBLIC for Compositor's reason below: the module's own tests compile against volk's prototypes too,
