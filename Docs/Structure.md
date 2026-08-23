@@ -23,7 +23,10 @@ splitting, or being renamed changes this file and nothing else. If a change here
 > may name the other, and `Seam` in its two frame-side halves, which is `IPresenter` and `IRenderer`,
 > the data their verbs take and report, and the source the presenter's completions arrive on — and
 > `Frame` now holds the step those interfaces are driven from and the walk that turns a published
-> scene into draw items, which runs against an empty ring until `Scene` exists to fill one. `Headless` is the first thing behind either seam:
+> scene into draw items. `Scene` is the other end of that walk, in its first half: the entity store,
+> the output model, and the serializer that turns the two into a snapshot — construction and
+> publication, with the commit scope that mutates one still to come.
+> `Headless` is the first thing behind either seam:
 > a simulated panel whose vblanks are arithmetic, a device that is the one source for all of them, a
 > synthetic plane catalog, and a renderer that charges a cost and draws nothing. `Compositor` closes
 > the circuit: it is the first module in the tree that is not portable, and it holds the `while`, the

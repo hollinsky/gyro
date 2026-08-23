@@ -283,6 +283,34 @@ gyro_add_module(Publication PORTABLE
 		Publisher/Publisher.Test.cpp
 )
 
+# The world, as the dispatch thread holds it: the entity store, and the serializer that turns it into
+# a snapshot. Decision 111 for the shape — an entity is a node's authoring side and the store is one
+# tree — and decision 86 for what comes out the other end.
+#
+# DISPATCH whole rather than a straddler, which is what makes the frame side's inability to reach it a
+# graph property instead of a directory one. Nothing here runs on the frame thread: the walk that
+# consumes what this publishes is Frame's, and the two never meet.
+#
+# DEPENDS is the row Docs/Structure.md already carried before there was a line of this module, which is
+# the check that the placements it rests on are right. The store needs SlotAllocator and Handle; the
+# entity holds Animatables; the serializer stages into Publication's builder and writes World's record;
+# and the output model needs Scale and the adapter. Seam is not among them and must not become one —
+# CheckLayering denies what is not declared, and its report would name the missing edge rather than
+# decision 87.
+gyro_add_module(Scene PORTABLE DISPATCH
+	DEPENDS
+		Core
+		Geometry
+		World
+		Animation
+		Publication
+	TESTS
+		Entity.Test.cpp
+		Output.Test.cpp
+		Serializer.Test.cpp
+		Store.Test.cpp
+)
+
 # The control waist: every interface with more than one implementation, and the plain data that
 # crosses them. This is the presentation half — IPresenter and what its two verbs take and report.
 # IRenderer, ISession and IInput join it where they are written.
@@ -636,6 +664,7 @@ add_executable(IntegrationTests
 	Source/Integration/PublicationRoundTrip.Test.cpp
 	Source/Integration/PublicationSoak.Test.cpp
 	Source/Integration/RenderImport.Test.cpp
+	Source/Integration/ScenePublication.Test.cpp
 	Source/Integration/SceneRoundTrip.Test.cpp
 	Source/Integration/Schedulability.Test.cpp
 	Source/Integration/VirtualComposite.Test.cpp
@@ -644,6 +673,7 @@ target_link_libraries(IntegrationTests
 	PRIVATE
 		Frame
 		Headless
+		Scene
 		Publication
 		Animation
 		Render
