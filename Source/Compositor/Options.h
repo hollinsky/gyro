@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
 
 #include "Core/Result.h"
@@ -27,6 +28,12 @@ enum class BackendKind : std::uint8_t
 	Headless = 1,
 	Nested = 2,
 	Drm = 3,
+
+	// A real presenter whose consumer is a file. Virtual/Dump.h writes one PAM per presented frame,
+	// which is what gives gyro a picture of itself before there is a panel or a protocol — and what
+	// paces frames while doing it, since a virtual output has a period and a phase exactly as a panel
+	// does. The presenter is `Virtual`, the renderer is `Blit`, and nothing on the path needs a GPU.
+	Dump = 4,
 };
 
 [[nodiscard]] constexpr std::string_view Name(BackendKind backend) noexcept
@@ -41,6 +48,8 @@ enum class BackendKind : std::uint8_t
 			return "nested";
 		case BackendKind::Drm:
 			return "drm";
+		case BackendKind::Dump:
+			return "dump";
 	}
 
 	return "?";
@@ -57,9 +66,21 @@ struct OutputRequest
 	double Refresh = 60.0;
 };
 
+// Where `--backend=dump` writes, when the command line does not say. Relative, because a boot
+// service that scattered images across an absolute path nobody named would be worse than one that
+// filled the directory somebody ran it from.
+inline constexpr std::string_view DefaultDumpDirectory = "gyro-frames";
+
 struct Options
 {
 	BackendKind Backend = BackendKind::Auto;
+
+	// Where the dump backend writes its frames. Empty under every other backend, and never read from
+	// the environment: this header is the command line and nothing else, which is what lets the one
+	// part of startup a person types into be tested without a seat. Virtual/Pam.h's `GYRO_FRAME_DUMP`
+	// is a separate knob for a separate audience — a test that has already failed — and keeping the
+	// two apart is cheaper than a precedence rule nobody remembers.
+	std::string DumpDirectory;
 
 	std::array<OutputRequest, MaxOutputs> Outputs{};
 	std::size_t OutputCount = 0;
@@ -242,10 +263,26 @@ namespace Detail
 			{
 				options.Backend = BackendKind::Drm;
 			}
+			else if (value == "dump")
+			{
+				options.Backend = BackendKind::Dump;
+			}
 			else
 			{
-				return Failure(EINVAL, "--backend is one of auto, headless, nested, drm");
+				return Failure(EINVAL, "--backend is one of auto, headless, nested, drm, dump");
 			}
+
+			continue;
+		}
+
+		if (Detail::Matches(argument, "--dump", value))
+		{
+			if (value.empty())
+			{
+				return Failure(EINVAL, "--dump wants a directory to write frames into");
+			}
+
+			options.DumpDirectory = value;
 
 			continue;
 		}
@@ -358,6 +395,19 @@ namespace Detail
 	if (options.FloorCost > options.PlannedCost)
 	{
 		return Failure(EINVAL, "--floor cannot exceed --cost");
+	}
+
+	// A destination under a backend that writes nothing is the case this header refuses to accept
+	// quietly: somebody who typed `--dump` believes frames are being written, and a run that says
+	// nothing leaves them looking for a directory that will never appear.
+	if (!options.DumpDirectory.empty() && options.Backend != BackendKind::Dump)
+	{
+		return Failure(EINVAL, "--dump names where the dump backend writes, so it wants --backend=dump");
+	}
+
+	if (options.Backend == BackendKind::Dump && options.DumpDirectory.empty())
+	{
+		options.DumpDirectory = DefaultDumpDirectory;
 	}
 
 	return options;

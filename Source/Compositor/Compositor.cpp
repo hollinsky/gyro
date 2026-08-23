@@ -7,6 +7,7 @@
 
 #include <signal.h>
 #include <spdlog/spdlog.h>
+#include <sys/stat.h>
 
 #include <algorithm>
 #include <array>
@@ -14,15 +15,20 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <thread>
+#include <utility>
 
+#include "Blit/Blit.h"
 #include "Compositor/RealTime.h"
 #include "Compositor/Schedule.h"
 #include "Compositor/Uring.h"
 #include "Core/Clock.h"
+#include "Core/ColorState.h"
 #include "Core/Signal.h"
 #include "Core/Time.h"
 #include "Frame/Evaluator.h"
@@ -35,7 +41,13 @@
 #include "Publication/Ring.h"
 #include "Seam/EventSource.h"
 #include "Seam/OutputConfiguration.h"
+#include "Seam/Presenter.h"
 #include "Seam/RenderTarget.h"
+#include "Seam/Renderer.h"
+#include "Virtual/Device.h"
+#include "Virtual/Dump.h"
+#include "Virtual/Heap.h"
+#include "Virtual/Output.h"
 
 namespace
 {
@@ -105,13 +117,20 @@ extern "C" void OnStopSignal(int)
 // device. Two outputs on one GPU is that same arrangement, and the serialisation is decision 29's
 // blocking term.
 //
-// The renderer is optional-wrapped because `IRenderer` is neither copyable nor movable, by the
-// contract Docs/Architecture.md#device-migration puts on it: a renderer is replaced by being destroyed
-// and constructed. So it is emplaced once its policy is known rather than assigned into.
+// Both members are held through the seam rather than by their concrete type, because there is now
+// more than one backend and the loop was never the thing that knew which. The renderer is a
+// `unique_ptr` because `IRenderer` is neither copyable nor movable, by the contract
+// Docs/Architecture.md#device-migration puts on it: a renderer is replaced by being destroyed and
+// constructed.
+//
+// The colour state is copied here rather than read back off the presenter, because `IPresenter` does
+// not carry a configuration — a presenter answers about targets and frames, and what the output was
+// *asked* for is the root's own record.
 struct BoundOutput
 {
-	HeadlessOutput* Presenter = nullptr;
-	std::optional<SimulatedRenderer> Renderer;
+	IPresenter* Presenter = nullptr;
+	std::unique_ptr<IRenderer> Renderer;
+	ColorState Color{};
 	Connection<> OnTargetsInvalidated;
 
 	// The root's half of decision 41: the images went away, so whatever holds them has to be told before
@@ -122,9 +141,242 @@ struct BoundOutput
 	{
 		if (Presenter != nullptr && Renderer)
 		{
-			(void)Renderer->BindTargets(Presenter->Targets(), Presenter->Configuration().Color);
+			(void)Renderer->BindTargets(Presenter->Targets(), Color);
 		}
 	}
+};
+
+// A backend, as the composition root needs one: a source to pump, a presenter and a renderer per
+// output, and whatever has to be stopped afterwards.
+//
+// **This is not a seam type and must not become one.** Seam/EventSource.h is deliberately a
+// descriptor and a drain; everything below that this adds is the root doing what only the root can.
+// `NextEvent` is the case Docs/Open.md's *whether a source can answer when it will next have
+// something* entry describes — a clock-driven presenter has an answer and a DRM file never will, so
+// putting the verb on `IEventSource` would be adding an interface for the fakes alone. Two fakes is
+// not two implementations; that entry settles when nested lands, and a host's frame callback is the
+// first real source with a genuine answer. Until then the knowledge lives here, where it is one
+// virtual call wide instead of a promise every backend has to keep.
+//
+// `Build` rather than a constructor per output because a backend allocates — target rings, a writer
+// thread — and a failure has to come back as a sentence naming what could not be had.
+class IBackend
+{
+public:
+	IBackend() = default;
+
+	virtual ~IBackend() = default;
+
+	IBackend(const IBackend&) = delete;
+	IBackend& operator=(const IBackend&) = delete;
+	IBackend(IBackend&&) = delete;
+	IBackend& operator=(IBackend&&) = delete;
+
+	[[nodiscard]] virtual IEventSource& Source() noexcept = 0;
+
+	// When the simulated hardware next moves, or `Duration::max()` for never.
+	[[nodiscard]] virtual Instant NextEvent() const noexcept = 0;
+
+	// One output, its presenter, and the renderer that draws into it.
+	[[nodiscard]] virtual Result<void>
+	Build(std::size_t index, const OutputConfiguration& wanted, const OutputPlan& plan, BoundOutput& into) = 0;
+
+	// Everything that has to stop before the process exits, called once the frame thread has been
+	// joined. A backend with no thread and no file does nothing here.
+	virtual void Close() noexcept {}
+
+	// What this backend did, into the log, after `Close`.
+	virtual void Report() const {}
+};
+
+// The sweep's instrument: simulated vblanks and a renderer that charges a cost and draws nothing.
+class HeadlessBackend final : public IBackend
+{
+public:
+	explicit HeadlessBackend(const IClock& clock) : m_Device{ clock } {}
+
+	[[nodiscard]] IEventSource& Source() noexcept override { return m_Device; }
+
+	[[nodiscard]] Instant NextEvent() const noexcept override { return m_Device.NextEvent(); }
+
+	[[nodiscard]] Result<void>
+	Build(std::size_t, const OutputConfiguration& wanted, const OutputPlan& plan, BoundOutput& into) override
+	{
+		HeadlessOutput* const presenter = m_Device.Add(wanted);
+
+		if (presenter == nullptr)
+		{
+			return Failure(ENOSPC, "more outputs than the headless device holds");
+		}
+
+		into.Presenter = presenter;
+		into.Color = presenter->Configuration().Color;
+
+		// The renderer is told exactly what admission allowed, which is the point of the bridge in
+		// Compositor/Schedule.h: a tier step that reduced the allowance without making the work cheaper is
+		// a plan the frame would then miss against, so one pair of figures both seeds the budget and
+		// charges the renderer.
+		into.Renderer = std::make_unique<SimulatedRenderer>(SimulatedRendererPolicy{ .PlannedCpu = plan.Planned.Cpu,
+		                                                                             .FloorCpu = plan.Floor.Cpu,
+		                                                                             .PlannedGpu = plan.Planned.Gpu,
+		                                                                             .FloorGpu = plan.Floor.Gpu });
+
+		return {};
+	}
+
+private:
+	HeadlessDevice m_Device;
+};
+
+// The backend whose consumer is a file. A real presenter that allocates, the CPU renderer, and one
+// PAM per presented frame.
+//
+// **It paces exactly as a panel does, and that is most of why it exists.** A virtual output has a
+// period and a phase and hands frames back on release, so the frame loop runs against real
+// backpressure rather than against a simulation of it — which is what makes the pictures worth
+// looking at: they are what a monitor would have shown at that frame boundary.
+//
+// **Nothing on the path needs a GPU.** `HeapAllocator` rather than udmabuf, `Blit` rather than
+// Vulkan, and `TargetFace::Mapped` because a CPU blitter handed a dmabuf is a miswiring
+// Seam/Renderer.h makes `EINVAL`. So `--backend=dump` runs in a container, over SSH, and on the
+// machine with no seat — which are the places somebody most wants a picture and least has a screen.
+class DumpBackend final : public IBackend
+{
+public:
+	DumpBackend(const IClock& clock, std::string directory, std::size_t outputs)
+		: m_Clock{ &clock }, m_Device{ clock }, m_Directory{ std::move(directory) }, m_Outputs{ outputs }
+	{}
+
+	~DumpBackend() override { Close(); }
+
+	[[nodiscard]] IEventSource& Source() noexcept override { return m_Device; }
+
+	[[nodiscard]] Instant NextEvent() const noexcept override { return m_Device.NextEvent(); }
+
+	[[nodiscard]] Result<void>
+	Build(std::size_t index, const OutputConfiguration& wanted, const OutputPlan&, BoundOutput& into) override
+	{
+		auto renderer = std::make_unique<Blit>(*m_Clock);
+		auto dump = std::make_unique<FrameDump>(Destination(index), wanted.Resolution, wanted.Format);
+
+		if (const Result<void> writing = dump->Open(); !writing)
+		{
+			return writing;
+		}
+
+		// The renderer is handed over as the completion gate even though a CPU composite finishes
+		// inside `Record` and every point it returns is immediate. Virtual/Device.h accepts null for
+		// exactly this case; passing the real renderer instead costs one `IsComplete` per delivery and
+		// means the wiring does not have to be revisited if this path ever gains a device that can
+		// export a timeline.
+		VirtualOutput* const presenter =
+			m_Device.Add(wanted, m_Allocator, *dump, renderer.get(), VirtualOutputPolicy{ .Face = TargetFace::Mapped });
+
+		if (presenter == nullptr)
+		{
+			return Failure(ENOSPC, "more outputs than the virtual device holds");
+		}
+
+		if (const Result<void>& allocated = presenter->Status(); !allocated)
+		{
+			return allocated;
+		}
+
+		into.Presenter = presenter;
+		into.Color = presenter->Configuration().Color;
+		into.Renderer = std::move(renderer);
+
+		m_Dumps[index] = std::move(dump);
+
+		return {};
+	}
+
+	void Close() noexcept override
+	{
+		for (std::unique_ptr<FrameDump>& dump : m_Dumps)
+		{
+			if (dump)
+			{
+				dump->Close();
+			}
+		}
+	}
+
+	void Report() const override
+	{
+		for (std::size_t index = 0; index < m_Dumps.size(); ++index)
+		{
+			const std::unique_ptr<FrameDump>& dump = m_Dumps[index];
+
+			if (!dump)
+			{
+				continue;
+			}
+
+			spdlog::info("  output {}: {} frame(s) written to {}", index, dump->Written(), dump->Directory());
+
+			// Said as a warning rather than a statistic, because a reader who does not know frames went
+			// missing will read a jump in the sequence numbers as something the compositor did. The
+			// remedy is a slower output — the cadence is what `--output` sets — rather than a deeper
+			// queue, since a queue absorbs a burst and this is a rate.
+			if (dump->Dropped() != 0)
+			{
+				spdlog::warn(
+					"             {} frame(s) dropped: the disk did not keep up, so the dump is a sample of the "
+					"run. Try a lower rate, as --output={}x{}@10",
+					dump->Dropped(),
+					m_Resolutions[index].Width,
+					m_Resolutions[index].Height
+				);
+			}
+
+			if (dump->Skipped() != 0)
+			{
+				spdlog::warn("             {} frame(s) could not be read at all", dump->Skipped());
+			}
+
+			if (dump->Failed() != 0)
+			{
+				spdlog::warn(
+					"             {} frame(s) could not be written: {}",
+					dump->Failed(),
+					dump->FirstFailure() ? dump->FirstFailure()->Context() : std::string_view{ "unknown" }
+				);
+			}
+		}
+	}
+
+	// Remember what each output's extent was, so `Report` can suggest a rate in the terms the person
+	// typed. Set by `Configure` alongside `Build`, because the plan is what knows it.
+	void Remember(std::size_t index, PixelSize<DeviceSpace> resolution) noexcept { m_Resolutions[index] = resolution; }
+
+private:
+	// One directory for one output, and a level per output beyond that — because `frame-00000042.pam`
+	// carries no output identity, so two panels writing into one directory would overwrite each
+	// other's frames at every boundary they share. The parent is created here because Virtual/Pam.h
+	// creates one level and this is the second.
+	[[nodiscard]] std::string Destination(std::size_t index)
+	{
+		if (m_Outputs <= 1)
+		{
+			return m_Directory;
+		}
+
+		(void)::mkdir(m_Directory.c_str(), 0755);
+
+		return std::format("{}/output-{}", m_Directory, index);
+	}
+
+	const IClock* m_Clock = nullptr;
+
+	HeapAllocator m_Allocator{};
+	VirtualDevice m_Device;
+
+	std::string m_Directory;
+	std::size_t m_Outputs = 0;
+
+	std::array<std::unique_ptr<FrameDump>, MaxOutputs> m_Dumps{};
+	std::array<PixelSize<DeviceSpace>, MaxOutputs> m_Resolutions{};
 };
 
 // Everything with a lifetime, in one object, constructed in place.
@@ -146,12 +398,17 @@ public:
 			return ready;
 		}
 
+		if (const Result<void> ready = Construct(); !ready)
+		{
+			return ready;
+		}
+
 		if (const Result<void> ready = Configure(); !ready)
 		{
 			return ready;
 		}
 
-		m_Sources[0] = &m_Device;
+		m_Sources[0] = &m_Backend->Source();
 		m_Sources[1] = &m_Interrupt;
 
 		m_Loop = std::make_unique<FrameLoop>(
@@ -182,6 +439,11 @@ public:
 		frame.join();
 
 		g_Stopping.store(nullptr, std::memory_order_release);
+
+		// After the join and before the report, which is the ordering the whole two-thread dump rests
+		// on: nothing is still presenting, so the drain is a drain, and the counters the report reads
+		// are final rather than a snapshot of a writer still working.
+		m_Backend->Close();
 
 		Report();
 
@@ -291,9 +553,42 @@ private:
 	// know which backend it built, is a seam question and is [open](../../Docs/Open.md).
 	[[nodiscard]] Wake BackendWake() const noexcept
 	{
-		const Instant next = m_Device.NextEvent();
+		const Instant next = m_Backend->NextEvent();
 
 		return next == Instant{ Duration::max() } ? Wake::Never() : Wake::At(next);
+	}
+
+	// Which backend was asked for, built. The one place in the process that names an implementation,
+	// which is the whole job of a composition root — everything below this point works through
+	// `IBackend`, and `Frame` never learns there was a choice.
+	[[nodiscard]] Result<void> Construct()
+	{
+		switch (m_Options.Backend)
+		{
+			case BackendKind::Dump:
+			{
+				auto dump =
+					std::make_unique<DumpBackend>(m_Clock, m_Options.DumpDirectory, m_Options.Requested().size());
+				m_Dump = dump.get();
+				m_Backend = std::move(dump);
+
+				spdlog::info("writing frames to {}", m_Options.DumpDirectory);
+
+				return {};
+			}
+
+			case BackendKind::Headless:
+				m_Backend = std::make_unique<HeadlessBackend>(m_Clock);
+
+				return {};
+
+			case BackendKind::Auto:
+			case BackendKind::Nested:
+			case BackendKind::Drm:
+				break;
+		}
+
+		return Failure(ENOSYS, "that backend is not built");
 	}
 
 	// Admission control, and then everything it decided applied to something. This is what runs again on
@@ -338,32 +633,22 @@ private:
 			.Format = PixelFormat{ FormatXrgb8888, 0, ModifierLinear },
 		};
 
-		HeadlessOutput* const presenter = m_Device.Add(wanted);
-
-		if (presenter == nullptr)
-		{
-			return Failure(ENOSPC, "more outputs than the headless device holds");
-		}
-
 		BoundOutput& bound = m_Bound[index];
 
-		bound.Presenter = presenter;
+		if (m_Dump != nullptr)
+		{
+			m_Dump->Remember(index, wanted.Resolution);
+		}
 
-		// The renderer is told exactly what admission allowed, which is the point of the bridge in
-		// Compositor/Schedule.h: a tier step that reduced the allowance without making the work cheaper is
-		// a plan the frame would then miss against, so one pair of figures both seeds the budget and
-		// charges the renderer.
-		bound.Renderer.emplace(
-			SimulatedRendererPolicy{ .PlannedCpu = plan.Planned.Cpu,
-		                             .FloorCpu = plan.Floor.Cpu,
-		                             .PlannedGpu = plan.Planned.Gpu,
-		                             .FloorGpu = plan.Floor.Gpu }
-		);
+		if (const Result<void> built = m_Backend->Build(index, wanted, plan, bound); !built)
+		{
+			return built;
+		}
 
 		bound.Rebind();
-		bound.OnTargetsInvalidated.ConnectTo<&BoundOutput::Rebind>(presenter->TargetsInvalidated, bound);
+		bound.OnTargetsInvalidated.ConnectTo<&BoundOutput::Rebind>(bound.Presenter->TargetsInvalidated, bound);
 
-		m_Outputs[index].Bind(*presenter, *bound.Renderer, 0, presenter->Configuration(), {}, plan.Budget());
+		m_Outputs[index].Bind(*bound.Presenter, *bound.Renderer, 0, wanted, {}, plan.Budget());
 
 		// The first frame has nothing behind it. Every subsequent one is damage relative to what reached
 		// the glass last time and there is no last time — so the output owes its whole extent, which is
@@ -411,6 +696,8 @@ private:
 			);
 		}
 
+		m_Backend->Report();
+
 		if (m_PriorityRefused)
 		{
 			spdlog::warn("running at normal priority: {}", *m_PriorityRefused);
@@ -441,7 +728,16 @@ private:
 	// stub, and the one that has to cost nothing.
 	SceneEvaluator m_Evaluator{ m_Clock };
 
-	HeadlessDevice m_Device{ m_Clock };
+	// The one implementation choice in the process, behind the one interface that hides it. Built in
+	// `Construct` and destroyed with the root, after every `FrameOutput` that holds one of its
+	// presenters by address has already gone — which is why it is declared before them.
+	std::unique_ptr<IBackend> m_Backend;
+
+	// The same object, when it is the dump. A backend answers `IBackend` and nothing more; this is
+	// the root keeping hold of the one extra thing only the dump has — an extent per output, so the
+	// warning about frames it could not write can name the rate that would fix it.
+	DumpBackend* m_Dump = nullptr;
+
 	std::array<BoundOutput, MaxOutputs> m_Bound{};
 	std::array<FrameOutput, MaxOutputs> m_Outputs{};
 	std::size_t m_Count = 0;
@@ -482,15 +778,16 @@ Result<void> Run(const Options& options)
 	{
 		// Auto picks nested where there is a host and DRM otherwise, and neither is built. Headless is
 		// what there is, so that is what auto resolves to — said out loud rather than silently, because
-		// somebody who typed nothing and got headless should be able to find out why.
+		// somebody who typed nothing and got headless should be able to find out why. Dump is built too
+		// and auto never picks it: writing files is something a person asks for.
 		resolved.Backend = BackendKind::Headless;
 
 		spdlog::info("no backend selected and only headless is built; running headless");
 	}
 
-	if (resolved.Backend != BackendKind::Headless)
+	if (resolved.Backend != BackendKind::Headless && resolved.Backend != BackendKind::Dump)
 	{
-		return Failure(ENOSYS, "only the headless backend is built");
+		return Failure(ENOSYS, "only the headless and dump backends are built");
 	}
 
 	if (resolved.RealTime)

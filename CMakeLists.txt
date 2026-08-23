@@ -459,6 +459,7 @@ gyro_add_module(Virtual
 		Headless
 	SOURCES
 		Buffer.cpp
+		Dump.cpp
 		Heap.cpp
 		Pam.cpp
 		Pixels.cpp
@@ -467,11 +468,19 @@ gyro_add_module(Virtual
 	TESTS
 		Buffer.Test.cpp
 		Device.Test.cpp
+		Dump.Test.cpp
 		Output.Test.cpp
 		Pam.Test.cpp
 		Pixels.Test.cpp
 		Sink.Test.cpp
 		Udmabuf.Test.cpp
+)
+
+# Virtual/Dump.h runs a writer thread, which is the one thing in this module the C library does not
+# supply on its own. PUBLIC so that both the module's own tests and the composition root inherit it.
+target_link_libraries(Virtual
+	PUBLIC
+		Threads::Threads
 )
 
 # The Vulkan renderer. Platform code by definition — Docs/Structure.md's table has had this row since
@@ -547,6 +556,8 @@ gyro_add_module(Compositor
 		Seam
 		Frame
 		Headless
+		Blit
+		Virtual
 	SOURCES
 		Compositor.cpp
 		RealTime.cpp

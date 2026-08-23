@@ -2,7 +2,9 @@
 
 #include <array>
 #include <chrono>
+#include <format>
 #include <span>
+#include <string>
 #include <string_view>
 
 #include "Core/Time.h"
@@ -132,4 +134,57 @@ GYRO_TEST(Options, MoreOutputsThanTheLoopAdmitsIsRefused)
 
 	GYRO_CHECK(!ParseOptions(std::span<const std::string_view>{ arguments }).has_value());
 	GYRO_CHECK(ParseOptions(std::span<const std::string_view>{ arguments.data(), MaxOutputs }).has_value());
+}
+
+GYRO_TEST(Options, TheDumpBackendIsSelectedByName)
+{
+	const Result<Options> options = Parse({ "--backend=dump" });
+
+	GYRO_REQUIRE(options.has_value());
+	GYRO_CHECK(options->Backend == BackendKind::Dump);
+	GYRO_CHECK_EQ(Name(options->Backend), std::string_view{ "dump" });
+
+	// Somewhere rather than nowhere, because a dump that wrote nothing until a second argument was
+	// supplied would be a backend that looks like it ran.
+	GYRO_CHECK_EQ(options->DumpDirectory, std::string{ DefaultDumpDirectory });
+}
+
+GYRO_TEST(Options, ADumpDirectoryReplacesTheDefault)
+{
+	const Result<Options> options = Parse({ "--backend=dump", "--dump=/tmp/gyro-run" });
+
+	GYRO_REQUIRE(options.has_value());
+	GYRO_CHECK_EQ(options->DumpDirectory, std::string{ "/tmp/gyro-run" });
+}
+
+// Order-independent, because the check that pairs them runs after the loop rather than inside it.
+GYRO_TEST(Options, ADumpDirectoryWithoutTheDumpBackendIsRefused)
+{
+	GYRO_CHECK(!Parse({ "--dump=/tmp/gyro-run" }).has_value());
+	GYRO_CHECK(!Parse({ "--backend=headless", "--dump=/tmp/gyro-run" }).has_value());
+	GYRO_CHECK(!Parse({ "--dump=/tmp/gyro-run", "--backend=headless" }).has_value());
+	GYRO_CHECK(Parse({ "--dump=/tmp/gyro-run", "--backend=dump" }).has_value());
+}
+
+// An empty destination is a typo — `--dump=` with the path left off — rather than a request for the
+// default, which `--backend=dump` alone already is.
+GYRO_TEST(Options, AnEmptyDumpDirectoryIsRefused)
+{
+	GYRO_CHECK(!Parse({ "--backend=dump", "--dump=" }).has_value());
+	GYRO_CHECK(!Parse({ "--backend=dump", "--dump" }).has_value());
+}
+
+// Every backend the parse accepts has a name, and a name nothing accepts is not one of them.
+GYRO_TEST(Options, EveryBackendNameRoundTrips)
+{
+	for (const std::string_view name : { "auto", "headless", "nested", "drm", "dump" })
+	{
+		const std::string argument = std::format("--backend={}", name);
+		const Result<Options> options = Parse({ argument });
+
+		GYRO_REQUIRE(options.has_value());
+		GYRO_CHECK_EQ(Name(options->Backend), name);
+	}
+
+	GYRO_CHECK(!Parse({ "--backend=virtual" }).has_value());
 }

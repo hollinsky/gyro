@@ -175,7 +175,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Protocol` | platform | dispatch | `Core`, `Geometry`, `Scene` |
 | `Session` | platform | dispatch | `Core`, `Protocol`, `Scene`, `Seam` |
 | `Headless` | **portable** | split | `Core`, `Geometry`, `Seam` |
-| `Virtual` | platform | frame | `Core`, `Geometry`, `Seam`, `Headless` |
+| `Virtual` | platform | frame, own | `Core`, `Geometry`, `Seam`, `Headless` |
 | `Nested`, `Drm` | platform | split | `Core`, `Geometry`, `Seam` |
 | `Console` | platform | own | `Core`, `Geometry`, `Seam`, `Blit` |
 | `Compositor` | platform | constructs | everything |
@@ -275,10 +275,21 @@ module depending down onto a portable one is the direction the graph allows; wha
 answer is the timeline acquiring behaviour only a sweep wants, at which point it moves rather than
 being copied.
 
-**It is frame-side entire**, like the presentation half of every other backend. The allocation is not
-— `BindTargets`' whole contract is that it runs at a target invalidation and never inside the frame
-section — but that is a phase rather than a thread, and nothing here is authored on dispatch. See
+**Presentation here is frame-side entire**, like the presentation half of every other backend. The
+allocation is not — `BindTargets`' whole contract is that it runs at a target invalidation and never
+inside the frame section — but that is a phase rather than a thread, and nothing here is authored on
+dispatch. See
 [decision 102](Decisions.md#102-a-virtual-output-allocates-the-buffers-it-hands-out-and-that-is-what-stands-the-renderer-up).
+
+**It also runs a thread of its own, and it is the only portable-graph neighbour that does.** *(Added
+2026-08-22.)* [Virtual/Dump.h](../Source/Virtual/Dump.h) writes a PAM per presented frame, and a file
+write from the frame thread is the hazard [Open.md](Open.md)'s *spdlog async sink* entry names — so
+the sink copies on the frame thread and a writer thread does the `open`, the `write`, and the
+`rename`. That thread is neither frame nor dispatch: it is off both partitions, it touches nothing
+either one owns, and what crosses to it is a copy in the sink's own slab rather than a target
+descriptor, which is why it does not race `AcquireTarget` on the ring it is reading out of. This is
+the "own" in the table's thread column, the same answer `Console` carries. See
+[decision 121](Decisions.md#121---backenddump-is-a-backend-and-the-frame-it-writes-crosses-to-a-writer-thread-as-a-copy).
 
 **The allocator it drives is in `Seam` rather than in this module.** *(Revised 2026-08-22.)*
 [Virtual/Allocator.h](../Source/Virtual/Allocator.h) kept `IDmabufAllocator` out of the waist because

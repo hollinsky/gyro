@@ -383,6 +383,24 @@ precisely. Fake clocks take arbitrary rates and phases, which is what makes the 
 falsifiable: an admitted task set can be swept across every phase relationship and asserted to miss
 nothing, including on rate combinations nobody has on a desk.
 
+### Dump
+
+A real presenter whose consumer is a file. `--backend=dump` wires a virtual output to the CPU
+renderer and writes one PAM per presented frame into `./gyro-frames`, or wherever `--dump=DIR` says.
+
+It is the one backend that produces a *picture* on a machine with nothing attached to it — no GPU, no
+seat, no Vulkan ICD, no `/dev/udmabuf` — and it is how the animation work sees what it is doing before
+there is a panel or a protocol. It also **paces**: a virtual output has a period and a phase and
+retires on release, so the frame loop meets a real cadence and real backpressure rather than a
+simulation of them, and two outputs at different rates produce frames in the ratio their rates imply.
+That is what separates it from [headless](#headless), whose renderer charges a cost and draws nothing.
+
+Frames cross to a writer thread as copies and are written from there, so no file I/O touches the frame
+path. A disk that cannot keep up drops the newest frame and says so with a count; the file names carry
+each frame's own sequence, so a gap in the numbers is a gap in the run. The remedy is a slower output
+rather than a deeper queue. See
+[decision 121](Decisions.md#121---backenddump-is-a-backend-and-the-frame-it-writes-crosses-to-a-writer-thread-as-a-copy).
+
 ### DRM / KMS
 
 Atomic modesetting, plane assignment, hardware cursor, explicit fencing, VRR, and the
@@ -393,8 +411,8 @@ from the start.
 ### Selection
 
 Configure-time `GYRO_BACKEND_DRM` / `_NESTED` / `_HEADLESS`, all `ON` by default. Runtime
-`--backend=auto|drm|nested|headless`, where `auto` picks nested when `WAYLAND_DISPLAY` is set and
-DRM otherwise.
+`--backend=auto|drm|nested|headless|dump`, where `auto` picks nested when `WAYLAND_DISPLAY` is set and
+DRM otherwise. `auto` never picks `dump`: writing files is something a person asks for by name.
 
 Note that the *rendering device* is a separate axis from the backend. Software rendering is a
 physical device gyro may select under any of the three, not a fourth backend — which is what makes

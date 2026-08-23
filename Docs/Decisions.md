@@ -9027,3 +9027,73 @@ and per-tranche target devices, and nothing guarantees they are the device
 case, not the exotic one. The tranche's device is the constraint, and a mismatch is a condition to
 report at `BindTargets` with both device names in the line, not one to discover as a host protocol
 error three frames later.
+
+### 121. `--backend=dump` is a backend, and the frame it writes crosses to a writer thread as a copy
+
+*(Decided 2026-08-22, on wanting something that paces frames and shows what was drawn before there is
+a panel, a protocol, or a scene author. The chicken-and-egg is the reason it comes first: the thing
+that will animate needs a monitor to animate against, and this is the monitor.)*
+
+**A fourth backend, wiring `Virtual` to `Blit` with [Virtual/Dump.h](../Source/Virtual/Dump.h) as the
+consumer: one PAM per presented frame, named for the frame's own sequence.** The presenter allocates
+through `HeapAllocator` and hands out mapped faces, the CPU renderer composites into them, and a sink
+copies each frame out and posts it to a writer thread. Nothing on the path needs a GPU, a seat, a
+Vulkan ICD or `/dev/udmabuf` — which matters because the machine where somebody most wants a picture
+of what gyro drew is usually the one with no screen attached to it.
+
+**It paces, and that is the half that is not about pictures.** A virtual output has a period and a
+phase and retires on release, so the frame loop meets real backpressure at a real cadence rather than
+a simulation of one. Two outputs at 60 and 30 produce frames in a 2:1 ratio without anything being
+told to; a 60 Hz single output runs 39 frames in 660 ms of wall clock. Headless cannot do this job —
+its renderer charges a cost and draws nothing, which is exactly right for the schedulability sweep and
+useless for seeing whether a fold looks correct.
+
+**The handoff is a copy, and that is what makes it admissible now.**
+[Virtual/Sink.h](../Source/Virtual/Sink.h) had already named *a sink that hands a frame to another
+thread* as deliberately not built, and the reason it gave was that a real recording consumer wants the
+**descriptor**, decoded on its own thread — which races the frame thread's `AcquireTarget` on the same
+ring. A copy races nothing: the image goes back to the output inside `OnFrame`, exactly as
+`CapturingSink` returns it, and what the writer owns afterwards is bytes in the sink's own slab. So
+the deferral stands for the case it was written about, and this is a different case that happens to
+sit next to it. The queue is a single-producer single-consumer ring of monotone counts over a
+preallocated slab — a release store on one side, an acquire load on the other, no read-modify-write
+between them, and no allocation after `Open`.
+
+**A full queue drops the newest frame and counts it, rather than making the frame thread wait.** The
+alternative turns a slow disk into a stutter, and an instrument that reads its own weight is worse
+than one with holes in it — especially since the holes are *visible*: a file is named for the frame's
+sequence, so a gap in the numbers is a gap in the run, and the root warns with the count and names the
+remedy. The remedy is a slower output rather than a deeper queue, because a queue absorbs a burst and
+this is a rate: 1080p60 is 498 MB/s, which the page cache swallows and a 4K panel would not.
+
+**Rejected: writing from the frame thread.** The dump forces `SCHED_FIFO` off anyway, so nothing
+hard-breaks — but [Open.md](Open.md)'s *spdlog async sink* entry is the same hazard, a file write from
+the frame path punts to io-wq and comes back as a frame gyro missed, and the one backend whose job is
+to show what the timing produced should not be the one that perturbs it.
+
+**Rejected: `--backend=virtual --dump=DIR`, naming the backend for the module.** It composes better on
+paper — the destination picks the sink, and `--record=out.mp4` needs no second backend name. It is the
+wrong axis: screen sharing and recording will each want their own target ring depth, their own format,
+and their own answer to backpressure, so they are separate backends over a shared presenter rather
+than sinks behind one name.
+
+**Rejected: a lossless mode that blocks until the writer catches up.** It would give a scene author a
+guaranteed-complete record, which is the thing the next consumer of this actually wants. It is not
+built because the cadence is already the knob — `--output=1920x1080@10` is 83 MB/s and any disk keeps
+up — and a mode that stops the compositor pacing is a different instrument wearing this one's name.
+`FrameDump::Flush` is the barrier if that turns out to be wrong; making it a policy is a line.
+
+**Rejected: a third verb on `IEventSource` so the root need not know which backend it built.** This is
+[Open.md](Open.md)'s *whether a source can answer when it will next have something*, and a second
+backend is not what settles it — `VirtualDevice` is a clock-driven fake exactly as `HeadlessDevice`
+is, so the verb would still exist for the fakes alone, which is
+[the test for whether a seam is real](Structure.md#orchestration) run in reverse. The knowledge lives
+on a root-local `IBackend` instead, one virtual call wide. That entry settles when nested lands, since
+a host's frame callback is the first *real* source with a genuine answer.
+
+**What it draws today is one black frame, and that is the correct answer rather than a defect.** There
+is no producer on the snapshot ring, so the evaluator walks an empty scene, `Blit` clears the first
+frame's whole-output damage, and nothing damages anything after that — so the loop settles and stops
+presenting, which is
+[doing nothing must cost nothing](Architecture.md#doing-nothing-must-cost-nothing) reached. Every
+frame after the first arrives when there is something to author.
