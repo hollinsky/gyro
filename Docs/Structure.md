@@ -163,6 +163,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | --- | --- | --- | --- |
 | `Core` | portable | either | — |
 | `Geometry` | portable | either | `Core` |
+| `Wire` | portable | either | `Core` |
 | `World` | portable | **both** | `Core`, `Geometry` |
 | `Animation` | portable | **both** | `Core`, `Geometry` |
 | `Publication` | portable | **both** | `Core`, `Geometry` |
@@ -279,6 +280,16 @@ being copied.
 section — but that is a phase rather than a thread, and nothing here is authored on dispatch. See
 [decision 102](Decisions.md#102-a-virtual-output-allocates-the-buffers-it-hands-out-and-that-is-what-stands-the-renderer-up).
 
+**The allocator it drives is in `Seam` rather than in this module.** *(Revised 2026-08-22.)*
+[Virtual/Allocator.h](../Source/Virtual/Allocator.h) kept `IDmabufAllocator` out of the waist because
+nothing outside `Virtual` named one, and
+[decision 120](Decisions.md#120-a-nested-outputs-targets-are-exported-from-the-vulkan-device-and-the-allocator-moves-to-seam)
+gives it a second caller: a nested output's targets are exported from the Vulkan device, so `Render`
+implements the interface and `Nested` consumes it, and neither may name the other. That is the waist
+rule met rather than bent — two implementations, two consumers in different modules, and the
+composition root the only thing that knows both sides. `Virtual` still owns the `udmabuf` provider,
+which is still the one that runs where there is no GPU.
+
 ### The draw list is in Seam
 
 What `IRenderer::Record` takes is a flat span of evaluated draw items — quads with a source, a colour
@@ -357,6 +368,32 @@ The split earns itself on one file.
 classification predicate to exist before it has a second caller, because plane promotion, damage
 mapping, and the sharpness path all ask the same question and three independently derived answers is
 how they drift apart. One module gives it one home.
+
+### The wire codec is its own module, and it is not `Nested`'s
+
+`Wire` is the Wayland wire codec: message framing, the argument vocabulary, fd passing over
+`SCM_RIGHTS`, and the per-connection object map. It depends on `Core` alone and sits below both
+waists, because `Nested` is split across the threads and reaching `Protocol` for a codec would make
+`Scene` reachable from the frame side — the one edge [the table above](#the-modules) says must never
+be added.
+
+**It has one caller today and that is stated rather than hidden.**
+[Decision 2](Decisions.md#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)
+gives the server codec to `libwayland-server`, so `Protocol` does not consume this; the client half
+`Nested` needs is all of it. What earns the module anyway is that a codec with no backend in front of
+it is exercised over a `socketpair` by a peer the test wrote — truncated headers, an fd arriving a
+message early, a `new_id` reused inside the `delete_id` window — none of which a real host can be
+asked to produce. See
+[decision 119](Decisions.md#119-the-wayland-wire-codec-is-its-own-module-wire-and-it-is-portable).
+
+**Portable, and that is the same argument.** `sendmsg` with `SCM_RIGHTS` over `AF_UNIX` is POSIX, so
+the tier costs nothing and buys the machine with no GPU, no seat, and no compositor that decision 6
+is about. `Nested` stays platform for its own reasons.
+
+**A connection is pumped by one thread; the module is pumped by none.** That is
+[decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread)'s
+rule applying per object, which is why the table reads `either` rather than `both`: gyro's host
+connection is the frame thread's for its whole life, and nothing here is shared between the two.
 
 ### Animation's Geometry edge is one member
 

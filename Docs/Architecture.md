@@ -112,9 +112,9 @@ public:
 ```
 
 Exactly one thread pumps a source for the whole of its life, which is what lets `Drain()` hold no
-lock — and which is why nested opens two connections to the host rather than partitioning one by
-event queue. See [decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait)
-and [decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-two-connections).
+lock — and which is why nested's single connection to the host is pumped by the frame thread rather
+than partitioned between the two by event queue. See [decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait)
+and [decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread).
 
 **The completion carries what was achieved rather than merely that it finished.** The
 variable-refresh range is derived from the mode and cannot be asked for, so a bare signal would need
@@ -356,11 +356,16 @@ Two features to build deliberately rather than let emerge:
   [Geometry](#geometry) is hardest — become testable without owning three monitors.
 - **Dynamic modes** — a window resize *is* a mode change. Handling that from day one means real
   hotplug and mode-setting work when the DRM backend arrives instead of being a rewrite.
-- **Two connections to the host**, not one. Presentation feedback is frame-side and `wl_seat` input
-  is dispatch-side, so a single connection is one socket read by two threads — and partitioning it
-  by event queue, which is what libwayland-client does, costs a lock that the frame thread meets and
-  the dispatch thread holds. Each connection binds only its own half's globals and is pumped by
-  exactly one thread. See [decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-two-connections).
+- **One connection to the host, pumped by the frame thread.** *(Revised 2026-08-22; this read "two
+  connections, not one" until the protocols were checked.)* Two `wl_display` connections are two
+  clients of the host, and a `wl_surface` id is meaningless outside the connection that created it —
+  so a dispatch-side connection owning no window is sent a keymap and never a keystroke, and a
+  frame-side one cannot name a surface in `wp_presentation.feedback`. Partitioning one connection by
+  event queue instead, which is what libwayland-client does, costs a lock that the frame thread meets
+  and the dispatch thread holds. So one connection, one reader, and the reader is the thread whose
+  deadline depends on what arrives. The price is that input decoded frame-side needs a handoff to
+  dispatch — a third channel, nested's alone, and not needed until there is an input path at all. See
+  [decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread).
 
 Safety rules, enforced by the backend rather than by convention. Nested and headless force off
 `SCHED_FIFO`, `mlockall`, session claiming, and DRM master unless explicitly overridden. A real-time

@@ -267,6 +267,18 @@ nothing only proves the grep.
   pass (much cheaper, but the renderer grows a YUV output path it otherwise would not have), or both
   can be offered. HDR sharpens it — P010 and transfer functions. This is the one part of decision 26
   with a real performance number attached and it should not be decided from the armchair.
+- **Nested's frame-to-dispatch handoff for input.**
+  [Decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread)
+  puts the host connection on the frame thread, so `wl_seat` events are decoded there and have to
+  reach dispatch — a third channel where
+  [the design turns on there being two](Architecture.md#the-publication-boundary). What is settled is
+  that it is nested's alone and not a general mechanism, and that the shape to reach for first is
+  [decision 83](Decisions.md#83-dispatchs-publication-is-an-event-source)'s: a queue behind an
+  `IEventSource` the dispatch thread already drains. What is not settled is the queue's discipline —
+  input is the one stream where newest-wins is wrong, so it cannot be a `Ring`, and a bounded queue
+  needs an answer for what a full one means. This does not bite until there is an input path at all;
+  today the connection carries feedback and configure and nothing crosses.
+
 - **Clock offset for injected input.** Decision 26 keeps the claim that `t₀` is the event timestamp,
   but a remote client's timestamps come from another machine's clock. Used naively they start
   animations in the past or the future. Needs an offset estimate, and it is the kind of thing that

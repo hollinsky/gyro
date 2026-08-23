@@ -934,20 +934,82 @@ a path nobody exercises is a path that is broken when it is reached.
 **Rejected: the shim drains and then steps.** The smallest version of the readiness set, and it
 fails the same way: the ordering that matters is in the untested half.
 
-### 81. A source is pumped by one thread; nested opens two connections
+### 81. A source is pumped by one thread; nested opens one connection, pumped by the frame thread
 
 *(Decided 2026-08-17, as the case that decides whether
 [decision 80](#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait)'s "exactly one thread
-pumps a source" is a rule or a preference.)*
+pumps a source" is a rule or a preference. Revised 2026-08-22: the rule stands, the nested
+application was impossible, and what replaced it is the third alternative this entry originally
+rejected.)*
 
 **Every `IEventSource` is pumped by exactly one thread for the whole of its life**, which is what
-lets `Drain()` hold no lock at all. Nested is the one backend where that is not free: gyro is a
-client of a host compositor, and one connection carries `wp_presentation_feedback`, which is
-frame-side, beside `wl_seat` input, which is dispatch-side.
-[Structure.md](Structure.md#threads-are-a-second-partition) splits presentation from input by thread,
-so one connection means two threads on one socket. **So the nested backend opens two connections to
-the host** — one pumped by the frame thread, one by the dispatch thread — and each binds only the
-globals its own half needs.
+lets `Drain()` hold no lock at all. That half is untouched by the revision, and it is the half the
+rest of the tree leans on.
+
+**Nested is the one backend where that is not free.** gyro is a client of a host compositor, and one
+connection carries `wp_presentation_feedback`, which is frame-side, beside `wl_seat` input, which is
+dispatch-side. [Structure.md](Structure.md#threads-are-a-second-partition) splits presentation from
+input by thread, so one connection *looks* like two threads on one socket.
+
+**So the nested backend opens one connection to the host, and the frame thread pumps it.** *(Revised
+2026-08-22; originally two connections, one per thread, which cannot work — see the first rejection
+below.)* Presentation feedback is then already on the thread that wants it, and input is handed
+across by the nested backend itself.
+
+**Superseded: two connections to the host, one per thread.** *(This entry's original conclusion,
+2026-08-17. Retired 2026-08-22 by reading `wayland.xml`, `presentation-time.xml`, and
+`xdg-foreign-unstable-v2.xml` against libwayland `1.26.0-9-ged0b9f1` — the same tree
+[decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec) was read on.)*
+**Two `wl_display` connections are two clients, not two views of one.** `wl_client_create` takes a
+socket fd and gives that client its own object map (`src/wayland-server.c:585`, `:611`), and an
+object argument is resolved in *that* map — `wl_map_lookup(&client->objects, ...)` at `:441`, a miss
+posting `invalid object %u` at `:446`. An id means nothing in the other connection.
+
+Both halves then fail, symmetrically:
+
+- **Input never arrives.** `wl_pointer.enter` and `wl_keyboard.enter` each carry an
+  `object interface="wl_surface"` argument naming the surface taking focus, and an event goes out on
+  its own resource's client: `handle_array` sends through `resource->client->connection`
+  (`src/wayland-server.c:254`). The dispatch connection owns no surface, so nothing it binds can ever
+  be the focus. What it *would* get is `wl_keyboard.keymap` — an fd and a format, no surface argument
+  — and then nothing. A seat that hands over a keymap and never a keystroke is worse than one that
+  fails to bind, because it looks like it worked.
+- **Feedback cannot be asked for.** `wp_presentation.feedback` takes
+  `<arg name="surface" type="object" interface="wl_surface"/>`, so the frame connection would have to
+  name a surface the dispatch connection created, and the host answers `invalid object`.
+
+libwayland names the mistake outright, which is the strongest evidence available that no host does
+this: `verify_objects` refuses to marshal any event whose object argument belongs to another client
+and logs *"compositor bug: The compositor tried to use an object from one client in a '%s.%s' for a
+different client"* (`src/wayland-server.c:196–226`). Whichever connection owns the windows owns both
+halves, and no protocol moves a surface between clients. `xdg-foreign` is the only thing that crosses
+a client boundary at all, and it exports *parenting*: `xdg_imported` has exactly `destroy` and
+`set_parent_of`, so an importer can make a window a child of a foreign one and can do nothing else
+with it — not receive its input, not ask after its presentation.
+
+**Reinstated: one connection read by the frame thread, input forwarded to dispatch.** *(2026-08-22;
+rejected below on 2026-08-17.)* The rejection was that this "puts wire decoding for a client-facing
+connection on the frame thread", and that sentence does not survive asking *which* connection. It is
+host-facing. It carries gyro's own traffic for gyro's own windows — a surface per output, a configure
+on resize, a feedback per output per frame, and one seat — with no untrusted peer on the far end and
+no per-client budget to enforce. [Decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) took a
+*server* dispatch loop off the frame thread, whose cost is a function of how many clients are running
+and what they choose to send; none of that generalises to a bounded stream gyro authored both ends
+of. And nested [forces `SCHED_FIFO` off](Architecture.md#nested-wayland), so the decode is not landing
+on a real-time thread in the first place. What survives of the rejection is the second sentence — the
+cost below — which is not the one it led with.
+
+**The cost, recorded rather than argued away: nested needs a frame-to-dispatch handoff of its own.**
+Input decoded frame-side has to reach the dispatch thread, and that is a third channel where
+[the design turns on there being two](Architecture.md#the-publication-boundary). Three things bound
+it. It is **nested's alone** — owned by the nested backend, not a general mechanism, and nothing
+outside that backend may reach for it. It is **not needed until input exists**: there is no input
+path in the tree, and until there is, the connection carries feedback and configure and nothing
+crosses at all. And when it is built, the shape to reach for first is
+[decision 83](#83-dispatchs-publication-is-an-event-source)'s — a queue behind an `IEventSource` the
+dispatch thread already drains — which makes it a second instance of a mechanism rather than a second
+mechanism, the way the stop path and dispatch's nudge already are. The direction is the harmless one:
+frame → dispatch owes no deadline, so a late handoff is a late keystroke rather than a missed frame.
 
 **Rejected: one connection partitioned by event queue.** The known answer, and libwayland-client
 implements exactly it, so the price is readable rather than arguable. Against
@@ -966,8 +1028,10 @@ inversion [decision 61](#61-the-frame-thread-is-sched_fifo-the-earliest-deadline
 ordering exists to prevent. gyro writes its own client codec under
 [decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec), so this is not a
 constraint inherited from a library — it is a design gyro would have to reproduce deliberately, and
-libwayland is the evidence for what reproducing it costs. Two sockets and a second registry bind are
-cheaper than one lock on that edge.
+libwayland is the evidence for what reproducing it costs. *(Revised 2026-08-22: the conclusion drawn
+here was "two sockets and a second registry bind are cheaper than one lock on that edge", and two
+sockets are not available at any price. The rejection itself stands — one connection with one reader
+is what gyro builds, and the reader is a thread rather than a lock.)*
 
 **Rejected: one connection read by the dispatch thread, feedback forwarded to the frame thread.**
 Tempting because a channel between the threads already exists, and wrong in direction: the return
@@ -977,13 +1041,9 @@ forward one — the reader takes the newest snapshot and skips the rest, so feed
 would be *dropped*, and a `FrameClock` that misses observations is the thing `Invalidate()` exists
 to represent rather than something to build. It also puts the clock's sole input behind the
 scheduling latency of the thread that owes no deadline, which would make `IsPrecise()` a claim gyro
-could not keep.
-
-**Rejected: one connection read by the frame thread, input forwarded to dispatch.** Symmetric, and
-worse in the direction that matters: it puts wire decoding for a client-facing connection on the
-frame thread, which is the whole of what
-[decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) removed, and it makes input latency a
-function of the frame thread's timer cadence.
+could not keep. *(This is the rejection that decides the direction, and the revision above leaves it
+standing untouched: both remaining candidates cost a third channel, and only this one puts it on the
+edge with a deadline.)*
 
 ### 82. The renderer is handed an evaluated draw list, not a scene
 
@@ -1106,7 +1166,7 @@ and at no additional cost.
 [decision 61](#61-the-frame-thread-is-sched_fifo-the-earliest-deadline-first-schedule-is-gyros-not-the-kernels)'s
 priority order intact.** Dispatch writes and the frame thread reads. An `eventfd` write is a counter
 increment that never blocks on the reader, so the higher-priority thread never waits on the lower one
-— the property [decision 81](#81-a-source-is-pumped-by-one-thread-nested-opens-two-connections)
+— the property [decision 81](#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread)
 rejected a shared connection for violating, arriving here for free because this channel carries no
 data at all. Nothing is read back across it: the descriptor says *something was published* and the
 ring says what. It is therefore not the third channel
@@ -1144,7 +1204,7 @@ the other end.
 
 **Rejected: folding the nudge into the backend's source.** One descriptor fewer, by having the backend
 own an eventfd dispatch also writes. It breaks
-[decision 81](#81-a-source-is-pumped-by-one-thread-nested-opens-two-connections)'s rule that a source
+[decision 81](#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread)'s rule that a source
 has one writer as surely as one reader, and it makes a headless backend — whose flips are a function
 of a `ManualClock` — the owner of a channel that has nothing to do with presentation.
 
@@ -7927,6 +7987,17 @@ target is a `wl_buffer` the host handed back. The narrower objection is the one 
 testing: a renderer verified against images it allocated for itself is verified against the one
 configuration that cannot fail.
 
+*(Revised 2026-08-22 by [decision 120](#120-a-nested-outputs-targets-are-exported-from-the-vulkan-device-and-the-allocator-moves-to-seam).
+This rejection holds for a virtual output and does not survive nested, where every clause of it is
+about scanout and nothing scans out. The nested sentence is also wrong on the protocol:
+`zwp_linux_dmabuf_v1` has no allocation request, `zwp_linux_buffer_params_v1.add` takes an fd the
+client already owns, and the `wl_buffer` the host hands back is a handle to gyro's own memory — so
+there is something to export into and exporting is the only way to fill it. The testing objection
+reverses there too, because the importer is a host compositor gyro did not write.
+`IDmabufAllocator` moves to `Seam` with that decision; the argument in
+[Virtual/Allocator.h](../Source/Virtual/Allocator.h) for keeping it out was a statement of fact
+about there being one caller, and there are now two.)*
+
 **Rejected: giving `HeadlessOutput` a dmabuf provider, which looks like much the smaller change.** The
 two rings retire on different events, and that is the one part that is not shared. A headless target
 is held until the *next* flip, because a plane is scanning it out — the bound
@@ -8668,7 +8739,7 @@ the tolerance was the harder half. It was, and not for the reason that entry exp
 said since it was written that the fused form is never required for correctness and that the
 separate-pass form is the oracle. Nothing unfused existed. The lattice was built whole at every
 binding and every item found its variant, so the sentence was aspirational — which is precisely the
-failure [decision 34](#34-quality-is-a-ladder-with-a-floor-and-the-floor-is-a-real-composite)'s
+failure [decision 34](#34-effect-quality-is-a-tier-gyro-chooses-and-the-floor-tier-is-the-recovery-path)'s
 floor-tier argument names, an alternative path that has never run.
 
 [Unfused.h](../Source/Render/Unfused.h) is that path. Per item: the fill into an offscreen, then the
@@ -8796,3 +8867,163 @@ cache first misses.
 **The comparison has not been run under validation layers**, which are not installed on the machine
 this was written on. Every barrier and layout transition here is unverified by anything except two
 drivers not complaining.
+
+### 119. The Wayland wire codec is its own module, `Wire`, and it is portable
+
+*(Decided 2026-08-22, on asking where the client codec
+[decision 1](#1-the-nested-backend-drives-raw-wayland-protocol-not-vulkan-wsi) requires actually
+lands, given [decision 81](#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread)'s
+revision putting a host connection on the frame thread.)*
+
+**The wire codec is a module of its own, `Wire`, depending on `Core` alone, sited below both waists,
+and in the portable tier.** A connection instance is pumped by one thread for the whole of its life,
+which is decision 81's rule applying per object rather than per module — so the module itself has no
+thread affinity, the way `Core` and `Geometry` have none.
+
+**What forced it out of `Nested` is a layering edge that cannot exist.**
+[Structure.md](Structure.md#the-modules) has `Protocol` depending on `Scene`, and `Nested` split
+across both halves. `Nested` reaching `Protocol` for a codec would make `Scene` reachable from the
+frame side, which that document names as *the one thing worth enforcing rather than describing* and
+which `CheckLayering.cmake` refuses. So the codec cannot be borrowed from the server side, and the
+question is only whether it lives inside `Nested` or below it.
+
+**It does not serve `Protocol` today, and saying so is worth more than the symmetry.** The obvious
+argument for the module — *one codec, two callers, so it belongs below both* — is not available,
+because [decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec) gives the
+server codec to `libwayland-server`. The demarshaller, the socket manager, id allocation and
+`delete_id`, fd buffering against the 28-fd send limit: all inherited, none of it gyro's to write, and
+what the build-time bindings generate for the server half *wraps* libwayland rather than sitting on a
+gyro codec. `Wire` has exactly one caller. The module has to be justified without the second one, and
+two arguments carry it.
+
+**It is testable against a scripted peer instead of a compositor.** A codec inside `Nested` is
+reachable only through a backend whose far end is a running host — so a marshalling bug is found by
+mutter closing the connection, with a protocol error string and no frame of reference. A codec in its
+own module is exercised over a `socketpair` with the peer written by the test: a truncated header, an
+fd arriving one message early, a `new_id` reused inside the `delete_id` window, an argument array
+that runs off the end. Those are the cases that matter and none of them is reproducible by asking a
+host nicely.
+
+**Which is also why it is portable rather than platform**, and that is a correction to the obvious
+reading. `sendmsg` with `SCM_RIGHTS` over `AF_UNIX` is POSIX — `<sys/socket.h>` and `<sys/un.h>` are
+not on `CheckPortability.cmake`'s forbidden list, and they are not on it because they should not be.
+Portable here means what [decision 6](#6-no-macos-port-development-continues-over-ssh) means — the
+tests build and run on a machine with no GPU, no seat, and no compositor — and a wire codec talking
+to a socket the test created satisfies that exactly. The one non-POSIX spelling in the neighbourhood
+is `MSG_CMSG_CLOEXEC`, which is a flag rather than a header and has an `fcntl` fallback if it ever
+needs one. `Nested` stays platform for its own reasons; the codec underneath it does not have to.
+
+**The second argument is decision 2's standing swap.** That entry records three conditions that
+reopen the in-tree server half and deliberately builds nothing on libwayland that would have to be
+unbuilt. If one of them fires, the server codec's home is this module — already below both waists,
+already portable, already exercised by a peer that is not a compositor. Siting the client codec
+inside `Nested` would make that swap a module extraction on top of everything else it already is,
+which is exactly the cost `Wire` is cheap enough to buy off now. This is
+[decision 69](#69-settling-answers-with-a-wake-idleness-folds-a-monoid-not-an-or)'s trigger rather than a prediction: the
+type has one caller, so the move costs nothing today.
+
+**Rejected: the codec inside `Nested`, extracted if `Protocol` ever wants it.** The honest version of
+the position above, and it loses on the test argument alone. It also gets the tier wrong by
+association — a codec inside a platform module is a platform module, and it would stop being run on
+the machines where it is cheapest to run it.
+
+**Rejected: `Seam`.** It is an interface with more than one implementation only in the sense that a
+socket has two ends, and nothing crosses the control waist here — `Frame` never names a connection,
+and the composition root never hands one to a renderer. `Seam`'s rule is a test, not a home for
+anything shared.
+
+**Deferred: whether the generated bindings live here.** The build-time generator is a host tool and
+its output is per protocol; whether the descriptors it emits are `Wire`'s types or a generated
+module's is a question about the generator, and there is no generator yet. What is settled is where
+the *runtime* codec lives, because that is what decision 81's revision needs a home for.
+
+### 120. A nested output's targets are exported from the Vulkan device, and the allocator moves to `Seam`
+
+*(Decided 2026-08-22, on asking what stands a nested output's target ring up, given that unlike KMS
+there is no GBM device handed over and unlike WSI nothing allocates on gyro's behalf.)*
+
+**The Vulkan device exports a nested output's dmabufs, and `IDmabufAllocator` moves from
+[Virtual/Allocator.h](../Source/Virtual/Allocator.h) up to `Seam`.** Two answers because the second
+is the only way to spend the first: a presenter owns its targets, `Nested` may not name `Render`, and
+the composition root is the only thing that knows both.
+
+**Export reuses machinery that already exists, which is most of the argument.**
+[Source/Render/Device.cpp](../Source/Render/Device.cpp) already requires
+`VK_KHR_external_memory_fd`, `VK_EXT_external_memory_dma_buf`, and
+`VK_EXT_image_drm_format_modifier`, and already queries `VkDrmFormatModifierPropertiesListEXT` for
+what a format can be tiled as. What export adds over the import path the renderer runs today is
+`VkExportMemoryAllocateInfo` on the allocation and one `vkGetMemoryFdKHR` — the same image, the same
+modifier query, the fd going out instead of coming in.
+
+**[Decision 102](#102-a-virtual-output-allocates-the-buffers-it-hands-out-and-that-is-what-stands-the-renderer-up)
+rejected exactly this, and every clause of that rejection is about scanout.** It reads: the chip that
+scans out is not always the chip that draws, the modifier set is an intersection with the display
+plane's, and GBM's scanout usage is what makes an allocation eligible for a framebuffer at all. A
+nested output never scans out. There is no plane, no `AddFB2`, and no second chip in the path — the
+consumer is a compositor importing a buffer, which is the same thing every Wayland client on the
+machine already does. What constrains the modifier instead is `zwp_linux_dmabuf_v1`'s feedback: the
+host sends a format table and per-tranche target devices, so gyro is *told* the constraint rather
+than having to infer it. Decision 102's objection was that a `VkImage` cannot carry a constraint
+nobody stated; here it is stated on the wire.
+
+**One clause of that rejection is wrong on the protocol and is marked there.** It says "nested there
+is nothing to export into, since a target is a `wl_buffer` the host handed back". `zwp_linux_dmabuf_v1`
+has no allocation request. `zwp_linux_buffer_params_v1.add` takes an fd the *client* already owns and
+`create` / `create_immed` turn those fds into a `wl_buffer`, so what the host hands back is a handle
+to gyro's own memory. There is something to export into, and exporting is the only way to fill it.
+
+**Decision 102's narrower objection reverses under nested, which is the part worth having.** It said a
+renderer verified against images it allocated for itself is verified against the one configuration
+that cannot fail. Under nested the importer is the host — mutter, then a wlroots compositor, neither
+of them gyro's code — so an exported image with a modifier the host will not take fails visibly and
+immediately rather than passing a fixture. This is the first target set in the tree whose consumer
+gyro did not write.
+
+**The tension this creates is real and is resolved by moving the interface up rather than by routing
+around it.** [Virtual/Allocator.h](../Source/Virtual/Allocator.h) argues an allocator must not appear
+in `Seam` because *nothing outside this module ever names one*. That was a statement of fact, and it
+has stopped being true — which is the rule working rather than eroding.
+[Structure.md](Structure.md#the-modules)'s test for the control waist is *more than one
+implementation and the data crossing it*, and both clauses now hold: two implementations, `udmabuf`
+and the Vulkan export; two consumers in different modules, `Virtual` and `Nested`, neither of which
+owns either implementation; and the composition root the only thing that knows both sides, which is
+what [orchestration](Structure.md#orchestration) says a seam is for.
+
+**The waist is already carrying the description, so what moves is small.**
+[Seam/RenderTarget.h](../Source/Seam/RenderTarget.h) already holds `PixelFormat` with a DRM modifier,
+`DmabufPlane`, and `DmabufImage`, in the portable tier. What comes up with the interface is the
+*owning* half — `DmabufBuffer` and `Mapping` — which is a `Core::Fd`, a pointer, and a length, and
+names no platform header. Constructing one stays a platform module's business, because only a
+platform module implements the interface.
+
+**Rejected: the composition root allocates and hands the buffers down.** The alternative that keeps
+`Seam` narrow, and it puts a window resize on the wrong thread. A nested output's target set is
+reallocated on `xdg_toplevel.configure`, which arrives on the host connection that
+[decision 81](#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread)
+now has the frame thread pumping;
+[Seam/Presenter.h](../Source/Seam/Presenter.h) already says the backend allocates or imports, and
+`Targets()` is empty between `TargetsInvalidated` and `Reconfigured`. Routing the reallocation
+through the root means that window is held open until a thread that owes no deadline is scheduled —
+so dragging the nested window's edge leaves the contents blank for as long as that takes, on the
+backend that is the daily driver. It also costs module edges the other answer does not: `Render`
+and `Nested` both already depend on `Seam`, so moving the interface up adds none, while
+root-allocates needs the root to grow a per-resize path and `Nested` an inbound verb it otherwise
+has no use for.
+
+**Rejected: GBM.** Decision 102 deferred it because it costs a pkg-config entry for tiled modifiers
+worth exercising against a real display plane, and nested has no display plane — so under this
+backend it buys nothing at all and the deferral gets easier rather than harder. It comes back with
+the DRM backend or not at all.
+
+**Rejected: udmabuf.** It is what `Virtual` uses and it is linear host memory, which a discrete GPU
+may refuse to import outright; where the host accepts it, it accepts it by copying, so the daily
+driver would run every frame through a detour that exists nowhere else. Decision 102's permission
+note points the same way: `/dev/udmabuf` is `0600 root:kvm` and reachable only through a seat-local
+ACL, which is precisely the environment a nested session may not have.
+
+**What must be checked at bind rather than assumed.** The host's dmabuf feedback names a main device
+and per-tranche target devices, and nothing guarantees they are the device
+[Device.cpp](../Source/Render/Device.cpp)'s ranking selected — a laptop with two GPUs is the ordinary
+case, not the exotic one. The tranche's device is the constraint, and a mismatch is a condition to
+report at `BindTargets` with both device names in the line, not one to discover as a host protocol
+error three frames later.
