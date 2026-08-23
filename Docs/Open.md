@@ -352,12 +352,6 @@ nothing only proves the grep.
   cheap way to characterise a dmabuf's margin at import, which is a rendering question rather than a
   protocol one. Worth re-reading when the import half of the renderer is written, since that is where
   the cost would actually land.
-- **The intermediate format for unfused effect passes.** Decision 62 requires the fused and unfused
-  paths to agree below the perceptual threshold, and the whole of the difference is rounding at pass
-  boundaries — registers at full precision against whatever the intermediate stores. `fp16` is
-  probably sufficient and 8-bit certainly is not, which is decision 47's precision argument on a
-  smaller surface; but *probably sufficient* is the standing that argument rejects. A measurement
-  with a tolerance attached, and the tolerance is the harder half.
 - **The damage verifier's waste threshold.** Decision 63 asserts that declared damage is not
   "grossly larger" than what changed, and grossly is not a number. Too tight and every gathering
   material fails on content that happens to be static; too loose and the silent direction stays

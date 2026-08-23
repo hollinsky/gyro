@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -38,6 +39,94 @@
 // second caller and a renderer may not depend on a presenter's module, so the shared half went down
 // rather than the dependency going sideways. What is left here is the vocabulary for asking
 // questions about an image, which has exactly the one caller this file always claimed.
+
+// How two images differ: how far apart they are at their worst, where that was, and how much of the
+// rectangle is further apart than the caller was willing to accept.
+//
+// **A record rather than a boolean, and the boolean is the cheap half.** `ImageView::Compare` is
+// written for decision 62's oracle, which draws one scene through two executions of the same chain;
+// when those disagree the question is immediately *by how much, and where* — a fringe along one
+// corner arc is a coverage bug and a uniform shift across a whole fill is a conversion bug, and the
+// two look identical to a predicate that answers false. Handing back the distance and the pixel is
+// the difference between a failure somebody bisects in an hour and one they spend a day
+// reconstructing this type in order to see.
+//
+// **`Worst` is in `Rgba16`'s depth and the formatter prints it in eight-bit code points**, which is
+// the unit the threshold is stated in: `FromEightBit(1)` is 257, one code point of an ordinary sRGB
+// output, and that is about where a difference stops being something a person could see in a
+// gradient. A number in sixteen-bit units tells a reader nothing without that division, so the
+// division happens where the number is printed rather than in everybody's head.
+struct ImageDifference
+{
+	// False where the comparison could not be made: a rectangle one of the two images does not
+	// contain, or an empty one. **Not the same as a disagreement** — a caller that read it as one
+	// would be reporting a difference it never measured, which is exactly the failure a test
+	// comparing a mistyped rectangle would otherwise pass off as a real one. `Agrees` is false in
+	// both cases, deliberately, because a comparison that did not happen has not agreed either.
+	bool Comparable = false;
+
+	// How many pixels were looked at, how many of those were not identical, and how many were
+	// further apart than `tolerance`.
+	//
+	// **`Differing` is the margin and `Beyond` is the verdict**, which is why both are here. A
+	// threshold comparison reports its worst pixel at the threshold as soon as *any* pixel lands
+	// near a rounding boundary, so the worst figure saturates and stops moving long before the
+	// difference underneath it does. What keeps moving is the count: two paths whose values drift by
+	// a fifth of a code point land on a different code at about a fifth of their pixels, so
+	// `Differing / Compared` estimates the drift directly and is what shows a margin eroding while
+	// the assertion still passes.
+	std::size_t Compared = 0;
+	std::size_t Differing = 0;
+	std::size_t Beyond = 0;
+
+	// The largest single-channel distance anywhere in the rectangle, whether or not it was within
+	// tolerance, and the pixel it was found at with what each image held there.
+	//
+	// **Reported even when everything agreed**, which is what makes this worth printing on a passing
+	// run: the margin between the worst pixel and the threshold is the only evidence that an
+	// assertion is still measuring something, and a suite that prints it is one where a driver
+	// upgrade eroding that margin is visible before it crosses.
+	std::uint16_t Worst = 0;
+	PixelPoint<DeviceSpace> Where{};
+	Rgba16 Here{};
+	Rgba16 There{};
+
+	[[nodiscard]] constexpr bool Agrees() const noexcept { return Comparable && Beyond == 0; }
+
+	friend constexpr bool operator==(const ImageDifference&, const ImageDifference&) noexcept = default;
+};
+
+// Prints as `3 of 2048 pixels beyond tolerance, 431 not identical; worst 0.74 code points at
+// (24, 9), rgba(...) against rgba(...)`, which is a line somebody can act on without opening this
+// file.
+template<>
+struct std::formatter<ImageDifference>
+{
+	static constexpr auto parse(std::format_parse_context& context) { return context.begin(); }
+
+	template<typename Context>
+	auto format(const ImageDifference& difference, Context& context) const
+	{
+		if (!difference.Comparable)
+		{
+			return std::format_to(context.out(), "not comparable: the rectangle is not inside both images");
+		}
+
+		return std::format_to(
+			context.out(),
+			"{} of {} pixels beyond tolerance, {} not identical; worst {:.2f} code points at ({}, {}), {} "
+			"against {}",
+			difference.Beyond,
+			difference.Compared,
+			difference.Differing,
+			static_cast<double>(difference.Worst) / static_cast<double>(FromEightBit(1)),
+			difference.Where.X,
+			difference.Where.Y,
+			difference.Here,
+			difference.There
+		);
+	}
+};
 
 // A rectangle of pixels somebody else owns, and the questions worth asking about it.
 //
@@ -94,6 +183,27 @@ public:
 	// How many pixels in `rect` match. Zero where the view does not contain the rectangle.
 	[[nodiscard]] std::size_t
 	CountMatching(PixelRect<DeviceSpace> rect, Rgba16 colour, std::uint16_t tolerance = 0) const noexcept;
+
+	// How this image and another differ over `rect`, and by how much, and where.
+	//
+	// **This is decision 62's oracle in one call, and the report is most of what it is for.** That
+	// decision draws one scene twice — the fused chain and the separate passes — and asserts the two
+	// agree below the perceptual threshold rather than to the bit. A predicate that answered *they
+	// differ* would leave whoever is holding a failed run to write this function anyway, at the worst
+	// possible moment, so it is written once here: the worst pixel, where it is, what each side held
+	// there, and how many pixels were further apart than the caller allowed.
+	//
+	// **Neither image is the expected one**, which is the difference from every other predicate in
+	// this file. `IsUniform` and `BoundsOfDiffering` compare an image against a claim a test wrote
+	// down; this compares two images against each other, and the reason decision 62 wants that is
+	// that neither of the two is a golden frame — the reference is the other execution of the same
+	// scene, available at runtime and unable to go stale.
+	//
+	// **The two formats need not match.** Both sides decode through `At`, so an `XR24` composite and
+	// an `XR30` one are comparable, and `Rgba16`'s depth is what the distance is measured in.
+	// `Comparable` is false where either image does not contain the rectangle.
+	[[nodiscard]] ImageDifference
+	Compare(const ImageView& other, PixelRect<DeviceSpace> rect, std::uint16_t tolerance = 0) const noexcept;
 
 	// The tightest rectangle enclosing every pixel that is *not* `background`, or nothing where every
 	// pixel is.
@@ -190,4 +300,9 @@ private:
 // is worth asserting here is that a view is a handle rather than an image: two of them over the same
 // memory are the same view, and a default-constructed one is not usable.
 static_assert(std::is_trivially_copyable_v<ImageView> && std::is_trivially_copyable_v<MutableImageView>);
+static_assert(std::is_trivially_copyable_v<ImageDifference> && std::formattable<ImageDifference, char>);
+
+// A comparison that did not happen has not agreed, which is the reading `Comparable` exists to make
+// unmissable: a default-constructed report is the one a caller gets when the rectangle was wrong.
+static_assert(!ImageDifference{}.Agrees());
 static_assert(!std::is_copy_constructible_v<BufferReader>, "The sync bracket is not something two objects may hold");

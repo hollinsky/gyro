@@ -223,6 +223,18 @@ constexpr Rgba16 Red = Rgb8(255, 0, 0);
 constexpr Rgba16 Blue = Rgb8(0, 0, 255);
 constexpr Rgba16 Prefilled = Rgb8(0xAB, 0xAB, 0xAB);
 
+// How far apart decision 62's two executions of one chain are allowed to be: one eight-bit code
+// point of the output's encoding, which `FromEightBit` spells in the sixteen-bit depth `Rgba16`
+// compares in.
+//
+// **A perceptual figure rather than a format one.** An eight-bit sRGB step is roughly where a
+// difference stops being visible in a gradient — that is why eight bits is marginal and ten fixes
+// it — so *within one step* is a claim about vision that holds whatever depth the output is
+// configured for. Decision 118's arithmetic says a half-float intermediate lands about a quarter of
+// a step out over this chain, so the margin is a factor of four and the printed figure is what says
+// it still is.
+constexpr std::uint16_t Threshold = FromEightBit(1);
+
 // Where the fill in the two placement tests below has to have landed. Shared so that the floor tier
 // and a real driver are held to one claim rather than to two that can drift apart.
 void CheckThePlacement(const ImageView& image)
@@ -240,6 +252,118 @@ void CheckThePlacement(const ImageView& image)
 	GYRO_CHECK_EQ(image.At(40, 12), OpaqueBlack);
 	GYRO_CHECK_EQ(image.At(28, 7), OpaqueBlack);
 	GYRO_CHECK_EQ(image.At(28, 20), OpaqueBlack);
+}
+
+// **The scene decision 62's oracle draws, and every element of the chain is in it.** One scene rather
+// than four is deliberate: fusion is about a *run* of elements, so the case worth comparing is a list
+// whose items have different runs and overlap each other, not four items each exercising one thing in
+// isolation.
+//
+// - An opaque square that converts nothing and is not rounded, which is the shortest chain there is.
+// - A rounded, half-opacity square laid over it, so that the corner mask, the scalar and the `over`
+//   against something already drawn are all in one item.
+// - A linear-light fill, which is the conversion on its own.
+// - A rounded, three-quarter-opacity fill in Rec.2020 primaries, which is the whole chain at once and
+//   the only item that runs all four passes.
+//
+// The two opacities are exact in every floating-point format involved, so a disagreement is the
+// intermediate's rounding rather than an argument about how `0.7` was stored.
+[[nodiscard]] std::array<DrawItem, 4> TheWholeChain()
+{
+	const ColorState linear{ ColorPrimaries::Bt709, TransferFunction::Linear, AlphaMode::Premultiplied, 0, 203.0F };
+	const ColorState wide{ ColorPrimaries::Bt2020, TransferFunction::Srgb, AlphaMode::Premultiplied, 0, 203.0F };
+
+	std::array<DrawItem, 4> items{
+		Solid({ { 2.0F, 2.0F }, { 12.0F, 12.0F } }, DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F }),
+		Solid({ { 8.0F, 6.0F }, { 20.0F, 20.0F } }, DrawSolid{ 0.0F, 0.0F, 1.0F, 1.0F }, 0.5F, 6.0F),
+		Solid({ { 34.0F, 4.0F }, { 24.0F, 12.0F } }, DrawSolid{ 0.5F, 0.5F, 0.5F, 1.0F }),
+		Solid({ { 40.0F, 14.0F }, { 20.0F, 14.0F } }, DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F }, 0.75F, 5.0F),
+	};
+
+	items[2].Color = linear;
+	items[3].Color = wide;
+
+	return items;
+}
+
+// **Decision 62's oracle: one scene, both executions, and the difference between them measured
+// rather than asserted away.**
+//
+// The fused path keeps every intermediate of a pointwise chain in a register; the separate-pass path
+// writes each one into an offscreen and reads it back, rounding at every boundary. Decision 118
+// picks the format that rounding happens at, and the claim being checked here is that a run of it
+// stays inside one eight-bit code point — which is about where a difference stops being something a
+// person could see in a gradient, and is what Docs/Experience.md#the-picture-is-correct means by the
+// image not changing when the machine changes how it draws it.
+//
+// **The worst pixel is printed whether or not it passed**, which is most of why this test is worth
+// having twice. A passing run that prints `0.31 code points` is evidence the assertion is still
+// measuring something; a passing run that prints `0.98` is a driver upgrade about to cross the
+// threshold, and nobody finds that from a green tick.
+//
+// **Neither side is a golden image and that is the point.** A checked-in frame states every pixel,
+// including the ones nobody meant to promise, and goes stale the first time a driver rounds a corner
+// arc differently. The reference here is the other execution of the same scene on the same device in
+// the same run — it cannot go stale, and what it asserts is exactly the property decision 62 needs
+// and nothing else.
+void CheckTheTwoPathsAgree(Fixture& fixture, std::string_view label)
+{
+	VulkanRenderer reference{ fixture.Clock(), fixture.Device(), Fusion::Separate };
+	GYRO_REQUIRE(reference.Status().has_value());
+	GYRO_REQUIRE_EQ(reference.Fuses(), Fusion::Separate);
+
+	// Both bound before either draws, because an import transitions an image out of
+	// `VK_IMAGE_LAYOUT_UNDEFINED` and a driver is entitled to discard what it held across that — so
+	// binding the second renderer after the first had drawn would clear the first frame away.
+	GYRO_REQUIRE(fixture.Renderer().BindTargets(fixture.Output().Targets(), ColorState::Srgb()).has_value());
+	GYRO_REQUIRE(reference.BindTargets(fixture.Output().Targets(), ColorState::Srgb()).has_value());
+	fixture.Prefill();
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	const std::array<DrawItem, 4> items = TheWholeChain();
+
+	const std::optional<std::uint32_t> fused = fixture.Output().AcquireTarget();
+	GYRO_REQUIRE(fused.has_value());
+
+	const Result<Submission> first = fixture.Renderer().Record(Composite(*fused, damage, items));
+	GYRO_REQUIRE_EQ(first.has_value(), true);
+
+	const std::optional<std::uint32_t> separate = fixture.Output().AcquireTarget();
+	GYRO_REQUIRE(separate.has_value());
+	GYRO_REQUIRE(*separate != *fused);
+
+	const Result<Submission> second = reference.Record(Composite(*separate, damage, items));
+	GYRO_REQUIRE_EQ(second.has_value(), true);
+
+	// A poll rather than a wait, which is what the frame loop does. On the floor tier both points
+	// are already immediate — decision 108 — and this spins zero times.
+	while (!fixture.Renderer().IsComplete(first->Point) || !reference.IsComplete(second->Point))
+	{
+		// Deliberately empty, for the reason the hardware placement test above gives.
+	}
+
+	const DmabufBuffer* left = fixture.Output().Buffer(*fused);
+	const DmabufBuffer* right = fixture.Output().Buffer(*separate);
+	GYRO_REQUIRE(left != nullptr);
+	GYRO_REQUIRE(right != nullptr);
+
+	const BufferReader lens{ *left };
+	const BufferReader other{ *right };
+	GYRO_REQUIRE(lens.IsValid());
+	GYRO_REQUIRE(other.IsValid());
+
+	// Neither path may have quietly drawn nothing. Two empty composites agree perfectly, and an
+	// oracle that could pass that way would be reporting the clear rather than the chain.
+	GYRO_REQUIRE(lens.Image().BoundsOfDiffering(OpaqueBlack).has_value());
+	GYRO_REQUIRE(other.Image().BoundsOfDiffering(OpaqueBlack).has_value());
+
+	const ImageDifference difference = lens.Image().Compare(other.Image(), lens.Image().Extent(), Threshold);
+
+	std::println("  {}: {}", label, difference);
+
+	GYRO_CHECK(difference.Agrees());
 }
 } // namespace
 
@@ -443,6 +567,39 @@ GYRO_TEST(RenderImport, ASolidLandsInTheSamePlaceOnHardware)
 	GYRO_REQUIRE(reader.IsValid());
 
 	CheckThePlacement(reader.Image());
+}
+
+GYRO_TEST(RenderImport, TheFusedAndUnfusedChainsDrawTheSamePicture)
+{
+	std::optional<Fixture> fixture = Available("TheFusedAndUnfusedChainsDrawTheSamePicture");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	CheckTheTwoPathsAgree(*fixture, "lavapipe");
+}
+
+// **The same claim on a real driver, and this is the pair that matters most in the file.** Everything
+// else here runs on the floor tier, where both executions are the same software rasterizer rounding
+// the same way; a real driver is where the two paths have a genuine chance to disagree — a different
+// half-float rounding mode on the intermediate, a different order of operations after the fragment
+// shader, a derivative estimated over a different quad. Two paths agreeing on lavapipe and
+// disagreeing on hardware is exactly what decision 62's oracle exists to catch, and it can only
+// catch it if it runs on both.
+GYRO_TEST(RenderImport, TheFusedAndUnfusedChainsAgreeOnHardware)
+{
+	std::optional<Fixture> fixture = Available("TheFusedAndUnfusedChainsAgreeOnHardware", DeviceClass::Hardware);
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	std::println("  {}", fixture->Device().Description());
+
+	CheckTheTwoPathsAgree(*fixture, "hardware");
 }
 
 // **The corner cut, and the two things about it that are easy to get backwards.** A radius removes

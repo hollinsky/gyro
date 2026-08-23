@@ -247,7 +247,8 @@ Constants(const DrawItem& item, DrawSolid solid, PixelSize<DeviceSpace> target, 
 }
 } // namespace
 
-VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device) : m_Clock{ &clock }, m_Device{ &device }
+VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device, Fusion fusion)
+	: m_Clock{ &clock }, m_Device{ &device }, m_Fusion{ fusion }
 {
 	if (!device.IsValid())
 	{
@@ -349,6 +350,22 @@ VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device) : m_Cl
 		spdlog::info("gather falls to its tint on this device: {}", created.error().Context());
 	}
 
+	// **Fatal where the renderer was built for it and not otherwise**, which is the asymmetry with
+	// the line above. A gather that cannot come up is decision 34's third rung and the picture
+	// survives; a renderer asked for decision 62's reference execution and unable to build it has
+	// nothing else it is allowed to draw, because falling back to the lattice would make an oracle
+	// compare the fused path against itself and report agreement.
+	if (m_Fusion == Fusion::Separate)
+	{
+		if (Result<void> created = m_Unfused.Create(device); !created)
+		{
+			m_Status = created;
+			Destroy();
+
+			return;
+		}
+	}
+
 	if (Result<void> created = m_Pipeline.Create(device); !created)
 	{
 		m_Status = created;
@@ -429,6 +446,20 @@ Result<void> VulkanRenderer::BindTargets(std::span<const RenderTarget> targets, 
 	}
 
 	Reserve(targets, output);
+
+	// Only where this renderer draws that way, and a failure is the bind's rather than a tier.
+	// Render/Unfused.h says why: there is no third thing for an unfused renderer to draw. An empty
+	// set reserves nothing and is not a failure, which is the answer `Reserve` above already gives —
+	// there is no size or format to build against and nothing will be drawn.
+	if (m_Fusion == Fusion::Separate && m_TargetCount > 0)
+	{
+		if (Result<void> reserved = m_Unfused.Reserve(m_Slots[0].Size, m_Slots[0].Format); !reserved)
+		{
+			ReleaseTargets();
+
+			return reserved;
+		}
+	}
 
 	return {};
 }
@@ -760,6 +791,12 @@ void VulkanRenderer::ReleaseTargets() noexcept
 		slot = Slot{};
 	}
 
+	// The intermediates go with the targets they were sized against. `Backdrop` is released by its
+	// next `Reserve` instead, which works because a bind always follows; this one is released here
+	// because a `Fusion::Separate` renderer that is unbound holds two full-resolution images, and an
+	// output that goes away should not keep paying for them.
+	m_Unfused.Release();
+
 	m_TargetCount = 0;
 }
 
@@ -853,6 +890,27 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		&acquire
 	);
 
+	// **Both intermediates into a shader-readable layout once, out of `UNDEFINED`.** They carry
+	// nothing across frames — every element writes what the next one reads within a single item — so
+	// this discards whatever was in them and establishes the invariant `Apply` relies on: a pass
+	// finds its source already legible and leaves its destination the same way.
+	if (m_Fusion == Fusion::Separate)
+	{
+		for (std::uint32_t index = 0; index < UnfusedImages; ++index)
+		{
+			Depend(
+				command,
+				m_Unfused.Image(index),
+				VK_IMAGE_LAYOUT_UNDEFINED,
+				VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+				0,
+				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				VK_ACCESS_SHADER_READ_BIT
+			);
+		}
+	}
+
 	BeginTarget(command, slot, request);
 
 	// The arena is a member-sized array rather than anything grown here: decision 36 forbids
@@ -937,6 +995,15 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 			// the same answer Seam/Renderer.h gives an empty `DrawGroup`.
 			if (solid == nullptr)
 			{
+				continue;
+			}
+
+			// Decision 62's reference execution, where this renderer was built for it: the same
+			// chain, one pass per element, through an intermediate that rounds.
+			if (m_Fusion == Fusion::Separate)
+			{
+				Separate(command, slot, item, *solid, request, std::span{ rects.data(), count }, bound);
+
 				continue;
 			}
 
@@ -1043,6 +1110,196 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 
 	return Submission{ .Point = SyncPoint{ .Timeline = m_TimelineFd.Borrow(), .Value = value },
 		               .RecordCost = Elapsed(started, m_Clock->Now()) };
+}
+
+void VulkanRenderer::Apply(
+	VkCommandBuffer command,
+	Element element,
+	std::uint32_t source,
+	std::uint32_t destination,
+	VkRect2D region,
+	const VkViewport& pane,
+	const ElementConstants& constants
+) const noexcept
+{
+	// **Every pass begins and ends with both intermediates legible to a shader**, which is what lets
+	// this be written without a layout tracked per image across a recording. The destination comes
+	// out of `SHADER_READ_ONLY_OPTIMAL` for the write and goes straight back into it afterwards, and
+	// the source is already there; `Record` is what puts both there once, out of `UNDEFINED`, at the
+	// top of the frame. `Pass` takes the other approach one function down — `UNDEFINED` as the old
+	// layout, discarding — which it can because the blur chain's ping-pong is a fixed alternation
+	// this one is not.
+	Depend(
+		command,
+		m_Unfused.Image(destination),
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+	);
+
+	// `DONT_CARE`, because the pass writes everything downstream of it will read: the next element
+	// rasterizes the same quad and reads its own fragment coordinate, so the only pixels ever read
+	// out of this image are the ones this draw is about to cover.
+	const VkRenderingAttachmentInfo attachment{ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+		                                        .pNext = nullptr,
+		                                        .imageView = m_Unfused.View(destination),
+		                                        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		                                        .resolveMode = VK_RESOLVE_MODE_NONE,
+		                                        .resolveImageView = VK_NULL_HANDLE,
+		                                        .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		                                        .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+		                                        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+		                                        .clearValue = Nothing };
+	const VkRenderingInfo rendering{ .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+		                             .pNext = nullptr,
+		                             .flags = 0,
+		                             .renderArea = region,
+		                             .layerCount = 1,
+		                             .viewMask = 0,
+		                             .colorAttachmentCount = 1,
+		                             .pColorAttachments = &attachment,
+		                             .pDepthAttachment = nullptr,
+		                             .pStencilAttachment = nullptr };
+
+	const VkDescriptorSet set = m_Unfused.Set(source);
+
+	vkCmdBeginRendering(command, &rendering);
+	vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_Unfused.For(element));
+	vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_Unfused.Layout(), 0, 1, &set, 0, nullptr);
+
+	// The target's grid, not the region's. Render/Shaders/Quad.glsl divides a device-space corner by
+	// the target's extent to reach clip space, so a viewport over the region would place the quad
+	// somewhere else entirely — and the two paths would then be compared on where they drew rather
+	// than on what they computed.
+	vkCmdSetViewport(command, 0, 1, &pane);
+	vkCmdSetScissor(command, 0, 1, &region);
+	vkCmdPushConstants(
+		command,
+		m_Unfused.Layout(),
+		VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+		0,
+		sizeof constants,
+		&constants
+	);
+	vkCmdDraw(command, 6, 1, 0, 0);
+	vkCmdEndRendering(command);
+
+	Depend(
+		command,
+		m_Unfused.Image(destination),
+		VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		VK_ACCESS_SHADER_READ_BIT
+	);
+}
+
+void VulkanRenderer::Separate(
+	VkCommandBuffer command,
+	const Slot& slot,
+	const DrawItem& item,
+	DrawSolid solid,
+	const RecordRequest& request,
+	std::span<const VkClearRect> rects,
+	VkPipeline& bound
+) const noexcept
+{
+	// **The item's own bound, and every element runs over all of it.** The elements are pointwise, so
+	// a pixel's value does not depend on which damage rectangle it fell in; running the chain once
+	// over the whole item and honouring damage at the composite is both cheaper and — the half that
+	// matters — the arrangement in which the corner mask's hardware derivatives are taken over the
+	// same fragments the fused program takes them over.
+	const VkRect2D region = Clip(item.Shape.PixelBounds(), slot.Size);
+
+	if (region.extent.width == 0 || region.extent.height == 0)
+	{
+		return;
+	}
+
+	// **The same variant the fused program would have been built with, read as a list.** A run mask
+	// says which elements a specialization compiled in; here it says which passes to run. That the
+	// two are the same function of the same item is the whole basis of the comparison — an oracle
+	// whose two sides disagreed about *which* elements the chain had would be measuring the
+	// disagreement rather than the rounding.
+	const QuadVariant variant = QuadVariant::For(item.Color, m_Output, item.Radius > 0.0F);
+
+	ElementConstants constants{ .Item = Constants(item, solid, slot.Size, m_Output) };
+
+	constants.Convert[0] = static_cast<std::int32_t>(item.Color.Transfer);
+	constants.Convert[1] = static_cast<std::int32_t>(item.Color.Primaries);
+	constants.Convert[2] = static_cast<std::int32_t>(m_Output.Transfer);
+	constants.Convert[3] = static_cast<std::int32_t>(m_Output.Primaries);
+
+	std::array<Element, 4> chain{};
+	std::uint32_t length = 0;
+
+	chain[length++] = Element::Emit;
+
+	if ((variant.Run & QuadRunConvert) != 0U)
+	{
+		chain[length++] = Element::Convert;
+	}
+
+	if ((variant.Run & QuadRunCorner) != 0U)
+	{
+		chain[length++] = Element::Corner;
+	}
+
+	// Always, and never folded into the composite. Render/Pipeline.h counts the opacity and decision
+	// 62's dim as one multiply the renderer does on the CPU, which makes them one element rather
+	// than none — and folding that element into the blend is a fusion, which is the one thing this
+	// path is not allowed to do.
+	chain[length++] = Element::Scale;
+
+	const VkViewport pane{ .x = 0.0F,
+		                   .y = 0.0F,
+		                   .width = static_cast<float>(slot.Size.Width),
+		                   .height = static_cast<float>(slot.Size.Height),
+		                   .minDepth = 0.0F,
+		                   .maxDepth = 1.0F };
+
+	vkCmdEndRendering(command);
+
+	// Which intermediate holds the chain's current value. It starts at one so that the emit — which
+	// reads nothing and has the set bound only because the layout has one — writes into zero.
+	std::uint32_t held = 1;
+
+	for (std::uint32_t index = 0; index < length; ++index)
+	{
+		Apply(command, chain[index], held, 1U - held, region, pane, constants);
+		held = 1U - held;
+	}
+
+	BeginTarget(command, slot, request);
+	vkCmdSetViewport(command, 0, 1, &pane);
+
+	const VkDescriptorSet set = m_Unfused.Set(held);
+
+	vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_Unfused.For(Element::Composite));
+	vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_Unfused.Layout(), 0, 1, &set, 0, nullptr);
+	vkCmdPushConstants(
+		command,
+		m_Unfused.Layout(),
+		VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+		0,
+		sizeof constants,
+		&constants
+	);
+
+	// The outer loop's memo is invalidated rather than updated, for `Dress`'s reason: what is bound
+	// now belongs to a different layout.
+	bound = VK_NULL_HANDLE;
+
+	for (const VkClearRect& rect : rects)
+	{
+		vkCmdSetScissor(command, 0, 1, &rect.rect);
+		vkCmdDraw(command, 6, 1, 0, 0);
+	}
 }
 
 void VulkanRenderer::Pass(
@@ -1183,6 +1440,17 @@ Result<void> VulkanRenderer::Dress(
 		// frame cannot afford.
 		DrawItem tinted = item;
 		tinted.Color = ChainState(m_Output);
+
+		// The tint is an ordinary fill, so it takes whichever execution this renderer draws fills
+		// with. The *chained* branch below is not offered the same choice and does not need it: a
+		// gather forces materialisation by definition, so decision 62 never fuses it and there is no
+		// second execution of it to compare against.
+		if (m_Fusion == Fusion::Separate)
+		{
+			Separate(command, slot, tinted, TintFill(item.Dress), request, rects, bound);
+
+			return {};
+		}
 
 		const VkPipeline pipeline = m_Pipeline.For(slot.Format, QuadVariant::For(tinted.Color, m_Output, rounded));
 

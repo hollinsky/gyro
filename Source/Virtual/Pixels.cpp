@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <initializer_list>
 
 namespace
 {
@@ -42,6 +43,26 @@ CheckShape(std::size_t bytes, PixelSize<DeviceSpace> size, std::uint32_t stride,
 	}
 
 	return {};
+}
+
+// How far apart two decoded pixels are, as the largest of the four per-channel distances.
+//
+// **The largest rather than a sum or a mean, because a threshold is per channel.** A pixel that is
+// one code point out in red and nothing in green and blue is one code point out, and adding the
+// three would call it three; averaging them would call it a third, and a colour cast that only ever
+// moves one channel would slip under every tolerance a caller thought it had set.
+[[nodiscard]] std::uint16_t Distance(Rgba16 left, Rgba16 right) noexcept
+{
+	const auto apart = [](std::uint16_t first, std::uint16_t second) noexcept {
+		return static_cast<std::uint16_t>(first > second ? first - second : second - first);
+	};
+
+	return std::max(
+		{ apart(left.Red, right.Red),
+	      apart(left.Green, right.Green),
+	      apart(left.Blue, right.Blue),
+	      apart(left.Alpha, right.Alpha) }
+	);
 }
 } // namespace
 
@@ -120,6 +141,55 @@ std::size_t ImageView::CountMatching(PixelRect<DeviceSpace> rect, Rgba16 colour,
 	}
 
 	return matched;
+}
+
+ImageDifference
+ImageView::Compare(const ImageView& other, PixelRect<DeviceSpace> rect, std::uint16_t tolerance) const noexcept
+{
+	// Both, because a rectangle inside one image and past the edge of the other would otherwise
+	// compare real pixels against `At`'s transparent black and report a difference that is entirely
+	// the caller's arithmetic.
+	if (!Contains(rect) || !other.Contains(rect))
+	{
+		return {};
+	}
+
+	ImageDifference difference{ .Comparable = true };
+
+	for (std::int32_t y = rect.Top(); y < rect.Bottom(); ++y)
+	{
+		for (std::int32_t x = rect.Left(); x < rect.Right(); ++x)
+		{
+			const Rgba16 here = At(x, y);
+			const Rgba16 there = other.At(x, y);
+			const std::uint16_t distance = Distance(here, there);
+
+			++difference.Compared;
+
+			if (distance > 0)
+			{
+				++difference.Differing;
+			}
+
+			if (distance > tolerance)
+			{
+				++difference.Beyond;
+			}
+
+			// Strictly greater, so the *first* pixel at the worst distance is the one reported. A
+			// difference that runs along an edge is usually the same distance at every pixel of it,
+			// and the first in scan order is the one whose coordinate says which edge.
+			if (distance > difference.Worst)
+			{
+				difference.Worst = distance;
+				difference.Where = { x, y };
+				difference.Here = here;
+				difference.There = there;
+			}
+		}
+	}
+
+	return difference;
 }
 
 std::optional<PixelRect<DeviceSpace>>

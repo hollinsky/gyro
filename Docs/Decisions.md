@@ -8655,3 +8655,144 @@ contradict. It arrives with per-node damage, alongside the expansion's second co
 
 **Nothing probes.** Decision 34's startup capability probe is still the thing that should choose a
 tier, and until it exists every output runs at the top of the ladder.
+
+### 118. The unfused chain's intermediate is a half float, and the oracle asserts one eight-bit code point
+
+*(Decided 2026-08-22, on writing decision 62's oracle. Answers [Open.md](Open.md)'s "the intermediate
+format for unfused effect passes", which asked for a measurement with a tolerance attached and said
+the tolerance was the harder half. It was, and not for the reason that entry expected.)*
+
+#### The reference had to be built before it could be the reference
+
+[Decision 62](#62-effect-composition-is-an-optimization-and-the-unfused-path-is-the-reference) has
+said since it was written that the fused form is never required for correctness and that the
+separate-pass form is the oracle. Nothing unfused existed. The lattice was built whole at every
+binding and every item found its variant, so the sentence was aspirational — which is precisely the
+failure [decision 34](#34-quality-is-a-ladder-with-a-floor-and-the-floor-is-a-real-composite)'s
+floor-tier argument names, an alternative path that has never run.
+
+[Unfused.h](../Source/Render/Unfused.h) is that path. Per item: the fill into an offscreen, then the
+colour-state conversion, then the corner mask, then the scalar — each rasterizing *the same six
+vertices through the same placement function* as the fused program, each reading its own fragment
+coordinate out of the offscreen the element before it wrote, and a final pass compositing the result
+`over` the target. Four rasterizations and three round trips where the lattice does one draw and
+keeps everything in registers.
+
+**Five pipelines rather than thirteen, and the selectors are the difference.** The fused set
+enumerates nine source colour states per binding because a specialization constant has to exist
+before a frame needs it; a separate pass carries the same four selectors as data, in the sixteen
+bytes `QuadConstants` had left of the guaranteed push constant block, so one convert pipeline serves
+every source state. That is decision 62's shape read from the other end — the fused set counts
+contiguous runs and the unfused set counts *effects* — and it is what makes keeping the reference
+available cheap rather than something to compile out.
+[Decision 109](#109-shaders-compile-at-build-time-runtime-compilation-is-a-development-option)'s
+argument against selectors as data does not reach it: nine multiplies per fragment on the identity is
+a real cost on every ordinary frame and is not a cost on a path that runs in a test.
+
+**A renderer that cannot build the reference refuses at the binding rather than falling back.**
+Everywhere else in the renderer a failure to reserve is a tier — decision 34's third rung, the
+material drawn as its tint — because the picture is what matters. Here the picture is not what
+matters: a reference that quietly fell back to the lattice would make the oracle compare the fused
+execution against itself and report agreement, which is the one failure this whole path must not
+have. So `Fusion` is fixed at construction, and a `Fusion::Separate` renderer whose intermediates did
+not come up fails `BindTargets`.
+
+#### The format is `R16G16B16A16_SFLOAT`
+
+The whole of what the two paths can disagree by is what the intermediate rounds to. Four
+requirements, and each of them kills at least one candidate:
+
+- **Finer than the output, by enough that several boundaries are still finer.** A half rounds at
+  2⁻¹¹ relative — about a quarter of an eight-bit code point at the top of its range and far less
+  below it — so a chain of four stays inside one code point.
+- **Alpha at colour's depth**, because what travels here is a premultiplied item mid-fade.
+- **Unbounded above**, so [decision 47](#47-compositing-happens-in-linear-light-at-wide-primaries)'s
+  HDR headroom over 1.0 survives a round trip.
+- **Present on every device**, and in particular on the floor tier, which is the machine that most
+  has to be able to run the reference.
+
+**Rejected: `R8G8B8A8_UNORM`.** The same depth as the output, so every boundary costs a whole code
+point and the disagreement is the pass count. This is the one that was measured rather than argued:
+swapping it in takes the worst pixel from one code point to **forty-eight** and puts 268 of 2048
+pixels past the threshold. That number is the evidence that the oracle bites rather than passing by
+construction, which is a property every comparison test owes and few can show.
+
+**Rejected: `A2B10G10R10_UNORM_PACK32`.** Two bits of alpha is a fade in four steps.
+
+**Rejected: `R16G16B16A16_UNORM`,** and it is the tempting one: over `[0, 1]` it is finer than a half
+everywhere, by sixty-four times at the top of the range. It clamps at 1.0, which throws away the
+headroom above; and Vulkan does not require it of a colour attachment, so the reference could be
+missing on exactly the device somebody is trying to explain a picture on.
+
+**Rejected: `B10G11R11_UFLOAT_PACK32`,** which
+[decision 117](#117-a-gather-reads-the-target-it-is-drawing-into-the-numbers-live-in-seam-and-the-tier-rides-the-request)
+gives the blur chain. No alpha at all, and six mantissa bits is *coarser* than the output it is
+supposed to be finer than. The two chains want opposite things for one reason: a backdrop is opaque
+and an item is not.
+
+**Rejected, and this is the one that decides the entry: `R32G32B32A32_SFLOAT`.** It would make the
+oracle pass with room to spare and prove nothing. A reference at a precision no production frame
+would ever use is a comparison against arithmetic rather than against an implementation, and the
+first real unfused frame would be the first time anybody found out what the format cost. The
+reference has to be a path the machine would actually run.
+
+Vulkan's required-format table lists the chosen format for `COLOR_ATTACHMENT` and `SAMPLED_IMAGE`,
+which is why it should be present everywhere; `Unfused::Reserve` asks the device anyway, because a
+renderer that read a table instead of the driver in front of it would report a driver's gap as a
+corrupted picture.
+
+#### The tolerance is one eight-bit code point, and the margin is the count rather than the worst
+
+[Experience.md](Experience.md#the-picture-is-correct) requires that the image not change when the
+machine changes how it draws it, and decision 62 says that promise now covers the fusion decision
+itself. An eight-bit sRGB step is about where a difference stops being visible in a gradient — which
+is why eight bits is marginal and ten fixes it — so *within one step of the output's own encoding* is
+a claim about vision rather than about a format, and it holds whatever depth an output is configured
+for.
+
+**The worst pixel saturates and the count does not**, which was not obvious until the test ran. Two
+executions whose values drift by a fifth of a code point land on a different code at about a fifth of
+their pixels and on the same code everywhere else — so the worst figure reads exactly 1.00 the moment
+any pixel sits near a rounding boundary, and stays at 1.00 whether the drift underneath is a fifth of
+a step or nine tenths of one. What keeps moving is how many pixels differ at all, so
+`ImageDifference` reports both and the test prints both. A threshold test whose only instrument is
+its worst pixel has no way to see its own margin eroding.
+
+**Measured, on a scene holding all four chain shapes at once: six pixels of 2048 differ, each by one
+code point, none beyond the threshold — identically on lavapipe and on Intel hardware.** Six of 2048
+puts the drift near three thousandths of a code point, two orders of magnitude inside the threshold
+rather than the factor of four the arithmetic alone predicts. The arithmetic is not wrong; the scene
+is mostly uniform fills, where a whole fill lands on one side of a boundary or the other together,
+and what is left is the corner arcs.
+
+**Rejected: a golden image.** A checked-in frame states every pixel, so it fails on the ones nobody
+meant to promise — a driver that rounds an arc one bit differently — and it goes stale silently. The
+reference here is the other execution of the same scene, on the same device, in the same run: it
+cannot go stale, and it asserts exactly the property decision 62 needs and nothing else.
+[Pixels.h](../Source/Virtual/Pixels.h) already made this argument for the predicates; this is the
+same argument where the expected value is a second rendering rather than a claim a test wrote down.
+
+**Rejected: reimplementing the chain on the CPU and comparing against that.** It is two hand-written
+copies of the same paragraph of the same standard, written the same afternoon, so a misreading goes
+into both and the oracle reports agreement.
+[Chain.glsl](../Source/Render/Shaders/Chain.glsl) is the answer to that: one implementation of every
+element, shared by both paths, so what is compared is composition and precision rather than two
+spellings. What that gives up is real — an element whose arithmetic is wrong is wrong identically on
+both sides — and it was never what this was for. Element correctness is a value against a curve in a
+standard, which is checkable without a second implementation; composition and precision are not.
+
+#### What is left undone, named
+
+**A gather has no second execution and is not compared.** Decision 62 segments a chain at every
+gathering effect, so decision 117's blur chain is separate passes by construction and there is no
+fused form to hold it against. The oracle covers exactly the run the lattice fuses.
+
+**Nothing selects unfused in production.** The lattice is built whole at every binding and no frame
+has ever missed a variant, so decision 62's *a variant that is absent is drawn unfused that frame*
+has no trigger yet. The path is built, exercised every run, and reachable only by asking for it. That
+is the right order — it is available before it is needed rather than written at the moment a cold
+cache first misses.
+
+**The comparison has not been run under validation layers**, which are not installed on the machine
+this was written on. Every barrier and layout transition here is unverified by anything except two
+drivers not complaining.

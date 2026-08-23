@@ -12,6 +12,7 @@
 #include "Render/Backdrop.h"
 #include "Render/Device.h"
 #include "Render/Pipeline.h"
+#include "Render/Unfused.h"
 #include "Render/Vulkan.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/Renderer.h"
@@ -54,6 +55,25 @@
 // runs at every mode set.
 inline constexpr std::uint32_t MaxRenderTargets = 8;
 
+// Which of decision 62's two executions this renderer draws.
+//
+// **It is a property of a renderer rather than of a frame, and that is what keeps the oracle
+// honest.** The comparison decision 62 asks for is one scene drawn twice, so the two executions have
+// to be able to exist at the same moment against the same device and the same targets — two
+// renderers, not one renderer told something different between two frames. A per-frame switch would
+// also be a lie about the production rule: decision 62 binds a variant when an animation begins and
+// holds it for the duration, precisely so that a path change never lands under a moving picture.
+enum class Fusion : std::uint8_t
+{
+	// Render/Pipeline.h's lattice where it has the variant, separate passes where it does not. What
+	// every renderer outside a test is built with.
+	Selected,
+
+	// Never fused: every element of every pointwise chain is a pass of its own through an
+	// intermediate that rounds. Render/Unfused.h, and decision 62's reference.
+	Separate,
+};
+
 class VulkanRenderer final : public IRenderer
 {
 public:
@@ -66,7 +86,14 @@ public:
 	// The clock is held for `SceneEvaluator`'s reason and it is decision 94's: the party that knows
 	// where the work started and stopped is the party that did it, so `Submission::RecordCost` is
 	// measured here rather than bracketed by a caller that cannot see the submission boundary.
-	VulkanRenderer(const IClock& clock, VulkanDevice& device);
+	//
+	// **`fusion` is the last argument and it has a default, which is the direction it should fail
+	// in.** A composition root that says nothing gets the fused path; the reference is something a
+	// caller asks for by name. It is fixed at construction rather than settable because the images
+	// it needs are reserved at a binding, and a renderer that could change its mind between two
+	// binds would be one whose two paths were never both available at once — which is the one
+	// arrangement the oracle cannot be written against.
+	VulkanRenderer(const IClock& clock, VulkanDevice& device, Fusion fusion = Fusion::Selected);
 
 	~VulkanRenderer() override;
 
@@ -98,6 +125,10 @@ public:
 	// property read back. False means every `Submission` is `Immediate` because the frame was
 	// finished before `Record` returned.
 	[[nodiscard]] bool ExportsTimeline() const noexcept { return m_TimelineFd.IsValid(); }
+
+	// Which execution this renderer was built for. Read back so that a test can say in one line
+	// which of the two it is holding, rather than inferring it from what it passed.
+	[[nodiscard]] Fusion Fuses() const noexcept { return m_Fusion; }
 
 private:
 	// One imported image. The descriptor is not here: `RenderTarget`'s is borrowed and belongs to the
@@ -186,6 +217,45 @@ private:
 	// start of a recording, and `Dress` resuming after a split.
 	void BeginTarget(VkCommandBuffer command, const Slot& slot, const RecordRequest& request) const noexcept;
 
+	// One item drawn as decision 62's separate passes: the fill into an intermediate, then one pass
+	// per element of the chain, then the result composited `over` the target.
+	//
+	// **It splits the render pass exactly as `Dress` does, and for a weaker reason.** A gather has to
+	// materialise because it reads a neighbourhood; this materialises because it was told to. The
+	// split is the same shape either way — end the target's rendering, run the chain against
+	// offscreens, resume with `LOAD_OP_LOAD` and composite — which is what makes the two paths
+	// comparable at all: whatever the split costs in rounding, it costs it in the same places.
+	//
+	// **The chain runs once over the item's own bound and the composite runs once per damage
+	// rectangle.** The elements are pointwise, so a pixel's value does not depend on which damage
+	// rectangle it fell in; the composite is where damage is honoured, and it draws the same six
+	// vertices under the same scissor the fused path would have used.
+	//
+	// **It is total rather than fallible** because `Record`'s pre-flight walk is what makes it so: an
+	// unfused renderer whose intermediates were not reserved fails at `BindTargets`, and every
+	// pipeline this reaches for was built there.
+	void Separate(
+		VkCommandBuffer command,
+		const Slot& slot,
+		const DrawItem& item,
+		DrawSolid solid,
+		const RecordRequest& request,
+		std::span<const VkClearRect> rects,
+		VkPipeline& bound
+	) const noexcept;
+
+	// One element of that chain: the barriers onto both images, a rendering instance over the item's
+	// region, and the quad. `source` is ignored by `Element::Emit`, which reads nothing.
+	void Apply(
+		VkCommandBuffer command,
+		Element element,
+		std::uint32_t source,
+		std::uint32_t destination,
+		VkRect2D region,
+		const VkViewport& pane,
+		const ElementConstants& constants
+	) const noexcept;
+
 	[[nodiscard]] Result<void> Settle();
 
 	[[nodiscard]] bool Reached(std::uint64_t value) const noexcept;
@@ -208,6 +278,13 @@ private:
 	// allocated a render target at the moment it started would be a stutter exactly where one is most
 	// visible.
 	class Backdrop m_Backdrop;
+
+	// Decision 62's reference path. Empty and costing nothing under `Fusion::Selected` — `Reserve`
+	// is never called, so no image is allocated and no pipeline is built on an output that will
+	// never draw this way.
+	class Unfused m_Unfused;
+
+	Fusion m_Fusion = Fusion::Selected;
 
 	// What the composite is encoded to, from the binding rather than from the frame. Held because
 	// every item's variant and its two luminance factors are a function of this and the item's own

@@ -160,3 +160,96 @@ GYRO_TEST(Pixels, AFillClipsAndLeavesThePaddingAlone)
 		GYRO_REQUIRE_EQ(bytes[index], std::byte{ 0x5A });
 	}
 }
+
+// **The comparison, and what its report has to say beyond *they differ*.** Decision 62's oracle
+// draws one scene through two executions of the same chain and asks whether they agree; when they do
+// not, what decides which half broke is *how far apart, and where* — a fringe on one arc is a
+// coverage bug and a uniform shift across a fill is a conversion bug, and a predicate returning
+// false cannot tell those apart. So what is checked here is the report and not only the verdict.
+GYRO_TEST(Pixels, ComparingTwoImagesReportsTheWorstPixelAndWhereItIs)
+{
+	std::vector<std::byte> first = Canvas();
+	std::vector<std::byte> second = Canvas();
+
+	const Result<MutableImageView> left = MutableImageView::Over(first, Small, PaddedStride, Xrgb8);
+	const Result<MutableImageView> right = MutableImageView::Over(second, Small, PaddedStride, Xrgb8);
+	GYRO_REQUIRE_EQ(left.has_value(), true);
+	GYRO_REQUIRE_EQ(right.has_value(), true);
+
+	left->Fill(left->Read().Extent(), Rgb8(64, 64, 64));
+	right->Fill(right->Read().Extent(), Rgb8(64, 64, 64));
+
+	// Identical images agree, and the report still says how many pixels it looked at — which is what
+	// separates *they matched* from *the rectangle was empty and nothing was compared*.
+	const ImageDifference same = left->Read().Compare(right->Read(), left->Read().Extent());
+	GYRO_CHECK(same.Agrees());
+	GYRO_CHECK_EQ(same.Compared, std::size_t{ 12 });
+	GYRO_CHECK_EQ(same.Differing, std::size_t{ 0 });
+	GYRO_CHECK_EQ(same.Worst, std::uint16_t{ 0 });
+
+	// One pixel moved by two eight-bit code points in green alone. The distance is the largest of
+	// the four channels rather than their sum, so it is two code points and not two thirds of one.
+	right->Set(2, 1, Rgb8(64, 66, 64));
+
+	const ImageDifference differing = left->Read().Compare(right->Read(), left->Read().Extent());
+	GYRO_CHECK(!differing.Agrees());
+	GYRO_CHECK_EQ(differing.Beyond, std::size_t{ 1 });
+	GYRO_CHECK_EQ(differing.Worst, static_cast<std::uint16_t>(2 * FromEightBit(1)));
+	GYRO_CHECK_EQ(differing.Where, (PixelPoint<DeviceSpace>{ 2, 1 }));
+	GYRO_CHECK_EQ(differing.Here, Rgb8(64, 64, 64));
+	GYRO_CHECK_EQ(differing.There, Rgb8(64, 66, 64));
+
+	// The same pair under a tolerance that admits it: still measured, still reported, no longer a
+	// disagreement. That is the shape decision 62 needs — the assertion is below a threshold rather
+	// than to the bit, and the margin has to stay visible on a passing run.
+	const ImageDifference tolerated =
+		left->Read().Compare(right->Read(), left->Read().Extent(), static_cast<std::uint16_t>(2 * FromEightBit(1)));
+	GYRO_CHECK(tolerated.Agrees());
+	GYRO_CHECK_EQ(tolerated.Worst, static_cast<std::uint16_t>(2 * FromEightBit(1)));
+
+	// **And the pixel is still counted as differing**, which is the field that keeps measuring after
+	// the verdict has stopped. A tolerance decides whether a run passes; the count is what says how
+	// much room is left before it stops.
+	GYRO_CHECK_EQ(tolerated.Differing, std::size_t{ 1 });
+}
+
+// **A comparison that could not happen is not an agreement, and it is not a disagreement either.**
+// A rectangle past the edge of one of the two images is a caller's arithmetic error; reported as a
+// difference it looks like a real failure, and reported as agreement it is a test that passes
+// without having looked at anything. `Comparable` is the third answer.
+GYRO_TEST(Pixels, AComparisonAcrossImagesThatDoNotOverlapIsNotAnAgreement)
+{
+	std::vector<std::byte> first = Canvas();
+	std::vector<std::byte> second(static_cast<std::size_t>(PaddedStride) * 2, std::byte{ 0x5A });
+
+	const Result<ImageView> left = ImageView::Over(first, Small, PaddedStride, Xrgb8);
+	const Result<ImageView> right = ImageView::Over(second, { 4, 2 }, PaddedStride, Xrgb8);
+	GYRO_REQUIRE_EQ(left.has_value(), true);
+	GYRO_REQUIRE_EQ(right.has_value(), true);
+
+	const ImageDifference across = left->Compare(*right, left->Extent());
+	GYRO_CHECK(!across.Agrees());
+	GYRO_CHECK_EQ(across.Comparable, false);
+	GYRO_CHECK_EQ(across.Compared, std::size_t{ 0 });
+
+	// The rectangle both of them do contain compares fine, which is what says the refusal above was
+	// about the rectangle rather than about the pair.
+	const ImageDifference shared = left->Compare(*right, right->Extent());
+	GYRO_CHECK_EQ(shared.Comparable, true);
+	GYRO_CHECK_EQ(shared.Compared, std::size_t{ 8 });
+
+	// And the two formats need not match: an `XR24` composite against an `XR30` one is a comparison
+	// decision 62 wants the day an output is configured for ten bits, and `Rgba16` is the depth that
+	// makes it one comparison rather than two decoders.
+	std::vector<std::byte> ignored = Canvas();
+	const Result<MutableImageView> opaque = MutableImageView::Over(ignored, Small, PaddedStride, Xrgb8);
+	GYRO_REQUIRE_EQ(opaque.has_value(), true);
+	opaque->Fill(opaque->Read().Extent(), Rgb8(255, 255, 255));
+
+	std::vector<std::byte> carried = Canvas();
+	const Result<MutableImageView> alpha = MutableImageView::Over(carried, Small, PaddedStride, Argb8);
+	GYRO_REQUIRE_EQ(alpha.has_value(), true);
+	alpha->Fill(alpha->Read().Extent(), Rgb8(255, 255, 255));
+
+	GYRO_CHECK(opaque->Read().Compare(alpha->Read(), opaque->Read().Extent()).Agrees());
+}

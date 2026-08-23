@@ -1661,6 +1661,7 @@ available headroom rather than scale pixels.
 | ------ | ------ | --- |
 | Blur pass chain | `B10G11R11_UFLOAT_PACK32` | a backdrop is opaque, so no alpha is needed — 32 bpp, the same bandwidth as the `RGBA8` it replaces |
 | Composite target | 16-bit float, one per output | carries alpha, so it pays the width |
+| Unfused chain intermediate | `R16G16B16A16_SFLOAT` | a premultiplied item mid-fade, so alpha at colour's depth; finer than the output by enough that a chain of boundaries still is, and no finer than a machine would really run — see [decision 118](Decisions.md#118-the-unfused-chains-intermediate-is-a-half-float-and-the-oracle-asserts-one-eight-bit-code-point) |
 | Scanout | output's own format | 8-bit sRGB or 10-bit PQ depending on the mode |
 
 Linear light at 8 bits bands unacceptably in the shadows, which looks at first like a doubling of

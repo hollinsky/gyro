@@ -497,10 +497,12 @@ gyro_add_module(Render
 		Device.cpp
 		Pipeline.cpp
 		Renderer.cpp
+		Unfused.cpp
 	TESTS
 		Backdrop.Test.cpp
 		Device.Test.cpp
 		Pipeline.Test.cpp
+		Unfused.Test.cpp
 )
 
 gyro_add_shaders(Render
@@ -512,6 +514,8 @@ gyro_add_shaders(Render
 		Blur.frag
 		Dress.vert
 		Dress.frag
+		Element.vert
+		Element.frag
 )
 
 # PUBLIC for Compositor's reason below: the module's own tests compile against volk's prototypes too,
