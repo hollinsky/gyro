@@ -121,6 +121,19 @@ public:
 
 	// The seam's view of this buffer. Borrowed throughout, which is what Seam/RenderTarget.h's
 	// `DmabufPlane` documents and what makes a target description trivially copyable.
+	//
+	// **It always says dmabuf, and a udmabuf image is honestly both — which is the one thing standing
+	// between this module and the CPU renderer.** Seam/RenderTarget.h's memory is a discriminated
+	// variant precisely so that a renderer branches rather than casts, and it is explicit that
+	// `Blit` handed a dmabuf is a composition-root miswiring: the blitter wants a `MappedImage` and
+	// this image *has* one, sitting right there in `m_Mapping`. So the description is not wrong, it
+	// is one of two true answers, and today it hands the only one a Vulkan device can use.
+	//
+	// Decision 79 puts a CPU blitter in front of the boot console and this is where it will collide.
+	// The answer is not obvious and should not be guessed at here — a second `Describe` overload, a
+	// policy on `VirtualOutput` naming which face to present, or a third alternative carrying both —
+	// and what decides it is which of them keeps the root from having to know which renderer it
+	// built, since that knowledge is the thing the seam exists to contain.
 	[[nodiscard]] RenderTarget Describe() const noexcept
 	{
 		DmabufImage image{};
@@ -128,6 +141,28 @@ public:
 		image.Planes[0] = DmabufPlane{ .Descriptor = m_Descriptor.Borrow(), .Offset = 0, .Stride = m_Stride };
 
 		return RenderTarget{ .Size = m_Size, .Format = m_Format, .Memory = image };
+	}
+
+	// The other true answer: this image as memory a CPU writes.
+	//
+	// **Same bytes, different face, and which one an output shows is the presenter's to decide.** See
+	// `Describe` above for why there are two. A buffer with no mapping describes nothing here — an
+	// allocator that cannot map is a real case, and a `MappedImage` with a null pointer is a target a
+	// blitter would happily write through.
+	[[nodiscard]] RenderTarget DescribeMapped() const noexcept
+	{
+		const std::span<std::byte> pixels = m_Mapping.Bytes();
+
+		if (pixels.empty())
+		{
+			return RenderTarget{};
+		}
+
+		return RenderTarget{
+			.Size = m_Size,
+			.Format = m_Format,
+			.Memory = MappedImage{ .Pixels = pixels.data(), .Stride = m_Stride, .Reserved = 0, .Length = pixels.size() }
+		};
 	}
 
 	// The mapping, mutable, for whoever filled the buffer without a device. Empty where the allocator

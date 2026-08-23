@@ -15,6 +15,7 @@
 #include "Seam/OutputConfiguration.h"
 #include "Seam/Presenter.h"
 #include "Seam/RenderTarget.h"
+#include "Seam/SyncPoint.h"
 #include "Virtual/Allocator.h"
 #include "Virtual/Buffer.h"
 
@@ -42,11 +43,12 @@
 // bug in the assigner rather than a condition to retry. Reaching for the synthetic catalog would be
 // modelling hardware this does not have.
 //
-// **There is no `IEventSource` here yet, deliberately.** Seam/EventSource.h puts the descriptor at
-// *device* granularity, and a virtual device with one output would be HeadlessDevice's ordering sort
-// copied for a set of one. `Advance` and `NextEvent` are public so the party that owns the set can
-// drive them, and the source is written when a second output shares a consumer or when the frame
-// loop drives one of these for real.
+// **The `IEventSource` is Virtual/Device.h's and not this file's.** Seam/EventSource.h puts the
+// descriptor at *device* granularity, so it belongs to the party that owns the set rather than to
+// one output — which is why `Advance` and `NextEvent` are public here. *(Revised 2026-08-22.)* This
+// paragraph used to say the source was unwritten, and named the trigger for writing it as the frame
+// loop driving one of these for real; an integration test that publishes a scene and reads the
+// pixels back is that, so the device exists.
 
 // What a consumer's pipeline depth wants, not what a panel's flip queue forces. Three rather than
 // headless's two: a recording should not stall the compositor because the writer is one frame
@@ -56,6 +58,29 @@ inline constexpr std::uint32_t DefaultVirtualTargets = 3;
 // The ring's ceiling, matching Headless/Output.h's for the reason that file gives — a flip queue past
 // four is headroom nobody has needed.
 inline constexpr std::uint32_t MaxVirtualTargets = 4;
+
+// Which face of its images an output shows at the render seam.
+//
+// **Both are true of the same memory, and the composition root is the party that knows which to
+// ask for.** Virtual/Buffer.h has the full argument: a `udmabuf` image is a descriptor a Vulkan
+// device imports *and* a mapping a CPU writes, and Seam/RenderTarget.h's discriminated memory makes
+// a renderer branch on which it was handed rather than cast. Decision 79 puts a CPU blitter in front
+// of the boot console, so both renderers are real and neither is the default in a way the other can
+// live with.
+//
+// It sits on the presenter rather than being negotiated at the seam because the alternative is worse
+// in the direction the seam exists to protect: a third memory alternative carrying both would widen
+// the waist for one backend and give every renderer a case to write. Docs/Structure.md#orchestration
+// already has the root constructing the renderer and the presenter together — it knows which it
+// built, and `Frame` still never finds out.
+enum class TargetFace : std::uint8_t
+{
+	// What a Vulkan device imports. The descriptor, its offset, and its stride.
+	Dmabuf,
+
+	// What a blitter writes. The mapping's address, its stride, and its true length.
+	Mapped,
+};
 
 struct VirtualOutputPolicy
 {
@@ -70,6 +95,11 @@ struct VirtualOutputPolicy
 	// What the format falls back to when the configuration names none. `XR24` linear, which is what
 	// the allocator can produce and what lavapipe imports.
 	PixelFormat Fallback{ FormatXrgb8888, 0, ModifierLinear };
+
+	// Which description the targets carry. Dmabuf by default, because that is the renderer decision
+	// 102 stood this module up for; a `Mapped` set over an allocator that cannot map is a target set
+	// that fails to build, reported through `Status()` like any other allocation failure.
+	TargetFace Face = TargetFace::Dmabuf;
 };
 
 // A frame that has been handed to the consumer and not yet released.
@@ -82,6 +112,21 @@ struct VirtualFrame
 	std::uint64_t Sequence = 0;
 
 	Instant At{};
+
+	// What the composite finishes at, carried through from the layer that was presented.
+	//
+	// **A virtual output cannot honour this itself, and saying so is the point of the field.** On a
+	// KMS output the acquire fence goes to the kernel as an in-fence and the atomic commit does the
+	// waiting; there is no kernel on this path, so a consumer that memcpys the pixels the moment
+	// `Presented` fires reads an image the GPU is still writing. Nothing here can wait for it either:
+	// `IRenderer::IsComplete` is the seam's poll and the renderer is the party that holds the
+	// timeline, which a presenter deliberately does not.
+	//
+	// So the obligation travels with the frame. Virtual/Device.h is what discharges it — it holds the
+	// renderer and declines to deliver a frame whose point is outstanding — and a consumer reached
+	// any other way owes itself the same check. Immediate is the common answer today, because
+	// decision 104 has a device that cannot export a timeline finish inside `Record`.
+	SyncPoint Acquire{};
 
 	friend constexpr bool operator==(VirtualFrame, VirtualFrame) noexcept = default;
 };
@@ -219,8 +264,10 @@ public:
 
 		m_Pending = false;
 		m_State[m_Queued.Target] = TargetState::Held;
-		m_Presented =
-			VirtualFrame{ .Target = m_Queued.Target, .Sequence = m_Sequence, .At = m_Timeline.At(m_Sequence) };
+		m_Presented = VirtualFrame{ .Target = m_Queued.Target,
+			                        .Sequence = m_Sequence,
+			                        .At = m_Timeline.At(m_Sequence),
+			                        .Acquire = m_Queued.Acquire };
 
 		Presented.Emit(
 			{ .PresentedAt = m_Timeline.At(m_Sequence),
@@ -359,7 +406,23 @@ private:
 				return;
 			}
 
-			m_Descriptions[index] = buffer->Describe();
+			const RenderTarget description =
+				m_Policy.Face == TargetFace::Mapped ? buffer->DescribeMapped() : buffer->Describe();
+
+			if (!description.IsValid())
+			{
+				// The only way here is a `Mapped` set over an allocator that hands out no mapping,
+				// which is a miswired composition root rather than a transient condition — reported
+				// as an empty target set for the same reason a refused allocation is, so that a
+				// machine whose provider cannot map comes up with an output it cannot draw rather
+				// than aborting before anything reaches the screen.
+				m_Status = Failure(ENODEV, "this allocator cannot describe a mapped target");
+				Drop();
+
+				return;
+			}
+
+			m_Descriptions[index] = description;
 			m_Buffers[index] = std::move(*buffer);
 			m_State[index] = TargetState::Free;
 		}

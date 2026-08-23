@@ -26,6 +26,7 @@
 #include "Testing/Test.h"
 #include "Virtual/Allocator.h"
 #include "Virtual/Buffer.h"
+#include "Virtual/Heap.h"
 
 // The presenter, against an allocator that needs no kernel.
 //
@@ -37,54 +38,6 @@
 
 namespace
 {
-// An allocator over ordinary heap pages, with a real descriptor so that `RenderTarget::IsValid`
-// is answered honestly rather than by a fabricated number a syscall could later be handed.
-class HeapAllocator final : public IDmabufAllocator
-{
-public:
-	[[nodiscard]] Result<DmabufBuffer> Allocate(PixelSize<DeviceSpace> size, PixelFormat format) override
-	{
-		if (Refuse != 0)
-		{
-			return Failure(Refuse, "scripted refusal");
-		}
-
-		if (size.IsEmpty() || !Supports(format))
-		{
-			return Failure(EINVAL, "heap allocator refuses");
-		}
-
-		Fd descriptor{ ::dup(2) };
-
-		if (!descriptor.IsValid())
-		{
-			return Failure(EMFILE, "duplicating a descriptor for a heap buffer");
-		}
-
-		const auto stride = static_cast<std::uint32_t>(size.Width) * 4U;
-		m_Storage.push_back(
-			std::vector<std::byte>(static_cast<std::size_t>(stride) * static_cast<std::size_t>(size.Height))
-		);
-
-		++Allocations;
-
-		// No mapping: `Mapping` owns an `mmap` and these pages are a vector's. What a consumer
-		// would read is the kernel provider's business, and Udmabuf.Test.cpp is where it is read.
-		return DmabufBuffer{ std::move(descriptor), size, format, stride, Mapping{} };
-	}
-
-	[[nodiscard]] bool Supports(PixelFormat format) const noexcept override { return format.IsValid(); }
-
-	[[nodiscard]] std::string_view Name() const noexcept override { return "heap"; }
-
-	// Fail the next allocation with this errno. Zero allocates.
-	int Refuse = 0;
-	int Allocations = 0;
-
-private:
-	std::vector<std::vector<std::byte>> m_Storage;
-};
-
 constexpr Duration Period = std::chrono::nanoseconds{ 16'666'666 };
 
 [[nodiscard]] OutputConfiguration Configured()
@@ -154,7 +107,7 @@ GYRO_TEST(VirtualOutput, AllocatesItsRingUpFront)
 
 	GYRO_CHECK(output.Status().has_value());
 	GYRO_CHECK_EQ(output.Targets().size(), std::size_t{ DefaultVirtualTargets });
-	GYRO_CHECK_EQ(allocator.Allocations, static_cast<int>(DefaultVirtualTargets));
+	GYRO_CHECK_EQ(allocator.Allocations, std::uint64_t{ DefaultVirtualTargets });
 	GYRO_CHECK_EQ(output.FreeTargets(), DefaultVirtualTargets);
 
 	// Every target is describable and importable, which is the contract a renderer's `BindTargets`
@@ -367,7 +320,7 @@ GYRO_TEST(VirtualOutput, AnUnpoweredOutputHasNoImagesAndNoError)
 	// Not a failure. Reporting one here would make a deliberate power-down indistinguishable from a
 	// broken allocator in the one field a reader would check.
 	GYRO_CHECK(output.Status().has_value());
-	GYRO_CHECK_EQ(allocator.Allocations, 0);
+	GYRO_CHECK_EQ(allocator.Allocations, std::uint64_t{ 0 });
 }
 
 GYRO_TEST(VirtualOutput, ReleasingSomethingNotHeldChangesNothing)

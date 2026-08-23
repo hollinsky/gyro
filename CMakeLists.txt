@@ -374,10 +374,18 @@ gyro_add_module(Virtual
 		Headless
 	SOURCES
 		Buffer.cpp
+		Heap.cpp
+		Pam.cpp
+		Pixels.cpp
+		Sink.cpp
 		Udmabuf.cpp
 	TESTS
 		Buffer.Test.cpp
+		Device.Test.cpp
 		Output.Test.cpp
+		Pam.Test.cpp
+		Pixels.Test.cpp
+		Sink.Test.cpp
 		Udmabuf.Test.cpp
 )
 
@@ -568,6 +576,7 @@ add_executable(IntegrationTests
 	Source/Integration/RenderImport.Test.cpp
 	Source/Integration/SceneRoundTrip.Test.cpp
 	Source/Integration/Schedulability.Test.cpp
+	Source/Integration/VirtualComposite.Test.cpp
 )
 target_link_libraries(IntegrationTests
 	PRIVATE
