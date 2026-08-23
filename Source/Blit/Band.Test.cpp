@@ -1,6 +1,8 @@
 #include "Blit/Band.h"
 
+#include <array>
 #include <cstdint>
+#include <span>
 
 #include "Core/Result.h"
 #include "Testing/Test.h"
@@ -167,4 +169,74 @@ GYRO_TEST(Band, ARowIsWhatTheEncodeReads)
 
 	GYRO_CHECK(band.Row(-1).empty());
 	GYRO_CHECK(band.Row(band.Rows()).empty());
+}
+
+// The per-pixel form of the run, which is what a texture makes it. The source varies along the span
+// and is positional over it, so a run whose left edge got clipped away reads from the middle of the
+// span rather than from its start — which is the off-by-one that would show up as a texture shifted
+// by one pixel only where it meets the edge of the damage.
+GYRO_TEST(Band, ASampledRunIsPositionalOverTheRunAndClipsWithIt)
+{
+	Band band;
+	GYRO_REQUIRE(band.Reserve(8).has_value());
+	band.Clear(band.Rows(), 0, 8);
+
+	const std::array<Light, 4> ramp{ Light{ 65535, 0, 0, 65535 },
+		                             Light{ 0, 65535, 0, 65535 },
+		                             Light{ 0, 0, 65535, 65535 },
+		                             Light{ 65535, 65535, 65535, 65535 } };
+
+	band.BlendRun(0, 2, 6, std::span<const Light>{ ramp });
+
+	GYRO_CHECK_EQ(band.At(0, 1), Black);
+	GYRO_CHECK_EQ(band.At(0, 2), ramp[0]);
+	GYRO_CHECK_EQ(band.At(0, 5), ramp[3]);
+	GYRO_CHECK_EQ(band.At(0, 6), Black);
+
+	// Clipped on the left: the span is still measured from where the caller said the run started, so
+	// the pixel that survives is the one that was always going to land there.
+	band.Clear(band.Rows(), 0, 8);
+	band.BlendRun(0, -2, 2, std::span<const Light>{ ramp });
+
+	GYRO_CHECK_EQ(band.At(0, 0), ramp[2]);
+	GYRO_CHECK_EQ(band.At(0, 1), ramp[3]);
+	GYRO_CHECK_EQ(band.At(0, 2), Black);
+
+	// A span shorter than the run it is for writes what it has rather than walking off the end, which
+	// is the same answer `Row` gives a row the band does not hold.
+	band.Clear(band.Rows(), 0, 8);
+	band.BlendRun(0, 0, 8, std::span<const Light>{ ramp.data(), 2 });
+
+	GYRO_CHECK_EQ(band.At(0, 1), ramp[1]);
+	GYRO_CHECK_EQ(band.At(0, 2), Black);
+
+	// A row the band does not hold writes nothing at all.
+	band.BlendRun(band.Rows(), 0, 4, std::span<const Light>{ ramp });
+	band.BlendRun(-1, 0, 4, std::span<const Light>{ ramp });
+}
+
+// A translucent sample composites rather than replaces, which is the one thing the per-pixel form
+// cannot hoist out of its loop: whether a pixel is opaque is a property of the texel.
+GYRO_TEST(Band, ASampledRunCompositesPerPixel)
+{
+	Band band;
+	GYRO_REQUIRE(band.Reserve(4).has_value());
+	band.Clear(band.Rows(), 0, 4);
+	band.BlendRun(0, 0, 4, Red);
+
+	const std::array<Light, 4> over{ Light{}, Light{ 0, 32768, 0, 32768 }, Light{ 0, 0, 65535, 65535 }, Light{} };
+
+	band.BlendRun(0, 0, 4, std::span<const Light>{ over });
+
+	GYRO_CHECK_EQ(band.At(0, 0), Red);
+	GYRO_CHECK_EQ(band.At(0, 2), Light{ 0, 0, 65535, 65535 });
+	GYRO_CHECK_EQ(band.At(0, 3), Red);
+
+	// Half green over full red, premultiplied: half the red survives and the alpha stays exactly full
+	// range, which is what lets the encode skip unpremultiplying.
+	const Light mixed = band.At(0, 1);
+
+	GYRO_CHECK_EQ(mixed.Green, std::uint16_t{ 32768 });
+	GYRO_CHECK_EQ(mixed.Alpha, std::uint16_t{ 65535 });
+	GYRO_CHECK(mixed.Red > 32000 && mixed.Red < 33000);
 }

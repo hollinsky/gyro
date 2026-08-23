@@ -102,7 +102,7 @@ namespace
 // What an item contributes, or nothing at all. `EINVAL` is the caller's answer for an item this
 // renderer cannot express; a `Draws` of false is an item that is legal and covers no pixels, which
 // draws nothing rather than being refused.
-Result<Blit::Painted> Blit::Classify(const DrawItem& item, ColorState output) noexcept
+Result<Blit::Painted> Blit::Classify(const DrawItem& item) const noexcept
 {
 	if (item.Dress != Material::None)
 	{
@@ -122,21 +122,17 @@ Result<Blit::Painted> Blit::Classify(const DrawItem& item, ColorState output) no
 		return Failure(EINVAL, "no CPU composite rounds a corner yet");
 	}
 
-	if (std::holds_alternative<DrawTexture>(item.Content))
-	{
-		return Failure(EINVAL, "no CPU composite samples a texture yet");
-	}
-
 	if (std::holds_alternative<DrawGroup>(item.Content))
 	{
 		return Failure(EINVAL, "no CPU composite flattens a group yet");
 	}
 
+	const DrawSolid* const solid = std::get_if<DrawSolid>(&item.Content);
+	const DrawTexture* const texture = std::get_if<DrawTexture>(&item.Content);
+
 	// A dressing with no material and no elevation has nothing of its own to draw, which is what the
 	// two refusals above have already established. It is legal and it is empty.
-	const DrawSolid* solid = std::get_if<DrawSolid>(&item.Content);
-
-	if (solid == nullptr)
+	if (solid == nullptr && texture == nullptr)
 	{
 		return Painted{};
 	}
@@ -144,15 +140,14 @@ Result<Blit::Painted> Blit::Classify(const DrawItem& item, ColorState output) no
 	// Render/Renderer.h's refusal, for its reason: nothing here converts between colour states, so an
 	// item whose light differs from the target's is refused rather than written through as though the
 	// numbers meant the same thing. Blit/Transfer.h is what this leaves standing — the transfer
-	// function, which is a conversion within one state rather than between two.
-	if (!(item.Color == output))
+	// function, which is a conversion within one state rather than between two. For a texture it is
+	// also what makes the decode table below the *output's*, which is the only one this renderer has.
+	if (!(item.Color == m_Output))
 	{
 		return Failure(EINVAL, "an item's colour state is not the output's, and nothing here converts");
 	}
 
-	Painted painted{ .Colour = Premultiplied(*solid, item.Color),
-		             .Opacity = std::clamp(item.Opacity, 0.0F, 1.0F),
-		             .Draws = true };
+	Painted painted{ .Opacity = std::clamp(item.Opacity, 0.0F, 1.0F), .Draws = true };
 
 	if (!AxisAligned(item.Shape, painted.Shape))
 	{
@@ -160,10 +155,181 @@ Result<Blit::Painted> Blit::Classify(const DrawItem& item, ColorState output) no
 	}
 
 	// Empty or back-facing. Not a refusal: a quad that collapsed is a scene that animated something to
-	// nothing, and a frame is not where that is reported.
+	// nothing, and a frame is not where that is reported. Returned before the map below, which would
+	// otherwise divide by the extent that just came out zero.
 	painted.Draws = painted.Shape.Right() > painted.Shape.Left() && painted.Shape.Bottom() > painted.Shape.Top();
 
+	if (!painted.Draws)
+	{
+		return painted;
+	}
+
+	if (solid != nullptr)
+	{
+		painted.Colour = Premultiplied(*solid, item.Color);
+
+		return painted;
+	}
+
+	// A null or stale id draws nothing and says nothing. Core/Texture.h is explicit that a frame is
+	// not where a lifetime bug gets reported — the frame after it would report the same one again —
+	// and this is the one thing in this file that is silent rather than refused.
+	const Image* const image = Find(texture->Texture);
+
+	if (image == nullptr)
+	{
+		painted.Draws = false;
+
+		return painted;
+	}
+
+	const Rect<BufferSpace> whole{ {},
+		                           { static_cast<float>(image->Size.Width), static_cast<float>(image->Size.Height) } };
+
+	// Empty means the whole image, which is Seam/Renderer.h's convention and World/Content.h's.
+	const Rect<BufferSpace> source = texture->Source.Extent.IsEmpty() ? whole : texture->Source;
+
+	// Refused rather than clamped. A rectangle outside the image is the scene and the image
+	// disagreeing about what was adopted, which is gyro's own code on both ends — clamping would draw
+	// a picture that is wrong in a way nothing reports, and this renderer's one safety argument is
+	// that everything reaching it is gyro's own and a refusal is caught by a test.
+	if (source.Left() < 0.0F || source.Top() < 0.0F || source.Right() > whole.Right() ||
+	    source.Bottom() > whole.Bottom())
+	{
+		return Failure(EINVAL, "a sampled rectangle that is not inside the image it names");
+	}
+
+	const DecodeTable& table = m_Decode[Depth(image->Bits)];
+
+	Sampled& sampled = painted.Source;
+
+	sampled.Pixels = image->Pixels;
+	sampled.Decode = table.Entries();
+	sampled.Stride = image->Stride;
+	sampled.Code = image->Code;
+	sampled.Shift = table.Shift();
+	sampled.Proportional = table.IsProportional();
+	sampled.Straight = item.Color.Alpha == AlphaMode::Straight;
+
+	// Decision 56's sharpness path, taken on the producer's word rather than recovered from the
+	// floats below — Seam/Renderer.h says why that recovery is a guess and this is not the place to
+	// make one.
+	sampled.Exact = item.Sampling.IsResampleFree();
+
+	sampled.ScaleX = source.Extent.Width / painted.Shape.Extent.Width;
+	sampled.ScaleY = source.Extent.Height / painted.Shape.Extent.Height;
+	sampled.OriginX = source.Left() + (0.5F - painted.Shape.Left()) * sampled.ScaleX - 0.5F;
+	sampled.OriginY = source.Top() + (0.5F - painted.Shape.Top()) * sampled.ScaleY - 0.5F;
+
+	// The texels the filter is allowed to reach: the sampled rectangle rounded outward to whole
+	// texels, and never outside the image.
+	sampled.MinX = std::clamp(static_cast<std::int32_t>(std::floor(source.Left())), 0, image->Size.Width - 1);
+	sampled.MinY = std::clamp(static_cast<std::int32_t>(std::floor(source.Top())), 0, image->Size.Height - 1);
+	sampled.MaxX =
+		std::clamp(static_cast<std::int32_t>(std::ceil(source.Right())) - 1, sampled.MinX, image->Size.Width - 1);
+	sampled.MaxY =
+		std::clamp(static_cast<std::int32_t>(std::ceil(source.Bottom())) - 1, sampled.MinY, image->Size.Height - 1);
+
+	painted.Textured = true;
+
 	return painted;
+}
+
+const Blit::Image* Blit::Find(TextureId id) const noexcept
+{
+	if (id.IsNull())
+	{
+		return nullptr;
+	}
+
+	for (std::size_t index = 0; index < m_Held; ++index)
+	{
+		// The whole handle, generation included. An index alone would resolve a stale id to whatever
+		// took the slot, which is the failure Core/Handle.h exists to make impossible.
+		if (m_Images[index].Id == id)
+		{
+			return &m_Images[index];
+		}
+	}
+
+	return nullptr;
+}
+
+Result<void> Blit::Adopt(TextureId id, const SourceImage& image)
+{
+	if (id.IsNull())
+	{
+		return Failure(EINVAL, "a null id names no image");
+	}
+
+	if (image.Pixels == nullptr || image.Size.Width <= 0 || image.Size.Height <= 0)
+	{
+		return Failure(EINVAL, "an image with no pixels or no extent");
+	}
+
+	if (DecodableBytesPerPixel(image.Format.Code) != 4)
+	{
+		return Failure(EINVAL, "no CPU composite samples this pixel format");
+	}
+
+	// A tiled source is a source whose rows are not rows, exactly as a tiled target is — see
+	// `BindTargets`, which refuses it for the same reason at the other end of the composite.
+	if (image.Format.Modifier != ModifierLinear && image.Format.Modifier != ModifierInvalid)
+	{
+		return Failure(EINVAL, "a CPU sampler reads rows, so the layout has to be linear");
+	}
+
+	const std::size_t row = static_cast<std::size_t>(image.Size.Width) * 4;
+	const std::size_t needed =
+		static_cast<std::size_t>(image.Stride) * static_cast<std::size_t>(image.Size.Height - 1) + row;
+
+	if (image.Stride < row || image.Length < needed)
+	{
+		return Failure(EINVAL, "the allocation is shorter than the image it describes");
+	}
+
+	const Image held{ .Id = id,
+		              .Pixels = image.Pixels,
+		              .Stride = image.Stride,
+		              .Code = image.Format.Code,
+		              .Bits = BitsPerChannel(image.Format.Code),
+		              .Size = image.Size };
+
+	// Re-adopting a live id replaces what it names rather than taking a second slot: a console that
+	// re-lays its grid across a mode change has the same grid at a new address, and the scene that
+	// names it did not change.
+	for (std::size_t index = 0; index < m_Held; ++index)
+	{
+		if (m_Images[index].Id == id)
+		{
+			m_Images[index] = held;
+
+			return {};
+		}
+	}
+
+	if (m_Held == MaxImages)
+	{
+		return Failure(EINVAL, "more images than this renderer holds");
+	}
+
+	m_Images[m_Held++] = held;
+
+	return {};
+}
+
+void Blit::Forget(TextureId id) noexcept
+{
+	for (std::size_t index = 0; index < m_Held; ++index)
+	{
+		if (m_Images[index].Id == id)
+		{
+			m_Images[index] = m_Images[--m_Held];
+			m_Images[m_Held] = Image{};
+
+			return;
+		}
+	}
 }
 
 Result<void> Blit::BindTargets(std::span<const RenderTarget> targets, ColorState output)
@@ -178,6 +344,18 @@ Result<void> Blit::BindTargets(std::span<const RenderTarget> targets, ColorState
 	if (const Result<void> built = m_Transfer.Build(output.Transfer); !built)
 	{
 		return std::unexpected{ built.error() };
+	}
+
+	// The decode direction, one table per source depth — see Blit/Transfer.h. Built here rather than
+	// at an adoption because the transfer function they tabulate is the *output's*: an item's colour
+	// state has to equal it to be drawn at all, so there is one curve in a composite and this is the
+	// call that learns which.
+	for (const std::uint32_t bits : { 8U, 10U })
+	{
+		if (const Result<void> decode = m_Decode[Depth(bits)].Build(output.Transfer, bits); !decode)
+		{
+			return std::unexpected{ decode.error() };
+		}
 	}
 
 	std::int32_t widest = 0;
@@ -247,6 +425,10 @@ Result<void> Blit::BindTargets(std::span<const RenderTarget> targets, ColorState
 
 			return std::unexpected{ reserved.error() };
 		}
+
+		// One row of sampled pixels, as wide as the widest run a damage rectangle can produce. Sized
+		// here for the band's reason and for Core/FrameSection.h's: a frame may not allocate.
+		m_Samples.resize(static_cast<std::size_t>(widest));
 	}
 
 	m_Output = output;
@@ -259,6 +441,13 @@ void Blit::ReleaseTargets() noexcept
 	m_Targets.fill(Bound{});
 	m_Count = 0;
 	m_Band.Release();
+
+	m_Samples.clear();
+	m_Samples.shrink_to_fit();
+
+	// The adopted images are deliberately kept. An image outlives the target set it was drawn into —
+	// a mode change rebinds targets and the logo on them is the same logo — and dropping them here
+	// would make a reconfiguration a silent loss of every texture in the scene.
 }
 
 Result<Submission> Blit::Record(const RecordRequest& request)
@@ -279,7 +468,7 @@ Result<Submission> Blit::Record(const RecordRequest& request)
 	// leave a target holding part of one frame and part of another, and the caller would present it.
 	for (std::size_t index = 0; index < request.Items.size(); ++index)
 	{
-		Result<Painted> painted = Classify(request.Items[index], m_Output);
+		Result<Painted> painted = Classify(request.Items[index]);
 
 		if (!painted)
 		{
@@ -297,6 +486,152 @@ Result<Submission> Blit::Record(const RecordRequest& request)
 	}
 
 	return Submission{ .Point = SyncPoint::Immediate(), .RecordCost = Elapsed(started, m_Clock->Now()) };
+}
+
+Light Blit::Fetch(const Sampled& source, std::int32_t x, std::int32_t y) noexcept
+{
+	// Clamped to the sampled rectangle, which is a filter tap's whole boundary policy. Doing it here
+	// rather than at the caller is what keeps the four taps of a corner texel from each needing their
+	// own test.
+	x = std::clamp(x, source.MinX, source.MaxX);
+	y = std::clamp(y, source.MinY, source.MaxY);
+
+	const Rgba16 texel = DecodePixel(
+		LoadWord(
+			source.Pixels + static_cast<std::size_t>(y) * static_cast<std::size_t>(source.Stride) +
+			static_cast<std::size_t>(x) * 4
+		),
+		source.Code
+	);
+
+	const std::uint16_t alpha = texel.Alpha;
+
+	// Nothing there. Also the answer for a malformed premultiplied texel whose components outlived its
+	// alpha, which would otherwise come back through the table as light that is not underneath
+	// anything.
+	if (alpha == 0)
+	{
+		return {};
+	}
+
+	const std::uint16_t red = source.Decode[texel.Red >> source.Shift];
+	const std::uint16_t green = source.Decode[texel.Green >> source.Shift];
+	const std::uint16_t blue = source.Decode[texel.Blue >> source.Shift];
+
+	// Straight alpha: the components are the colour, so they convert where they stand and the
+	// multiply happens afterwards, in linear light, which is where premultiplication is defined.
+	if (source.Straight)
+	{
+		return Attenuate(Light{ red, green, blue, 65535 }, alpha);
+	}
+
+	// Premultiplied, and either already proportional to light or fully opaque — both of which make the
+	// stored value its own straight value, so the table answers directly. This is the branch a boot
+	// screen takes: the firmware logo and the console grid are opaque images.
+	if (source.Proportional || alpha == 65535)
+	{
+		return { red, green, blue, alpha };
+	}
+
+	// **Premultiplied in a non-linear encoding, which is Core/ColorState.h's sharp edge arriving one
+	// texel at a time.** The alpha was applied in the wrong space, so it has to come off before the
+	// curve and go back on after, and the undone value is no longer a source code — it is off the
+	// table and costs a `std::pow` per channel. Correct rather than close: leaving it on the table
+	// would darken every partially transparent texel by the same amount a blend in the target's
+	// encoding darkens an edge, which is the artefact this whole module exists to remove.
+	//
+	// `Srgb` is the only curve that reaches here, because `Linear` took the branch above and the
+	// absolute two are refused at the binding.
+	const float scale = static_cast<float>(alpha) / 65535.0F;
+
+	const auto convert = [scale](std::uint16_t component) noexcept {
+		return Quantize(SrgbToLinear(static_cast<float>(component) / 65535.0F / scale) * scale);
+	};
+
+	return { convert(texel.Red), convert(texel.Green), convert(texel.Blue), alpha };
+}
+
+// **Bilinear, and the alternative is a box.** The two are the same picture only where the resample is
+// a no-op, and this renderer's one resampling consumer is the firmware logo: the BGRT offsets are in
+// the firmware's mode and gyro draws in its own, so the common case is a magnification of a few times
+// — a 1024x768 GOP logo onto a 4K panel. **A box filter at magnification is nearest-neighbour**, since
+// a pixel's footprint in the source is smaller than a texel, so the logo's curved edges come back as
+// stair steps where the firmware had just drawn them smooth. That is a visible change in the picture
+// at the exact frame Docs/Architecture.md#from-firmware-to-gyro is about, and it is the one thing the
+// handoff cannot have. Bilinear is soft there instead, which is what a person reads as the same logo.
+//
+// **Under strong minification bilinear starts skipping texels**, and a footprint box is the fix. It is
+// not built because nothing produces one — the boot scene draws its logo up and its console grid one
+// to one — and this is deliberately *not* a refusal like the rotated quad beside it: a rotation is
+// something the author of the scene chose, and a scale factor is decided by whichever mode the
+// firmware happened to leave behind. Refusing on that is a black screen on somebody's machine and
+// nowhere in gyro to look; a slightly aliased logo is not.
+//
+// **The taps are averaged in linear light**, which is the same argument as the antialiased edge one
+// file over and is why the decode happens per texel rather than after the filter: a half-and-half of
+// white and black texels is half the light, and averaging the encodings would put a dark seam through
+// every scaled logo's edge.
+Light Blit::Filter(const Sampled& source, float u, float v) noexcept
+{
+	const float column = std::floor(u);
+	const float row = std::floor(v);
+
+	const std::int32_t left = static_cast<std::int32_t>(column);
+	const std::int32_t top = static_cast<std::int32_t>(row);
+
+	const std::uint16_t across = Quantize(u - column);
+	const std::uint16_t down = Quantize(v - row);
+
+	const Light upper = Mix(Fetch(source, left, top), Fetch(source, left + 1, top), across);
+	const Light lower = Mix(Fetch(source, left, top + 1), Fetch(source, left + 1, top + 1), across);
+
+	return Mix(upper, lower, down);
+}
+
+Light Blit::Sample(const Sampled& source, float u, float v) noexcept
+{
+	if (source.Exact)
+	{
+		return Fetch(source, static_cast<std::int32_t>(std::lround(u)), static_cast<std::int32_t>(std::lround(v)));
+	}
+
+	return Filter(source, u, v);
+}
+
+// **The sharp path is a cost decision and not a correctness one, which is worth stating because it
+// looks like the opposite.** Where the resample is a no-op the map lands exactly on texel centres, the
+// two weights come out zero, and `Mix` is exact at zero — so the filter returns the same texel the
+// copy does, bit for bit, and Blit.Test.cpp asserts precisely that. What the branch buys is four
+// fetches becoming one, on the console's full-screen grid where that is thirty million decodes a frame
+// against eight.
+std::span<const Light>
+Blit::SampleRow(const Sampled& source, float v, std::int32_t from, std::int32_t to, std::uint16_t scale) noexcept
+{
+	const std::size_t count = static_cast<std::size_t>(to - from);
+
+	if (source.Exact)
+	{
+		const std::int32_t row = static_cast<std::int32_t>(std::lround(v));
+
+		for (std::size_t index = 0; index < count; ++index)
+		{
+			const std::int32_t column = from + static_cast<std::int32_t>(index);
+
+			m_Samples[index] =
+				Attenuate(Fetch(source, static_cast<std::int32_t>(std::lround(source.Across(column))), row), scale);
+		}
+
+		return { m_Samples.data(), count };
+	}
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		const std::int32_t column = from + static_cast<std::int32_t>(index);
+
+		m_Samples[index] = Attenuate(Filter(source, source.Across(column), v), scale);
+	}
+
+	return { m_Samples.data(), count };
 }
 
 void Blit::Paint(const Bound& target, PixelRect<DeviceSpace> rect, std::size_t items) noexcept
@@ -349,18 +684,31 @@ void Blit::Paint(const Bound& target, PixelRect<DeviceSpace> rect, std::size_t i
 				// sees them, because attenuating a premultiplied colour is the same operation for both.
 				const float weight = vertical * painted.Opacity;
 
-				// The interior, where the run is one constant blended across a span. This is what
+				// The texel row this device row's centre lands on. One value for the whole run,
+				// because the quad is axis-aligned — which is most of why the refusal above is worth
+				// having rather than a general rasterizer.
+				const float down = painted.Source.Down(bandTop + row);
+
+				// The interior, where a solid is one constant blended across a span. This is what
 				// decision 110 replaced the sketch's fill-per-item-per-damage-rectangle with, and the
 				// reason is overdraw: a CPU composite at a panel's resolution cannot afford to touch a
-				// pixel once per item in the list.
-				if (runTo > runFrom)
+				// pixel once per item in the list. A texture resamples the same span into the scratch
+				// first and blends it the same way.
+				const std::int32_t spanFrom = std::max(runFrom, left);
+				const std::int32_t spanTo = std::min(runTo, right);
+
+				if (spanTo > spanFrom)
 				{
-					m_Band.BlendRun(
-						row,
-						std::max(runFrom, left),
-						std::min(runTo, right),
-						Attenuate(painted.Colour, Quantize(weight))
-					);
+					if (painted.Textured)
+					{
+						m_Band.BlendRun(
+							row, spanFrom, spanTo, SampleRow(painted.Source, down, spanFrom, spanTo, Quantize(weight))
+						);
+					}
+					else
+					{
+						m_Band.BlendRun(row, spanFrom, spanTo, Attenuate(painted.Colour, Quantize(weight)));
+					}
 				}
 
 				// The one or two partial columns, which carry the subpixel placement. A logo scaled to
@@ -369,15 +717,29 @@ void Blit::Paint(const Bound& target, PixelRect<DeviceSpace> rect, std::size_t i
 				if (edgeLeft < runFrom && edgeLeft >= left && edgeLeft < right)
 				{
 					const float horizontal = Overlap(painted.Shape.Left(), painted.Shape.Right(), edgeLeft);
+					const std::uint16_t coverage = Quantize(horizontal * weight);
 
-					m_Band.BlendPixel(row, edgeLeft, Attenuate(painted.Colour, Quantize(horizontal * weight)));
+					m_Band.BlendPixel(
+						row,
+						edgeLeft,
+						painted.Textured ?
+							Attenuate(Sample(painted.Source, painted.Source.Across(edgeLeft), down), coverage) :
+							Attenuate(painted.Colour, coverage)
+					);
 				}
 
 				if (edgeRight >= runTo && edgeRight >= left && edgeRight < right)
 				{
 					const float horizontal = Overlap(painted.Shape.Left(), painted.Shape.Right(), edgeRight);
+					const std::uint16_t coverage = Quantize(horizontal * weight);
 
-					m_Band.BlendPixel(row, edgeRight, Attenuate(painted.Colour, Quantize(horizontal * weight)));
+					m_Band.BlendPixel(
+						row,
+						edgeRight,
+						painted.Textured ?
+							Attenuate(Sample(painted.Source, painted.Source.Across(edgeRight), down), coverage) :
+							Attenuate(painted.Colour, coverage)
+					);
 				}
 			}
 		}

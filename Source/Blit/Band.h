@@ -61,6 +61,32 @@ struct Light
 	return { Multiply(light.Red, by), Multiply(light.Green, by), Multiply(light.Blue, by), Multiply(light.Alpha, by) };
 }
 
+// A weighted average of two premultiplied colours: `by` of the second and the rest of the first.
+//
+// **One rounding rather than two**, which is what makes it exact at both ends — a resample whose
+// weight lands on zero returns the texel it landed on, bit for bit, rather than a value one unit
+// away from it. That is the property the sharp path and the filtered path are compared against, and
+// two roundings would make them disagree by a least-significant bit everywhere.
+[[nodiscard]] constexpr std::uint16_t Blend(std::uint16_t from, std::uint16_t to, std::uint16_t by) noexcept
+{
+	const std::uint32_t keep = 65535U - static_cast<std::uint32_t>(by);
+	const std::uint32_t product = static_cast<std::uint32_t>(from) * keep +
+	                              static_cast<std::uint32_t>(to) * static_cast<std::uint32_t>(by) + 32768U;
+
+	return static_cast<std::uint16_t>((product + (product >> 16U)) >> 16U);
+}
+
+// The same across all four channels, which for premultiplied values is the whole of a filter tap:
+// the weights sum to one, so a weighted sum of premultiplied colours is the premultiplied colour of
+// the weighted sum and nothing has to be undone in between.
+[[nodiscard]] constexpr Light Mix(Light from, Light to, std::uint16_t by) noexcept
+{
+	return { Blend(from.Red, to.Red, by),
+		     Blend(from.Green, to.Green, by),
+		     Blend(from.Blue, to.Blue, by),
+		     Blend(from.Alpha, to.Alpha, by) };
+}
+
 // `source` over `under`, both premultiplied.
 [[nodiscard]] constexpr Light Over(Light source, Light under) noexcept
 {
@@ -109,6 +135,17 @@ public:
 	// constant blended across a span, rather than a per-pixel decision repeated.
 	void BlendRun(std::int32_t row, std::int32_t left, std::int32_t right, Light source) noexcept;
 
+	// The same run where the source varies per pixel, which is what a texture makes it. `source` is
+	// positional over `[left, right)` and is already attenuated, exactly as the constant above is —
+	// so a sampled span and a solid reach the band having had their coverage and opacity applied in
+	// the same place, and the two paths differ only in where the colour came from.
+	//
+	// **The constant form above is kept and is not a special case of this one.** Most of a boot
+	// screen is a fill: the console's background, a solid panel, the interior of a logo. That path
+	// stores where this one has to blend, reads one register where this one reads a second array,
+	// and is the reason a full-screen repaint on a CPU is affordable at all.
+	void BlendRun(std::int32_t row, std::int32_t left, std::int32_t right, std::span<const Light> source) noexcept;
+
 	// One pixel, for a partially covered edge where the run's constant does not hold.
 	void BlendPixel(std::int32_t row, std::int32_t column, Light source) noexcept;
 
@@ -139,3 +176,10 @@ static_assert(Over(Attenuate(Light{ 65535, 65535, 65535, 65535 }, 32768), Light{
 // Attenuating by nothing and by everything are both exact, so an opacity of one costs no precision.
 static_assert(Attenuate(Light{ 65535, 1, 2, 65535 }, 65535) == Light{ 65535, 1, 2, 65535 });
 static_assert(Attenuate(Light{ 65535, 65535, 65535, 65535 }, 0) == Light{});
+
+// A filter tap that landed on a texel is that texel, at both ends and in the middle of the range.
+// The first two are what let the sharp path and the filtered path be compared byte for byte; the
+// third is the same linear-light claim the edge above makes, reached through the resample instead.
+static_assert(Mix(Light{ 65535, 1, 2, 65535 }, Light{ 3, 4, 5, 6 }, 0) == Light{ 65535, 1, 2, 65535 });
+static_assert(Mix(Light{ 3, 4, 5, 6 }, Light{ 65535, 1, 2, 65535 }, 65535) == Light{ 65535, 1, 2, 65535 });
+static_assert(Mix(Light{ 0, 0, 0, 65535 }, Light{ 65535, 65535, 65535, 65535 }, 32768).Red == 32768);

@@ -5,6 +5,7 @@
 
 #include "Core/ColorState.h"
 #include "Core/Result.h"
+#include "Seam/Pixel.h"
 #include "Testing/Test.h"
 
 // The table against the closed form, everywhere.
@@ -119,4 +120,84 @@ GYRO_TEST(Transfer, HalfTheLightIsNotHalfTheCode)
 	// And what a blend in the target's own encoding would have put there instead: code 128 of 255,
 	// which is 22% of the light. That gap is the dark rim around every antialiased edge.
 	GYRO_CHECK(SrgbToLinear(128.0F / 255.0F) < 0.23F);
+}
+
+// The decode direction, against the closed form at every code there is. It is a smaller sweep than
+// the one above because that is the point of it: a texel has 256 or 1024 values, so the table holds
+// all of them and there is no interpolation to be wrong in the middle of.
+GYRO_TEST(Transfer, TheDecodeTableIsExactAtEveryCodeOfTheSourcesDepth)
+{
+	for (const std::uint32_t bits : { 8U, 10U })
+	{
+		DecodeTable table;
+		GYRO_REQUIRE(table.Build(TransferFunction::Srgb, bits).has_value());
+
+		const std::uint32_t codes = 1U << bits;
+		const float top = static_cast<float>(codes - 1);
+
+		GYRO_REQUIRE_EQ(table.Shift(), 16 - bits);
+		GYRO_CHECK_EQ(table.IsProportional(), false);
+
+		for (std::uint32_t code = 0; code < codes; ++code)
+		{
+			const float exact = SrgbToLinear(static_cast<float>(code) / top) * 65535.0F;
+
+			// Rounded to nearest and nothing else — no segment to land on the wrong side of.
+			GYRO_REQUIRE(std::abs(static_cast<float>(table.Entries()[code]) - exact) <= 0.5F);
+		}
+
+		// Black and white are exact, which is what keeps an opaque white logo full range rather than
+		// one code below the background it is continuing.
+		GYRO_CHECK_EQ(table.Entries()[0], std::uint16_t{ 0 });
+		GYRO_CHECK_EQ(table.Entries()[codes - 1], std::uint16_t{ 65535 });
+	}
+}
+
+// A linear source is already light, so what the table holds is the source's own codes — and the
+// assertion that matters is the round trip, because that is the claim on screen: an image drawn one
+// to one onto an output in the same state comes back as itself rather than as itself minus a code.
+//
+// **It is within a unit of Seam/Pixel.h's widening rather than equal to it, and the difference is
+// deliberate.** That file widens by bit replication, which is exact at both ends and off by a
+// fraction of a unit in the middle; this rounds the fraction to nearest, which is what the sRGB
+// branch beside it does with the same input. One unit in 65535 is below what either end of the round
+// trip can see, and the alternative — two different notions of "this code as a fraction" inside one
+// table — is the kind of inconsistency that shows up much later as a curve that is off by a step.
+GYRO_TEST(Transfer, ALinearSourceIsTheSourcesOwnCodes)
+{
+	DecodeTable eight;
+	GYRO_REQUIRE(eight.Build(TransferFunction::Linear, 8).has_value());
+	GYRO_CHECK(eight.IsProportional());
+
+	for (std::uint32_t code = 0; code <= 255; ++code)
+	{
+		const std::uint16_t entry = eight.Entries()[code];
+
+		GYRO_REQUIRE_EQ(ToEightBit(entry), static_cast<std::uint8_t>(code));
+		GYRO_REQUIRE(Rgba16{ entry }.Within(Rgba16{ FromEightBit(static_cast<std::uint8_t>(code)) }, 1));
+	}
+
+	DecodeTable ten;
+	GYRO_REQUIRE(ten.Build(TransferFunction::Linear, 10).has_value());
+
+	for (std::uint32_t code = 0; code <= 1023; ++code)
+	{
+		const std::uint16_t entry = ten.Entries()[code];
+
+		GYRO_REQUIRE_EQ(ToTenBit(entry), static_cast<std::uint16_t>(code));
+		GYRO_REQUIRE(Rgba16{ entry }.Within(Rgba16{ FromTenBit(static_cast<std::uint16_t>(code)) }, 1));
+	}
+}
+
+// A depth this cannot tabulate and a transfer function it will not approximate, both refused rather
+// than answered at the wrong width. A table whose top entry is not white would darken every channel
+// of every texture by a fraction nobody would attribute to a table.
+GYRO_TEST(Transfer, ADepthOrACurveItCannotDecodeIsRefused)
+{
+	DecodeTable table;
+
+	GYRO_CHECK_EQ(table.Build(TransferFunction::Srgb, 12).has_value(), false);
+	GYRO_CHECK_EQ(table.Build(TransferFunction::Srgb, 0).has_value(), false);
+	GYRO_CHECK_EQ(table.Build(TransferFunction::Pq, 8).has_value(), false);
+	GYRO_CHECK_EQ(table.Build(TransferFunction::Hlg, 10).has_value(), false);
 }

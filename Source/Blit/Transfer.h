@@ -41,9 +41,10 @@
 // `Transfer.Test.cpp` sweeps the whole range against the exact form rather than taking that on
 // trust.
 //
-// **The inverse direction is not here.** Nothing in a composite decodes per pixel yet: a solid's
-// colour is converted once per item and the clear is black in every encoding. A `DrawTexture` is
-// what adds one, and it wants a table over the source's own depth rather than over sixteen bits.
+// **The decode direction is `DecodeTable` below rather than a second array in here**, and the
+// difference between the two is the reason they are two types: this one's input is a composited
+// pixel and has 65536 values, and that one's input is a texel and has 256 or 1024. One has to
+// interpolate and the other is exact.
 class TransferTable
 {
 public:
@@ -79,4 +80,52 @@ private:
 
 	std::array<std::uint16_t, Samples> m_Encode{};
 	bool m_Identity = true;
+};
+
+// The per-texel form: the decode direction, tabulated over the source's own codes.
+//
+// **Exact rather than sampled, which the encode above could not be.** A texel of an eight-bit format
+// has 256 possible values and a ten-bit one has 1024, so every one of them fits in 512 bytes or
+// 2 KiB — smaller than the interpolated table above and with no error in it at all. What reads this
+// is a `DrawTexture`, once per channel per sampled texel, which for the console's full-screen grid
+// is thirty million lookups in a frame; the band scratch has to survive that, and a table this size
+// sits beside it rather than evicting it.
+//
+// **Indexed by the top `bits` of a widened channel.** Seam/Pixel.h widens a source code by bit
+// replication, so shifting the widened value back down recovers the code exactly and the two files
+// agree by construction rather than by a divide that rounds.
+//
+// **Why the source is decoded per texel and not once, at adoption.** Decoding an image into the
+// band's own linear premultiplied form would pay this once instead of once per frame — and it would
+// cost eight bytes a texel, which for a console grid at 4K is 66 MB and a full re-decode every time
+// a line is printed. Blit/Band.h refuses that footprint for the scratch and it is refused here for
+// the same reason.
+class DecodeTable
+{
+public:
+	// `bits` is Seam/Pixel.h's `BitsPerChannel` for the source format, which is 8 or 10. `EINVAL` for
+	// any other depth, and for an absolute transfer function for `TransferTable`'s reason.
+	[[nodiscard]] Result<void> Build(TransferFunction transfer, std::uint32_t bits) noexcept;
+
+	// The entries themselves, so that a sampler hoists the pointer out of its inner loop rather than
+	// calling through this object once per channel per texel.
+	[[nodiscard]] const std::uint16_t* Entries() const noexcept { return m_Decode.data(); }
+
+	// What to shift a widened channel down by to index them.
+	[[nodiscard]] std::uint32_t Shift() const noexcept { return m_Shift; }
+
+	// Whether the source's codes are already proportional to light. It is what decides whether a
+	// premultiplied texel can be converted where it stands — see Blit/Blit.cpp's `Fetch`, which is
+	// the one place in the composite that has to divide by an alpha.
+	[[nodiscard]] bool IsProportional() const noexcept { return m_Proportional; }
+
+private:
+	// Ten bits' worth, which is the deepest source Seam/Pixel.h codes. An eight-bit table uses the
+	// first 256 and the rest is 1.5 KiB that never gets touched — cheaper than the branch a second
+	// storage size would put in the sampler.
+	static constexpr std::size_t MaxEntries = 1024;
+
+	std::array<std::uint16_t, MaxEntries> m_Decode{};
+	std::uint32_t m_Shift = 8;
+	bool m_Proportional = true;
 };

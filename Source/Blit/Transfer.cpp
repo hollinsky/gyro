@@ -87,3 +87,41 @@ Result<void> TransferTable::Build(TransferFunction transfer) noexcept
 
 	return {};
 }
+
+Result<void> DecodeTable::Build(TransferFunction transfer, std::uint32_t bits) noexcept
+{
+	// Eight and ten are what Seam/Pixel.h decodes, so they are what there are texels of. A depth this
+	// does not know is refused rather than tabulated at the wrong width, which would sample every
+	// channel through a table whose top entry is not white.
+	if (bits != 8 && bits != 10)
+	{
+		return Failure(EINVAL, "no CPU composite samples a texel of this depth");
+	}
+
+	switch (transfer)
+	{
+		case TransferFunction::Linear:
+		case TransferFunction::Srgb:
+			break;
+
+		case TransferFunction::Pq:
+		case TransferFunction::Hlg:
+			return Failure(EINVAL, "no CPU composite decodes an absolute transfer function yet");
+	}
+
+	m_Shift = 16 - bits;
+	m_Proportional = transfer == TransferFunction::Linear;
+
+	const std::uint32_t codes = 1U << bits;
+	const float top = static_cast<float>(codes - 1);
+
+	for (std::uint32_t code = 0; code < codes; ++code)
+	{
+		const float encoded = static_cast<float>(code) / top;
+		const float linear = m_Proportional ? encoded : SrgbToLinear(encoded);
+
+		m_Decode[code] = static_cast<std::uint16_t>(linear * 65535.0F + 0.5F);
+	}
+
+	return {};
+}

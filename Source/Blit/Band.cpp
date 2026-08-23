@@ -135,6 +135,32 @@ void Band::BlendRun(std::int32_t row, std::int32_t left, std::int32_t right, Lig
 	}
 }
 
+void Band::BlendRun(std::int32_t row, std::int32_t left, std::int32_t right, std::span<const Light> source) noexcept
+{
+	// Where the span starts, kept before the clip narrows the bounds: the source is positional over
+	// the caller's own run, so a run whose left edge was clipped away reads from the middle of it.
+	const std::int32_t from = left;
+
+	// A span shorter than the run it is for is a caller's bug, and it writes what it has rather than
+	// walking off the end — `Row` above answers a bad row the same way.
+	right = std::min(right, from + static_cast<std::int32_t>(source.size()));
+
+	if (!Clip(row, left, right))
+	{
+		return;
+	}
+
+	Light* const at = m_Pixels.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(m_Width);
+
+	// No opaque store here, deliberately. Whether a sampled pixel is opaque is a property of the
+	// texel rather than of the run, so hoisting the test out of the loop is not available and putting
+	// it inside costs a branch per pixel to save four multiplies whose operand is zero.
+	for (std::int32_t column = left; column < right; ++column)
+	{
+		at[column] = Over(source[static_cast<std::size_t>(column - from)], at[column]);
+	}
+}
+
 void Band::BlendPixel(std::int32_t row, std::int32_t column, Light source) noexcept
 {
 	BlendRun(row, column, column + 1, source);
