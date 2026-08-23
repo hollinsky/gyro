@@ -72,7 +72,7 @@ public:
 
 	explicit SimulatedRenderer(SimulatedRendererPolicy policy) noexcept : m_Policy{ policy } {}
 
-	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget> targets) override
+	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget> targets, ColorState) override
 	{
 		// Seam/Renderer.h obliges a renderer to refuse what it cannot bind rather than to assume, and
 		// names a `Blit` handed a dmabuf as a composition-root miswiring rather than a frame's problem.

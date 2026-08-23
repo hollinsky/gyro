@@ -84,7 +84,7 @@ constexpr Rgba16 Blue = Rgb8(0, 0, 255);
 class SketchRenderer final : public IRenderer
 {
 public:
-	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget> targets) override
+	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget> targets, ColorState) override
 	{
 		ReleaseTargets();
 
@@ -245,7 +245,7 @@ public:
 		GYRO_REQUIRE(m_Output != nullptr);
 		GYRO_REQUIRE(m_Output->Status().has_value());
 
-		GYRO_REQUIRE_EQ(m_Renderer.BindTargets(m_Output->Targets()).has_value(), true);
+		GYRO_REQUIRE_EQ(m_Renderer.BindTargets(m_Output->Targets(), ColorState::Srgb()).has_value(), true);
 
 		m_Outputs[0].Bind(*m_Output, m_Renderer, 0, configuration);
 

@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "Core/Clock.h"
+#include "Core/ColorState.h"
 #include "Core/Time.h"
 #include "Core/Wake.h"
 #include "Frame/Admission.h"
@@ -136,9 +137,9 @@ public:
 		: m_Clock{ &clock }, m_Policy{ policy }, m_Inner{ policy }
 	{}
 
-	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget> targets) override
+	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget> targets, ColorState) override
 	{
-		return m_Inner.BindTargets(targets);
+		return m_Inner.BindTargets(targets, ColorState::Srgb());
 	}
 
 	void ReleaseTargets() noexcept override { m_Inner.ReleaseTargets(); }
@@ -531,7 +532,7 @@ private:
 		const BudgetPolicy budget{ .FloorGpu = panel.Floor, .InitialGpu = allocation.Cost };
 
 		m_Renderers[index].emplace(m_Clock, costs);
-		GYRO_CHECK(m_Renderers[index]->BindTargets(output->Targets()));
+		GYRO_CHECK(m_Renderers[index]->BindTargets(output->Targets(), ColorState::Srgb()));
 
 		// One device for every output, because that is the coupling decision 29 is about: two outputs
 		// are independent except that they share one frame thread and one queue.

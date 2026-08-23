@@ -122,7 +122,7 @@ struct BoundOutput
 	{
 		if (Presenter != nullptr && Renderer)
 		{
-			(void)Renderer->BindTargets(Presenter->Targets());
+			(void)Renderer->BindTargets(Presenter->Targets(), Presenter->Configuration().Color);
 		}
 	}
 };

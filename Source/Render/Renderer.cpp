@@ -77,19 +77,6 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 	};
 }
 
-// Whether two colour states describe the same light, alpha aside.
-//
-// **The alpha mode is excluded because it is the one difference this renderer can absorb.** A solid
-// is four numbers, so a straight-alpha fill becomes a premultiplied one with three multiplies on the
-// CPU and nothing lost. Everything else — the primaries, the transfer function, what the content
-// calls its own 1.0 — is a conversion the fragment stage would have to perform, and none of it is
-// written yet.
-[[nodiscard]] constexpr bool SameLight(ColorState item, ColorState output) noexcept
-{
-	return item.Primaries == output.Primaries && item.Transfer == output.Transfer &&
-	       item.ReferenceLuminance == output.ReferenceLuminance;
-}
-
 // What the quad pipeline can express, asked of one item.
 //
 // **Every branch here is a picture somebody would otherwise have to notice was wrong.** A texture
@@ -120,9 +107,16 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 		return Failure(EINVAL, "this renderer draws no shadows yet");
 	}
 
-	if (!SameLight(item.Color, output))
+	// **What is left of the colour-state branch, and it is a missing number rather than missing
+	// code.** Every other conversion is built — Chain.glsl holds the curves and the six primaries
+	// matrices, and `QuadVariant` selects one at pipeline creation. HLG is refused because converting
+	// it needs the display's peak luminance to build BT.2100's scene-to-display step, and
+	// Core/ColorState.h carries a reference white instead. Every implementation without a peak has
+	// picked one silently, and a film that is subtly the wrong contrast on one panel and not another
+	// is the kind of wrong nobody traces back to a shader.
+	if (item.Color.Transfer == TransferFunction::Hlg || output.Transfer == TransferFunction::Hlg)
 	{
-		return Failure(EINVAL, "this renderer converts no colour states yet; the item's light is not the target's");
+		return Failure(EINVAL, "this renderer converts no HLG; ColorState carries no display peak luminance");
 	}
 
 	return {};
@@ -134,7 +128,15 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 // the order the vertex stage indexes. The fill is premultiplied here rather than in the shader
 // because it is three multiplies on the CPU against one per fragment, and because
 // `AlphaMode::Straight` is a property of the item rather than of the draw.
-[[nodiscard]] QuadConstants Constants(const DrawItem& item, DrawSolid solid, PixelSize<DeviceSpace> target) noexcept
+//
+// **Premultiplied in the item's own encoding, and that is not the sharp edge it looks like.**
+// Docs/Architecture.md#premultiplied-alpha-is-the-sharp-edge is about applying alpha in an encoded
+// space and then *blending* in a linear one. Here the two agree: a variant that converts nothing
+// blends in the item's own space, so the premultiply is consistent with the blend; a variant that
+// converts undoes this divide before it linearises, which is exactly the un-premultiply that section
+// requires. What is refused either way is applying alpha in one space and blending in another.
+[[nodiscard]] QuadConstants
+Constants(const DrawItem& item, DrawSolid solid, PixelSize<DeviceSpace> target, ColorState output) noexcept
 {
 	QuadConstants constants{};
 
@@ -160,6 +162,14 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 
 	constants.Target[0] = static_cast<float>(target.Width);
 	constants.Target[1] = static_cast<float>(target.Height);
+
+	// The two factors that meet an absolute transfer function and a relative one in the middle. They
+	// are computed for every item rather than only for the converting ones because the branch would
+	// cost more than the two stores, and a variant that does not convert never reads them.
+	const QuadLuminance luminance = QuadLuminance::For(item.Color, output);
+
+	constants.Target[2] = luminance.Decode;
+	constants.Target[3] = luminance.Encode;
 
 	return constants;
 }
@@ -274,7 +284,7 @@ VulkanRenderer::~VulkanRenderer()
 	Destroy();
 }
 
-Result<void> VulkanRenderer::BindTargets(std::span<const RenderTarget> targets)
+Result<void> VulkanRenderer::BindTargets(std::span<const RenderTarget> targets, ColorState output)
 {
 	if (!m_Status)
 	{
@@ -285,6 +295,11 @@ Result<void> VulkanRenderer::BindTargets(std::span<const RenderTarget> targets)
 	// fails half way leaves nothing bound rather than a mix of two generations — partial success is
 	// not expressible, because a set is what `AcquireTarget` indexes into.
 	ReleaseTargets();
+
+	// Before the imports, so that a binding which fails part way has already recorded what it was
+	// asked to encode to. Nothing is drawable until a later bind succeeds either way, and the
+	// alternative is a renderer whose held state and built pipelines disagree about the output.
+	m_Output = output;
 
 	if (targets.size() > MaxRenderTargets)
 	{
@@ -318,7 +333,7 @@ Result<void> VulkanRenderer::BindTargets(std::span<const RenderTarget> targets)
 		Slot& slot = m_Slots[m_TargetCount];
 		++m_TargetCount;
 
-		if (Result<void> imported = Import(target, slot); !imported)
+		if (Result<void> imported = Import(target, output, slot); !imported)
 		{
 			ReleaseTargets();
 
@@ -336,7 +351,7 @@ Result<void> VulkanRenderer::BindTargets(std::span<const RenderTarget> targets)
 	return {};
 }
 
-Result<void> VulkanRenderer::Import(const RenderTarget& target, Slot& slot)
+Result<void> VulkanRenderer::Import(const RenderTarget& target, ColorState output, Slot& slot)
 {
 	if (!m_Device->Supports(target.Format))
 	{
@@ -489,7 +504,7 @@ Result<void> VulkanRenderer::Import(const RenderTarget& target, Slot& slot)
 	// pipelines against a format it has not seen; `Record` may do neither. A driver that cannot build
 	// the pipeline is an output that cannot be drawn, reported now, rather than a frame that fails
 	// during a transition.
-	return m_Pipeline.Prepare(slot.Format);
+	return m_Pipeline.Prepare(slot.Format, output);
 }
 
 Result<void> VulkanRenderer::Settle()
@@ -632,22 +647,23 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 	// not ended, and the caller has no way to know how much of its frame reached the queue. Walking
 	// the list first costs one pass over an array the caller just built, and makes the failure the
 	// same shape as `BindTargets`'s: nothing happened.
+	// **The variant is checked in the same pass, and it is the same argument one level down.** A
+	// missing pipeline discovered mid-recording is the failure above with a command buffer already
+	// open, and the check is a lookup either way. `Prepare` enumerated every variant this output can
+	// want, so a miss here is a renderer that came up wrong rather than a scene that asked for
+	// something new — but it is still reported, because the alternative is a `vkCmdBindPipeline` with
+	// a null handle and a driver entitled to reject the whole buffer.
 	for (const DrawItem& item : request.Items)
 	{
-		if (Result<void> expressible = Expressible(item, request.Output); !expressible)
+		if (Result<void> expressible = Expressible(item, m_Output); !expressible)
 		{
 			return std::unexpected{ expressible.error() };
 		}
-	}
 
-	// A pipeline this target's format has none of is a bind that failed and a `Record` that followed
-	// it. `For` is a lookup and never a build, because decision 62 is explicit that no frame blocks
-	// on compilation.
-	const VkPipeline pipeline = m_Pipeline.For(slot.Format);
-
-	if (!request.Items.empty() && pipeline == VK_NULL_HANDLE)
-	{
-		return Failure(EINVAL, "no pipeline was built for this target's format");
+		if (m_Pipeline.For(slot.Format, QuadVariant::For(item.Color, m_Output, item.Radius > 0.0F)) == VK_NULL_HANDLE)
+		{
+			return Failure(EINVAL, "no pipeline was built for this item's colour conversion on this target's format");
+		}
 	}
 
 	// Nothing to redraw. The seam is explicit that this is not the same as the caller skipping the
@@ -756,7 +772,12 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 
 	if (count > 0 && !request.Items.empty())
 	{
-		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+		// **Bound per item rather than once, and only where it changes.** An item's variant is a
+		// function of its colour state and whether it is rounded, so a list of ordinary windows on one
+		// output binds once and every item after the first is a push and a draw. The comparison is a
+		// handle against a handle; the alternative — sorting the list by variant — would reorder the
+		// painter's order, which decision 55 fixes as the list's own.
+		VkPipeline bound = VK_NULL_HANDLE;
 
 		// The whole target, not the damage. The vertex stage divides a device-space corner by
 		// `Target` to reach clip space, so the viewport has to be the grid those corners are measured
@@ -794,7 +815,16 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 					continue;
 				}
 
-				const QuadConstants constants = Constants(item, *solid, slot.Size);
+				const VkPipeline pipeline =
+					m_Pipeline.For(slot.Format, QuadVariant::For(item.Color, m_Output, item.Radius > 0.0F));
+
+				if (pipeline != bound)
+				{
+					vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+					bound = pipeline;
+				}
+
+				const QuadConstants constants = Constants(item, *solid, slot.Size, m_Output);
 				vkCmdPushConstants(
 					command,
 					m_Pipeline.Layout(),

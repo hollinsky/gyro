@@ -116,7 +116,7 @@ private:
 class FakeRenderer final : public IRenderer
 {
 public:
-	Result<void> BindTargets(std::span<const RenderTarget>) override { return {}; }
+	Result<void> BindTargets(std::span<const RenderTarget>, ColorState) override { return {}; }
 
 	void ReleaseTargets() noexcept override {}
 

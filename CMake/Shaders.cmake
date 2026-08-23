@@ -2,8 +2,8 @@
 #
 # **The compiler is a build tool and is not linked into gyro**, which is the whole point of the rule
 # below. Decision 62 fuses effect chains into pipeline variants and compiles a missing one off the
-# frame path, and the variant set is enumerable — decision 103 counts it — so every module gyro can
-# ever need exists before it boots. What happens at runtime is `vkCreateGraphicsPipelines` against a
+# frame path, and the variant set is enumerable — decisions 103 and 110 count it — so every module
+# gyro can ever need exists before it boots. What happens at runtime is `vkCreateGraphicsPipelines` against a
 # module that is already there, not a front end turning text into SPIR-V. A compositor that linked
 # glslang would carry it in a process that calls `mlockall(MCL_CURRENT | MCL_FUTURE)`, which is a
 # compiler pinned into RAM for the life of the machine on every machine.
@@ -67,10 +67,24 @@ function(gyro_add_shaders MODULE)
 				-V
 				--target-env vulkan1.3
 				--quiet
+				# The module's own shader directory, which is what makes a shared `.glsl` header
+				# reachable from a `#include` — see DEPFILE below for the half of that which is not
+				# optional. Joined to the flag rather than a separate argument because glslang says
+				# *include path must immediately follow option* and exits, which under `VERBATIM` is
+				# the difference between a build and a one-line error nobody reads twice.
+				-I${GYRO_SOURCE_DIR}/${MODULE}/Shaders
+				--depfile "${OUTPUT}.d"
 				--vn "${NAME}${GYRO_SHADER_STAGE_${STAGE}}Spirv"
 				-o "${OUTPUT}"
 				"${INPUT}"
 			DEPENDS "${INPUT}" glslang-standalone
+			# **Without this an edit to an included header rebuilds nothing.** `DEPENDS` above names
+			# the one file on the command line, so a shared header changes and every shader that
+			# includes it keeps its stale SPIR-V — a picture that is wrong until somebody deletes the
+			# build directory, and wrong differently for each person depending on when they last did.
+			# glslang writes the list it actually opened, so the rule is generated rather than
+			# maintained, which is the only version of it that cannot drift from the `#include`s.
+			DEPFILE "${OUTPUT}.d"
 			COMMENT "Compiling ${MODULE}/Shaders/${SOURCE}"
 			VERBATIM
 		)

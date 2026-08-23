@@ -12,8 +12,9 @@ Stack: C++23, CMake with CPM, Vulkan, spdlog. Nothing commercial.
 ## Working model
 
 **Never commit.** Stage the change, write the commit message, and hand both to Paul for review. He
-commits. When a change is ready, `git add` it and put the message in the reply — subject on one line,
-blank line, then the body.
+commits. When a change is ready, check that there are no currently staged changes, then if not you can
+`git add` it, hunkwise if necessary to avoid accidentally pulling another agent's work in. In any case
+put the message in the reply — subject on one line, blank line, then the body.
 
 - **Ask before implementing** where an answer would make the implementation better, and ask when you
   think extra effort would make the code better. Code quality is the point.

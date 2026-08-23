@@ -7,6 +7,7 @@
 #include <span>
 #include <vector>
 
+#include "Core/ColorState.h"
 #include "Core/Result.h"
 #include "Core/Time.h"
 #include "Geometry/Region.h"
@@ -33,7 +34,7 @@ using namespace std::chrono_literals;
 class FakeBlitter : public IRenderer
 {
 public:
-	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget> targets) override
+	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget> targets, ColorState) override
 	{
 		for (const RenderTarget& target : targets)
 		{
@@ -85,7 +86,7 @@ private:
 class FakeDevice : public IRenderer
 {
 public:
-	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget> targets) override
+	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget> targets, ColorState) override
 	{
 		for (const RenderTarget& target : targets)
 		{
@@ -227,11 +228,11 @@ GYRO_TEST(Renderer, ARendererRefusesMemoryItCannotBindRatherThanAssuming)
 	const RenderTarget mapped[] = { MappedTarget() };
 	const RenderTarget dmabuf[] = { DmabufTarget() };
 
-	GYRO_CHECK(blitter.BindTargets(mapped).has_value());
-	GYRO_CHECK(device.BindTargets(dmabuf).has_value());
+	GYRO_CHECK(blitter.BindTargets(mapped, ColorState::Srgb()).has_value());
+	GYRO_CHECK(device.BindTargets(dmabuf, ColorState::Srgb()).has_value());
 
-	const Result<void> blitterRefused = blitter.BindTargets(dmabuf);
-	const Result<void> deviceRefused = device.BindTargets(mapped);
+	const Result<void> blitterRefused = blitter.BindTargets(dmabuf, ColorState::Srgb());
+	const Result<void> deviceRefused = device.BindTargets(mapped, ColorState::Srgb());
 
 	GYRO_REQUIRE(!blitterRefused.has_value());
 	GYRO_REQUIRE(!deviceRefused.has_value());
@@ -248,7 +249,7 @@ GYRO_TEST(Renderer, ReleasedTargetsCannotBeRecordedInto)
 	const RenderTarget mapped[] = { MappedTarget() };
 	const DrawItem items[] = { Solid({ { 0.0F, 0.0F }, { 1920.0F, 1080.0F } }) };
 
-	GYRO_REQUIRE(blitter.BindTargets(mapped).has_value());
+	GYRO_REQUIRE(blitter.BindTargets(mapped, ColorState::Srgb()).has_value());
 	GYRO_REQUIRE(blitter.Record(FullFrame(items)).has_value());
 
 	blitter.ReleaseTargets();
@@ -269,7 +270,7 @@ GYRO_TEST(Renderer, TheCpuCostReturnsAndTheGpuCostIsCollected)
 	const RenderTarget dmabuf[] = { DmabufTarget() };
 	const DrawItem items[] = { Solid({ { 0.0F, 0.0F }, { 1920.0F, 1080.0F } }) };
 
-	GYRO_REQUIRE(device.BindTargets(dmabuf).has_value());
+	GYRO_REQUIRE(device.BindTargets(dmabuf, ColorState::Srgb()).has_value());
 
 	RecordRequest request = FullFrame(items);
 	request.CostGeneration = 4;
@@ -304,7 +305,7 @@ GYRO_TEST(Renderer, ARendererWithNoSecondDeviceCostsNothingOnIt)
 	const RenderTarget mapped[] = { MappedTarget() };
 	const DrawItem items[] = { Solid({ { 0.0F, 0.0F }, { 1920.0F, 1080.0F } }) };
 
-	GYRO_REQUIRE(blitter.BindTargets(mapped).has_value());
+	GYRO_REQUIRE(blitter.BindTargets(mapped, ColorState::Srgb()).has_value());
 
 	const Result<Submission> submitted = blitter.Record(FullFrame(items));
 
@@ -327,8 +328,8 @@ GYRO_TEST(Renderer, CompletionIsPolledAndImmediateIsComplete)
 	const RenderTarget dmabuf[] = { DmabufTarget() };
 	const DrawItem items[] = { Solid({ { 0.0F, 0.0F }, { 1920.0F, 1080.0F } }) };
 
-	GYRO_REQUIRE(blitter.BindTargets(mapped).has_value());
-	GYRO_REQUIRE(device.BindTargets(dmabuf).has_value());
+	GYRO_REQUIRE(blitter.BindTargets(mapped, ColorState::Srgb()).has_value());
+	GYRO_REQUIRE(device.BindTargets(dmabuf, ColorState::Srgb()).has_value());
 
 	GYRO_CHECK(blitter.IsComplete(blitter.Record(FullFrame(items))->Point));
 
@@ -352,7 +353,7 @@ GYRO_TEST(Renderer, ChunkingIsSeveralRecordsAgainstOneHeldTarget)
 	const RenderTarget dmabuf[] = { DmabufTarget() };
 	const DrawItem items[] = { Solid({ { 0.0F, 0.0F }, { 960.0F, 1080.0F } }) };
 
-	GYRO_REQUIRE(device.BindTargets(dmabuf).has_value());
+	GYRO_REQUIRE(device.BindTargets(dmabuf, ColorState::Srgb()).has_value());
 
 	const Result<Submission> first = device.Record(FullFrame(items));
 	const Result<Submission> second = device.Record(FullFrame(items));
@@ -381,7 +382,7 @@ GYRO_TEST(Renderer, TheListIsBottomFirstAndTheOrderSurvives)
 		Solid({ { 100.0F, 100.0F }, { 64.0F, 64.0F } }),
 	};
 
-	GYRO_REQUIRE(blitter.BindTargets(mapped).has_value());
+	GYRO_REQUIRE(blitter.BindTargets(mapped, ColorState::Srgb()).has_value());
 	GYRO_REQUIRE(blitter.Record(FullFrame(items)).has_value());
 	GYRO_REQUIRE_EQ(blitter.Items().size(), std::size_t{ 2 });
 
@@ -432,7 +433,7 @@ GYRO_TEST(Renderer, EmptyDamageIsNothingToRedrawRatherThanNothingToDo)
 	const RenderTarget mapped[] = { MappedTarget() };
 	const DrawItem items[] = { Solid({ { 0.0F, 0.0F }, { 1920.0F, 1080.0F } }) };
 
-	GYRO_REQUIRE(blitter.BindTargets(mapped).has_value());
+	GYRO_REQUIRE(blitter.BindTargets(mapped, ColorState::Srgb()).has_value());
 
 	RecordRequest quiet;
 	quiet.Items = items;

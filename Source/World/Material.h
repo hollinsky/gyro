@@ -118,10 +118,12 @@ static_assert([] {
 //
 // **Everything in the set gathers, and the empty pointwise column is decision 103's answer rather
 // than an omission.** What Open.md wanted from the question was a size for decision 62's variant
-// lattice, and empty gives a much better one: the pointwise run per item is the colour-state
-// conversion, the corner-radius mask, per-node opacity, and the dim on an output with no backlight —
-// four, in one fixed order, so contiguous runs number ten and a gather splits a chain into at most
-// two of them. Tens of variants precompiled at startup rather than 2ⁿ over the vocabulary.
+// lattice, and empty gives a much better one. Decision 116 is what the size turned out to be once it
+// was counted against code: two run bits and a conversion selector rather than that entry's ten
+// contiguous runs, because opacity and the dim are one multiply of data, the conversion's selector is
+// its own mask, and a gather can only land at one position in an item's chain — so it admits two runs
+// and never ten. The property both entries need is the same one, and it holds: the set is enumerable
+// before gyro boots.
 //
 // The rule for the first pointwise material that arrives: it has to justify why it is not a `Solid`
 // node or a field on the node, since those already do every pointwise thing the scene can express.

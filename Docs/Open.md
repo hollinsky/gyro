@@ -284,6 +284,22 @@ nothing only proves the grep.
 - **Virtual outputs for a session that does not exist yet.** Remote login goes through the
   privileged login agent, as the greeter does, but the ordering against decision 24's listener
   handover is not worked out.
+- **A display's peak luminance, which is what HLG needs and `ColorState` does not carry.**
+  [Decision 116](Decisions.md#116-the-pointwise-lattice-is-two-run-bits-and-a-conversion-selector-and-the-outputs-colour-state-moves-to-the-binding)
+  refuses `TransferFunction::Hlg` on both ends of a conversion rather than approximating it: BT.2100's
+  scene-to-display step is `γ = 1.2 + 0.42·log10(Lw/1000)` and `Lw` is the display's peak, while a
+  color state states a *reference white*. Deriving one from the other goes through BT.2408's
+  conventions, which is a policy chain rather than an arithmetic one. What is open is whether the peak
+  belongs on `ColorState`, on `OutputConfiguration` beside it, or in the per-output characterisation
+  the primaries question below already wants — and the answer decides whether an HLG *source* and an
+  HLG *output* are one question or two, since a client declares one and a panel reports the other.
+- **Gamut mapping, where today there is a clip.** A conversion into narrower primaries produces
+  negative components — Bt2020's red is a long way outside Bt709's — and decision 116 clips them at
+  zero, which desaturates rather than losing the colour and is the same picture on every driver. What
+  a clip cannot do is preserve the *relationship* between two out-of-gamut colours: a saturated red
+  and a slightly more saturated one land on the same pixel value, so a gradient across the boundary
+  bands. It wants a curve, a curve wants a perceptual argument, and the argument wants a wide-gamut
+  panel to make it in front of. Same review as the dressing numbers below.
 - **The dressing numbers, which are what the review with a screen is actually for.**
   [Decisions 103 and 104](Decisions.md#103-a-dressing-is-named-by-what-it-does-to-light-the-material-set-is-glass-and-smoke)
   fix which materials and which levels exist and what each is for, and deliberately fix no value:

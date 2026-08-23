@@ -419,7 +419,6 @@ private:
 		const RecordRequest request{ .Target = *target,
 			                         .Mode = decision.Mode(),
 			                         .CostGeneration = output.m_Cost.Generation(),
-			                         .Output = output.m_Configuration.Color,
 			                         .Damage = output.m_Damage,
 			                         .Items = list.Items };
 

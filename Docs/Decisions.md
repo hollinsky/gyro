@@ -5278,6 +5278,14 @@ Contiguous runs over four ordered elements is ten, and a gather splits a chain i
 them. **The lattice is tens of variants precompiled at startup rather than 2ⁿ over the vocabulary**,
 which is what decision 62 needed the vocabulary to be designed as a set in order to know.
 
+*(This count is wrong and [decision 116](#116-the-pointwise-lattice-is-two-run-bits-and-a-conversion-selector-and-the-outputs-colour-state-moves-to-the-binding)
+is the correction, made on building it. Three of the four elements are not axes: opacity and the dim
+are one multiply of data, and the conversion is a selector that is its own mask. And the
+contiguous-runs formula does not apply — a gather can land at only one position in an item's chain,
+because `Dress` is one field and decision 99 puts the dressing over the node's own content, so the
+chain admits two runs rather than ten. The conclusion this paragraph exists to support survives
+whole: the set is enumerable before gyro boots.)*
+
 #### Rejected: within-window blur
 
 macOS's `.withinWindow`, where a sidebar blurs its own window's scrolled content rather than the
@@ -8074,7 +8082,9 @@ the same sentence as glslang running in the compositor, and that is the reading 
 
 **What makes it possible is that the set is closed.** Decision 103 counts the lattice — four ordered
 pointwise elements make ten contiguous runs, a gather splits a chain into at most two of them, and
-there is at most one gather per item because `Dress` is one field — over a vocabulary
+there is at most one gather per item because `Dress` is one field
+*(the arithmetic is corrected by [decision 116](#116-the-pointwise-lattice-is-two-run-bits-and-a-conversion-selector-and-the-outputs-colour-state-moves-to-the-binding);
+what this entry needs from it — that the set is finite and known before boot — is what survived)* — over a vocabulary
 [decision 33](#33-effects-are-named-materials-not-parameterized-filter-calls) closed for cohesion.
 An enumerable set can be compiled before boot. Compiz is the instructive contrast and the reason the
 comparison keeps coming up: it composed plugin-supplied fragment snippets into one program in 2007
@@ -8285,3 +8295,152 @@ per-target damage accumulation
 [decision 101](#101-damage-is-the-whole-output-while-anything-moves-and-per-node-damage-needs-an-identity-the-record-does-not-carry)
 reports the whole output while anything moves, and a whole-output CPU composite is the expensive
 case by a wide margin.
+
+### 116. The pointwise lattice is two run bits and a conversion selector, and the output's colour state moves to the binding
+
+*(Decided 2026-08-22, on building
+[decision 103](#103-a-dressing-is-named-by-what-it-does-to-light-the-material-set-is-glass-and-smoke)'s
+chain into the quad pipeline. Corrects that entry's arithmetic, below, and settles what
+[decision 109](#109-shaders-compile-at-build-time-runtime-compilation-is-a-development-option) meant
+by a run mask.)*
+
+**Decision 103's conclusion holds and its count does not.** That entry needed the variant set to be
+enumerable at build time, and it is — which is the property decision 109 rests on and it is
+untouched. What it got wrong is the number, and the three mistakes are each worth more than the
+figure they produced.
+
+#### Counted against code
+
+Decision 103 reads *four ordered pointwise elements — the colour-state conversion, the corner-radius
+mask, per-node opacity, and decision 62's dim — so contiguous runs number ten*. Three of the four
+premises fail.
+
+**Opacity and the dim are one multiply, and it is data rather than code.** Both are a scalar on
+premultiplied components, so they commute with each other and the renderer folds them into one
+number per item. There is nothing for a variant to switch on: eliding a multiply by a push constant
+saves one instruction and costs a whole pipeline. Two of the four elements are not axes at all, and
+counting them as two was counting a name rather than an operation.
+
+**The conversion is not one element but three stages, and its presence bit is not separate from
+its selector.** `TransferFunction::Linear` *is* the absent decode; matching `ColorPrimaries` *is*
+the absent matrix. So there is no mask bit to add beside the selector — the selector is the mask,
+and what the conversion costs the lattice is a product over two closed enumerations rather than a
+factor of two.
+
+**Nothing splits this chain, so the contiguous-runs formula counts a shape the vocabulary cannot
+express.** [Decision 62](#62-effect-composition-is-an-optimization-and-the-unfused-path-is-the-reference)
+counts runs because a gather forces materialisation *in the middle* of a chain, and the ten follows
+from a gather being able to land at any of the positions. Here it cannot. There is at most one
+gather per item because `Dress` is one field, and
+[decision 99](#99-a-dressing-draws-over-the-nodes-own-extent-whatever-the-nodes-kind) places the
+dressing over the node's own content — so the gather lands at exactly one position, after the
+content's conversion and before the mask and the scalar. **One fixed split point admits two runs,
+not ten**, and the eight the formula adds are chain shapes no `DrawItem` can encode.
+
+**So the run mask is two bits** — the corner mask and the conversion — and the lattice's size is the
+conversion's selector rather than the mask. `Prepare` builds twenty pipelines per binding: the two
+corner variants that convert nothing, and a converting pair for each of the nine source colour
+states. About twenty-five milliseconds of pipeline creation for the set, measured on lavapipe, at a
+reconfiguration and nothing at all inside a frame.
+
+*(That figure is measured rather than derived, and the first version of this paragraph got it wrong
+in exactly the way this entry is about. A plain variant takes six hundred microseconds and a
+converting one roughly 1.3 milliseconds, so twenty of them is twenty-five rather than the twelve that
+multiplying by the cheap one gives. [Pipeline.Test.cpp](../Source/Render/Pipeline.Test.cpp) prints it
+rather than asserting it, so the next person to change the variant count sees what it did.)*
+
+**Twenty-five milliseconds is paid at a binding, which includes the first one**, so it is that much
+before the first composite on a boot service whose whole point is being early. That is acceptable and
+it is not free, and the lever if it stops being acceptable is the pipeline cache decision 62 already
+asks for and nothing here builds — not a smaller set, because a smaller set is a frame that cannot be
+drawn.
+
+**The corner mask survives as a real axis and it is the only one of the three that does.** It is two
+hardware derivatives, a length and a divide, and an unrounded node — the wallpaper, a tiled window,
+[decision 106](#106-an-x11-client-has-no-window-geometry-gyros-window-manager-computes-the-frame-rect)'s
+X11 client — pays all of it to be multiplied by one. Its elision is also exact rather than close: at
+a radius of zero the field is identically one everywhere the rasterizer covers, so the two variants
+are the same picture bit for bit.
+
+**What a person sees is nothing, and that is the point of writing it down.** No frame looks different
+for this. What changes is that the number decision 109 cited as evidence the set is enumerable was
+arithmetic nobody had run, and the next question resting on it — the first gathering material, which
+is where a chain genuinely does split — would have inherited it.
+
+#### The output's colour state moves from `RecordRequest` to `BindTargets`
+
+**A renderer is per output, so what the composite is encoded to is a property of a binding rather
+than of a frame.** [Compositor.cpp](../Source/Compositor/Compositor.cpp) already says so in as many
+words — a writer is bound to one presenter's target set for as long as that set exists — so stating
+the colour state on every `RecordRequest` was a per-frame restatement of a per-binding fact.
+
+What forced the move is that **the target end of a conversion decides which pipelines have to
+exist.** Decision 62 forbids a frame blocking on compilation, so a variant an item wants and does not
+find is a refused frame; `For` therefore has to be total, which means `Prepare` has to have
+enumerated everything reachable, which means the target end has to be known at the only call the seam
+allows to be slow. It was not. The renderer learned it one call too late, every frame, forever.
+
+**Rejected: enumerating the target end as well.** It needs no seam change and it is what the code
+would have done by default. Nine target states against nine source states and two corner variants is
+a hundred and sixty-four pipelines per format — over two hundred milliseconds of pipeline creation at
+every binding, on a boot service whose first pixel is the firmware logo continuing, and twice that
+where two formats are bound. Paid on every hotplug,
+to discover at runtime a fact the composition root held all along.
+
+**Rejected: the colour state on `RenderTarget`.** It scales to several outputs on one renderer
+without a second thought, and [RenderTarget.h](../Source/Seam/RenderTarget.h) rejects it in a comment
+that is still right: a copy on every target is a second place to be wrong when a reconfiguration
+changes one and not the others. One per call has the same staleness window and one copy in it.
+
+**Rejected: building the missing variant on the first frame that names it.** It is decision 62's own
+*a variant that is nevertheless absent is drawn unfused that frame*, and the unfused path does not
+exist yet — so what it actually means today is dropping the first frame after a client posts content
+in a new colour state. That is a stutter exactly when something new appears on screen, which is the
+worst available moment for one.
+
+#### HLG is refused by name, and the gamut clip is named rather than discovered
+
+**Nothing converts to or from `TransferFunction::Hlg`.** BT.2100's scene-to-display step needs the
+display's peak luminance and [ColorState.h](../Source/Core/ColorState.h) carries a reference white
+instead. Every implementation without a peak has silently picked one; the failure is a film that is
+subtly the wrong contrast on one panel and right on another, which nobody traces to a shader. So it
+is `EINVAL` at the binding and at the item, and the peak is an [Open.md](Open.md) entry rather than a
+constant somebody guessed.
+
+**A conversion into narrower primaries is clipped at zero, and that is a gamut clip.** Bt2020's red
+is a long way outside Bt709's, so the matrix produces negative components and there is no encoding
+for negative light — left alone it is `pow` of a negative, which GLSL leaves undefined and drivers
+answer with a NaN that blends across the whole quad. The clip desaturates rather than losing the
+colour, and every alternative is a gamut-mapping curve with a perceptual argument behind it, which is
+a number wanting a screen. What must not happen is the picture depending on which driver the machine
+has.
+
+#### The fused and unfused paths are built from one set of GLSL functions
+
+Decision 62 requires the unfused path to exist as separate passes and to be the reference.
+[Chain.glsl](../Source/Render/Shaders/Chain.glsl) is one function per element and both forms compose
+it, rather than each form spelling the elements itself.
+
+**Sharing strengthens the oracle decision 62 actually described and weakens one it did not.** That
+entry names the hard part as precision — a fused chain keeps intermediates in registers while
+separate passes round at every target boundary — and that comparison is only readable if the
+arithmetic on both sides is the *same* arithmetic. With two sources, a disagreement is ambiguous
+between a fusion bug and two sRGB curves differing in the last bit, and the ambiguous reading is the
+one a tired person takes.
+
+**What is given up, named:** an element whose arithmetic is wrong is wrong identically on both sides,
+so the oracle cannot see it. That was never what it was for, and two hand-written copies would fail
+the test they look like they pass — both get written the same afternoon from the same paragraph of
+the same standard, so a misreading goes into both and the oracle reports agreement. Element
+correctness is a value against a published curve, and
+[RenderImport.Test.cpp](../Source/Integration/RenderImport.Test.cpp) checks it that way: the sRGB
+encode of one half, Bt709's red through the Bt2020 matrix, and a reference-white ratio, each
+isolating one stage.
+
+**And the pass-based form is not built yet, deliberately.** A pass boundary exists because a gather
+cannot consume a value that has not been written, and no gather is expressible — every `Material` is
+refused. Building one now would be a render target introduced so that a chain with no split could be
+split, whose only distinguishing property is the round-trip rounding decision 62 calls a difficulty.
+The comparison that is worth running today is the elided variant against the unelided one, which
+needs no target and tests the thing this change actually introduces: whether the run mask elides
+something that was not a no-op.

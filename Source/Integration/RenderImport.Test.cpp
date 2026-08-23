@@ -170,12 +170,9 @@ private:
 [[nodiscard]] RecordRequest
 Composite(std::uint32_t target, const Region<DeviceSpace>& damage = {}, std::span<const DrawItem> items = {})
 {
-	return RecordRequest{ .Target = target,
-		                  .Mode = RenderMode::Planned,
-		                  .CostGeneration = 0,
-		                  .Output = ColorState::Srgb(),
-		                  .Damage = damage,
-		                  .Items = items };
+	return RecordRequest{
+		.Target = target, .Mode = RenderMode::Planned, .CostGeneration = 0, .Damage = damage, .Items = items
+	};
 }
 
 // How many descriptors this process holds. Counted from `/proc` rather than tracked, because what is
@@ -258,7 +255,7 @@ GYRO_TEST(RenderImport, DamageIsDrawnAndTheRestSurvives)
 	const std::span<const RenderTarget> targets = fixture->Output().Targets();
 	GYRO_REQUIRE(!targets.empty());
 
-	const Result<void> bound = fixture->Renderer().BindTargets(targets);
+	const Result<void> bound = fixture->Renderer().BindTargets(targets, ColorState::Srgb());
 	GYRO_REQUIRE_EQ(bound.has_value(), true);
 	GYRO_CHECK_EQ(fixture->Renderer().BoundTargets(), static_cast<std::uint32_t>(targets.size()));
 
@@ -318,7 +315,7 @@ GYRO_TEST(RenderImport, ACompositedFrameReachesTheConsumer)
 		return;
 	}
 
-	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
 	fixture->Prefill();
 
 	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
@@ -377,7 +374,7 @@ GYRO_TEST(RenderImport, ASolidLandsExactlyWhereItsCornersSay)
 		return;
 	}
 
-	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
 	fixture->Prefill();
 
 	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
@@ -416,7 +413,7 @@ GYRO_TEST(RenderImport, ASolidLandsInTheSamePlaceOnHardware)
 
 	std::println("  {}", fixture->Device().Description());
 
-	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
 	fixture->Prefill();
 
 	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
@@ -458,7 +455,7 @@ GYRO_TEST(RenderImport, ARadiusCutsTheCornersAndNothingElse)
 		return;
 	}
 
-	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
 	fixture->Prefill();
 
 	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
@@ -510,7 +507,7 @@ GYRO_TEST(RenderImport, ItemsPaintInListOrderAndOpacityBlends)
 		return;
 	}
 
-	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
 	fixture->Prefill();
 
 	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
@@ -545,6 +542,106 @@ GYRO_TEST(RenderImport, ItemsPaintInListOrderAndOpacityBlends)
 	GYRO_CHECK(reader.Image().IsUniform(PixelRect<DeviceSpace>{ { 44, 8 }, { 8, 16 } }, Rgb8(128, 0, 0), 300));
 }
 
+// **The colour-state conversion, checked against arithmetic rather than against itself.** Chain.glsl
+// argues that the fused and unfused paths must be built from one set of functions, which buys a real
+// oracle for composition and precision and buys nothing at all for the elements themselves: a curve
+// written once is wrong once, identically on both sides. So the elements are checked the only way a
+// single implementation can be — against the numbers the standards state — and this is that check.
+//
+// Three conversions, each isolating one stage. Two least significant bits of tolerance, because
+// `pow` is the driver's and a compositor that demanded the last bit of it would fail on hardware
+// that is drawing the right picture.
+GYRO_TEST(RenderImport, AColourStateIsConvertedByTheArithmeticTheStandardsState)
+{
+	std::optional<Fixture> fixture = Available("AColourStateIsConvertedByTheArithmeticTheStandardsState");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	const Rect<DeviceSpace> where{ { 0.0F, 0.0F }, { 32.0F, 32.0F } };
+	const PixelRect<DeviceSpace> inside{ { 4, 4 }, { 24, 24 } };
+
+	// Two least significant bits of an eight-bit channel, in the sixteen-bit space `Rgba16` compares
+	// in — 257 per bit, and `pow` is where the drivers differ.
+	constexpr std::uint32_t Tolerance = 600;
+
+	// **The transfer function alone.** Linear light at 0.5 under Bt709 primaries, onto an sRGB output
+	// of the same primaries and the same reference white: the matrix is the identity, the two
+	// luminance factors cancel, and what is left is the sRGB encode of one half — 187.5, which is what
+	// a person sees as mid grey and what naive `0.5 * 255` gets wrong by fifty-nine levels.
+	{
+		GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
+
+		const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+		GYRO_REQUIRE(acquired.has_value());
+
+		DrawItem item = Solid(where, DrawSolid{ 0.5F, 0.5F, 0.5F, 1.0F });
+		item.Color = ColorState{ ColorPrimaries::Bt709, TransferFunction::Linear, AlphaMode::Premultiplied, 0, 203.0F };
+
+		GYRO_REQUIRE_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &item, 1 })).has_value(), true);
+
+		const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+		GYRO_REQUIRE(buffer != nullptr);
+
+		const BufferReader reader{ *buffer };
+		GYRO_REQUIRE(reader.IsValid());
+		GYRO_CHECK(reader.Image().IsUniform(inside, Rgb8(188, 188, 188), Tolerance));
+	}
+
+	// **The primaries matrix alone.** Bt709's own red, in linear light, onto an output at Bt2020
+	// primaries: the same light needs less of a wider gamut's red and a little of its green and blue,
+	// which is the whole content of the matrix. Getting it transposed produces a colour rather than an
+	// obvious failure, which is why the check is three channels and not one.
+	{
+		const ColorState wide{ ColorPrimaries::Bt2020, TransferFunction::Srgb, AlphaMode::Premultiplied, 0, 203.0F };
+
+		GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), wide).has_value());
+
+		const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+		GYRO_REQUIRE(acquired.has_value());
+
+		DrawItem item = Solid(where, DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F });
+		item.Color = ColorState{ ColorPrimaries::Bt709, TransferFunction::Linear, AlphaMode::Premultiplied, 0, 203.0F };
+
+		GYRO_REQUIRE_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &item, 1 })).has_value(), true);
+
+		const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+		GYRO_REQUIRE(buffer != nullptr);
+
+		const BufferReader reader{ *buffer };
+		GYRO_REQUIRE(reader.IsValid());
+		GYRO_CHECK(reader.Image().IsUniform(inside, Rgb8(208, 74, 34), Tolerance));
+	}
+
+	// **The reference white alone**, which is the case a comparison of the two enumerators would call
+	// identical. Content that calls 406 nits its own 1.0, shown on an output that calls 203 nits its
+	// own, is twice as bright — and the doubling happens in linear light, so mid grey lands at 175
+	// rather than at the 255 a naive multiply in the encoding would saturate to.
+	{
+		GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
+
+		const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+		GYRO_REQUIRE(acquired.has_value());
+
+		DrawItem item = Solid(where, DrawSolid{ 0.5F, 0.5F, 0.5F, 1.0F });
+		item.Color = ColorState{ ColorPrimaries::Bt709, TransferFunction::Srgb, AlphaMode::Premultiplied, 0, 406.0F };
+
+		GYRO_REQUIRE_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &item, 1 })).has_value(), true);
+
+		const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+		GYRO_REQUIRE(buffer != nullptr);
+
+		const BufferReader reader{ *buffer };
+		GYRO_REQUIRE(reader.IsValid());
+		GYRO_CHECK(reader.Image().IsUniform(inside, Rgb8(175, 175, 175), Tolerance));
+	}
+}
+
 // **The refusals, which are what keep a half-built renderer from lying about a scene.** Each of these
 // composites successfully under a renderer that ignored what it could not draw, and each is a
 // different picture from the one the scene described — so the seam's `EINVAL` is the only honest
@@ -558,7 +655,7 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 		return;
 	}
 
-	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
 
 	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
 	GYRO_REQUIRE(acquired.has_value());
@@ -577,7 +674,13 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 	refused[1].Content = DrawGroup{ .Count = 0 };
 	refused[2].Dress = Material::Glass;
 	refused[3].Lift = Elevation::Resting;
-	refused[4].Color = ColorState::Composite();
+
+	// **The colour-state refusal is now one transfer function rather than every conversion**, and HLG
+	// is the one because converting it needs a display peak luminance `ColorState` does not carry.
+	// Everything else — a solid authored in linear light at wide primaries, drawn onto an sRGB
+	// output — is a specialization constant and a matrix that exist, and the check below is that it
+	// draws rather than that it is refused.
+	refused[4].Color = ColorState{ ColorPrimaries::Bt2020, TransferFunction::Hlg, AlphaMode::Premultiplied, 0, 203.0F };
 
 	for (const DrawItem& item : refused)
 	{
@@ -585,6 +688,13 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 		GYRO_REQUIRE_EQ(answer.has_value(), false);
 		GYRO_CHECK_EQ(answer.error().Code(), EINVAL);
 	}
+
+	// The branch that used to be here, from the other side: an item whose light is not the output's
+	// is drawn rather than refused, because `Prepare` built the variant that converts it.
+	DrawItem converted = drawable;
+	converted.Color = ColorState::Composite();
+
+	GYRO_CHECK_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &converted, 1 })).has_value(), true);
 
 	// **A list whose last item is refused records none of the ones in front of it.** The check runs
 	// before anything is recorded, so a refusal leaves the target exactly as it was rather than
@@ -620,7 +730,7 @@ GYRO_TEST(RenderImport, MiswiredTargetSetsAreRefused)
 		                       .Memory =
 		                           MappedImage{ .Pixels = pixels.data(), .Stride = 64 * 4, .Length = pixels.size() } };
 
-	const Result<void> refusedMapping = fixture->Renderer().BindTargets({ &mapped, 1 });
+	const Result<void> refusedMapping = fixture->Renderer().BindTargets({ &mapped, 1 }, ColorState::Srgb());
 	GYRO_REQUIRE_EQ(refusedMapping.has_value(), false);
 	GYRO_CHECK_EQ(refusedMapping.error().Code(), EINVAL);
 	GYRO_CHECK_EQ(fixture->Renderer().BoundTargets(), 0U);
@@ -628,7 +738,7 @@ GYRO_TEST(RenderImport, MiswiredTargetSetsAreRefused)
 	// A half-built description, which is what a backend that filled in a size and forgot a format
 	// produces. Worth catching where it is consumed rather than as a black screen later.
 	const RenderTarget empty{};
-	GYRO_CHECK_EQ(fixture->Renderer().BindTargets({ &empty, 1 }).has_value(), false);
+	GYRO_CHECK_EQ(fixture->Renderer().BindTargets({ &empty, 1 }, ColorState::Srgb()).has_value(), false);
 
 	// Recording against a target set that was refused names an unbound target, which is the caller's
 	// bug and the seam's `EINVAL`.
@@ -681,7 +791,7 @@ GYRO_TEST(RenderImport, AHalfImportedSetLeavesNothingBehind)
 	// cannot open a file. Well past any per-process soft limit divided by what one attempt strands.
 	for (int attempt = 0; attempt < 512; ++attempt)
 	{
-		const Result<void> refused = fixture->Renderer().BindTargets(mixed);
+		const Result<void> refused = fixture->Renderer().BindTargets(mixed, ColorState::Srgb());
 		GYRO_REQUIRE_EQ(refused.has_value(), false);
 		GYRO_REQUIRE_EQ(refused.error().Code(), EINVAL);
 		GYRO_REQUIRE_EQ(fixture->Renderer().BoundTargets(), 0U);
@@ -691,7 +801,7 @@ GYRO_TEST(RenderImport, AHalfImportedSetLeavesNothingBehind)
 
 	// And the renderer is still usable afterwards, which is what says the failures released rather
 	// than merely reported.
-	GYRO_CHECK_EQ(fixture->Renderer().BindTargets(targets).has_value(), true);
+	GYRO_CHECK_EQ(fixture->Renderer().BindTargets(targets, ColorState::Srgb()).has_value(), true);
 }
 
 // Releasing and rebinding, which is what `TargetsInvalidated` and `Reconfigured` do in that order.
@@ -706,7 +816,7 @@ GYRO_TEST(RenderImport, TargetsSurviveAReconfiguration)
 		return;
 	}
 
-	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
 	GYRO_CHECK(fixture->Renderer().BoundTargets() > 0);
 
 	fixture->Renderer().ReleaseTargets();
@@ -724,7 +834,7 @@ GYRO_TEST(RenderImport, TargetsSurviveAReconfiguration)
 	const std::span<const RenderTarget> reconfigured = fixture->Output().Targets();
 	GYRO_REQUIRE(!reconfigured.empty());
 	GYRO_CHECK_EQ(reconfigured.front().Size, (PixelSize<DeviceSpace>{ 128, 64 }));
-	GYRO_CHECK_EQ(fixture->Renderer().BindTargets(reconfigured).has_value(), true);
+	GYRO_CHECK_EQ(fixture->Renderer().BindTargets(reconfigured, ColorState::Srgb()).has_value(), true);
 
 	fixture->Prefill();
 
@@ -766,7 +876,7 @@ GYRO_TEST(RenderImport, EmptyDamageDrawsNothing)
 		return;
 	}
 
-	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
 	fixture->Prefill();
 
 	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
@@ -797,7 +907,7 @@ GYRO_TEST(RenderImport, SyncPointsMatchWhatTheDeviceCanExport)
 
 	GYRO_CHECK_EQ(fixture->Renderer().ExportsTimeline(), fixture->Device().Description().ExportsTimeline);
 
-	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
 
 	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
 	GYRO_REQUIRE(acquired.has_value());
@@ -856,7 +966,7 @@ GYRO_TEST(RenderImport, AnExportingDeviceHandsOutAWaitablePoint)
 		return;
 	}
 
-	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets()).has_value());
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
 	fixture->Prefill();
 
 	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();

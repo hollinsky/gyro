@@ -1,8 +1,10 @@
 #include "Render/Pipeline.h"
 
+#include <array>
 #include <cerrno>
 #include <cstdint>
 
+#include "Core/ColorState.h"
 #include "Core/Result.h"
 #include "Render/Shaders/Quad.frag.h"
 #include "Render/Shaders/Quad.vert.h"
@@ -87,20 +89,20 @@ Result<void> QuadPipeline::Create(VulkanDevice& device)
 	return Check(vkCreatePipelineLayout(device.Handle(), &layoutInfo, nullptr, &m_Layout), "vkCreatePipelineLayout");
 }
 
-VkPipeline QuadPipeline::For(VkFormat format) const noexcept
+VkPipeline QuadPipeline::For(VkFormat format, QuadVariant variant) const noexcept
 {
-	for (std::size_t index = 0; index < m_VariantCount; ++index)
+	for (std::size_t index = 0; index < m_BuiltCount; ++index)
 	{
-		if (m_Variants[index].Format == format)
+		if (m_Built[index].Format == format && m_Built[index].Variant == variant)
 		{
-			return m_Variants[index].Pipeline;
+			return m_Built[index].Pipeline;
 		}
 	}
 
 	return VK_NULL_HANDLE;
 }
 
-Result<void> QuadPipeline::Prepare(VkFormat format)
+Result<void> QuadPipeline::Prepare(VkFormat format, ColorState output)
 {
 	if (m_Device == nullptr || m_Layout == VK_NULL_HANDLE)
 	{
@@ -112,16 +114,95 @@ Result<void> QuadPipeline::Prepare(VkFormat format)
 		return Failure(EINVAL, "no pipeline is built for a format the renderer cannot name");
 	}
 
-	if (For(format) != VK_NULL_HANDLE)
+	// Refused at the binding rather than per item, because an output nothing can be encoded to is a
+	// black screen either way and this is the call that can say so out loud. Chain.glsl carries the
+	// argument: HLG's scene-to-display step needs the display's peak luminance and a `ColorState`
+	// states a reference white, so an implementation without one has picked a peak on the user's
+	// behalf and the picture is wrong in a way nobody can attribute.
+	if (output.Transfer == TransferFunction::Hlg)
+	{
+		return Failure(EINVAL, "this renderer encodes no HLG output; ColorState carries no display peak luminance");
+	}
+
+	// Every source state that can reach this output, plus the pair that converts nothing. Enumerated
+	// rather than built on demand because a frame may not compile — decision 62 — so `For` has to be
+	// total over what an item can ask for, and the closed vocabulary is what makes that finite.
+	for (std::uint32_t rounded = 0; rounded < 2; ++rounded)
+	{
+		if (Result<void> built = Build(format, QuadVariant{ .Run = rounded != 0 ? QuadRunCorner : 0U }); !built)
+		{
+			return built;
+		}
+	}
+
+	constexpr std::array<TransferFunction, 3> Transfers{ TransferFunction::Srgb,
+		                                                 TransferFunction::Linear,
+		                                                 TransferFunction::Pq };
+	constexpr std::array<ColorPrimaries, 3> Primaries{ ColorPrimaries::Bt709,
+		                                               ColorPrimaries::DciP3,
+		                                               ColorPrimaries::Bt2020 };
+
+	for (const TransferFunction transfer : Transfers)
+	{
+		for (const ColorPrimaries primaries : Primaries)
+		{
+			for (std::uint32_t rounded = 0; rounded < 2; ++rounded)
+			{
+				const QuadVariant variant{ .Run = QuadRunConvert | (rounded != 0 ? QuadRunCorner : 0U),
+					                       .SourceTransfer = transfer,
+					                       .SourcePrimaries = primaries,
+					                       .TargetTransfer = output.Transfer,
+					                       .TargetPrimaries = output.Primaries };
+
+				if (Result<void> built = Build(format, variant); !built)
+				{
+					return built;
+				}
+			}
+		}
+	}
+
+	return {};
+}
+
+Result<void> QuadPipeline::Build(VkFormat format, QuadVariant variant)
+{
+	if (For(format, variant) != VK_NULL_HANDLE)
 	{
 		return {};
 	}
 
-	if (m_VariantCount == m_Variants.size())
+	if (m_BuiltCount == m_Built.size())
 	{
-		return Failure(EINVAL, "more distinct composite formats at once than this renderer builds pipelines for");
+		return Failure(EINVAL, "more distinct bindings at once than this renderer builds pipelines for");
 	}
 
+	// The five constants Quad.frag declares, laid out contiguously so that one entry per constant can
+	// name an offset into this object. Four bytes each and no padding to state: a specialization
+	// entry is a size and an offset rather than a struct the front end has to agree about.
+	const std::array<std::int32_t, 5> values{ static_cast<std::int32_t>(variant.Run),
+		                                      static_cast<std::int32_t>(variant.SourceTransfer),
+		                                      static_cast<std::int32_t>(variant.SourcePrimaries),
+		                                      static_cast<std::int32_t>(variant.TargetTransfer),
+		                                      static_cast<std::int32_t>(variant.TargetPrimaries) };
+	std::array<VkSpecializationMapEntry, 5> entries{};
+
+	for (std::uint32_t constant = 0; constant < entries.size(); ++constant)
+	{
+		entries[constant] =
+			VkSpecializationMapEntry{ .constantID = constant,
+			                          .offset = constant * static_cast<std::uint32_t>(sizeof(std::int32_t)),
+			                          .size = sizeof(std::int32_t) };
+	}
+
+	const VkSpecializationInfo specialization{ .mapEntryCount = static_cast<std::uint32_t>(entries.size()),
+		                                       .pMapEntries = entries.data(),
+		                                       .dataSize = sizeof(values),
+		                                       .pData = values.data() };
+
+	// The vertex stage takes none of it. Nothing it does varies by variant — it places four corners
+	// the producer already projected — and specializing it anyway would be one more vertex module per
+	// variant for a program that is byte for byte the same.
 	const std::array<VkPipelineShaderStageCreateInfo, 2> stages{
 		VkPipelineShaderStageCreateInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
 		                                 .pNext = nullptr,
@@ -136,7 +217,7 @@ Result<void> QuadPipeline::Prepare(VkFormat format)
 		                                 .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
 		                                 .module = m_Fragment,
 		                                 .pName = "main",
-		                                 .pSpecializationInfo = nullptr },
+		                                 .pSpecializationInfo = &specialization },
 	};
 
 	// Nothing bound and nothing described. The corners arrive as push constants and the six vertices
@@ -264,8 +345,8 @@ Result<void> QuadPipeline::Prepare(VkFormat format)
 		return created;
 	}
 
-	m_Variants[m_VariantCount] = Variant{ .Format = format, .Pipeline = pipeline };
-	++m_VariantCount;
+	m_Built[m_BuiltCount] = Built{ .Format = format, .Variant = variant, .Pipeline = pipeline };
+	++m_BuiltCount;
 
 	return {};
 }
@@ -277,13 +358,13 @@ void QuadPipeline::Destroy() noexcept
 		return;
 	}
 
-	for (std::size_t index = 0; index < m_VariantCount; ++index)
+	for (std::size_t index = 0; index < m_BuiltCount; ++index)
 	{
-		vkDestroyPipeline(m_Device->Handle(), m_Variants[index].Pipeline, nullptr);
-		m_Variants[index] = Variant{};
+		vkDestroyPipeline(m_Device->Handle(), m_Built[index].Pipeline, nullptr);
+		m_Built[index] = Built{};
 	}
 
-	m_VariantCount = 0;
+	m_BuiltCount = 0;
 
 	if (m_Layout != VK_NULL_HANDLE)
 	{

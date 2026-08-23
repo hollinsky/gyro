@@ -69,7 +69,7 @@ public:
 
 	~VulkanRenderer() override;
 
-	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget> targets) override;
+	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget> targets, ColorState output) override;
 
 	void ReleaseTargets() noexcept override;
 
@@ -121,7 +121,7 @@ private:
 		std::uint64_t LastSubmit = 0;
 	};
 
-	[[nodiscard]] Result<void> Import(const RenderTarget& target, Slot& slot);
+	[[nodiscard]] Result<void> Import(const RenderTarget& target, ColorState output, Slot& slot);
 
 	// Put every freshly imported image into `VK_IMAGE_LAYOUT_GENERAL` once, so that every later
 	// barrier is a queue-family transfer with matching layouts on both halves rather than a layout
@@ -144,6 +144,11 @@ private:
 	// recording ever creates one — decision 62's *no frame blocks on compilation*, holding at the one
 	// place it is currently possible to break it.
 	QuadPipeline m_Pipeline;
+
+	// What the composite is encoded to, from the binding rather than from the frame. Held because
+	// every item's variant and its two luminance factors are a function of this and the item's own
+	// colour state, and `Record` may only look things up.
+	ColorState m_Output = ColorState::Srgb();
 
 	// One timeline for the device's whole life, which is what Seam/SyncPoint.h's borrowed descriptor
 	// requires: *the timeline outlives every point on it*. The descriptor is invalid on a device that

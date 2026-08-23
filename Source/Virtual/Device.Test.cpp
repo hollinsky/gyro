@@ -53,7 +53,7 @@ constexpr Duration Slow = PeriodFromHertz(60.0);
 class ScriptedRenderer final : public IRenderer
 {
 public:
-	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget>) override { return {}; }
+	[[nodiscard]] Result<void> BindTargets(std::span<const RenderTarget>, ColorState) override { return {}; }
 
 	void ReleaseTargets() noexcept override {}
 

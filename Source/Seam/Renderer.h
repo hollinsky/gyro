@@ -342,10 +342,10 @@ struct RecordRequest
 	// Frame/Budget.h's `ObserveGpu`.
 	std::uint32_t CostGeneration = 0;
 
-	// What the composite is encoded to, from the output's configuration — which is where
-	// Seam/RenderTarget.h deliberately declined to put it, so that a reconfiguration changing one
-	// cannot leave a stale copy on every target.
-	ColorState Output = ColorState::Srgb();
+	// No colour state here. *(Moved to `BindTargets` 2026-08-22.)* What the composite is encoded to is
+	// the output's, a renderer is per output, and it is what decides which pipelines have to exist —
+	// so it is stated once where a renderer is allowed to act on it rather than once per frame where
+	// it cannot.
 
 	// What must be redrawn in *this target*, in its device grid.
 	//
@@ -427,7 +427,18 @@ public:
 	// Binding a new set implies releasing the old one. Partial success is not expressible on purpose:
 	// a set is what `AcquireTarget` indexes into, so half of one is not a smaller set, it is a
 	// numbering with holes in it.
-	[[nodiscard]] virtual Result<void> BindTargets(std::span<const RenderTarget> targets) = 0;
+	//
+	// **`output` is what the composite is encoded to, and it is here rather than on a request because
+	// a renderer is per output.** *(Moved from `RecordRequest` 2026-08-22.)* The composition root says
+	// so in as many words — a writer is bound to one presenter's target set for as long as that set
+	// exists — so the output's colour state is constant for the life of a binding, and stating it per
+	// frame was a per-frame restatement of a per-binding fact. What made it worth moving is that the
+	// target end of every colour conversion decides which pipelines exist: a variant an item wants and
+	// does not find is a refused frame, since decision 62 forbids compiling inside one, so the set has
+	// to be built while the state is known and this is the only call that is allowed to be slow. It is
+	// not on `RenderTarget` for that file's own reason: a copy per target is a second place to be
+	// wrong when a reconfiguration changes one and not the others.
+	[[nodiscard]] virtual Result<void> BindTargets(std::span<const RenderTarget> targets, ColorState output) = 0;
 
 	// Drop everything imported from the last target set.
 	//

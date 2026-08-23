@@ -496,6 +496,7 @@ gyro_add_module(Render
 		Renderer.cpp
 	TESTS
 		Device.Test.cpp
+		Pipeline.Test.cpp
 )
 
 gyro_add_shaders(Render

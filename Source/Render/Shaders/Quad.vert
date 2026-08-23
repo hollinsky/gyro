@@ -28,8 +28,10 @@ layout(push_constant) uniform Item
 	// The node's own extent in x and y, the corner radius, and the per-node opacity.
 	vec4 Shape;
 
-	// The target's extent in pixels, which turns a device-space position into a clip-space one.
-	vec2 Target;
+	// The target's extent in pixels in `xy`, which turns a device-space position into a clip-space
+	// one, and the fragment stage's two luminance scales in `zw`. One block declared identically by
+	// both stages rather than two ranges to keep in step with two files.
+	vec4 Target;
 } item;
 
 // Surface-local coordinates, which is what the corner radius is measured in. `Extent` maps the four
@@ -46,7 +48,7 @@ void main()
 	int index = order[gl_VertexIndex];
 	vec2 local[4] = vec2[4](vec2(0.0, 0.0), vec2(item.Shape.x, 0.0), item.Shape.xy, vec2(0.0, item.Shape.y));
 	vec4 placed = item.Corner[index];
-	vec2 clip = placed.xy / item.Target * 2.0 - 1.0;
+	vec2 clip = placed.xy / item.Target.xy * 2.0 - 1.0;
 
 	Local = local[index];
 	gl_Position = vec4(clip * placed.z, 0.0, placed.z);

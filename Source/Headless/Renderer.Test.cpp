@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <span>
 
+#include "Core/ColorState.h"
 #include "Core/Time.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/Renderer.h"
@@ -40,7 +41,7 @@ RecordRequest Frame(RenderMode mode = RenderMode::Planned, std::uint32_t generat
 void Bind(SimulatedRenderer& renderer)
 {
 	const std::array<RenderTarget, 1> targets{ Mapped() };
-	(void)renderer.BindTargets(targets);
+	(void)renderer.BindTargets(targets, ColorState::Srgb());
 }
 } // namespace
 
@@ -157,7 +158,7 @@ GYRO_TEST(SimulatedRenderer, ADmabufTargetIsRefused)
 		.Format = { FormatXrgb8888, 0, ModifierLinear },
 		.Memory = DmabufImage{ .Planes = { DmabufPlane{ RawFd{ 7 }, 0, 16 } }, .PlaneCount = 1 } } };
 
-	const Result<void> refused = renderer.BindTargets(targets);
+	const Result<void> refused = renderer.BindTargets(targets, ColorState::Srgb());
 	GYRO_REQUIRE(!refused.has_value());
 	GYRO_CHECK_EQ(refused.error().Code(), EINVAL);
 }
