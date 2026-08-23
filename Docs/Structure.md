@@ -163,7 +163,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | --- | --- | --- | --- |
 | `Core` | portable | either | — |
 | `Geometry` | portable | either | `Core` |
-| `Wire` | portable | either | `Core` |
+| `Wire` | portable | either | `Core`, `Seam` |
 | `World` | portable | **both** | `Core`, `Geometry` |
 | `Animation` | portable | **both** | `Core`, `Geometry` |
 | `Publication` | portable | **both** | `Core`, `Geometry` |
@@ -384,10 +384,16 @@ how they drift apart. One module gives it one home.
 ### The wire codec is its own module, and it is not `Nested`'s
 
 `Wire` is the Wayland wire codec: message framing, the argument vocabulary, fd passing over
-`SCM_RIGHTS`, and the per-connection object map. It depends on `Core` alone and sits below both
-waists, because `Nested` is split across the threads and reaching `Protocol` for a codec would make
-`Scene` reachable from the frame side — the one edge [the table above](#the-modules) says must never
-be added.
+`SCM_RIGHTS`, and the per-connection object map. It sits below both waists, because `Nested` is split
+across the threads and reaching `Protocol` for a codec would make `Scene` reachable from the frame
+side — the one edge [the table above](#the-modules) says must never be added.
+
+**It depends on `Seam` for `IEventSource` and nothing else.** A connection is drained by the frame
+loop alongside a DRM device and a simulated vblank, so it is a source like any other rather than
+something `Frame/Loop.h` learns to poll specially. The edge is confined to `Wire/Connection.h`:
+`Wire/Writer.h` forward-declares `Connection` and the one constructor needing it complete lives in
+`Wire/Writer.cpp`, so marshalling a request does not pull the control waist into every generated call
+site.
 
 **It has one caller today and that is stated rather than hidden.**
 [Decision 2](Decisions.md#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)

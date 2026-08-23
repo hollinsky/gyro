@@ -8876,9 +8876,18 @@ lands, given [decision 81](#81-a-source-is-pumped-by-one-thread-nested-opens-one
 revision putting a host connection on the frame thread.)*
 
 **The wire codec is a module of its own, `Wire`, depending on `Core` alone, sited below both waists,
-and in the portable tier.** A connection instance is pumped by one thread for the whole of its life,
-which is decision 81's rule applying per object rather than per module — so the module itself has no
-thread affinity, the way `Core` and `Geometry` have none.
+and in the portable tier.** *(Revised 2026-08-23: it depends on `Core` and `Seam`. A connection is
+drained by the frame loop alongside a DRM device and a simulated vblank, so it implements
+`IEventSource` rather than being something `Frame/Loop.h` learns to poll specially — an edge this
+entry did not have to consider because decision 81's revision had not yet put a host connection on
+the frame thread in a form anything polled. The edge is `IEventSource` and nothing else, and it is
+confined to `Wire/Connection.h`: `Wire/Writer.h` forward-declares `Connection` and the one
+constructor needing it complete lives in `Wire/Writer.cpp`, so marshalling a request — which is what
+every generated call site does — does not include the control waist. Below both waists still holds
+in the sense the entry meant it: nothing here names `Scene` or `Protocol`, and `CheckLayering.cmake`
+still refuses the edge that was the reason for the module.)* A connection instance is pumped by one
+thread for the whole of its life, which is decision 81's rule applying per object rather than per
+module — so the module itself has no thread affinity, the way `Core` and `Geometry` have none.
 
 **What forced it out of `Nested` is a layering edge that cannot exist.**
 [Structure.md](Structure.md#the-modules) has `Protocol` depending on `Scene`, and `Nested` split
@@ -8902,7 +8911,10 @@ mutter closing the connection, with a protocol error string and no frame of refe
 own module is exercised over a `socketpair` with the peer written by the test: a truncated header, an
 fd arriving one message early, a `new_id` reused inside the `delete_id` window, an argument array
 that runs off the end. Those are the cases that matter and none of them is reproducible by asking a
-host nicely.
+host nicely. *(2026-08-23: the `new_id`-inside-`delete_id` case named here is where
+[decision 123](#123-a-destroyed-proxy-keeps-its-dispatcher-and-loses-its-object) came from — the
+runtime as first written ended the connection on it, which is what a scripted peer found and a real
+host would only have shown as an unexplained disconnect.)*
 
 **Which is also why it is portable rather than platform**, and that is a correction to the obvious
 reading. `sendmsg` with `SCM_RIGHTS` over `AF_UNIX` is POSIX — `<sys/socket.h>` and `<sys/un.h>` are
@@ -9233,3 +9245,98 @@ model values a commit set. `Source/Integration/Schedulability.Test.cpp`'s
 *ASettledOutputIsNotWokenByTheOneAnimatingBesideIt* still passes and is now the one claim in the tree
 that the authoring side cannot produce: it drives a per-output schedule a test wrote. That is the cost of
 this decision with a test's name on it.
+
+### 123. A destroyed proxy keeps its dispatcher and loses its object
+
+*(Decided 2026-08-23, on reading [decision 119](#119-the-wayland-wire-codec-is-its-own-module-wire-and-it-is-portable)'s
+module into the tree and finding that an event for an object the client had already destroyed ended
+the connection.)*
+
+**An unbound id keeps its dispatcher until `delete_id` frees it, and the runtime calls that dispatcher
+with a null `self`.** The arguments are read and thrown away; only the call into the proxy is skipped.
+
+**What this costs a person is a nested output going black in the middle of a session, with nothing
+in front of it to explain why.** Both ends of a connection talk at once, so the host has an event for
+an object on the wire before it has read the request destroying that object — every time, for one
+round trip. Treating that as a protocol error means the ordinary lifecycle of a `wl_callback`, a
+presentation feedback, or a buffer release ends the connection, at a moment that depends on how the
+two processes were scheduled. It is the failure this project cannot absorb: it ships as a window that
+stops updating and a log line naming the *symptom*.
+
+**Skipping the message is not available, and that is the whole difficulty.** A Wayland message frames
+its own bytes — the header's size word says where the next one starts — so bytes can always be
+stepped over. Descriptors cannot. They arrive out of band on `SCM_RIGHTS`, attached to whichever
+`sendmsg` carried the first byte of their message, and they come off a queue in the order the
+receiver's demarshalling asks for them. Nothing in that queue says which message an entry belongs to.
+So a message whose arguments go unread leaves the queue one entry out of step, and the *next* message
+takes a descriptor belonging to the one thrown away — a real, open descriptor for the wrong buffer.
+The compositor draws somebody else's window contents and no check anywhere fires. Reading the
+arguments is what takes the descriptors off the queue and closes them, so the message has to be read
+whether or not there is anything left to hand it to.
+
+**The dispatcher is the only thing that knows how**, which is
+[decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)'s split showing up
+as a constraint rather than a convenience. `Wire` has no signatures by construction — it cannot know
+that opcode 3 on this object takes a descriptor — so the decode has to come from the generated
+bindings, and the generated bindings are a function pointer and a `void*`. Keeping the pointer and
+dropping the object is the smallest thing that keeps the decode reachable after the object is gone.
+
+The obligation this puts on the generator is one line per event. The emitted code already reads its
+arguments into locals and then makes one call, so the guard goes around the call:
+
+    const std::uint32_t name = wireReader.GetUint();
+    const std::string_view interface = wireReader.GetString();
+
+    if (wireListener != nullptr)
+    {
+        wireListener->OnGlobal(name, interface);
+    }
+
+**Rejected: a second generated function that reads and discards.** The honest version — `Unbind`
+takes an explicit skip dispatcher, and nothing is ever handed a nullable `self`. It states the
+contract in the type system, which is the better property, and it loses anyway: two decoders for one
+interface drift apart the first time an argument is added to one of them, and the symptom of that
+drift is the misaligned descriptor queue this entry exists to prevent — silent, delayed, and
+attributed to the wrong message. One decoder and one branch cannot drift. What the rejected version
+would have bought is a null dereference becoming impossible; what it costs is that the failure it
+replaces is loud and immediate while the one it introduces is neither.
+
+**Rejected: discarding the message, as libwayland does.** libwayland can, because it holds every
+interface's signature and closes exactly the descriptors the discarded message carried. Reproducing
+that here means putting the signatures in `Wire`, which is the thing decision 2 spent an entry not
+doing.
+
+**Rejected: never unbinding a proxy the host may still be eventing.** Pushes an unanswerable question
+onto every call site — no client knows what is in flight — and the answer would have to be "keep
+every proxy alive for one round trip", which is the zombie this decision already is, with the
+bookkeeping moved somewhere it cannot be done correctly.
+
+**A message may carry at most twenty-eight descriptors, refused where it is marshalled.** The same
+invariant from the sending side. `SCM_RIGHTS` is limited to what one `sendmsg` carries, so a burst of
+requests holding more than that has to be split — and the split has to fall on a message boundary,
+because a message reaching the far end ahead of its descriptors is the same queue misalignment read
+backwards. A single message with twenty-nine descriptors of its own offers no boundary to split at:
+it would go out whole with twenty-eight behind it. `MessageWriter::Send` refuses it, latching on the
+buffer the way the 16-bit size cap already does, so the batching clamp is total rather than true in
+practice. No protocol in the set gyro speaks comes close — four planes is the most any request asks
+for — and the point is that the clamp is now provable rather than lucky.
+
+**Two things were wrong underneath this and are worth recording, because both were invisible.** A
+descriptor's message boundary was doubling as a *committed* flag, with zero meaning "not yet"; the
+offset rebasing that happens when a sent prefix is reclaimed could land a live boundary back on zero,
+at which point the next message adopted the descriptor and sent it one message late. Committed is a
+count now, which cannot be rebased into meaning something else. Separately, an id that was allocated
+and never bound was retired rather than freed — but nothing on the wire had ever named it, so no
+`delete_id` was ever coming and the id was stranded for the life of the connection. It frees
+immediately now, which rests on the rule that a proxy is bound before its id is marshalled; that rule
+is stated in `Wire/Connection.h` rather than enforced, because the request that would break it is
+generated code this module never sees.
+
+**What is now asserted rather than argued.** `Source/Wire/Connection.Test.cpp`'s
+*AnEventForARetiredProxyIsReadAndDropped* sends two events each carrying a descriptor, the first for
+an object already unbound, and checks that the *second* object received its own descriptor — which is
+only true if the dead object's came off the queue first. *DeleteIdClearsTheRetiredDispatcher* checks
+that the zombie window closes when the host says so, and that an event after it is a connection error
+again. `Source/Wire/Codec.Test.cpp`'s *RefusesAMessageCarryingMoreDescriptorsThanOneSend* and
+*TwentyEightDescriptorsInOneMessageStillGo* are the send limit as a boundary rather than a ceiling
+somebody guessed at.
