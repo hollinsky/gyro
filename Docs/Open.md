@@ -158,16 +158,22 @@ nothing only proves the grep.
   [Decision 74](Decisions.md#74-the-forward-ring-recycles-only-below-the-watermark-and-a-full-ring-defers)'s refused publish is retained
   and retried, and what unblocks it is the frame thread posting a `FrameReport` — but
   [Publication/Return.h](../Source/Publication/Return.h) carries no descriptor, so nothing wakes
-  dispatch when that happens. [Dispatch/Loop.h](../Source/Dispatch/Loop.h) folds in a one-millisecond
-  poll instead, which is decision 83's problem with the threads reversed and without decision 83's
-  answer. The obvious fix is an eventfd on the return channel, written by the frame thread — and
-  writing an eventfd is a counter increment that never blocks, so the priority order survives it in
-  the same way it survives the forward nudge. What makes it a question rather than a patch is that
-  the frame thread would then write a descriptor *every frame* to serve a case that only arises when
-  it is already four publishes behind, which is the opposite of decision 83's *zero on an idle
-  machine*. A conditional write — only when the frame thread's report actually moves a watermark
-  dispatch is waiting on — needs the frame thread to know dispatch is waiting, which is state on a
-  third channel. Settle it once the deferral path has been seen to happen at all; it may never.
+  dispatch when that happens. [Dispatch/Loop.h](../Source/Dispatch/Loop.h) polls instead, at an
+  interval sized to a panel period because a frame completing is the only thing that can unblock it.
+  That is decision 83's problem with the threads reversed and without decision 83's answer. The
+  obvious fix is an eventfd on the return channel, written by the frame thread, and it keeps decision
+  83's bargain rather than inverting it: the post site is reached only when the frame thread steps,
+  and an idle frame thread blocks indefinitely, so an idle machine writes nothing on this channel
+  either. What it actually costs is a syscall per *rendered* frame from inside the `FrameSection`
+  guard — non-blocking, and sub-microsecond beside the commit it would sit next to, and the post is
+  the last statement before the guard closes, so it can move out of the section rather than have to
+  be argued into it. The conditional form is available for the same reason decision 83 gives for a
+  doorbell not being the third channel [the publication
+  boundary](Architecture.md#the-publication-boundary) forbids: dispatch raising a flag on the forward
+  ring when a publish is refused, and the frame thread testing it before it posts, carries nothing
+  anything renders from — and the lost wakeup that opens is the double-check decision 83 already
+  wrote down for the forward nudge. What is left as the argument for the poll is not its cost but its
+  reach: settle this once the deferral path has been seen to happen at all, since it may never.
 - **The shell's scene vocabulary.** *(Kinds answered 2026-08-22; the dressings remain.)*
   [Decision 95](Decisions.md#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind)
   settles the node kinds — container, image, solid, reference — and finds decision 51's sketch wrong

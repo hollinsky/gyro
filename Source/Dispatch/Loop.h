@@ -51,12 +51,23 @@
 // return direction has the same hole with the threads reversed. So dispatch polls, and this is the
 // cadence.
 //
-// A millisecond is below any panel period, so the first retry after the frame thread catches up is
-// prompt; and the path is only reached when the frame thread is already four publishes behind, which
-// on a running system means it is late rather than idle. The waste is therefore bounded by a case that
-// is already degraded, which is the direction to be wrong in. Carried in
-// [Open.md](../../Docs/Open.md) as a doorbell the return channel does not have.
-inline constexpr Duration PublishRetryInterval = std::chrono::milliseconds{ 1 };
+// **What sizes it is the event it is waiting for, which is a frame completing.** A retry can only
+// succeed once the frame thread has posted a report that moves the watermark past the slot the
+// deferred sequence wants, and it posts one per frame — so an interval below a panel period spends
+// whole scene walks that cannot possibly go out, and spends every one of them at the moment the
+// machine is already behind. The world holds no refresh rate to derive this from: decision 97 gives
+// the mode's extent to the frame side, and `Scene/Output.h` carries where an output *is* rather than
+// when it scans, so this is a constant here rather than a function of the output set.
+//
+// **Four milliseconds is under one period for any panel to 250 Hz and a quarter of a frame at 60.**
+// Below it there is nothing to win: a refused publish means the frame thread is four publishes behind,
+// so a retry that succeeded instantly would still not be *read* for four frames. Above it there is
+// something to lose, but in one corner only — a world that settles with its last publish refused,
+// where the retry's own publication is what rings
+// [decision 83](../../Docs/Decisions.md#83-dispatchs-publication-is-an-event-source)'s doorbell and
+// wakes an idle frame thread. That delay lands at the tail of a spring that has already stopped
+// moving. Carried in [Open.md](../../Docs/Open.md) as a doorbell the return channel does not have.
+inline constexpr Duration PublishRetryInterval = std::chrono::milliseconds{ 4 };
 
 // One dispatch iteration: everything the world's author owes the frame thread, and when to come back.
 class DispatchLoop
@@ -163,6 +174,13 @@ public:
 		// supersedes the pending slot in place under the same unconsumed sequence, which is the
 		// behaviour its own documentation argues for. `Flush` earns its place the day a step can decide
 		// it has nothing new to serialise; today every step does.
+		//
+		// **Superseding is also what pays for `PublishRetryInterval` being a panel period rather than a
+		// millisecond**, and the two choices only work together. A retry that merely flushed would hand
+		// over a scene one interval stale, so lengthening the interval would be lengthening how far
+		// behind the delivered scene is; a retry that re-serialises hands over the current one whenever
+		// it lands, so the interval buys nothing back for being short. Shortening it and flushing is the
+		// combination to avoid: it is the most work for the stalest result.
 
 		// Two folds, from opposite sides of the same settling. `Advance` says when the author next wants
 		// to write; `Republish` says when a channel it already wrote comes to rest, which is when this
