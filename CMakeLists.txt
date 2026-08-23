@@ -24,6 +24,7 @@ include(CMake/CPM.cmake)
 include(CMake/BuildFlags.cmake)
 include(CMake/Module.cmake)
 include(CMake/Shaders.cmake)
+include(CMake/Bindings.cmake)
 
 enable_testing()
 
@@ -417,6 +418,27 @@ gyro_add_module(Wire PORTABLE
 		Message.Test.cpp
 )
 
+# The typed client bindings, generated from the published XML into the build tree — decision 2's
+# split, with the server codec left to libwayland and the client half gyro's because the nested
+# backend needs it and there is no alternative that does not fork the renderer.
+#
+# The set is what a nested output actually speaks. `wayland` and `xdg-shell` are how a surface exists
+# and gets a size; `linux-dmabuf-v1` is how the renderer's own allocation reaches the host without a
+# copy, and `linux-drm-syncobj-v1` is how it says when that allocation is finished being drawn into;
+# `presentation-time` is the host's vblank, which is the clock Frame/FrameClock.h predicts against
+# when the panel belongs to somebody else; `viewporter` is scaling without a re-render; and
+# `xdg-decoration` is how gyro says it draws its own, which it does.
+gyro_add_bindings(WaylandProtocols
+	PROTOCOLS
+		wayland
+		stable/xdg-shell/xdg-shell
+		stable/presentation-time/presentation-time
+		stable/linux-dmabuf/linux-dmabuf-v1
+		staging/linux-drm-syncobj/linux-drm-syncobj-v1
+		stable/viewporter/viewporter
+		unstable/xdg-decoration/xdg-decoration-unstable-v1
+)
+
 # The CPU renderer, and PORTABLE is the load-bearing word here for a stronger reason than it is
 # anywhere else.
 #
@@ -767,6 +789,7 @@ add_executable(IntegrationTests
 	Source/Integration/SceneRoundTrip.Test.cpp
 	Source/Integration/Schedulability.Test.cpp
 	Source/Integration/VirtualComposite.Test.cpp
+	Source/Integration/WaylandBindings.Test.cpp
 )
 target_link_libraries(IntegrationTests
 	PRIVATE
@@ -778,6 +801,8 @@ target_link_libraries(IntegrationTests
 		Render
 		Blit
 		Virtual
+		WaylandProtocols
+		Wire
 		World
 		Seam
 		Geometry

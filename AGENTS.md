@@ -64,7 +64,7 @@ than an interruption. What earns an interruption is a disagreement that survived
 refute it, or a choice where you genuinely cannot know Paul's preference.
 
 **This applies to the task, not only the code.** If the thing being asked for looks like the wrong
-thing to build, say that before building it.
+thing to build or should be split into smaller tasks say that before building it.
 
 Nothing here is sacred and there is no "mine" versus "yours" — we are building this together, and the
 world outside the repo is malleable too. If the right answer is a kernel change or a new userspace

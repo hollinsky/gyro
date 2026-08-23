@@ -147,6 +147,18 @@ public:
 	// dispatcher returns, rather than at every accessor by the generated code.
 	[[nodiscard]] bool Failed() const noexcept { return m_Failed; }
 
+	// The generated dispatcher's answer to an opcode it has no case for, which is the one thing it
+	// cannot demarshal its way out of. Skipping the *bytes* would be free — Wire/Connection.h frames
+	// the next message off the header's size word regardless of what was read — but the descriptors
+	// are not in the message: they arrive on a queue shared across messages, so an event carrying one
+	// that nobody consumes leaves every later `fd` argument one entry out of step, and the next buffer
+	// imported belongs to something else. Wire/Connection.h makes the identical call for an event
+	// naming an id nothing is bound to, and this is that same refusal reached one level in.
+	//
+	// A conforming host never provokes it: it may not send an event above the version an object was
+	// bound at, and every version the bindings ask for came from the same XML their switch did.
+	void Fail() noexcept { m_Failed = true; }
+
 	// What is left unread. Not a protocol error on its own — a client built against an older version
 	// of an interface will legitimately ignore arguments a newer host appends — so it is offered
 	// rather than checked.

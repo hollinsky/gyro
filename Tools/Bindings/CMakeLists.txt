@@ -34,9 +34,18 @@ include(${GYRO_ROOT}/CMake/BuildFlags.cmake)
 
 enable_testing()
 
-add_library(BindingsParser STATIC Xml.cpp)
+# The parser and the emitter, in one library because the tests drive both and the executable is a
+# `main()` over them. Split into two targets it would be two archives with one consumer each.
+add_library(BindingsParser STATIC
+	Emit.cpp
+	Naming.cpp
+	Xml.cpp
+)
 target_link_libraries(BindingsParser PUBLIC BuildFlags)
 target_include_directories(BindingsParser PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(GyroBindings Main.cpp)
+target_link_libraries(GyroBindings PRIVATE BindingsParser)
 
 # The published protocols, located rather than hardcoded. The generator needs them at build time
 # regardless, so a machine that cannot find them cannot build gyro's bindings either — which makes
@@ -57,6 +66,8 @@ endif()
 # them* parse. A protocol suite update that introduces something outside the subset should break
 # this build on the day it lands, not on the day somebody remembers to refresh a fixture.
 add_executable(BindingsParserTests
+	Emit.Test.cpp
+	Naming.Test.cpp
 	Xml.Test.cpp
 	${GYRO_SOURCE_DIR}/Testing/Main.cpp
 	${GYRO_SOURCE_DIR}/Testing/Test.cpp
