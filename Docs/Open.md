@@ -154,6 +154,20 @@ nothing only proves the grep.
   report and sleeps — so the conditional form is correct only with the step re-checking the ring after
   posting and before it returns `Never()`. Settle it by measuring the waste on a busy system rather
   than before.
+- **The return channel has no doorbell, so a deferred publish is retried on a timer.**
+  [Decision 74](Decisions.md#74-the-forward-ring-recycles-only-below-the-watermark-and-a-full-ring-defers)'s refused publish is retained
+  and retried, and what unblocks it is the frame thread posting a `FrameReport` — but
+  [Publication/Return.h](../Source/Publication/Return.h) carries no descriptor, so nothing wakes
+  dispatch when that happens. [Dispatch/Loop.h](../Source/Dispatch/Loop.h) folds in a one-millisecond
+  poll instead, which is decision 83's problem with the threads reversed and without decision 83's
+  answer. The obvious fix is an eventfd on the return channel, written by the frame thread — and
+  writing an eventfd is a counter increment that never blocks, so the priority order survives it in
+  the same way it survives the forward nudge. What makes it a question rather than a patch is that
+  the frame thread would then write a descriptor *every frame* to serve a case that only arises when
+  it is already four publishes behind, which is the opposite of decision 83's *zero on an idle
+  machine*. A conditional write — only when the frame thread's report actually moves a watermark
+  dispatch is waiting on — needs the frame thread to know dispatch is waiting, which is state on a
+  third channel. Settle it once the deferral path has been seen to happen at all; it may never.
 - **The shell's scene vocabulary.** *(Kinds answered 2026-08-22; the dressings remain.)*
   [Decision 95](Decisions.md#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind)
   settles the node kinds — container, image, solid, reference — and finds decision 51's sketch wrong

@@ -1,0 +1,218 @@
+#pragma once
+
+#include <cerrno>
+#include <chrono>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <utility>
+
+#include "Core/Clock.h"
+#include "Core/Result.h"
+#include "Core/Time.h"
+#include "Core/Wake.h"
+#include "Gym/Gym.h"
+#include "Publication/Publisher/Outbox.h"
+#include "Publication/Return.h"
+#include "Publication/Ring.h"
+#include "Scene/Output.h"
+#include "Scene/Serializer.h"
+#include "Scene/Store.h"
+
+// The dispatch thread's iteration, with the wait left to whoever owns the thread.
+//
+// **It is a step for the reason
+// [decision 80](../../Docs/Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait)
+// makes the frame loop one**, and the symmetry is the point rather than a nicety: the composition root
+// is the only thing in the process allowed to name a ring, a descriptor, or a thread, so both halves of
+// the boundary hand it a `Wake` and let it do the sleeping. That keeps this file portable, which is
+// what lets the producer side of the publication boundary be exercised on a machine with no GPU, no
+// seat, and no compositor — the same tier the gyms are held to and for the same reason.
+//
+// **What it is not is the dispatch loop [Architecture.md](../../Docs/Architecture.md#the-dispatch-loop)
+// describes.** That one drains input first, demarshals client traffic under a per-connection budget,
+// and imports buffers. None of those have a producer yet. What is here is the part of that loop which
+// exists below all of it and does not change when they arrive: author, serialise, publish, reclaim.
+// The gym is standing where the clients will stand, and `IGym`'s two verbs are the shape a shell has
+// anyway — author once, retarget what is due, say when to come back.
+//
+// **Nothing here blocks and nothing here waits on the frame thread**, which is
+// [decision
+// 61](../../Docs/Decisions.md#61-the-frame-thread-is-sched_fifo-the-earliest-deadline-first-schedule-is-gyros-not-the-kernels)'s
+// priority order surviving contact: a full ring costs a retained buffer rather than a lost snapshot,
+// and the watermark arrives on a queue the frame thread never waits to write to.
+
+// SPEC: how long dispatch waits before retrying a publish the ring had no room for.
+//
+// **There is nothing to wake it, and that is the whole reason for a number here.** A refused publish is
+// unblocked by the frame thread posting a `FrameReport`, and the return channel carries no descriptor
+// — [decision 83](../../Docs/Decisions.md#83-dispatchs-publication-is-an-event-source) gave the
+// *forward* channel a doorbell precisely because the frame thread had nothing to wake it, and the
+// return direction has the same hole with the threads reversed. So dispatch polls, and this is the
+// cadence.
+//
+// A millisecond is below any panel period, so the first retry after the frame thread catches up is
+// prompt; and the path is only reached when the frame thread is already four publishes behind, which
+// on a running system means it is late rather than idle. The waste is therefore bounded by a case that
+// is already degraded, which is the direction to be wrong in. Carried in
+// [Open.md](../../Docs/Open.md) as a doorbell the return channel does not have.
+inline constexpr Duration PublishRetryInterval = std::chrono::milliseconds{ 1 };
+
+// One dispatch iteration: everything the world's author owes the frame thread, and when to come back.
+class DispatchLoop
+{
+public:
+	DispatchLoop(const IClock& clock, SnapshotRing& ring, ReturnChannel& returns)
+		: m_Store{ clock }, m_Outbox{ ring, returns }
+	{}
+
+	// Neither copied nor moved, for `SnapshotOutbox`'s reason rather than a weaker one: the outbox is
+	// the ring's writer *and* the bookkeeping beside it, and a second loop on one ring would keep a
+	// second answer to what is still out.
+	DispatchLoop(const DispatchLoop&) = delete;
+	DispatchLoop& operator=(const DispatchLoop&) = delete;
+	DispatchLoop(DispatchLoop&&) = delete;
+	DispatchLoop& operator=(DispatchLoop&&) = delete;
+
+	// Take the author and the output set, and let the author build its tree. Called once, before the
+	// first `Step`.
+	//
+	// **The outputs are the composition root's and arrive here rather than being discovered**, because
+	// where an output sits in global space is a fact only the root holds — it is the one thing that has
+	// both the mode the backend agreed to and the layout the world is arranged in, which is
+	// [decision
+	// 87](../../Docs/Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)'s
+	// division. Their *order* is load-bearing: the snapshot's per-output wake and placement runs are
+	// positional, so index `i` here has to be the frame loop's output `i`.
+	[[nodiscard]] Result<void> Open(std::unique_ptr<IGym> author, std::span<const SceneOutput> outputs)
+	{
+		if (m_Author)
+		{
+			return Failure(EEXIST, "the dispatch loop already has an author");
+		}
+
+		if (!author)
+		{
+			return Failure(EINVAL, "the dispatch loop needs an author");
+		}
+
+		// **An empty output set is refused rather than published**, and the failure it prevents is the
+		// quiet one. Decision 84 makes a run whose length is not the output set's *no* information
+		// rather than partial information, so a scene published against no outputs reaches the frame
+		// thread as a wake schedule of length zero — which reads as nothing owed. The compositor would
+		// then fold to idle, correctly, with a scene nobody ever sees, and every counter in the process
+		// would say it was working.
+		if (outputs.empty())
+		{
+			return Failure(EINVAL, "a scene with no outputs publishes a wake schedule nothing can read");
+		}
+
+		m_Store.SetOutputs(outputs);
+
+		if (const Result<void> opened = author->Open(m_Store); !opened)
+		{
+			return opened;
+		}
+
+		m_Author = std::move(author);
+
+		return {};
+	}
+
+	// One iteration. Returns the wake the next one is owed at; `Wake::Never()` arms nothing, which on
+	// this side of the boundary means *the world has stopped changing* rather than *nothing is being
+	// drawn*.
+	//
+	// The order is `SnapshotOutbox`'s own: collect first so the watermark is fresh and everything below
+	// it is back in the pool before anything asks for a buffer, then author, then publish what the scene
+	// resolved to.
+	[[nodiscard]] Wake Step()
+	{
+		// Nothing has been authored, so there is nothing to say and nothing to come back for. A loop
+		// stepping an unopened dispatch is a wiring mistake in the root rather than a state to serve,
+		// and `Open` is where it is caught.
+		if (!m_Author)
+		{
+			return Wake::Never();
+		}
+
+		Collect();
+
+		const Instant now = m_Store.Now();
+		const Wake authored = m_Author->Advance(m_Store, now);
+
+		// **`Serialize` takes the store by mutable reference and that is the point of calling it here
+		// rather than caching**: the walk that decides whether a coefficient crosses is the walk that
+		// retires the channels which have settled, so a scene that is finishing gets smaller only
+		// because this ran.
+		const bool published = m_Outbox.Publish(m_Serializer.Serialize(m_Store));
+
+		if (published)
+		{
+			++m_Publications;
+		}
+		else
+		{
+			++m_Deferrals;
+		}
+
+		// **`Flush` is deliberately not called beside `Publish`**, though `SnapshotOutbox`'s header
+		// sketches a loop that does. Flushing first would deliver the refused snapshot *and* then the
+		// one just built, spending two of the four ring slots at the one moment the frame thread has
+		// already shown it cannot keep up, to hand it a scene the world has moved past. `Publish`
+		// supersedes the pending slot in place under the same unconsumed sequence, which is the
+		// behaviour its own documentation argues for. `Flush` earns its place the day a step can decide
+		// it has nothing new to serialise; today every step does.
+
+		// Two folds, from opposite sides of the same settling. `Advance` says when the author next wants
+		// to write; `Republish` says when a channel it already wrote comes to rest, which is when this
+		// scene can be re-serialised smaller. Both must be armed or one of the two halves of
+		// Docs/Architecture.md#doing-nothing-must-cost-nothing goes unserved.
+		const Wake wake = Sooner(authored, m_Serializer.Republish());
+
+		return published ? wake : Sooner(wake, Wake::At(Advanced(now, PublishRetryInterval)));
+	}
+
+	// The world this loop authors into, so that a test can ask what is in the scene rather than infer it
+	// from the bytes that crossed.
+	[[nodiscard]] const SceneStore& Store() const noexcept { return m_Store; }
+
+	// What is still out and what has come back. Nothing in the design reads these; they are the
+	// composition root's report line and a test's way of asserting that reclamation happened rather than
+	// that nothing crashed.
+	[[nodiscard]] const SnapshotOutbox& Outbox() const noexcept { return m_Outbox; }
+
+	[[nodiscard]] std::uint64_t Publications() const noexcept { return m_Publications; }
+
+	// Publishes the ring had no room for. Retained rather than lost, and retried on the wake above — so
+	// a number that climbs is the frame thread falling behind, not a scene going missing.
+	[[nodiscard]] std::uint64_t Deferrals() const noexcept { return m_Deferrals; }
+
+	// Frame reports taken off the return channel. The releases in them belong to whoever imported the
+	// buffers, and nothing imports one yet.
+	[[nodiscard]] std::uint64_t Reports() const noexcept { return m_Reports; }
+
+private:
+	// Drain the return channel to empty, which is what advances the watermark and puts every buffer
+	// below it back in the pool. Taking one report and stopping would leave reclamation a frame behind
+	// forever, since the frame thread posts one per frame whatever else happened.
+	void Collect() noexcept
+	{
+		FrameReport report{};
+
+		while (m_Outbox.Collect(report))
+		{
+			++m_Reports;
+		}
+	}
+
+	SceneStore m_Store;
+	SceneSerializer m_Serializer{};
+	SnapshotOutbox m_Outbox;
+
+	std::unique_ptr<IGym> m_Author;
+
+	std::uint64_t m_Publications = 0;
+	std::uint64_t m_Deferrals = 0;
+	std::uint64_t m_Reports = 0;
+};

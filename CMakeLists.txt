@@ -348,6 +348,30 @@ gyro_add_module(Gym PORTABLE DISPATCH
 		Lanes.Test.cpp
 )
 
+# The dispatch thread's iteration, with the wait left to the composition root — decision 80's shape,
+# on the other side of the boundary and for the same reason.
+#
+# A module rather than files under `Compositor`, and CheckLayering is what forces it rather than taste:
+# the outbox lives in `Publication/Publisher`, which is a dispatch half, so a file in the composition
+# root cannot name one. The root is neither thread — it constructs both — and the check reads anything
+# outside a dispatch half as the side being protected. Putting the step here makes the boundary a graph
+# property, and PORTABLE keeps the producer side of the publication boundary runnable on a machine with
+# no GPU, no seat, and no compositor.
+#
+# DEPENDS is what the code has. `Scene` for the store and the serializer, `Publication` for the ring,
+# the return channel and the outbox that owns a published snapshot's bytes, `Gym` because the scenes
+# gyro authors for itself are the only author there is until there is a protocol, and `Core` for the
+# clock, the result and the wake.
+gyro_add_module(Dispatch PORTABLE DISPATCH
+	DEPENDS
+		Core
+		Publication
+		Scene
+		Gym
+	TESTS
+		Loop.Test.cpp
+)
+
 # The control waist: every interface with more than one implementation, and the plain data that
 # crosses them. This is the presentation half — IPresenter and what its two verbs take and report.
 # IRenderer, ISession and IInput join it where they are written.

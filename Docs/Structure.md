@@ -170,6 +170,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Seam` | portable | **both** | `Core`, `Geometry`, `World` |
 | `Scene` | portable | dispatch | `Core`, `Geometry`, `World`, `Animation`, `Publication` |
 | `Gym` | portable | dispatch | `Core`, `Geometry`, `World`, `Animation`, `Scene` |
+| `Dispatch` | portable | dispatch | `Core`, `Publication`, `Scene`, `Gym` |
 | `Blit` | **portable** | frame | `Core`, `Geometry`, `Seam` |
 | `Frame` | portable | frame | `Core`, `Geometry`, `World`, `Animation`, `Publication`, `Seam` |
 | `Render` | platform | **both** | `Core`, `Geometry`, `Publication`, `Seam` |
@@ -605,9 +606,9 @@ of and a module holding its own call sites stops being the thing under test.
 
 **`DISPATCH` whole, for `Scene`'s reason.** A gym holds a `SceneStore` and opens `SceneCommit`s, so
 the frame side's inability to reach it is a graph property rather than a directory one. It does not
-depend on `Publication`: a gym authors and never publishes, and the loop around it — `Open` once,
-`Advance` on the wake it asked for, publish, sleep — is the composition root's, exactly as the frame
-loop's `while` is.
+depend on `Publication`: a gym authors and never publishes. The loop around it — `Open` once,
+`Advance` on the wake it asked for, publish — is `Dispatch`'s, and the `sleep` at the end of that
+sentence is the composition root's, exactly as the frame loop's `while` is.
 
 **Two of its scenes do not draw under the CPU renderer, and the module says so rather than leaving it
 to be found.** [Blit/Blit.cpp](../Source/Blit/Blit.cpp)'s `Classify` refuses a material, an
@@ -617,6 +618,37 @@ instruments for the Vulkan renderer specifically: under `--backend=dump` they wr
 for as long as they are moving, which is an empty directory somebody would otherwise file against the
 backend. `DrawsOnCpu` is a free function beside the interface rather than a verb on it, so the root
 can say so at startup without a gym having to answer a question about a renderer it never sees.
+
+### The dispatch step is a module because the outbox is behind a dispatch half
+
+`Dispatch` holds one function: author, serialise, publish, reclaim, and answer when to come back. It
+is [decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait)'s shape
+on the producer side of the boundary — a step, with the wait left to whoever owns the thread — and the
+symmetry is deliberate, since the composition root is the only thing in the process permitted to name
+a ring, a descriptor, or a thread.
+
+**It is a module because `CheckLayering` leaves no alternative, and that is a better reason than
+taste.** `SnapshotOutbox` lives in `Publication/Publisher`, which is a declared dispatch half, and the
+check reads every file outside a dispatch half as the side being protected. The composition root is
+*neither* thread — it constructs both — so `Compositor.cpp` cannot name the outbox, cannot name the
+serializer, and cannot hold the store. Putting the step in its own `DISPATCH` module turns the
+boundary into a graph property, and `PORTABLE` keeps the producer half of the publication boundary
+runnable on a machine with no GPU, no seat, and no compositor — the same tier `Gym` is held to, for
+the same reason.
+
+**What is here is not the dispatch loop [Architecture.md](Architecture.md#the-dispatch-loop)
+describes**, and the difference is scope rather than disagreement. That one drains input first,
+demarshals client traffic under a per-connection budget, and imports buffers; none of those have a
+producer yet. What exists is the part underneath all of it that does not change when they arrive, with
+a gym standing where the clients will stand — `IGym`'s two verbs being the shape a shell has anyway.
+
+**The one number it carries is a poll, and it is there because the return direction has no doorbell.**
+[Decision 83](Decisions.md#83-dispatchs-publication-is-an-event-source) gave the forward channel an
+eventfd because an idle frame thread had nothing to wake it. The mirror hole is a publish the ring had
+no room for: it is unblocked by the frame thread posting a `FrameReport`, and
+[Publication/Return.h](../Source/Publication/Return.h) carries no descriptor, so dispatch retries on a
+timer instead. It is [open](Open.md), and the path is only reached when the frame thread is already
+four publishes behind.
 
 ## Threads are a second partition
 
