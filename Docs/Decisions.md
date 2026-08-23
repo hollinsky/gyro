@@ -9097,3 +9097,139 @@ frame's whole-output damage, and nothing damages anything after that — so the 
 presenting, which is
 [doing nothing must cost nothing](Architecture.md#doing-nothing-must-cost-nothing) reached. Every
 frame after the first arrives when there is something to author.
+
+### 122. The wake fold is scene-wide and replicated per output; a settled channel retires where it is published
+
+*(Decided 2026-08-23, against the serializer and the frame loop at once. Answers the geometric half of
+[Open.md](Open.md)'s *settling thresholds* with numbers rather than a form, narrows the non-geometric
+half, and spends part of [decision 69](#69-settling-answers-with-a-wake-idleness-folds-a-monoid-not-an-or)'s
+partition on purpose.)*
+
+**Nothing gyro published was ever drawn, and it took three absences to make that true.**
+`SceneSerializer` staged every run except the wake schedule; `FrameLoop::SceneWake` reads a schedule
+whose length does not match the output count as `Never()`; `Never()` is `Settled`; and `Wants` gates
+*evaluation* rather than presentation. So an animating scene drew whatever damage an invalidated target
+happened to buy and then sat still while the springs it had published ran to completion unseen. Each of
+the three is defensible alone — decision 84's rule about run lengths is right, and `Wants` gating
+evaluation is decision 94's whole point — which is why the failure survived every unit test in the
+tree. It is the shape [decision 76](#76-cadence-authority-follows-predictability-not-foreground) already
+warned about from the other side: a fold whose contributor list is incomplete answers *settled* and is
+believed.
+
+**The fold is over the scene and the answer is replicated to every output.** Decision 69 makes `Sooner`
+a monoid so the fold *may* be partitioned per output, and the example both it and
+[Animation.md](Animation.md#settling-answers-with-a-wake-not-a-boolean) give is a cursor blinking on one
+panel and not the other. That example is a contributor attached to an **output**, and every such
+contributor still partitions exactly: an idle timeout, a `wp_fifo_v1` pairing, the recovery console's
+blink. The contributor that exists today is attached to a **node**, and partitioning it means knowing
+which outputs a node reaches *while it moves* — a swept screen-space bound, composed through the
+transform chain, per node, on the dispatch thread. That is the walk
+[Frame/Evaluator.h](../Source/Frame/Evaluator.h) performs a few milliseconds later with the output's own
+placement and its predicted presentation time in hand, run a second time on the side that is called at
+input rate rather than at frame rate — which is the wrong side of the trade
+[Open.md](Open.md)'s *publication pacing* entry is about.
+
+**What that costs is a whole composite on a panel with nothing moving on it, for the length of every
+animation on the panel beside it, and it is worse than a wasted watt.** Two outputs share one GPU queue,
+and [decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)'s
+`deviceFreeAt` threads that serialisation through the loop — so the frame nobody asked for on the idle
+panel pushes back the frame somebody is watching on the active one. This is stated rather than softened
+because it is the reason the entry stays open: the honest version of this decision is *not yet*, not
+*never*.
+
+**Rejected: computing the bound dispatch-side anyway.** It is not merely expensive, it is expensive and
+still approximate — the bound that matters is swept over the spring's whole trajectory, since a window
+crossing the seam intersects the output it is leaving and the one it is arriving at, and neither the
+model value nor the presentation value at the instant of publication is that set. So the price is a
+second transform walk per commit *plus* an envelope derivation per channel, to compute conservatively
+what the frame side computes exactly for free.
+
+**Rejected: narrowing after the fact through the return channel.** The frame walk already knows, per
+output, whether anything it drew was moving; `FrameReport` has a spare word and
+[decision 83](#83-dispatchs-publication-is-an-event-source)'s channel could carry it back. It is the
+cheapest correct mechanism visible and it is a feedback loop: dispatch would narrow an output's wake on
+the strength of a frame that has already been drawn, which is one frame stale in the direction that
+freezes a motion rather than the direction that wastes one. Worth building when there is a second
+observation to justify the loop; not worth building for its first.
+
+**A channel that has settled is retired in the serializer, on the visit that decides whether it
+crosses.** [Animatable.h](../Source/Animation/Author/Animatable.h) deferred this to *the publisher that
+owns the array* on the grounds that writing the hook before the array existed would fix the interface
+from the wrong end; the array is now the serializer's runs. The two questions turn out to be one
+question — *is this channel at rest* decides whether a coefficient crosses, and *has it settled* is the
+same question asked with the thresholds in hand — so they are asked together, per channel, in one
+branch. That is what makes the two bad states unwritable rather than checked: a coefficient published
+with a `Settled` wake is a scene that never idles, and a wake published for a coefficient that was
+dropped is a scene that stops mid-motion, and neither is reachable when one branch decides both.
+
+**What it costs is `Serialize` taking a non-const store**, which was the real question rather than a
+line to add. The alternative is a pass of its own over the entity array, which touches every entity
+twice per publication and, worse, leaves a caller able to run one without the other. `SceneStore`
+therefore has a second friend, and the reason it is admissible is that
+[decision 89](#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete)'s
+objection to a writable entity is that a caller could *start* a motion outside a transaction: what the
+serializer does is end one that ended by itself, and `Animatable` gives it no verb for anything else.
+
+**Retirement is invisible, and that is an arithmetic claim rather than a hope.** `Animatable::Settle`
+puts the property on its model value, and the property is inside the position threshold by construction
+at the moment it is called — so the published value moves by less than
+[decision 54](#54-settled-geometry-snaps-to-the-outputs-device-grid)'s snap to the device grid moves it
+on the very next frame. The two happen at the same instant for the same reason.
+
+**Without a third piece the change swaps one broken invariant for its mirror image.** A scene is
+published when a commit resolves, and a free-running animation commits once. So the snapshot the frame
+thread holds says *every frame, forever*, nothing ever contradicts it, and the compositor that used to
+draw one frame and stop would instead draw every frame and never stop. `SceneSerializer::Republish` is
+the missing number: the earliest instant at which some active channel comes to rest, folded by the same
+monoid and answered as `Timed` rather than `Continuous`, because dispatch has exactly one thing to do
+while an animation runs and nothing to do between. It is [Animation.md](Animation.md#storage)'s *the
+settle time is analytic, so nothing has to observe an evaluation* given a carrier. **Nothing arms it
+yet** — there is no dispatch event loop in the tree, and inventing one here would fix its shape from a
+serializer — so what exists is the fold and not the timer.
+`Source/Integration/SceneIdle.Test.cpp` stands in for the loop in two lines, and stands in honestly:
+it re-serialises at the instant the serializer named and never on a frame boundary.
+
+**The settling thresholds, as numbers, because both halves above need them and neither can proceed
+without.** They live in [Scene/Settle.h](../Source/Scene/Settle.h) as policy fields rather than
+constants, for the reason `BudgetPolicy`'s are: every one is chosen rather than measured, and the entry
+that replaces them should replace them in one place.
+
+- **A sixteenth of a device pixel, and one device pixel per second.** The position figure is what bounds
+  decision 54's snap, and the whole argument for snapping at settle rather than every frame is that the
+  jump is invisible: an eighth of a pixel shifts an antialiased edge's coverage by an eighth, which on a
+  black-on-white window border is a visible twitch, and a sixteenth is half of that. It costs one halving
+  of the exponential — under a tenth of a second on a standard response, at the tail of a transition. The
+  velocity figure is legible rather than derived: at one pixel per second the fastest panel gyro will
+  drive moves a node by a hundred and forty-fourth of a pixel between frames, and on the catalog's own
+  responses the two crossings land within a tenth of a second of each other, which is the sign that
+  neither is doing all the work.
+- **Half an eight-bit code point for opacity, and one code point per second.** Open.md is right that
+  opacity has no output pixel to be expressed in, and this deliberately does not pretend otherwise: it is
+  a *representability* argument, not a perceptual one. Below half a code point two values cannot be the
+  difference between two pixels that leave the machine on an ordinary wire. The perceptual half stays
+  open and belongs to the same review with a screen in front of it that the dressing numbers want.
+- **The finest grid in the output set, rather than the finest grid a node intersects.** Decision 54 asks
+  for the second and it is the same screen-space question the fold could not answer either. The
+  substitution is conservative — a superset of outputs can only make the grid finer, so a node settles no
+  earlier — and it costs a node on a 1× panel settling to the tolerance of the 2× panel beside it.
+- **A dimensionless residual is judged at the screen's half-diagonal.** Scale and a log-map rotation
+  displace a point at radius `r` by about `ε·r`, and the honest radius is the node's own composed through
+  every ancestor's scale, because an overview magnifying a thumbnail magnifies its residual too. Judging
+  every node at the largest radius anything can be drawn at cannot be wrong in the direction that
+  freezes. It costs about three tenths of a second of extra tail on a small node that scales, which is
+  the largest single price in this list and the first thing a per-node radius buys back.
+
+**Every number errs long, and that is one rule rather than four choices.** A threshold that is too small
+costs redundant composites at the tail of an animation; one that is too large freezes a motion somebody
+is watching. It is the same asymmetry
+[decision 11](#11-springs-are-closed-form-not-numerically-integrated)'s envelopes are built on, applied one level up,
+and it is why nothing here is tuned toward the shorter tail.
+
+**What is now asserted rather than argued.** `Source/Integration/SceneIdle.Test.cpp` runs a real store, a
+real serializer, a real ring, and a real `SceneEvaluator` against a headless panel: a still scene draws
+nothing and arms nothing, damage from outside buys exactly one frame and no second one, and an animating
+scene is drawn every frame for about a second and then stops — with the store's springs at rest on the
+model values a commit set. `Source/Integration/Schedulability.Test.cpp`'s
+*ASettledOutputIsNotWokenByTheOneAnimatingBesideIt* still passes and is now the one claim in the tree
+that the authoring side cannot produce: it drives a per-output schedule a test wrote. That is the cost of
+this decision with a test's name on it.

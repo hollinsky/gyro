@@ -309,6 +309,7 @@ gyro_add_module(Scene PORTABLE DISPATCH
 		Entity.Test.cpp
 		Output.Test.cpp
 		Serializer.Test.cpp
+		Settle.Test.cpp
 		Store.Test.cpp
 )
 
@@ -760,6 +761,7 @@ add_executable(IntegrationTests
 	Source/Integration/PublicationSoak.Test.cpp
 	Source/Integration/RenderImport.Test.cpp
 	Source/Integration/SceneCommit.Test.cpp
+	Source/Integration/SceneIdle.Test.cpp
 	Source/Integration/ScenePublication.Test.cpp
 	Source/Integration/SceneRoundTrip.Test.cpp
 	Source/Integration/Schedulability.Test.cpp

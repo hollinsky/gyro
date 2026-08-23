@@ -184,6 +184,15 @@ public:
 private:
 	friend class SceneCommit;
 
+	// **The second friend, and it writes for the opposite reason.** `Scene/Serializer.h` retires a spring
+	// that has settled — `Animatable::Settle`, and nothing else — which is not a motion an author asked
+	// for but the coefficients catching up with arithmetic that was already true. Decision 89's objection
+	// to a writable entity is that a caller could *start* a motion outside a transaction; what the
+	// serializer does is end one that ended by itself, and it has no way to say anything else, because
+	// `Animatable` exposes settling and retargeting as different verbs. Why it is the serializer at all
+	// rather than a pass of its own is that file's argument, and it is about touching every entity once.
+	friend class SceneSerializer;
+
 	// The writable side of `Find`, which only a commit reaches. Reaching for `handle.Index` directly is
 	// how the generation check gets skipped, so there is no accessor that takes one.
 	[[nodiscard]] Entity* Mutable(EntityId id) noexcept

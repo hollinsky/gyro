@@ -129,6 +129,21 @@ nothing only proves the grep.
   previous run's bytes rather than walking the store to rebuild them. Whether that copy beats the
   walk is a memcpy against a pointer chase over the same node count, which is the kind of thing to
   measure rather than argue.
+- **The wake fold is not partitioned per output, and an idle panel pays for its neighbour's
+  animation.** *(Raised 2026-08-23 by
+  [decision 122](Decisions.md#122-the-wake-fold-is-scene-wide-and-replicated-per-output-a-settled-channel-retires-where-it-is-published),
+  which takes the scene-wide answer deliberately and says why.)* Decision 69 made `Sooner` a monoid so
+  the fold could be split by output; the split is unavailable for the one contributor that exists,
+  because partitioning a node's contribution needs a swept screen-space bound the dispatch side has no
+  way to compute cheaply. So every output is told the whole scene's answer, and a panel with nothing
+  moving on it composites at full rate for the length of an animation happening on the panel beside
+  it — on the same GPU queue, so it delays the frame somebody is actually watching. Two exits are
+  visible and neither is free. Compute the bound dispatch-side, which is a second transform walk per
+  commit plus a per-channel envelope, at input rate. Or let the frame walk report per output what it
+  saw moving, through decision 83's return channel, and narrow on the strength of it — cheap, and a
+  feedback loop that is one frame stale in the direction that freezes rather than the direction that
+  wastes. What decides it is a number nobody has: how much of a second panel's budget this actually
+  costs on a real desktop, which wants two monitors and a menu rather than an argument.
 - **Whether the publication nudge should be conditional.**
   [Decision 83](Decisions.md#83-dispatchs-publication-is-an-event-source) has dispatch write its
   descriptor on every publication, which is correct and which wakes the frame thread ahead of its
@@ -307,6 +322,15 @@ nothing only proves the grep.
   same static scene a real desktop presents — a clock in the shell's panel ticks once a second
   forever. What the test fixes as "idle" needs deciding before it is written, or it passes on a
   scene nobody runs.
+
+  **Half of it is written and the half that is missing is exactly the half this entry names.**
+  *(2026-08-23, by
+  [decision 122](Decisions.md#122-the-wake-fold-is-scene-wide-and-replicated-per-output-a-settled-channel-retires-where-it-is-published).)*
+  `Source/Integration/SceneIdle.Test.cpp` runs an authored scene through a real serializer and a real
+  frame loop and asserts both ends: a still scene draws nothing and arms nothing, and an animating one
+  is drawn every frame and then stops. What it cannot assert is that the scene it runs is a scene
+  anybody has — it is one window and one commit — which is this entry unchanged. The mechanism it
+  needed is no longer in the way, so what is left is choosing the scene.
 - **Backlight without a backlight.** Decision 58 dims via `/sys/class/backlight`, which external
   monitors do not have; DDC/CI is the usual answer and it is slow, unreliable, and needs I2C access.
   Whether an external output dims at all, and what the composite-side fallback is when it cannot, is
@@ -713,6 +737,21 @@ nothing only proves the grep.
   54; opacity, blur radius, and corner radius have no output pixel to be expressed in. Decision 65's
   progress parameter is the one such channel that escapes rather than joins them, since its mapping
   carries a travel distance and a threshold on it converts back to output pixels.
+
+  **Numbers are now in the tree and three of the four are weaker than they look.** *(2026-08-23, by
+  [decision 122](Decisions.md#122-the-wake-fold-is-scene-wide-and-replicated-per-output-a-settled-channel-retires-where-it-is-published).)*
+  [Scene/Settle.h](../Source/Scene/Settle.h) carries a sixteenth of a device pixel and one device pixel
+  per second for geometry, and half an eight-bit code point and one code point per second for opacity.
+  The geometric pair is an argument about what decision 54's snap may move without being seen and is
+  probably close to right. The opacity pair is deliberately a *representability* claim rather than a
+  perceptual one — it settles what can be settled and leaves this entry's actual question open. What
+  joins the entry are two substitutions the numbers rest on, both of which trade tail frames for safety
+  and both of which a per-node answer buys back: the finest grid is taken over *every* output rather
+  than the ones a node intersects, and a dimensionless residual is judged at the screen's half-diagonal
+  rather than at the node's own bounding radius composed through its ancestors' scale. The second is
+  the larger price — roughly three tenths of a second of extra tail on a small node that scales — and
+  it is the one worth retiring first. Blur radius and corner radius still have no answer at all,
+  because nothing animates them yet.
 - **Detents, and the flick threshold underneath them.** Decision 13 names detent placement as part
   of the displacement mapping the catalog owns, and no seed transition has one — correct for all of
   them today, so the field is absent rather than defaulted. What keeps this from being a matter of

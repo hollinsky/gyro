@@ -48,11 +48,20 @@ constexpr Instant Opening = Monotonic::FromNanoseconds(1'000'000'000);
 constexpr Duration Gap = Duration{ 8'000'000 };
 constexpr Instant Focus = Advanced(Opening, Gap);
 
-// The scene's clock, parked after both origins so that neither is clamped. A commit's `t₀` is never
+// The scene's clock, parked one nanosecond after the later of the two origins. A commit's `t₀` is never
 // later than dispatch's own now — decision 112's guard against a stamp from the future, which is
 // exercised where it belongs, in Source/Scene/Commit.Test.cpp — and an event is always something that
 // already happened by the time the thread reaches it.
-ManualClock Clock{ Monotonic::FromNanoseconds(2'000'000'000) };
+//
+// **Just after, rather than comfortably after, and the difference is now load-bearing.** `Serialize`
+// judges every channel against this clock and retires the ones that have settled, so a clock parked a
+// second past these origins would publish a scene in which the open had already finished — and every
+// assertion below is about a motion eight milliseconds in. That is not the test being delicate: a
+// publication follows the commit that caused it by microseconds, so the instant here is the realistic
+// one and the old parking was the arbitrary one.
+ManualClock Clock{
+	Advanced(Advanced(Monotonic::FromNanoseconds(1'000'000'000), Duration{ 8'000'000 }), Duration{ 1 })
+};
 
 // What the window is when it is summoned and before anything animates it: off-centre, small, and
 // invisible. `Scene/Entity.h` constructs these at rest, so the open below has something to move from.
@@ -126,7 +135,7 @@ struct Published
 	}
 };
 
-[[nodiscard]] Published Publish(SceneSerializer& serializer, const SceneStore& store, std::uint64_t sequence)
+[[nodiscard]] Published Publish(SceneSerializer& serializer, SceneStore& store, std::uint64_t sequence)
 {
 	Published published{ .Buffer = serializer.Serialize(store).Build(sequence), .Reader = {} };
 

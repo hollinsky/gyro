@@ -416,6 +416,17 @@ other, and a scene-wide reduce would reintroduce the coupling per-output damage 
 lets it be cached per subtree and recomputed along the dirty path, instead of swept over every node
 each time anything moves.
 
+*(Annotated 2026-08-23.)* **The partition is a property of the monoid and not yet a property of the
+implementation**, and the distinction is worth stating where the claim is made rather than leaving the
+paragraph above reading as a description.
+[Decision 122](Decisions.md#122-the-wake-fold-is-scene-wide-and-replicated-per-output-a-settled-channel-retires-where-it-is-published)
+folds the scene once and replicates the answer to every output, because the cursor in the example is a
+contributor attached to an **output** and a spring is attached to a **node** — and splitting a node's
+contribution means knowing which outputs it reaches while it moves, which is a screen-space question
+the dispatch side cannot answer without redoing the frame walk. The carrier stays per output, so an
+output-attached contributor partitions exactly when the first one arrives; what does not partition
+today is the animating scene, and what that costs is in [Open.md](Open.md).
+
 **The saturation the solver already chose composes with this in the safe direction.** `SettlesAt`
 returns an instant no frame reaches for a spring that never settles, so the comparison against it is
 false forever and an undamped oscillator contributes `Continuous` — correct, and visible to whatever
@@ -537,6 +548,19 @@ destruction, [retirement](#lifetime), and [atlas](#where-snapshots-live) release
 thread entirely. The [wake fold](#settling-answers-with-a-wake-not-a-boolean) runs on the same side
 and for the same reason, and its result crosses in the snapshot header — one per output, beside the
 coefficients — so the frame thread reads a schedule rather than deriving one.
+
+*(Written against the implementation, 2026-08-23.)* **Emitting the array and retiring a settled spring
+are one pass, and they have to be.** The serializer already asks each channel whether it is at rest in
+order to decide whether a coefficient crosses; *has it settled* is the same question asked with the
+thresholds in hand, so it is asked in the same branch — and the two states that would otherwise be
+reachable are both fatal to the invariant above. A coefficient published with a `Settled` wake is a
+scene that never idles; a wake published for a coefficient that was dropped is a scene that stops
+mid-motion.
+[Decision 122](Decisions.md#122-the-wake-fold-is-scene-wide-and-replicated-per-output-a-settled-channel-retires-where-it-is-published)
+also names the piece this section had left implicit: a free-running animation commits **once**, so
+something has to make dispatch look again, and *analytic settle* is the instant it looks at. The
+serializer answers it as a `Timed` wake of its own — dispatch's, never published — and nothing arms it
+yet, because there is no dispatch event loop to arm it with.
 
 ## Declarative commits
 
@@ -1000,7 +1024,11 @@ retargeting.
   hand-rolled XML parse in the protocol generator. Not yet decided.
 - **Settling thresholds** for non-geometric properties. The geometric case is settled — output
   pixels of the finest grid a node intersects — but opacity, blur radius, and corner radius have no
-  output pixel to be expressed in, and the policy for them is unresolved. A progress parameter is
+  output pixel to be expressed in, and the policy for them is unresolved. *(Numbers landed
+  2026-08-23 by
+  [decision 122](Decisions.md#122-the-wake-fold-is-scene-wide-and-replicated-per-output-a-settled-channel-retires-where-it-is-published);
+  opacity's is a representability argument rather than a perceptual one, so this question is narrowed
+  rather than answered. See [Open.md](Open.md).)* A progress parameter is
   the one non-geometric channel that escapes the problem rather than adding to it: its
   [mapping](#the-mapping-belongs-to-the-catalog) carries a distance, so a threshold on `p` converts
   to output pixels of travel like anything geometric.

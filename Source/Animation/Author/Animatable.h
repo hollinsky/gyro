@@ -83,13 +83,18 @@
 // progress ever reaches. That it was the snapshot's layout as much as this file's is why it was a
 // decision and not a default.
 //
-// **What is deferred for a smaller reason.** Docs/Animation.md#storage has registration into the
-// flat array of active springs happen inside this type's own methods, when a spring becomes active
-// or settles. Becoming active is AnimateTo. Settling is not an event any method here observes — the
-// settle instant is analytic, so it is the wake fold that discovers it, dispatch-side and with the
-// thresholds in hand — and the method that retires a settled spring belongs with the publisher that
-// owns the array. Writing the hook before the array exists would fix that interface from the wrong
-// end.
+// **What was deferred for a smaller reason, and where it landed.** Docs/Animation.md#storage has
+// registration into the flat array of active springs happen inside this type's own methods, when a
+// spring becomes active or settles. Becoming active is AnimateTo. Settling is not an event any method
+// here observes — the settle instant is analytic, so it is the wake fold that discovers it,
+// dispatch-side and with the thresholds in hand — and the method that retires a settled spring belongs
+// with the publisher that owns the array.
+//
+// The array turned out to be Scene/Serializer.h's runs, and the hook turned out to need no hook: that
+// walk already asks IsAtRest per channel to decide whether a coefficient crosses, so decision 122 has
+// it ask NextWake in the same branch and call Settle below where the answer is Settled. Nothing was
+// added here, which is what waiting for the array bought — a registration callback written before it
+// existed would have been a second mechanism for a question the consumer was already asking.
 
 // Constrained on Animation/Solve's own concept rather than on one of its own, because SpringValue
 // already asks for exactly the right thing — a vector space with a norm — and a second name for one

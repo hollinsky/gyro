@@ -7,11 +7,14 @@
 
 #include "Animation/Solve/Ramp.h"
 #include "Animation/Solve/Spring.h"
+#include "Core/Time.h"
+#include "Core/Wake.h"
 #include "Geometry/AxisTransform.h"
 #include "Geometry/NodeTransform.h"
 #include "Publication/Publisher/Publisher.h"
 #include "Publication/Snapshot.h"
 #include "Scene/Entity.h"
+#include "Scene/Settle.h"
 #include "Scene/Store.h"
 #include "World/Content.h"
 #include "World/Node.h"
@@ -30,11 +33,15 @@
 // entity is one record, so there is no second accounting of what an entity contributed before its
 // children's could be added to it.
 //
-// **A channel crosses as a coefficient exactly where it is moving.** Decision 86 makes the runs the
-// *active* set and decision 98 makes `NoCoefficient` the statement that a channel is at rest, so the
-// question this file asks of each channel is `Animatable::IsAtRest`, and a still desktop publishes no
-// coefficients at all. The model value goes inline either way, because the inline value is redundant
-// while a spring is active and is the whole answer when it is not — one line rather than a case.
+// **A channel crosses as a coefficient exactly where it is still owed a frame.** Decision 86 makes the
+// runs the *active* set and decision 98 makes `NoCoefficient` the statement that a channel is at rest,
+// so the question this file asks of each channel is `Animatable::NextWake`, and a still desktop
+// publishes no coefficients at all. The model value goes inline either way, because the inline value is
+// redundant while a spring is active and is the whole answer when it is not — one line rather than a
+// case. `IsAtRest` was that question until the wake fold arrived, and the difference between the two is
+// the whole of the paragraph on retirement below: a spring inside its thresholds has finished as far as
+// the schedule is concerned and is not yet at rest, and publishing it on the strength of the second
+// predicate is a scene that draws a coefficient nothing will ever move again.
 //
 // **The published index is not the store's index, for either kind of payload.** An entity's `Content`
 // is a position in the store's own per-kind array and a reference's target is an `EntityId`; what
@@ -48,6 +55,33 @@
 // `RLIMIT_RTTIME` taking every session's UI at once. A reference the walk cannot resolve names no
 // target, which `Frame/Evaluator.h` reads as an expansion it will not perform.
 //
+// **A channel that has settled is retired here, and that is why the store arrives non-const.**
+// `Animation/Author/Animatable.h` defers "the method that retires a settled spring" to *the publisher
+// that owns the array*, and this is that publisher: the array is the runs below. The two questions are
+// one question — *is this channel at rest* decides whether a coefficient crosses, and *has it settled*
+// is the same question asked with the thresholds in hand — so they are asked together, per channel, in
+// one place. Split into a pass of its own it would touch every entity twice per publication, and worse,
+// a caller could run one without the other: publishing a coefficient whose wake says settled is a scene
+// that never reaches idle, and publishing a wake for a coefficient that was dropped is a scene that
+// stops mid-motion. Neither state is reachable from here, because the same branch decides both.
+//
+// What the retirement actually does is `Animatable::Settle` — the model value is where the spring
+// already was to within the threshold, so the *published* value moves by less than decision 54's own
+// snap moves it a moment later. Nothing a person can see happens at the instant a channel retires.
+//
+// **The wake fold is scene-wide and replicated across the outputs, deliberately.** Decision 69 makes
+// `Sooner` a monoid so the fold *may* be partitioned per output, and Docs/Animation.md's example for
+// why is a cursor blinking on one panel and not the other. That example is a contributor attached to an
+// *output*, and every such contributor still partitions exactly: an idle timeout, a client's
+// `wp_fifo_v1` pairing, a console blink. The contributor here is attached to a *node*, and partitioning
+// it means knowing which outputs the node reaches while it moves — a swept screen-space bound per node,
+// composed through the transform chain, recomputed on the dispatch thread at commit rate. That is the
+// walk `Frame/Evaluator.h` performs a few milliseconds later, run again on the side that is called at
+// input rate rather than at frame rate. So every output is told the whole scene's answer, which wakes a
+// panel with nothing moving on it for the length of an animation happening on the panel beside it. The
+// cost is real and it is named in Docs/Open.md rather than hidden here: it is a composite, on the same
+// device queue the animation is being drawn on.
+//
 // **Naive by construction, and Docs/Open.md asks that it stay that way for now.** Every publication is
 // a full re-serialisation of the node run, which decision 111 accepts on its own grounds: any insertion
 // renumbers indices, enclosing lengths, and every backward reference target, so there is no patch
@@ -55,21 +89,35 @@
 // node run is byte-identical publication to publication while the coefficient run is fresh, and whether
 // copying those bytes beats re-walking to produce them is a measurement.
 //
-// **Two runs are staged empty and neither is an oversight.** Decision 72's driven ramp has no author
-// until an interactive transition has one. And the per-output wake schedule of decision 69 is a fold
-// over `Animatable::NextWake`, which takes the settling thresholds — geometric ones are in device
-// pixels of the finest grid a node intersects, and the policy for opacity and the dressings is open —
-// so folding it before those exist would answer the open question by whoever wrote the default first.
+// **One run is staged empty and it is not an oversight.** Decision 72's driven ramp has no author until
+// an interactive transition has one, so it crosses as a declared run of length zero rather than as an
+// absence the reader would have to have a second reading for.
 
 class SceneSerializer
 {
 public:
+	SceneSerializer() = default;
+
+	// The thresholds this serializer settles against, for a test that wants to vary them. `Scene/Settle.h`
+	// carries the numbers and the argument for each; nothing in the design passes anything but the
+	// default.
+	explicit SceneSerializer(SettlePolicy policy) noexcept : m_Policy{ policy } {}
+
 	// Serialise the store into a publisher ready for `Build`. The reference stays valid until the next
 	// call, which is the shape `SnapshotOutbox::Publish` wants: `outbox.Publish(serializer.Serialize(store))`.
 	//
 	// Dispatch-side, so it may allocate — and after the first few frames of a session it does not,
 	// because every vector below keeps its capacity across calls.
-	const SnapshotPublisher& Serialize(const SceneStore& store)
+	//
+	// **The store is not const**, for the reason the header gives at length: a channel that has settled
+	// is retired on the same visit that decides whether it crosses.
+	//
+	// The instant everything is judged at is the store's own clock rather than an output's predicted
+	// presentation, which is the conservative direction and the only one available: dispatch's now is at
+	// or before every presentation the frame thread will evaluate for, so a channel retired here had
+	// already settled by every instant that will read it. Decision 57's one reader of the timebase is
+	// what `SceneStore::Now` is.
+	const SnapshotPublisher& Serialize(SceneStore& store)
 	{
 		Reset(store);
 		Walk(store);
@@ -77,6 +125,36 @@ public:
 
 		return m_Publisher;
 	}
+
+	// What the last serialisation folded to: what the scene as a whole still owes, before it was
+	// replicated across the outputs. Nothing in the design reads this — the frame thread reads the
+	// per-output schedule in the snapshot header — and it is here so a test can assert the fold rather
+	// than infer it from the bytes.
+	[[nodiscard]] Wake SceneWake() const noexcept { return m_Wake; }
+
+	// When *dispatch* has to look at this scene again, which is a different question from the one above
+	// and asked on the other side of the boundary.
+	//
+	// **Without it the two halves of settling do not close, and the failure swaps one bug for another.**
+	// A scene is published when a commit resolves. A free-running animation commits once and then nothing
+	// commits again, so the snapshot the frame thread holds says *every frame, forever* and no later
+	// publication ever contradicts it — the compositor that used to draw one frame and stop would instead
+	// draw every frame and never stop, which is the same invariant broken from the other end.
+	// Docs/Architecture.md#doing-nothing-must-cost-nothing is what both violate.
+	//
+	// So the answer is the earliest instant at which some active channel comes to rest — `SettlesAt`, the
+	// analytic settle decision 11 exists for, folded by the same monoid. It is `Timed` rather than
+	// `Continuous` because dispatch has exactly one thing to do at that instant and nothing to do
+	// between: re-serialise, retire whatever finished, and publish a scene that owes less. A spring that
+	// never settles saturates the instant, which reads here as *no republication is owed*, and is correct
+	// for the one motion in the design that genuinely never stops — decision 69's sentinel collision
+	// avoided rather than met, because this is the fold over *retirements* and not over frames.
+	//
+	// **Nothing arms it yet**, and that is deliberate rather than unfinished: there is no dispatch event
+	// loop in the tree to arm anything, and inventing one here would fix its shape from this file. What
+	// exists is the number, computed where the coefficients are already in hand, so the loop that
+	// eventually arms it is reading a fold rather than inventing a second one.
+	[[nodiscard]] Wake Republish() const noexcept { return m_Republish; }
 
 	// What the last serialisation produced. Nothing in the design reads these — they are here so a test
 	// can assert that the active set is the active set rather than infer it from a draw list.
@@ -97,6 +175,11 @@ private:
 
 	void Reset(const SceneStore& store)
 	{
+		m_At = store.Now();
+		m_Thresholds = SettleThresholdSet{ store.Outputs(), m_Policy };
+		m_Wake = Wake::Never();
+		m_Republish = Wake::Never();
+
 		m_Nodes.clear();
 		m_Translations.clear();
 		m_Scales.clear();
@@ -105,6 +188,7 @@ private:
 		m_Images.clear();
 		m_Solids.clear();
 		m_Views.clear();
+		m_Wakes.clear();
 		m_Open.clear();
 
 		// Where each entity's record landed, indexed by the entity's slot, so a reference can be
@@ -117,13 +201,13 @@ private:
 	// Preorder over the tree, iteratively. Iteratively rather than recursively because the depth is the
 	// author's — a shell that nests a thousand containers would be a stack overflow in the one process
 	// on the machine that must not have one, where here it is a vector that grows.
-	void Walk(const SceneStore& store)
+	void Walk(SceneStore& store)
 	{
 		EntityId cursor = store.FirstRoot();
 
 		while (!cursor.IsNull() || !m_Open.empty())
 		{
-			const Entity* entity = cursor.IsNull() ? nullptr : store.Find(cursor);
+			Entity* entity = cursor.IsNull() ? nullptr : store.Mutable(cursor);
 
 			// A sibling chain ends at a null link, and a stale one ends it too. The second cannot happen
 			// while nothing is destroyed, and it is written as an ending rather than a skip because a
@@ -160,32 +244,24 @@ private:
 
 	// One entity's record: the fields it carries itself, plus the three that are positions in runs this
 	// walk is building.
-	[[nodiscard]] Node Emit(const Entity& entity, const SceneStore& store, std::uint32_t index)
+	[[nodiscard]] Node Emit(Entity& entity, const SceneStore& store, std::uint32_t index)
 	{
 		Node node = entity.Record();
 
-		if (!entity.Translation.IsAtRest())
-		{
-			node.TranslationSpring = Append(m_Translations, entity.Translation.Coefficients());
-		}
-
-		if (!entity.Scale.IsAtRest())
-		{
-			node.ScaleSpring = Append(m_Scales, entity.Scale.Coefficients());
-		}
+		node.TranslationSpring = Coefficient(entity.Translation, m_Translations, m_Thresholds.Translation());
+		node.ScaleSpring = Coefficient(entity.Scale, m_Scales, m_Thresholds.Scaling());
 
 		// The rotation channel is the one that composes rather than replaces: the spring is over the
 		// geodesic deviation from the orientation the record already carries, which is the chart's base
 		// point. See `Geometry/NodeTransform.h`'s `FromDeviation`, which is the other end of this.
-		if (!entity.Turn.IsAtRest())
-		{
-			node.RotationSpring = Append(m_Rotations, entity.Turn.Coefficients());
-		}
-
-		if (!entity.Opacity.IsAtRest())
-		{
-			node.OpacitySpring = Append(m_Opacities, entity.Opacity.Coefficients());
-		}
+		//
+		// **Retiring it is still `Settle`, and the chart is why that is not obvious.** The deviation's
+		// target is zero, so settling drives the deviation to zero and leaves `Orientation` — the base
+		// point the record already carries — exactly where it is. A rotation that has finished is
+		// therefore the orientation the commit set, published inline, which is what decision 90 means by
+		// a node carrying whatever reconstitutes its value.
+		node.RotationSpring = Coefficient(entity.Turn, m_Rotations, m_Thresholds.Rotation());
+		node.OpacitySpring = Coefficient(entity.Opacity, m_Opacities, m_Thresholds.Opacity());
 
 		switch (entity.Kind)
 		{
@@ -231,6 +307,13 @@ private:
 		for (const SceneOutput& output : store.Outputs())
 		{
 			m_Views.push_back(output.Placement());
+
+			// Decision 69's schedule, one entry per output in output order, and every entry the same —
+			// the replication this file's header argues for. It is written per output rather than as one
+			// value with a count because the *carrier* is per output and stays that way: the day a
+			// contributor attached to an output arrives, it folds into its own entry here and nothing
+			// downstream changes, which is the property the monoid was chosen for.
+			m_Wakes.push_back(m_Wake);
 		}
 
 		// Every run is staged on every serialisation, including the empty ones. The publisher is reused
@@ -243,9 +326,46 @@ private:
 		m_Publisher.Put<Ramp>(SnapshotRun::DrivenProgress, {});
 
 		m_Publisher.PutNodes<Node>(m_Nodes);
+		m_Publisher.PutWakes(m_Wakes);
 		m_Publisher.PutViews<OutputAdapter>(m_Views);
 		m_Publisher.PutImages<ImageContent>(m_Images);
 		m_Publisher.PutSolids<SolidContent>(m_Solids);
+	}
+
+	// One channel's whole story: retire it if it has settled, publish it if it has not, and fold what it
+	// still owes into the scene's answer.
+	//
+	// **Three outcomes and one branch**, which is what makes the two representations unable to disagree.
+	// At rest there is nothing to do and nothing to say. Settled but not at rest is the case this
+	// function exists for — the spring is inside both thresholds and stays there, so it is brought to
+	// rest here and crosses as an inline model value, and the schedule hears nothing from it. Still
+	// moving is a coefficient in the run and a term in the fold, and the two come from one call to
+	// `NextWake` rather than from a predicate and a separate answer that could differ.
+	//
+	// `Sooner` is decision 69's reduction, applied here rather than at the end, so the fold is over the
+	// contributors as the walk meets them and the result is independent of the order it meets them in.
+	template<typename Channel, typename Run>
+	[[nodiscard]] std::uint32_t
+	Coefficient(Channel& channel, Run& run, SettleThresholds<typename Channel::Scalar> thresholds)
+	{
+		if (channel.IsAtRest())
+		{
+			return NoCoefficient;
+		}
+
+		const Wake wake = channel.NextWake(m_At, thresholds);
+
+		if (wake.Which == Wake::Kind::Settled)
+		{
+			channel.Settle();
+
+			return NoCoefficient;
+		}
+
+		m_Wake = Sooner(m_Wake, wake);
+		m_Republish = Sooner(m_Republish, Wake::At(channel.Coefficients().SettlesAt(thresholds)));
+
+		return Append(run, channel.Coefficients());
 	}
 
 	// Append one element and hand back where it landed. The position is the index a node record names,
@@ -290,6 +410,16 @@ private:
 	std::vector<ImageContent> m_Images;
 	std::vector<SolidContent> m_Solids;
 	std::vector<OutputAdapter> m_Views;
+	std::vector<Wake> m_Wakes;
+
+	// What this serialisation is judged at, and what against. Both are resolved once in `Reset` rather
+	// than per node: the instant is the store's clock, which decision 57 makes one read, and the
+	// thresholds are a function of the output set, which does not change while a walk is running.
+	SettlePolicy m_Policy{};
+	SettleThresholdSet m_Thresholds{};
+	Instant m_At{};
+	Wake m_Wake = Wake::Never();
+	Wake m_Republish = Wake::Never();
 
 	std::vector<Open> m_Open;
 	std::vector<std::uint32_t> m_Published;

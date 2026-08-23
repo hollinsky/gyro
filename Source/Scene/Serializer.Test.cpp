@@ -9,6 +9,7 @@
 #include "Animation/Author/Retarget.h"
 #include "Core/Clock.h"
 #include "Core/Time.h"
+#include "Core/Wake.h"
 #include "Geometry/Scale.h"
 #include "Publication/Publisher/Publisher.h"
 #include "Publication/Reader/Reader.h"
@@ -285,4 +286,135 @@ GYRO_TEST(SceneSerializer, ASecondSerialisationKeepsNothingOfTheFirst)
 	GYRO_CHECK(!reader.Nodes<Node>()[0].IsTranslating());
 	GYRO_CHECK_EQ(reader.Images<ImageContent>().size(), std::size_t{ 1 });
 	GYRO_CHECK(panel != moving);
+}
+
+// The wake schedule and retirement, which are one mechanism seen from its two ends: a channel that is
+// still owed frames crosses as a coefficient *and* as a term in the fold, and one that has settled
+// crosses as neither. What the fold is worth end to end — an animation that is actually drawn, and an
+// output that actually sleeps afterwards — is Source/Integration/SceneIdle.Test.cpp's, because it takes
+// a frame loop to say it.
+
+GYRO_TEST(SceneSerializer, AMovingSceneOwesEveryFrameAndSaysSoOncePerOutput)
+{
+	ManualClock clock;
+	SceneStore store{ clock };
+
+	const EntityId window = store.CreateContainer({}, {}).value();
+	const SceneOutput outputs[] = { Primary(), Primary() };
+
+	store.SetOutputs(outputs);
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+
+		GYRO_REQUIRE(commit.Move(window, { 400.0, 0.0, 0.0 }, Animate(Motion::Standard)));
+	}
+
+	SceneSerializer serializer;
+	const SnapshotBuffer buffer = serializer.Serialize(store).Build(1);
+
+	// A spring in flight has no next interesting instant to name, because every instant until it settles
+	// is one — so the contribution is a standing commitment to every frame the output offers, which is
+	// decision 69's third case and the reason the answer is not an optional instant.
+	GYRO_CHECK(serializer.SceneWake() == Wake::EveryFrame(clock.Now()));
+
+	const SnapshotReader reader{ buffer.Bytes() };
+
+	GYRO_REQUIRE(reader.IsValid());
+
+	// One entry per output, which is decision 84's rule: a schedule of any other length is read by the
+	// frame side as no information rather than as partial information, and an output would then be told
+	// nothing is owed while something is moving on it.
+	const std::span<const Wake> schedule = reader.Wakes();
+
+	GYRO_REQUIRE_EQ(schedule.size(), std::size_t{ 2 });
+	GYRO_CHECK(schedule[0] == serializer.SceneWake());
+	GYRO_CHECK(schedule[1] == serializer.SceneWake());
+
+	// And dispatch is told when to look again, as one instant rather than as a standing commitment: it
+	// has exactly one thing to do while an animation runs, at the moment something comes to rest.
+	GYRO_CHECK(serializer.Republish().Which == Wake::Kind::Timed);
+	GYRO_CHECK(serializer.Republish().When > clock.Now());
+}
+
+GYRO_TEST(SceneSerializer, ASettledChannelIsRetiredRatherThanRepublished)
+{
+	ManualClock clock;
+	SceneStore store{ clock };
+
+	const EntityId window = store.CreateContainer({}, {}).value();
+	const SceneOutput outputs[] = { Primary() };
+
+	store.SetOutputs(outputs);
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+
+		GYRO_REQUIRE(commit.Move(window, { 400.0, 0.0, 0.0 }, Animate(Motion::Standard)));
+	}
+
+	SceneSerializer serializer;
+
+	serializer.Serialize(store);
+
+	GYRO_REQUIRE_EQ(serializer.ActiveTranslations(), std::size_t{ 1 });
+	GYRO_REQUIRE(!store.Find(window)->Translation.IsAtRest());
+
+	// The instant the serializer itself named. Nothing observed an evaluation to find it — decision 11's
+	// analytic settle is what lets the dispatch side know a spring has finished without one.
+	const Wake owed = serializer.Republish();
+
+	GYRO_REQUIRE(owed.Which == Wake::Kind::Timed);
+	clock.Set(owed.When);
+
+	serializer.Serialize(store);
+
+	// **Retired, which is three statements at once and the reason they cannot come apart.** No
+	// coefficient crosses, so the frame walk reads the inline value and counts the node as still. The
+	// schedule says nothing further is owed, so the output folds to idle. And the property is genuinely
+	// at rest on the model value the commit set, so the next write against it is an ordinary retarget
+	// rather than an interruption of a motion nobody could see.
+	GYRO_CHECK_EQ(serializer.ActiveTranslations(), std::size_t{ 0 });
+	GYRO_CHECK(!serializer.Nodes()[0].IsTranslating());
+	GYRO_CHECK(serializer.SceneWake() == Wake::Never());
+	GYRO_CHECK(serializer.Republish() == Wake::Never());
+
+	GYRO_CHECK(store.Find(window)->Translation.IsAtRest());
+	GYRO_CHECK_EQ(store.Find(window)->Translation.Model(), Vector3<double>(400.0, 0.0, 0.0));
+
+	// The published value is the model value, which is what makes the retirement invisible: the spring
+	// was already inside the position threshold, so what a person sees move at this instant is less than
+	// decision 54's snap to the device grid moves it a moment later.
+	GYRO_CHECK_EQ(serializer.Nodes()[0].Transform.Translation, Vector3<double>(400.0, 0.0, 0.0));
+}
+
+GYRO_TEST(SceneSerializer, AnOutputlessSceneStillSettlesAndStagesNoSchedule)
+{
+	ManualClock clock;
+	SceneStore store{ clock };
+
+	const EntityId window = store.CreateContainer({}, {}).value();
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+
+		GYRO_REQUIRE(commit.Fade(window, 0.0F, Animate(Motion::Standard)));
+	}
+
+	SceneSerializer serializer;
+
+	// A scene with nowhere to be drawn — a session whose outputs have not been assigned, a machine
+	// between modesets. The schedule is empty because there is no output to owe anything to, and the
+	// thresholds still have to be finite: an empty output set that produced a threshold of zero would
+	// leave every channel unsettleable, which is the one direction that is not recoverable.
+	serializer.Serialize(store);
+
+	GYRO_REQUIRE_EQ(serializer.ActiveOpacities(), std::size_t{ 1 });
+	GYRO_REQUIRE(serializer.Republish().Which == Wake::Kind::Timed);
+
+	clock.Set(serializer.Republish().When);
+	serializer.Serialize(store);
+
+	GYRO_CHECK_EQ(serializer.ActiveOpacities(), std::size_t{ 0 });
+	GYRO_CHECK(serializer.SceneWake() == Wake::Never());
 }
