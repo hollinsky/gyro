@@ -6,8 +6,8 @@
 #include "Core/Fd.h"
 #include "Core/Result.h"
 #include "Geometry/Space.h"
+#include "Seam/Allocator.h"
 #include "Seam/RenderTarget.h"
-#include "Virtual/Allocator.h"
 #include "Virtual/Buffer.h"
 
 // Real dmabufs on a machine with no GPU.

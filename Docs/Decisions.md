@@ -9340,3 +9340,133 @@ that the zombie window closes when the host says so, and that an event after it 
 again. `Source/Wire/Codec.Test.cpp`'s *RefusesAMessageCarryingMoreDescriptorsThanOneSend* and
 *TwentyEightDescriptorsInOneMessageStillGo* are the send limit as a boundary rather than a ceiling
 somebody guessed at.
+---
+
+### 124. A discarded frame is a fourth signal; a nested output is the presenter that emits it
+
+*(Decided 2026-08-23, while building the nested backend against
+[decision 1](#1-the-nested-backend-drives-raw-wayland-protocol-not-vulkan-wsi)'s raw protocol. Asked
+by `wp_presentation_feedback`, which has two terminal events and only one of them had anywhere to
+go.)*
+
+**`IPresenter` gains `Signal<> Missed`: the frame that was accepted will never reach the glass.** The
+frame loop answers it by dropping what was in flight, invalidating the clock, and re-damaging the
+output. It carries nothing, because there is nothing to say beyond *not that one*.
+
+**`Present()` returning success is a promise about the commit and never about the picture**, and
+this is what happens when the two come apart. `wp_presentation_feedback` ends in exactly one of
+`presented` or `discarded`, and a host sends the second routinely: a commit superseded by a later
+one, a window moved to another output, a surface occluded entirely.
+[Seam/Presenter.h](../Source/Seam/Presenter.h) already said success "means the commit was accepted,
+never that anything reached the glass. That arrives as `Presented`, or does not arrive at all" — and
+*does not arrive at all* turns out to be a state the loop cannot survive.
+
+**Silence is what makes it a defect rather than a gap.** `FrameOutput` marks an output flip-pending
+at the commit and will not serve it again until something clears that, which is
+[Architecture.md](Architecture.md#admission-control)'s hardware condition rather than the schedule's:
+KMS refuses a second nonblocking commit on a CRTC that has not flipped. So an unanswered commit is an
+output that **stops drawing for good**. On a session with three windows that is one of them freezing
+while the other two carry on, from a frame the host quietly dropped, with no error reported anywhere
+and nothing in the log to look at.
+
+**Both existing signals would lie, which is what makes it a third one rather than a reuse.**
+`Presented` hands `FrameClock::Observe` a `PresentationInfo`, and there is no timestamp behind a
+frame that never happened — a fabricated one is indistinguishable from a real one and produces a
+schedule with no error bar, which is the exact failure
+[Seam/PresentationInfo.h](../Source/Seam/PresentationInfo.h) is written to prevent.
+`TargetsInvalidated` says the images are gone, and they are not: the host is still holding the
+discarded buffer and will release it in its own time, so a presenter that took it back there would
+hand the renderer a target somebody else is reading.
+
+**The clock is invalidated rather than left running, and that is the half worth reading twice.** A
+discarded frame is not a *late* observation — it is a boundary that produced none. Left alone,
+`FrameClock` would predict the next deadline from a run of observations with a hole in it and have no
+way to see the hole. `Invalidate` is exactly the state that says *start again from the next thing
+that really lands*, and this is its second caller after a mode set.
+
+**Rejected: the loop timing out a flip that never lands.** The shape that needs no signal at all: if
+nothing has arrived within some multiple of the period, assume the frame was lost. It is a number
+where there is a fact, and the number is unanswerable — a host under load may present three periods
+late and be right to, while an occluded surface will never present and is not late at all. It also
+makes the wrong case the *silent* one, since a timeout fires identically whether the host dropped the
+frame or gyro's own commit never went out.
+
+**Rejected: `Present()` reporting it.** It cannot: the discard arrives asynchronously, some
+milliseconds after the call that returned success.
+
+**Rejected: leaving it to the nested backend to re-present.** A presenter that noticed its own
+discard and quietly committed the same target again would keep the loop's books wrong — `Committed`
+would name a frame the loop believes is outstanding, `Timing::Assess` would schedule around it, and
+the cost of the redraw would be charged to nobody. The loop owns the decision to draw; the presenter
+owns the report.
+
+**What every other backend does is nothing, and that is correct rather than a stub.** Headless and
+virtual outputs flip on a clock they own, and a KMS commit that is accepted produces a completion
+event. The second real emitter is the DRM backend's superseded commit, which is why the signal is on
+the seam rather than in `Nested`.
+
+---
+
+### 125. Nested's release timelines come from a DRM node it opens itself
+
+*(Decided 2026-08-23, on finding that `wp_linux_drm_syncobj_v1` cannot be used for the acquire
+direction alone.)*
+
+**The nested backend opens the render node the host's dmabuf feedback names, and mints its own
+release timelines on it.** Where that fails, or where the host has no syncobj protocol, a commit is
+*held* until `IRenderer::IsComplete` says the composite has landed and released on a later drain.
+
+**The protocol is all-or-nothing per surface, which is what forces the question.** A surface carrying
+a `wp_linux_drm_syncobj_surface_v1` must name an acquire point *and* a release point on every commit
+that attaches a buffer: `no_acquire_point` and `no_release_point` are both fatal. The acquire point is
+the renderer's own timeline and arrives inside a `SyncPoint`; the release point is the other
+direction — the host signals it when it has finished reading — and it must be created *and read back*
+by gyro. A bare syncobj descriptor cannot be queried; the query needs the DRM file the handle came
+from. So *use explicit sync* and *hold a DRM fd* are one decision.
+
+**What a person gets, which is what decides it.** Without the acquire point the order is: record,
+draw, *notice* the draw finished, commit. Noticing needs a wakeup, so either the commit slips to the
+next deadline — a permanent frame of latency, which on the daily driver is the nested window visibly
+trailing the cursor — or gyro polls sub-frame, and then every `presented` timestamp it feeds
+`FrameClock` carries gyro's own poll granularity inside it. That last is the one that matters:
+[Architecture.md](Architecture.md#what-nested-can-and-cannot-prove) says nested is worth building
+because *the real deadline scheduler runs unmodified against it*, and a backend whose clock input is
+contaminated by its own polling cannot do that job. With the acquire point the commit goes out
+immediately naming a value the GPU has not reached, and the host plans its own frame around gyro's.
+
+**The device is named rather than guessed at.** `zwp_linux_dmabuf_feedback_v1` carries a `dev_t` per
+tranche, which is already the fact
+[decision 120](#120-a-nested-outputs-targets-are-exported-from-the-vulkan-device-and-the-allocator-moves-to-seam)'s
+modifier choice rests on; this reads the same fact for a second purpose. Where the named node will
+not open, any DRM node does — a `drm_syncobj` is DRM core rather than a driver's, its descriptor is a
+file any node can import a handle for, and nothing on this path ever submits work or allocates memory
+through it. The ABI is `#include`d rather than transcribed the way
+[Seam/RenderTarget.h](../Source/Seam/RenderTarget.h)'s fourccs are, because `<drm/drm.h>` arrives with
+`kernel-headers` rather than with libdrm: no package, no pkg-config entry, and `Nested` is a platform
+module in the first place.
+
+**Rejected: a timeline verb on `IDmabufAllocator`.** The seam already carries *where a presenter's
+target-side resources come from*, and a per-target release timeline is one. It is rejected because
+the poll has to come back through the same interface — a bare fd cannot be queried — so it is two
+verbs, and `udmabuf` and the heap answer both with `ENOTSUP`.
+[Structure.md](Structure.md#the-modules)'s test for the waist is *more than one implementation*, and
+one implementation plus two refusals passes it only on a technicality.
+
+**Rejected: `Nested` depending on `Render`.** `VulkanDevice::ExportTimeline` already makes exactly
+what is wanted, and decision 120 closes the edge by name.
+
+**Rejected: the composition root creating them and handing them down.** Decision 120's own rejection,
+which transfers: a resize reallocates the ring, and routing that through a thread that owes no
+deadline leaves the window blank for as long as it takes to be scheduled.
+
+**Rejected: relying on implicit synchronization.** Attach the dmabuf and let the kernel's `dma_resv`
+do the waiting, which is what every Wayland client did for a decade.
+[Seam/SyncPoint.h](../Source/Seam/SyncPoint.h) forbids it in as many words: implicit sync is a
+property of the *buffer* and must be answered where the buffer is described, never by reading a null
+sync point as permission — and nothing in the tree describes it today.
+
+**The fallback is built rather than deferred, because a host without the protocol is an ordinary
+host.** What it costs is stated once at startup and again at shutdown, in the terms that matter:
+this window runs a frame behind, and its pacing figures are not a measurement of the host's cadence.
+
+---

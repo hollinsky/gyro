@@ -125,6 +125,20 @@ public:
 	// already writes it this way.
 	[[nodiscard]] ObjectId Allocate();
 
+	// Size the object table for this many client ids up front.
+	//
+	// **Because a connection whose ids are allocated on the frame path must not grow there.** A nested
+	// output asks for a `wp_presentation_feedback` object per commit, and `Present` runs inside
+	// Core/FrameSection.h's guard, where an allocation is an abort rather than a hiccup. In the steady
+	// state nothing grows — the host destroys each feedback object as soon as it has spoken and the id
+	// comes back through `delete_id` — but the first frames of a session climb to the high-water mark
+	// and there is no reason to discover that from a stack trace. Sized once by whoever knows how many
+	// windows and how deep a ring, which is the composition root.
+	//
+	// Capacity only: an id is still handed out by `Allocate` in the order it always was, and reserving
+	// more than a connection ever uses costs eight bytes an id and nothing else.
+	void Reserve(std::size_t ids);
+
 	// Points an id at a proxy. A client id must have come from `Allocate` and not yet be bound; a
 	// host-allocated id — one at or above `FirstServerId`, arriving as a `new_id` in an event — is
 	// bound directly, because nothing on this side handed it out.

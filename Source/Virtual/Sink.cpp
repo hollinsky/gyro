@@ -45,7 +45,7 @@ void CapturingSink::OnFrame(VirtualOutput& output, const VirtualFrame& frame)
 	}
 
 	// The sync bracket is held across the copy and released before the frame is given back, which is
-	// what `DmabufBuffer::CpuRead` is for — an exporter with real cache maintenance needs both ends,
+	// what `DmabufRead` is for — an exporter with real cache maintenance needs both ends,
 	// and the end is the half that gets forgotten.
 	const BufferReader reader{ *buffer };
 

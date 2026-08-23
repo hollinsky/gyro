@@ -74,7 +74,7 @@ GYRO_TEST(Options, BareOutputIsTheDefaultPanel)
 // effect, and on a boot service there is nowhere for them to find out otherwise.
 GYRO_TEST(Options, AnUnknownArgumentIsRefused)
 {
-	GYRO_CHECK(!Parse({ "--outputs=3" }).has_value());
+	GYRO_CHECK(!Parse({ "--monitors=3" }).has_value());
 	GYRO_CHECK(!Parse({ "--backend" }).has_value());
 	GYRO_CHECK(!Parse({ "-x" }).has_value());
 	GYRO_CHECK(!Parse({ "1080p" }).has_value());
@@ -187,4 +187,42 @@ GYRO_TEST(Options, EveryBackendNameRoundTrips)
 	}
 
 	GYRO_CHECK(!Parse({ "--backend=virtual" }).has_value());
+}
+
+// `--outputs=N` is the nested backend's one host window each, and Docs/Architecture.md#nested-wayland
+// names it first: multi-monitor layout without owning three monitors.
+GYRO_TEST(Options, OutputsPadsWithWhatOutputSaid)
+{
+	const Result<Options> three = Parse({ "--outputs=3" });
+
+	GYRO_REQUIRE(three.has_value());
+	GYRO_REQUIRE_EQ(three->OutputCount, std::size_t{ 3 });
+
+	// Three of the default panel, because that is what `--output` would have said if it had been
+	// asked.
+	for (const OutputRequest& request : three->Requested())
+	{
+		GYRO_CHECK_EQ(request.Width, std::int64_t{ 1920 });
+		GYRO_CHECK(request.Refresh == 60.0);
+	}
+
+	// And with a geometry given, three of *that* — which is the whole ergonomic point, since typing one
+	// geometry twice is how a sweep ends up with two rates it did not mean.
+	const Result<Options> sized = Parse({ "--output=1280x720@90", "--outputs=2" });
+
+	GYRO_REQUIRE(sized.has_value());
+	GYRO_REQUIRE_EQ(sized->OutputCount, std::size_t{ 2 });
+	GYRO_CHECK_EQ(sized->Requested()[1].Width, std::int64_t{ 1280 });
+	GYRO_CHECK(sized->Requested()[1].Refresh == 90.0);
+}
+
+GYRO_TEST(Options, OutputsBelowWhatWasSpelledOutIsAContradiction)
+{
+	// Two geometries and then a request for one of them. Truncating would drop an output somebody
+	// described, which is the reading this header refuses to take quietly.
+	GYRO_CHECK(!Parse({ "--output=1280x720", "--output=1920x1080", "--outputs=1" }).has_value());
+
+	GYRO_CHECK(!Parse({ "--outputs=0" }).has_value());
+	GYRO_CHECK(!Parse({ "--outputs" }).has_value());
+	GYRO_CHECK(!Parse({ "--outputs=99" }).has_value());
 }

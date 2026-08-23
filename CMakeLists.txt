@@ -366,11 +366,14 @@ gyro_add_module(Gym PORTABLE DISPATCH
 # the renderer, so decision 87 puts it below both waists rather than here, and the seam reaches down
 # for it — which is the direction that stays legal as the scene vocabulary grows.
 gyro_add_module(Seam PORTABLE
+	SOURCES
+		Buffer.cpp
 	DEPENDS
 		Core
 		Geometry
 		World
 	TESTS
+		Buffer.Test.cpp
 		Dressing.Test.cpp
 		EventSource.Test.cpp
 		OutputConfiguration.Test.cpp
@@ -595,6 +598,7 @@ gyro_add_module(Render
 		Geometry
 		Seam
 	SOURCES
+		Allocator.cpp
 		Backdrop.cpp
 		Device.cpp
 		Pipeline.cpp
@@ -628,6 +632,54 @@ target_link_libraries(Render
 		spdlog::spdlog
 )
 
+# The nested backend: gyro as a client of another compositor, one host window per output.
+#
+# Docs/Architecture.md#nested-wayland calls it the daily driver, and the reason is not convenience. A
+# compositor holding DRM master is somewhere between awkward and impossible to point RenderDoc, the
+# Vulkan validation layers, ASan or gdb at; nested is where all four work. It is also where the
+# deadline scheduler runs unmodified against a real cadence with real jitter, because the clock is
+# somebody else's vblank arriving as `wp_presentation_feedback`.
+#
+# DEPENDS is the whole of what a presenter needs — a clock and a result from Core, a size and a damage
+# region from Geometry, the presentation seam, and the client codec — and deliberately not `Render`.
+# Decision 120 is why: the targets are exported from the Vulkan device, and the interface that says so
+# is `Seam`'s, so the composition root is the only thing that knows both sides. The generated bindings
+# are not a module and carry no edge; they are `Wire` plus text the build wrote, and the target below
+# is what links them.
+#
+# No DISPATCH_HALF yet, and it is not an omission. Docs/Structure.md splits this module by thread and
+# only the frame half exists: input is dispatch-side, decision 81 has the connection pumped by the
+# frame thread and the input handed across, and there is no dispatch thread on the far end of that
+# handoff. `gyro_add_module` refuses a half that names no directory, which is the right moment for the
+# declaration to appear.
+gyro_add_module(Nested
+	DEPENDS
+		Core
+		Geometry
+		Seam
+		Wire
+	SOURCES
+		Feedback.cpp
+		Host.cpp
+		Output.cpp
+		Peer.cpp
+		Sync.cpp
+	TESTS
+		Feedback.Test.cpp
+		Host.Test.cpp
+		Output.Test.cpp
+		Sync.Test.cpp
+)
+
+# The generated client bindings, and spdlog for the handful of lines that say which path a session
+# came up on — which format and modifier the host and the device agreed on, and whether explicit sync
+# is live. PUBLIC because the module's headers name `Wayland::` types: a presenter holds proxies.
+target_link_libraries(Nested
+	PUBLIC
+		WaylandProtocols
+		spdlog::spdlog
+)
+
 # The composition root, and the only module that knows both sides of either waist. Docs/Structure.md
 # #orchestration is its whole brief: it constructs the clock, the backend, the rendering device, the
 # publication channel, and the threads, and hands each subsystem what it needs.
@@ -651,6 +703,8 @@ gyro_add_module(Compositor
 		Headless
 		Blit
 		Virtual
+		Render
+		Nested
 	SOURCES
 		Compositor.cpp
 		RealTime.cpp

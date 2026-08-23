@@ -7,6 +7,7 @@
 
 #include <signal.h>
 #include <spdlog/spdlog.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -37,8 +38,13 @@
 #include "Headless/Device.h"
 #include "Headless/Output.h"
 #include "Headless/Renderer.h"
+#include "Nested/Host.h"
+#include "Nested/Output.h"
 #include "Publication/Return.h"
 #include "Publication/Ring.h"
+#include "Render/Allocator.h"
+#include "Render/Device.h"
+#include "Render/Renderer.h"
 #include "Seam/EventSource.h"
 #include "Seam/OutputConfiguration.h"
 #include "Seam/Presenter.h"
@@ -123,14 +129,18 @@ extern "C" void OnStopSignal(int)
 // Docs/Architecture.md#device-migration puts on it: a renderer is replaced by being destroyed and
 // constructed.
 //
-// The colour state is copied here rather than read back off the presenter, because `IPresenter` does
-// not carry a configuration — a presenter answers about targets and frames, and what the output was
-// *asked* for is the root's own record.
+// The configuration is copied here rather than read back off the presenter, because `IPresenter` does
+// not carry one — a presenter answers about targets and frames. **What is copied is what was
+// *achieved* rather than what was asked for**, which used to be the same thing and stopped being one
+// when nested landed: a host that will not take `XR24` linear hands back a tiled modifier, and a
+// tiling window manager configures the window's size before gyro has drawn a pixel. Binding
+// `FrameOutput` to the request would then give it the wrong extent to scissor to and the wrong colour
+// state to bind targets under, on the backend where both routinely differ.
 struct BoundOutput
 {
 	IPresenter* Presenter = nullptr;
 	std::unique_ptr<IRenderer> Renderer;
-	ColorState Color{};
+	OutputConfiguration Configuration{};
 	Connection<> OnTargetsInvalidated;
 
 	// The root's half of decision 41: the images went away, so whatever holds them has to be told before
@@ -141,7 +151,7 @@ struct BoundOutput
 	{
 		if (Presenter != nullptr && Renderer)
 		{
-			(void)Renderer->BindTargets(Presenter->Targets(), Color);
+			(void)Renderer->BindTargets(Presenter->Targets(), Configuration.Color);
 		}
 	}
 };
@@ -181,6 +191,17 @@ public:
 	[[nodiscard]] virtual Result<void>
 	Build(std::size_t index, const OutputConfiguration& wanted, const OutputPlan& plan, BoundOutput& into) = 0;
 
+	// Whether this backend has run out of reasons to keep going.
+	//
+	// **Root-local for `NextEvent`'s reason, and it has exactly one answer that is not `false`.** A
+	// headless sweep stops on `--frames`, a dump stops when it is interrupted, and a KMS output does
+	// not stop at all — but a nested session ends when the person closes the window, which is the
+	// ordinary way to quit it, and it ends when the host hangs up, which is not. Neither of those is
+	// an `IEventSource` question: `Drain` already answers whether a read failed, and the loop
+	// deliberately does not act on it, because a backend that has *finished* and one that failed a
+	// read are different things and only the root can sequence a shutdown.
+	[[nodiscard]] virtual bool IsFinished() const noexcept { return false; }
+
 	// Everything that has to stop before the process exits, called once the frame thread has been
 	// joined. A backend with no thread and no file does nothing here.
 	virtual void Close() noexcept {}
@@ -210,7 +231,7 @@ public:
 		}
 
 		into.Presenter = presenter;
-		into.Color = presenter->Configuration().Color;
+		into.Configuration = presenter->Configuration();
 
 		// The renderer is told exactly what admission allowed, which is the point of the bridge in
 		// Compositor/Schedule.h: a tier step that reduced the allowance without making the work cheaper is
@@ -283,7 +304,7 @@ public:
 		}
 
 		into.Presenter = presenter;
-		into.Color = presenter->Configuration().Color;
+		into.Configuration = presenter->Configuration();
 		into.Renderer = std::move(renderer);
 
 		m_Dumps[index] = std::move(dump);
@@ -377,6 +398,181 @@ private:
 
 	std::array<std::unique_ptr<FrameDump>, MaxOutputs> m_Dumps{};
 	std::array<PixelSize<DeviceSpace>, MaxOutputs> m_Resolutions{};
+};
+
+// The daily driver: gyro as a client of another compositor, one host window per output.
+//
+// **It is the first backend whose presenter and renderer are the same device's, and that is decision
+// 120 arriving.** A nested output has no GBM device handed to it and no swapchain allocating on its
+// behalf, so the only thing on the machine that can produce its targets is the Vulkan device that is
+// about to draw into them — and `Nested` may not name `Render`, so the root is what pairs them. Here
+// that pairing is three lines and one `IDmabufAllocator`, which is exactly what moving the interface
+// to the waist bought.
+//
+// **The device is opened once and the renderers are per output**, for `BoundOutput`'s reason: binding
+// targets is not a per-frame call, so a writer belongs to one presenter's target set, while the queue
+// the work serialises on is the device's. Every output names device zero because there is one GPU.
+//
+// **Nothing here forces real time and nothing here should.** Docs/Architecture.md#backends makes
+// nested drop `SCHED_FIFO` and `mlockall` unless explicitly overridden, and `Run` below is where that
+// happens — a real-time thread inside a normal-priority host is an effective way to hard-lock the
+// desktop somebody is developing on.
+class NestedBackend final : public IBackend
+{
+public:
+	explicit NestedBackend(const IClock& clock) noexcept : m_Clock{ &clock } {}
+
+	// Open the connection and the device, in that order.
+	//
+	// The connection first because it is what says whether there is a session to nest in at all, and a
+	// machine with no `WAYLAND_DISPLAY` should answer that rather than spend a Vulkan instance
+	// discovering it. Both failures are sentences: the host's is *what it did not offer*, the device's
+	// is Render/Device.h's own.
+	[[nodiscard]] Result<void> Open()
+	{
+		if (const Result<void> connected = m_Host.Open(); !connected)
+		{
+			return connected;
+		}
+
+		// Sized before the frame thread exists, per Wire/Connection.h: a nested output asks for a
+		// `wp_presentation_feedback` object per commit and `Present` runs inside the frame section,
+		// where a vector growing is an abort. Two per window per ring slot plus the fixed objects is
+		// generous by an order of magnitude and costs eight bytes an id.
+		m_Host.Connection().Reserve(256);
+
+		Result<VulkanDevice> device = VulkanDevice::Open();
+
+		if (!device)
+		{
+			return std::unexpected{ device.error() };
+		}
+
+		m_Device = std::move(*device);
+		m_Allocator.emplace(m_Device);
+
+		spdlog::info("rendering on {} ({})", m_Device.Description().DeviceName(), m_Device.Description().DriverName());
+
+		if (!m_Device.Description().ExportsTimeline)
+		{
+			// Decision 108's case, said out loud because it decides which of the two commit paths this
+			// session runs. lavapipe advertises the extension and then refuses to create an exportable
+			// semaphore, so the floor tier finishes inside `Record` and hands back an immediate point —
+			// which needs no acquire point at all and is therefore fine, rather than degraded.
+			spdlog::info("this device exports no timeline, so every composite finishes before it is committed");
+		}
+
+		return {};
+	}
+
+	[[nodiscard]] IEventSource& Source() noexcept override { return m_Host; }
+
+	[[nodiscard]] Instant NextEvent() const noexcept override { return m_Host.NextEvent(); }
+
+	[[nodiscard]] bool IsFinished() const noexcept override
+	{
+		// The host hanging up is not something to keep drawing through: every window is gone and every
+		// `Present` from here on is refused by a connection that has latched its failure.
+		if (m_Host.Connection().Failed().has_value())
+		{
+			return true;
+		}
+
+		// **Every window, not any window.** Closing one of three under `--outputs=3` is a person
+		// removing an output, and the session carries on with two — which is the same thing hotplug
+		// will be. It is over when the last one goes.
+		for (std::size_t index = 0; index < m_Count; ++index)
+		{
+			if (!m_Windows[index]->IsClosed())
+			{
+				return false;
+			}
+		}
+
+		return m_Count != 0;
+	}
+
+	[[nodiscard]] Result<void>
+	Build(std::size_t index, const OutputConfiguration& wanted, const OutputPlan&, BoundOutput& into) override
+	{
+		if (index >= m_Windows.size())
+		{
+			return Failure(ENOSPC, "more outputs than one host connection carries");
+		}
+
+		auto renderer = std::make_unique<VulkanRenderer>(*m_Clock, m_Device);
+
+		auto window = std::make_unique<Nested::NestedOutput>(
+			m_Host,
+			*m_Allocator,
+			renderer.get(),
+			wanted,
+			Nested::NestedOutputPolicy{ .Title = std::format("gyro output {}", index) }
+		);
+
+		if (const Result<void> opened = window->Open(); !opened)
+		{
+			return opened;
+		}
+
+		into.Presenter = window.get();
+		into.Configuration = window->Configuration();
+		into.Renderer = std::move(renderer);
+
+		m_Windows[index] = std::move(window);
+		m_Count = index + 1;
+
+		return {};
+	}
+
+	void Report() const override
+	{
+		for (std::size_t index = 0; index < m_Count; ++index)
+		{
+			const Nested::NestedOutput& window = *m_Windows[index];
+
+			spdlog::info(
+				"  output {}: {} commit(s), {} discarded by the host, {} held for a composite",
+				index,
+				window.Commits,
+				window.Discarded,
+				window.Held()
+			);
+
+			// The two figures a session's pacing is only as good as. A discard is a frame the host threw
+			// away — occlusion, a superseded commit, a move to another monitor — and a held commit is one
+			// gyro could not hand over until its own GPU had finished, which is the fallback path saying
+			// what it cost.
+			if (window.Held() != 0)
+			{
+				spdlog::warn(
+					"             this window ran without explicit sync, so its presentation timestamps "
+					"include gyro's own polling and are not a measurement of the host's cadence"
+				);
+			}
+		}
+
+		if (const std::optional<Wire::ProtocolFault>& fault = m_Host.Fault(); fault.has_value())
+		{
+			spdlog::error("the host ended the connection: {} on {}", fault->Message, fault->Object);
+		}
+	}
+
+private:
+	const IClock* m_Clock = nullptr;
+
+	// Declared before the device, so it is destroyed after it — a window holds `wl_buffer`s over
+	// descriptors the device exported, and the protocol objects have to go while the connection is
+	// still open.
+	Nested::NestedHost m_Host;
+
+	VulkanDevice m_Device;
+	std::optional<VulkanAllocator> m_Allocator;
+
+	// `unique_ptr` because a presenter is neither copyable nor movable and the array has to be built
+	// one at a time, which is `BoundOutput::Renderer`'s reason exactly.
+	std::array<std::unique_ptr<Nested::NestedOutput>, MaxOutputs> m_Windows{};
+	std::size_t m_Count = 0;
 };
 
 // Everything with a lifetime, in one object, constructed in place.
@@ -516,7 +712,7 @@ private:
 				}
 			}
 
-			if (m_Interrupt.IsRaised())
+			if (m_Interrupt.IsRaised() || m_Backend->IsFinished())
 			{
 				return {};
 			}
@@ -582,8 +778,21 @@ private:
 
 				return {};
 
-			case BackendKind::Auto:
 			case BackendKind::Nested:
+			{
+				auto nested = std::make_unique<NestedBackend>(m_Clock);
+
+				if (const Result<void> opened = nested->Open(); !opened)
+				{
+					return opened;
+				}
+
+				m_Backend = std::move(nested);
+
+				return {};
+			}
+
+			case BackendKind::Auto:
 			case BackendKind::Drm:
 				break;
 		}
@@ -648,7 +857,7 @@ private:
 		bound.Rebind();
 		bound.OnTargetsInvalidated.ConnectTo<&BoundOutput::Rebind>(bound.Presenter->TargetsInvalidated, bound);
 
-		m_Outputs[index].Bind(*bound.Presenter, *bound.Renderer, 0, wanted, {}, plan.Budget());
+		m_Outputs[index].Bind(*bound.Presenter, *bound.Renderer, 0, bound.Configuration, {}, plan.Budget());
 
 		// The first frame has nothing behind it. Every subsequent one is damage relative to what reached
 		// the glass last time and there is no last time — so the output owes its whole extent, which is
@@ -776,18 +985,29 @@ Result<void> Run(const Options& options)
 
 	if (resolved.Backend == BackendKind::Auto)
 	{
-		// Auto picks nested where there is a host and DRM otherwise, and neither is built. Headless is
-		// what there is, so that is what auto resolves to — said out loud rather than silently, because
-		// somebody who typed nothing and got headless should be able to find out why. Dump is built too
-		// and auto never picks it: writing files is something a person asks for.
-		resolved.Backend = BackendKind::Headless;
+		// **A host, or headless.** Docs/Architecture.md#selection has auto picking nested where there is
+		// a compositor to nest in and DRM otherwise; DRM is not built, so the second half falls to
+		// headless. `WAYLAND_SOCKET` counts as well as `WAYLAND_DISPLAY`, because a client launched by
+		// something that already opened the socket inherits the descriptor rather than the path — which
+		// is how a sandboxed client reaches a compositor whose socket it cannot open, and Wire's own
+		// connect path already prefers it.
+		//
+		// Auto never picks dump: writing files is something a person asks for by name.
+		const bool host = ::getenv("WAYLAND_DISPLAY") != nullptr || ::getenv("WAYLAND_SOCKET") != nullptr;
 
-		spdlog::info("no backend selected and only headless is built; running headless");
+		resolved.Backend = host ? BackendKind::Nested : BackendKind::Headless;
+
+		// Said out loud rather than silently, because somebody who typed nothing and got one of the two
+		// should be able to find out why without reading this file.
+		spdlog::info(
+			host ? "no backend selected and WAYLAND_DISPLAY is set; running nested" :
+				   "no backend selected and there is no wayland host; running headless"
+		);
 	}
 
-	if (resolved.Backend != BackendKind::Headless && resolved.Backend != BackendKind::Dump)
+	if (resolved.Backend == BackendKind::Drm)
 	{
-		return Failure(ENOSYS, "only the headless and dump backends are built");
+		return Failure(ENOSYS, "the DRM backend is not built");
 	}
 
 	if (resolved.RealTime)

@@ -1,28 +1,11 @@
-// munmap is POSIX and the dma-buf sync ioctl is Linux's, which is the whole reason this module is not
-// in the portable tier. Requested in the translation unit for the reason Core/Fd.cpp requests
-// _POSIX_C_SOURCE: what is wanted from the platform is named where it is wanted.
-#define _POSIX_C_SOURCE 200809L
-
+// The dma-buf sync ioctl is Linux's, which is the whole reason this file is not in the portable tier
+// and the reason Seam/Buffer.h could go there without it.
 #include "Virtual/Buffer.h"
 
 #include <linux/dma-buf.h>
 #include <sys/ioctl.h>
-#include <sys/mman.h>
 
-void Mapping::Reset() noexcept
-{
-	if (m_Pixels != nullptr)
-	{
-		// Dropped for Core/Fd.cpp's reason, and the reasoning transfers exactly: the only way munmap
-		// fails is a base or a length that never described a mapping, which is a defect here rather
-		// than something the caller could act on, and the caller is usually a destructor that has no
-		// way to report it.
-		::munmap(m_Pixels, m_Length);
-	}
-
-	m_Pixels = nullptr;
-	m_Length = 0;
-}
+#include <cstdint>
 
 namespace
 {
@@ -45,13 +28,13 @@ void Sync(RawFd descriptor, std::uint64_t phase) noexcept
 }
 } // namespace
 
-DmabufBuffer::CpuRead::CpuRead(const DmabufBuffer& buffer) noexcept
+DmabufRead::DmabufRead(const DmabufBuffer& buffer) noexcept
 	: m_Descriptor{ buffer.IsMapped() ? buffer.Descriptor() : RawFd{} }, m_Bytes{ buffer.Pixels() }
 {
 	Sync(m_Descriptor, DMA_BUF_SYNC_START);
 }
 
-DmabufBuffer::CpuRead::~CpuRead()
+DmabufRead::~DmabufRead()
 {
 	Sync(m_Descriptor, DMA_BUF_SYNC_END);
 }

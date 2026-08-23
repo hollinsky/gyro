@@ -170,7 +170,7 @@ GYRO_TEST(Udmabuf, TheMappingIsTheBufferAndSurvivesTheMemfd)
 	pixels[0] = std::byte{ 0xAB };
 	pixels[pixels.size() - 1] = std::byte{ 0xCD };
 
-	const DmabufBuffer::CpuRead read{ *buffer };
+	const DmabufRead read{ *buffer };
 	GYRO_REQUIRE_EQ(read.Bytes().size(), pixels.size());
 	GYRO_CHECK_EQ(read.Bytes()[0], std::byte{ 0xAB });
 	GYRO_CHECK_EQ(read.Bytes()[read.Bytes().size() - 1], std::byte{ 0xCD });

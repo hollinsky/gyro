@@ -461,7 +461,7 @@ GYRO_TEST(RenderImport, DamageIsDrawnAndTheRestSurvives)
 	GYRO_REQUIRE(buffer != nullptr);
 	GYRO_REQUIRE(buffer->IsMapped());
 
-	const DmabufBuffer::CpuRead read{ *buffer };
+	const DmabufRead read{ *buffer };
 
 	// Inside each rectangle: what an empty scene composites to.
 	GYRO_CHECK_EQ(PixelAt(*buffer, 6, 6), Black);
@@ -528,7 +528,7 @@ GYRO_TEST(RenderImport, ACompositedFrameReachesTheConsumer)
 	const DmabufBuffer* buffer = fixture->Output().Buffer(presented->Target);
 	GYRO_REQUIRE(buffer != nullptr);
 
-	const DmabufBuffer::CpuRead read{ *buffer };
+	const DmabufRead read{ *buffer };
 	GYRO_CHECK_EQ(PixelAt(*buffer, 32, 16), Black);
 
 	fixture->Output().Release(presented->Target);
@@ -695,7 +695,7 @@ GYRO_TEST(RenderImport, AnExportedTargetImportsBackAndDraws)
 	// After the bind, for `Fixture::Prefill`'s reason: the import transitions the image out of
 	// `VK_IMAGE_LAYOUT_UNDEFINED`, and a driver is entitled to discard whatever it held across that.
 	{
-		const DmabufBuffer::CpuRead write{ *readable };
+		const DmabufRead write{ *readable };
 		std::ranges::fill(readable->Pixels(), Untouched);
 	}
 
@@ -777,7 +777,7 @@ GYRO_TEST(RenderImport, AnExportedTargetImportsBackOnHardware)
 	}
 
 	{
-		const DmabufBuffer::CpuRead write{ *readable };
+		const DmabufRead write{ *readable };
 		std::ranges::fill(readable->Pixels(), Untouched);
 	}
 
@@ -1382,7 +1382,7 @@ GYRO_TEST(RenderImport, TargetsSurviveAReconfiguration)
 	// The rectangle spans x 100..120 and y 50..70, and the target is 64 rows tall — so the bottom
 	// eight rows of the damage are off the end. What must happen is that the *rest* still draws:
 	// the last row inside the target is composited, and the columns past the rectangle are not.
-	const DmabufBuffer::CpuRead read{ *buffer };
+	const DmabufRead read{ *buffer };
 	GYRO_CHECK_EQ(PixelAt(*buffer, 110, 55), Black);
 	GYRO_CHECK_EQ(PixelAt(*buffer, 119, 63), Black);
 	GYRO_CHECK_EQ(PixelAt(*buffer, 100, 63), Black);
@@ -1416,7 +1416,7 @@ GYRO_TEST(RenderImport, EmptyDamageDrawsNothing)
 	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
 	GYRO_REQUIRE(buffer != nullptr);
 
-	const DmabufBuffer::CpuRead read{ *buffer };
+	const DmabufRead read{ *buffer };
 	GYRO_CHECK_EQ(PixelAt(*buffer, 32, 16), Filled);
 }
 
@@ -1523,7 +1523,7 @@ GYRO_TEST(RenderImport, AnExportingDeviceHandsOutAWaitablePoint)
 	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
 	GYRO_REQUIRE(buffer != nullptr);
 
-	const DmabufBuffer::CpuRead read{ *buffer };
+	const DmabufRead read{ *buffer };
 	GYRO_CHECK_EQ(PixelAt(*buffer, 16, 16), Black);
 	GYRO_CHECK_EQ(PixelAt(*buffer, 40, 24), Filled);
 

@@ -177,7 +177,8 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Session` | platform | dispatch | `Core`, `Protocol`, `Scene`, `Seam` |
 | `Headless` | **portable** | split | `Core`, `Geometry`, `Seam` |
 | `Virtual` | platform | frame, own | `Core`, `Geometry`, `Seam`, `Headless` |
-| `Nested`, `Drm` | platform | split | `Core`, `Geometry`, `Seam` |
+| `Nested` | platform | split | `Core`, `Geometry`, `Seam`, `Wire` |
+| `Drm` | platform | split | `Core`, `Geometry`, `Seam` |
 | `Console` | platform | own | `Core`, `Geometry`, `Seam`, `Blit` |
 | `Compositor` | platform | constructs | everything |
 | `Testing` | portable | — | — |
@@ -301,6 +302,13 @@ implements the interface and `Nested` consumes it, and neither may name the othe
 rule met rather than bent — two implementations, two consumers in different modules, and the
 composition root the only thing that knows both sides. `Virtual` still owns the `udmabuf` provider,
 which is still the one that runs where there is no GPU.
+
+**Only `Nested`'s frame half exists, and the table says `split` anyway.** Input is dispatch-side and
+[decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread)
+has the host connection pumped by the *frame* thread, so what the module owes when input lands is a
+handoff across the publication boundary rather than a second reader. Until there is a dispatch thread
+on the far end of that handoff there is nothing to declare: `gyro_add_module` refuses a
+`DISPATCH_HALF` that names no directory, which is the right moment for the declaration to appear.
 
 ### The draw list is in Seam
 

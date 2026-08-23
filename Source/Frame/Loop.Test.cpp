@@ -469,6 +469,37 @@ GYRO_TEST(FrameLoop, LosingTheTargetsDamagesTheWholeOutputAndDropsTheCommitment)
 	GYRO_CHECK(!harness.Output().Damage().IsEmpty());
 }
 
+GYRO_TEST(FrameLoop, ADiscardedFrameFreesTheOutputRatherThanFreezingIt)
+{
+	// Seam/Presenter.h's fourth signal, and the failure it exists to prevent: the commit was accepted,
+	// so the loop marked the output flip-pending and will not serve it again until something clears
+	// that. A host that drops the frame and says nothing leaves this output dark for good while every
+	// other one carries on, with no error anywhere.
+	Harness harness;
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE(harness.Output().IsFlipPending());
+	GYRO_REQUIRE(harness.Output().Clock().IsValid());
+	GYRO_REQUIRE(harness.Output().Damage().IsEmpty());
+
+	harness.Presenter.Missed.Emit();
+
+	GYRO_CHECK(!harness.Output().IsFlipPending());
+	GYRO_CHECK_EQ(harness.Output().Committed(), FrameClock::NoSequence);
+
+	// The clock is invalidated rather than left running, because a discarded frame is not a late
+	// observation — it is a boundary that produced none, and a prediction carried across it is derived
+	// from a cadence with a hole in it.
+	GYRO_CHECK(!harness.Output().Clock().IsValid());
+
+	// And the pixels are on no screen, so the output owes them again.
+	GYRO_CHECK(!harness.Output().Damage().IsEmpty());
+}
+
 GYRO_TEST(FrameLoop, AReconfigurationReanchorsTheClockAndInvalidatesTheRecord)
 {
 	Harness harness;

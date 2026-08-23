@@ -571,6 +571,15 @@ Result<void> Connection::Recycle(ObjectId id)
 	return {};
 }
 
+void Connection::Reserve(std::size_t ids)
+{
+	m_Client.reserve(ids);
+
+	// The recycle list cannot hold more than the table does, so one figure sizes both — and the push
+	// that fills it happens on a `delete_id`, which is inside `Drain` rather than inside a frame.
+	m_Recycled.reserve(ids);
+}
+
 ObjectId Connection::Allocate()
 {
 	if (!m_Recycled.empty())

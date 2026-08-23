@@ -85,6 +85,21 @@ struct Options
 	std::array<OutputRequest, MaxOutputs> Outputs{};
 	std::size_t OutputCount = 0;
 
+	// How many outputs there are, where saying it once is what somebody means.
+	//
+	// **`--outputs=3` is one host window each under nested**, which is the feature
+	// Docs/Architecture.md#nested-wayland names first: multi-monitor layout, cross-output window drags
+	// and per-output scale become testable without owning three monitors. It is a *count* rather than
+	// a fourth field on `--output` because the thing being asked for is usually three of the same
+	// panel, and typing the same geometry three times is how a sweep ends up with two of them at 60
+	// and one at 59.94 by accident.
+	//
+	// Zero is *however many `--output` said*. Past that it pads with the last `--output`, so
+	// `--output=1280x720 --outputs=2` is two 720p windows and `--outputs=3` alone is three of the
+	// default panel. Fewer than the `--output`s given is a contradiction rather than a truncation, and
+	// is refused.
+	std::size_t WantedOutputs = 0;
+
 	// SCHED_FIFO, mlockall, and RLIMIT_RTTIME. Default on, and Docs/Architecture.md#backends makes
 	// headless and nested force it off anyway — a real-time thread inside a normal-priority host is an
 	// effective way to hard-lock the desktop somebody is developing on. `--realtime` is the explicit
@@ -307,6 +322,20 @@ namespace Detail
 			continue;
 		}
 
+		if (Detail::Matches(argument, "--outputs", value))
+		{
+			std::int64_t count = 0;
+
+			if (!Detail::ParseInteger(value, count) || count < 1 || static_cast<std::size_t>(count) > MaxOutputs)
+			{
+				return Failure(EINVAL, "--outputs is how many outputs to bring up, within what the frame loop admits");
+			}
+
+			options.WantedOutputs = static_cast<std::size_t>(count);
+
+			continue;
+		}
+
 		if (Detail::Matches(argument, "--cost", value))
 		{
 			const Result<Duration> cost = Detail::ParseMilliseconds(value);
@@ -388,6 +417,23 @@ namespace Detail
 	{
 		options.Outputs[0] = OutputRequest{};
 		options.OutputCount = 1;
+	}
+
+	// `--outputs` last, because it pads with what `--output` said and the default above is one of those
+	// answers. A count below what was spelled out is a contradiction: somebody wrote three geometries
+	// and then asked for two, and dropping one silently is the reading nobody wants.
+	if (options.WantedOutputs != 0)
+	{
+		if (options.WantedOutputs < options.OutputCount)
+		{
+			return Failure(EINVAL, "--outputs is fewer than the number of --output arguments given");
+		}
+
+		while (options.OutputCount < options.WantedOutputs)
+		{
+			options.Outputs[options.OutputCount] = options.Outputs[options.OutputCount - 1];
+			++options.OutputCount;
+		}
 	}
 
 	// The floor is what decision 35's second branch renders, so a floor above the planned cost is a

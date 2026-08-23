@@ -367,6 +367,21 @@ Two features to build deliberately rather than let emerge:
   dispatch — a third channel, nested's alone, and not needed until there is an input path at all. See
   [decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread).
 
+What a session comes up on, in the order it is decided. The host's `zwp_linux_dmabuf_v1` feedback
+ranks format-and-modifier pairs against its own hardware; the Vulkan device vetoes; and the first pair
+both accept is what the whole target ring is allocated under — see
+[decision 120](Decisions.md#120-a-nested-outputs-targets-are-exported-from-the-vulkan-device-and-the-allocator-moves-to-seam).
+The acquire point goes out with the commit where the host speaks `wp_linux_drm_syncobj_v1` and there
+is a DRM node to mint a release timeline on; where either is missing the commit is *held* until the
+composite has landed, which costs a frame of latency and contaminates the timestamps the clock then
+reads. [Decision 125](Decisions.md#125-nesteds-release-timelines-come-from-a-drm-node-it-opens-itself)
+has both paths and the log says which one is live.
+
+`wp_presentation_feedback` ends in `presented` or in `discarded`, and the second is a *miss* that
+reaches the frame loop as one —
+[decision 124](Decisions.md#124-a-discarded-frame-is-a-fourth-signal-a-nested-output-is-the-presenter-that-emits-it).
+Silence there is an output that stops drawing for good.
+
 Safety rules, enforced by the backend rather than by convention. Nested and headless force off
 `SCHED_FIFO`, `mlockall`, session claiming, and DRM master unless explicitly overridden. A real-time
 thread nested inside a normal-priority host is an effective way to hard-lock a desktop. gyro also
@@ -411,8 +426,11 @@ from the start.
 ### Selection
 
 Configure-time `GYRO_BACKEND_DRM` / `_NESTED` / `_HEADLESS`, all `ON` by default. Runtime
-`--backend=auto|drm|nested|headless|dump`, where `auto` picks nested when `WAYLAND_DISPLAY` is set and
-DRM otherwise. `auto` never picks `dump`: writing files is something a person asks for by name.
+`--backend=auto|drm|nested|headless|dump`, where `auto` picks nested when `WAYLAND_DISPLAY` or
+`WAYLAND_SOCKET` is set and DRM otherwise — falling back to headless while DRM is unbuilt. `auto`
+never picks `dump`: writing files is something a person asks for by name. `--outputs=N` is how many
+outputs to bring up, which under nested is one host window each; it pads with whatever `--output`
+described, so `--output=1280x720 --outputs=3` is three 720p windows.
 
 Note that the *rendering device* is a separate axis from the backend. Software rendering is a
 physical device gyro may select under any of the three, not a fourth backend — which is what makes

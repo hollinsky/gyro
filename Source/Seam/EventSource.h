@@ -22,11 +22,15 @@
 // presenters are what it emits *into*. See Docs/Decisions.md decision 80.
 //
 // **Exactly one thread pumps a source, for the whole of its life.** That is what lets Drain() hold
-// no lock at all, and it is what obliges the nested backend to open a second connection to the host
-// rather than partitioning one by event queue — presentation feedback is frame-side and input is
-// dispatch-side, and a shared connection is a mutex spanning the publication boundary. Decision 81
-// has the reading that settles it, and the rule generalizes past nested: a source that two threads
-// pump is a design error rather than a configuration.
+// no lock at all, and it is why the nested backend's one connection to the host is pumped by the
+// *frame* thread rather than partitioned by event queue — presentation feedback is frame-side, input
+// is dispatch-side, and partitioning one connection is a mutex spanning the publication boundary
+// because one socket has one reader however many queues sit above it. Decision 81 has the reading
+// that settles it, including why the connection cannot be split in two instead: a `wl_surface` id
+// means nothing outside the connection that created it, so whichever one owns the windows owns both
+// halves. The rule generalizes past nested — a source that two threads pump is a design error rather
+// than a configuration. *(Revised 2026-08-23; this said "obliges the nested backend to open a second
+// connection", which is decision 81's superseded conclusion.)*
 //
 // **The loop drains every source every iteration and never asks which one is ready.** Being handed a
 // readiness set is the obvious alternative and it is rejected, because "drain before evaluating" is a

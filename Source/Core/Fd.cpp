@@ -5,6 +5,7 @@
 
 #include "Core/Fd.h"
 
+#include <fcntl.h>
 #include <unistd.h>
 
 void Fd::Reset(int descriptor) noexcept
@@ -22,4 +23,17 @@ void Fd::Reset(int descriptor) noexcept
 	}
 
 	m_Descriptor = descriptor;
+}
+
+Fd Duplicate(RawFd descriptor) noexcept
+{
+	if (!descriptor.IsValid())
+	{
+		return Fd{};
+	}
+
+	// `F_DUPFD_CLOEXEC` rather than `dup`, because a descriptor that survives an exec is one a child
+	// holds open on a buffer nobody told it about. gyro spawns nothing today and will — the session
+	// agent and the recovery console are both processes — and the flag costs a constant.
+	return Fd{ ::fcntl(descriptor.Value, F_DUPFD_CLOEXEC, 0) };
 }

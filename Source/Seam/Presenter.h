@@ -177,6 +177,30 @@ public:
 	// being mistaken for the one being waited on.
 	Signal<const OutputConfiguration&> Reconfigured;
 
+	// The frame that was accepted will never reach the glass.
+	//
+	// **Present() returning success is a promise about the commit and never about the picture**, and
+	// this is what happens when the two come apart. A nested output learns it from
+	// `wp_presentation_feedback.discarded` — a host that superseded the commit, moved the window to
+	// another output, or occluded it entirely — and the answer at the seam has to be a *third* one,
+	// because both existing signals would lie. Presented would hand FrameClock an observation with no
+	// timestamp behind it, which is a prediction built on a frame that never happened;
+	// TargetsInvalidated says the images are gone, and they are not — the host is still holding this
+	// one and will release it in its own time.
+	//
+	// **Silence is the thing that must not happen.** The loop marks an output flip-pending at the
+	// commit and will not serve it again until something clears that, which is the hardware condition
+	// KMS imposes and not an arithmetic one. So an unanswered commit is an output that stops drawing
+	// for good, from a frame the host quietly dropped — visible as one window in a multi-output
+	// session freezing while the others carry on, with nothing anywhere reporting a failure. What the
+	// loop does instead is drop what was in flight, invalidate the clock rather than let it predict
+	// from a cadence that has a hole in it, and re-damage the output, because the pixels that were
+	// drawn are not on any screen.
+	//
+	// It carries nothing. There is nothing to say beyond *not that one*: no instant, since none
+	// happened, and no sequence, since the loop already knows which frame it committed.
+	Signal<> Missed;
+
 	// The images are gone: a resize, a mode set, a modifier renegotiation. Everything the renderer
 	// imported from Targets() is invalid from this point and the set must be re-read.
 	//
@@ -185,7 +209,7 @@ public:
 	// rather than one with an argument.
 	Signal<> TargetsInvalidated;
 
-	// All three emit on the frame thread. Docs/Structure.md has signals intra-thread only: one
+	// All four emit on the frame thread. Docs/Structure.md has signals intra-thread only: one
 	// crossing the publication boundary would be a third channel where the design turns on there being
 	// two, and Core/Signal.h makes that a runtime abort rather than a convention. Reconfigured is the
 	// one worth checking twice — completion arrives as an event the frame loop already polls for, so

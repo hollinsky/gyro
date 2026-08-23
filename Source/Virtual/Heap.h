@@ -5,8 +5,8 @@
 
 #include "Core/Result.h"
 #include "Geometry/Space.h"
+#include "Seam/Allocator.h"
 #include "Seam/RenderTarget.h"
-#include "Virtual/Allocator.h"
 #include "Virtual/Buffer.h"
 
 // Images with no kernel behind them, so that everything above the allocator can be tested anywhere.

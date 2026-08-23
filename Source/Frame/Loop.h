@@ -116,6 +116,7 @@ public:
 		Adopt(configuration);
 
 		m_OnPresented.ConnectTo<&FrameOutput::OnPresented>(presenter.Presented, *this);
+		m_OnMissed.ConnectTo<&FrameOutput::OnMissed>(presenter.Missed, *this);
 		m_OnReconfigured.ConnectTo<&FrameOutput::OnReconfigured>(presenter.Reconfigured, *this);
 		m_OnTargetsInvalidated.ConnectTo<&FrameOutput::OnTargetsInvalidated>(presenter.TargetsInvalidated, *this);
 	}
@@ -153,6 +154,24 @@ private:
 	{
 		m_Clock.Observe(info);
 		m_FlipPending = false;
+	}
+
+	// The frame was accepted and never shown, which Seam/Presenter.h argues has to be its own signal.
+	//
+	// **The clock is invalidated rather than left alone, and that is the half worth reading twice.**
+	// `FrameClock` predicts the next deadline from a run of observations, and a discarded frame is not
+	// a late observation — it is a boundary that produced none. Left to run, the prediction would
+	// carry a hole it has no way to see, so every deadline after it is derived from a cadence that
+	// never happened. `Invalidate` is exactly the state that says *start again from the next thing
+	// that really lands*, and this is its second caller after a mode set.
+	//
+	// The whole output is damaged for `OnTargetsInvalidated`'s reason: what was drawn is not on a
+	// screen, and the next frame's damage would otherwise be relative to a picture nobody saw.
+	void OnMissed() noexcept
+	{
+		m_Clock.Invalidate();
+		Discard();
+		DamageWholeOutput();
 	}
 
 	// Decision 73: the transition completes as an event some time later, and this is that event. The
@@ -217,6 +236,7 @@ private:
 	FrameDecision m_Last{};
 
 	Connection<const PresentationInfo&> m_OnPresented;
+	Connection<> m_OnMissed;
 	Connection<const OutputConfiguration&> m_OnReconfigured;
 	Connection<> m_OnTargetsInvalidated;
 };

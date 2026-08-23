@@ -265,7 +265,7 @@ private:
 // A mapped dmabuf, viewed, with the kernel's cache maintenance held open across the look.
 //
 // **It exists so that reading a frame without the sync is not something a caller can express.**
-// `DmabufBuffer::CpuRead` already brackets `DMA_BUF_IOCTL_SYNC` and Virtual/Buffer.h says why the
+// `DmabufRead` already brackets `DMA_BUF_IOCTL_SYNC` and Virtual/Buffer.h says why the
 // bracket is an object rather than two calls — the end is the half that gets forgotten. Handing out
 // a bare `ImageView` over `buffer.Pixels()` would reintroduce exactly that: a view outlives the
 // expression it was built in, and the sync would end while somebody still held it. Owning both puts
@@ -291,7 +291,7 @@ public:
 	[[nodiscard]] const ImageView& Image() const noexcept { return m_View; }
 
 private:
-	DmabufBuffer::CpuRead m_Read;
+	DmabufRead m_Read;
 	ImageView m_View{};
 	Result<void> m_Status{};
 };

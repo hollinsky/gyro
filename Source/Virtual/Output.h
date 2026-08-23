@@ -12,11 +12,11 @@
 #include "Core/Result.h"
 #include "Core/Time.h"
 #include "Headless/Vblank.h"
+#include "Seam/Allocator.h"
 #include "Seam/OutputConfiguration.h"
 #include "Seam/Presenter.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/SyncPoint.h"
-#include "Virtual/Allocator.h"
 #include "Virtual/Buffer.h"
 
 // An output whose glass is somebody else's problem: a file, an encoder, a test.

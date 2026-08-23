@@ -117,6 +117,19 @@ private:
 	int m_Descriptor = InvalidFd;
 };
 
+// A second owner of the same open file, for the handover that is a copy rather than a move.
+//
+// **It exists because two APIs in this tree take ownership of what they are handed while the caller
+// still needs it.** `Wire::MessageWriter::PutFd` is one — a marshalled request may sit unsent for as
+// long as the host is slow, so a caller that closed its copy on return would have handed over a
+// number the kernel has already given to something else — and `zwp_linux_buffer_params_v1.add`
+// reaches it once per plane per target. Written here rather than at each call site so that the
+// `dup` and the `<unistd.h>` it needs live in the one file that already owns both.
+//
+// An invalid descriptor duplicates to an invalid one rather than to an error, because the caller's
+// next question is `IsValid` either way. Defined in Fd.cpp.
+[[nodiscard]] Fd Duplicate(RawFd descriptor) noexcept;
+
 // Prints as fd 7, or fd none. No format spec is accepted.
 //
 // The context is a template parameter for the reason recorded at length in Core/Time.h: naming
