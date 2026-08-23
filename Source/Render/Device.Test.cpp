@@ -117,7 +117,7 @@ GYRO_TEST(Device, UnsupportedFormatsAreRefused)
 	GYRO_CHECK(!device->Supports({ FourCc('Z', 'Z', 'Z', 'Z'), 0, ModifierLinear }));
 }
 
-// Decision 104, as the measurement it came from. This does not assert *which* answer the device
+// Decision 108, as the measurement it came from. This does not assert *which* answer the device
 // gives — that is the machine's business — it asserts that the renderer's behaviour is derived from
 // the answer rather than assumed, which is the thing that was wrong before it was measured.
 GYRO_TEST(Device, TimelineExportIsAskedRatherThanAssumed)

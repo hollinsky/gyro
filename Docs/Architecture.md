@@ -1557,8 +1557,8 @@ count, no chain resolution, exactly as it names no spring parameters.
 The set is named by what each material does to light rather than by the role it is put to, which is
 what keeps `Sidebar` and `Titlebar` out of it: the moment the vocabulary knows what a sidebar is, the
 arrangements that are not sidebars stop being sayable about, and that is
-[decision 51](Decisions.md#51-the-shell-composes-gyro-animates)'s rule one field over from the node
-kinds. `Glass` sits over content the user arranged, so it can be thin. `Smoke` sits over content gyro
+[decision 51](Decisions.md#51-the-shell-is-a-per-session-client-gyro-owns-mechanism)'s rule one
+field over from the node kinds. `Glass` sits over content the user arranged, so it can be thin. `Smoke` sits over content gyro
 did not choose — a film, a white page — so its opacity comes from a worst-case contrast floor rather
 than from taste. See
 [decision 103](Decisions.md#103-a-dressing-is-named-by-what-it-does-to-light-the-material-set-is-glass-and-smoke).
@@ -2522,7 +2522,7 @@ sudo dnf install wayland-devel wayland-protocols-devel libdrm-devel libinput-dev
 ```
 
 **Vulkan is deliberately absent from that line**, and its absence is the content of
-[decision 103](Decisions.md#103-vulkan-arrives-through-cpm-and-gyro-never-links-the-loader): gyro
+[decision 107](Decisions.md#107-vulkan-arrives-through-cpm-and-gyro-never-links-the-loader): gyro
 does not link the loader. volk resolves it with `dlopen("libvulkan.so.1")` at startup, so the headers
 are the only build input and they arrive pinned through CPM. What that buys is not convenience — it
 is that a machine with a broken or missing Vulkan install answers `volkInitialize()` with a failure

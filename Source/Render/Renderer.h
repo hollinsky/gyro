@@ -83,7 +83,7 @@ public:
 	// How many images are currently imported.
 	[[nodiscard]] std::uint32_t BoundTargets() const noexcept { return m_TargetCount; }
 
-	// Whether this renderer hands out a waitable point at all, which is decision 104's device
+	// Whether this renderer hands out a waitable point at all, which is decision 108's device
 	// property read back. False means every `Submission` is `Immediate` because the frame was
 	// finished before `Record` returned.
 	[[nodiscard]] bool ExportsTimeline() const noexcept { return m_TimelineFd.IsValid(); }
@@ -127,7 +127,7 @@ private:
 
 	// One timeline for the device's whole life, which is what Seam/SyncPoint.h's borrowed descriptor
 	// requires: *the timeline outlives every point on it*. The descriptor is invalid on a device that
-	// cannot export one, and decision 104 is what that means for the points handed out.
+	// cannot export one, and decision 108 is what that means for the points handed out.
 	VkSemaphore m_Timeline = VK_NULL_HANDLE;
 	Fd m_TimelineFd;
 	std::uint64_t m_Submitted = 0;

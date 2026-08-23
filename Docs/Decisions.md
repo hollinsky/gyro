@@ -4752,9 +4752,10 @@ because that file says the two are twins, and §4 of this pair is what came of t
 usually put to, and never by degree.** The rule is one sentence and it decides most of the contents.
 
 *Role names* — `Sidebar`, `Titlebar`, `Menu` — are
-[decision 51](#51-the-shell-composes-gyro-animates)'s fisheye-dock failure arriving one field over
-from where [decision 95](#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind)
-already refused it. That entry rejects *a node kind that knows what a window is*, because the moment
+[decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism)'s fisheye-dock failure
+arriving one field over from where
+[decision 95](#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind) already
+refused it. That entry rejects *a node kind that knows what a window is*, because the moment
 the scene knows what a window is, the arrangements that are not windows stop being expressible. A
 material called `Sidebar` knows what a sidebar is, and a shell that dresses a workspace switcher with
 it is not wrong so much as unsayable-about.
@@ -7482,10 +7483,13 @@ does not — a modifier the display plane will accept, and the scanout usage tha
 eligible — is untested until the DRM backend lands. That failure should arrive there honestly rather
 than appear to have been covered by a fixture.
 
-### 103. Vulkan arrives through CPM and gyro never links the loader
+### 107. Vulkan arrives through CPM and gyro never links the loader
 
 *(Decided 2026-08-22, on going to add the pkg-config rows for the renderer and finding they buy
-nothing.)*
+nothing. Numbered 107 rather than 103 on the same day: two changes landed within the hour and both
+claimed 103 and 104, and the dressing set — [decision 103](#103-a-dressing-is-named-by-what-it-does-to-light-the-material-set-is-glass-and-smoke)
+and [decision 104](#104-an-elevation-is-a-height-under-one-light-and-the-shadow-is-analytic) — went
+in first and kept them. Anything citing "decision 103" about the loader means this.)*
 
 **`Vulkan-Headers` and `volk` are CPM packages pinned to the same SDK, and there is no `vulkan.pc`
 entry, no `libvulkan` link line, and no `vulkan-loader-devel` in the setup instructions.** volk
@@ -7496,11 +7500,11 @@ a directory of headers — which is a git tag rather than a distribution package
 missing or broken `libvulkan.so.1` a failure of `execve`: the dynamic linker refuses, the process
 never runs a line, and nothing reaches a screen. On a login-session compositor that is an error
 message in a terminal somebody already has. On a boot service that has subsumed the splash and
-[removed the VTs](#37-no-vts-the-recovery-console-is-gyros-own), it is a black machine with no way in.
-`volkInitialize()` returning `VK_ERROR_INITIALIZATION_FAILED` is a condition gyro can *report*, and
-[decision 79](#79-the-pre-vulkan-console-is-a-renderer-not-a-second-presentation-path)'s console
-renderer is what it falls back to — the same path the boot splash already draws through, so the
-fallback is a path that runs rather than one that is argued about.
+[removed the VTs](#37-gyro-owns-the-display-from-firmware-handoff-onward-there-are-no-vts), it is a
+black machine with no way in. `volkInitialize()` returning `VK_ERROR_INITIALIZATION_FAILED` is a
+condition gyro can *report*, and [decision 79](#79-the-console-is-a-renderer-not-a-presenter)'s
+console renderer is what it falls back to — the same path the boot splash already draws through, so
+the fallback is a path that runs rather than one that is argued about.
 
 The second-order benefit is that this was found by trying to build on a machine that had
 `vulkan-loader` and `mesa-vulkan-drivers` installed and neither `vulkan-headers` nor a
@@ -7533,10 +7537,14 @@ compilation for hot reload and that argument still holds; what has changed is th
 known to be a build-time one rather than a dependency-availability one, which is a different
 trade to make and worth making when there is a shader to compile.
 
-### 104. A device that cannot export a timeline finishes the frame inside `Record`
+### 108. A device that cannot export a timeline finishes the frame inside `Record`
 
 *(Decided 2026-08-22, on writing the Vulkan renderer's first commit and discovering that the floor
-tier cannot do what [Seam/SyncPoint.h](../Source/Seam/SyncPoint.h) says every device does.)*
+tier cannot do what [Seam/SyncPoint.h](../Source/Seam/SyncPoint.h) says every device does. Numbered
+108 rather than 104 for the reason [decision 107](#107-vulkan-arrives-through-cpm-and-gyro-never-links-the-loader)
+gives; anything citing "decision 104" about a `SyncPoint` means this, and
+[decision 104](#104-an-elevation-is-a-height-under-one-light-and-the-shadow-is-analytic) itself is
+about shadows.)*
 
 **lavapipe cannot create an exportable semaphore of any kind, so a renderer on it has no descriptor
 to put in a `SyncPoint` — and rather than lie about that, it waits for its own submission and returns

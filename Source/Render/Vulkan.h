@@ -14,7 +14,7 @@
 // into a `VkFormat`.
 //
 // **volk rather than the loader's own prototypes, and the reason is what gyro is.** Decision 9 took
-// volk for dispatch overhead and decision 103 found the better reason underneath it: volk resolves
+// volk for dispatch overhead and decision 107 found the better reason underneath it: volk resolves
 // Vulkan with `dlopen("libvulkan.so.1")`, so gyro links nothing and a machine with a broken Vulkan
 // install answers `volkInitialize()` with a failure. A boot service that refuses to exec because a
 // shared object moved is a black screen with no console behind it — decision 37 removed the VT that

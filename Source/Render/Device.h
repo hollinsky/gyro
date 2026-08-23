@@ -63,7 +63,7 @@ struct DeviceDescription
 
 	// Whether a timeline semaphore on this device can be exported as a descriptor.
 	//
-	// **This is the field decision 104 exists for, and it is a device property rather than a
+	// **This is the field decision 108 exists for, and it is a device property rather than a
 	// per-frame branch.** lavapipe advertises `VK_KHR_external_semaphore_fd` and refuses to *create*
 	// an exportable semaphore of either kind, so a renderer on the floor tier has no descriptor to
 	// put in a `SyncPoint` and must finish the frame before `Record` returns. Queried once with

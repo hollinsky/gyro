@@ -125,7 +125,7 @@ struct VirtualFrame
 	// So the obligation travels with the frame. Virtual/Device.h is what discharges it — it holds the
 	// renderer and declines to deliver a frame whose point is outstanding — and a consumer reached
 	// any other way owes itself the same check. Immediate is the common answer today, because
-	// decision 104 has a device that cannot export a timeline finish inside `Record`.
+	// decision 108 has a device that cannot export a timeline finish inside `Record`.
 	SyncPoint Acquire{};
 
 	friend constexpr bool operator==(VirtualFrame, VirtualFrame) noexcept = default;

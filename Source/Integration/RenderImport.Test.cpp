@@ -117,7 +117,7 @@ private:
 
 // `Software` by default, for Render/Device.Test.cpp's reason: the machine this was written on has
 // a GPU beside lavapipe, and it is the floor tier whose import path must keep working. The
-// parameter exists for the one test below that wants the *other* answer to decision 104's
+// parameter exists for the one test below that wants the *other* answer to decision 108's
 // question, which no software device can give.
 [[nodiscard]] std::optional<Fixture> Available(std::string_view test, DeviceClass wanted = DeviceClass::Software)
 {
@@ -231,7 +231,7 @@ GYRO_TEST(RenderImport, DamageIsDrawnAndTheRestSurvives)
 	GYRO_REQUIRE_EQ(submission.has_value(), true);
 
 	// The composite has to have landed before the bytes are read, and on the floor tier it already
-	// has: decision 104 has a device that cannot export a timeline finish inside `Record`, so the
+	// has: decision 108 has a device that cannot export a timeline finish inside `Record`, so the
 	// point comes back immediate. On a device that can, this is where the caller waits.
 	GYRO_CHECK(fixture->Renderer().IsComplete(submission->Point));
 
@@ -528,7 +528,7 @@ GYRO_TEST(RenderImport, EmptyDamageDrawsNothing)
 	GYRO_CHECK_EQ(PixelAt(*buffer, 32, 16), Filled);
 }
 
-// Decision 104, from the caller's side. What is asserted is the *implication* rather than the
+// Decision 108, from the caller's side. What is asserted is the *implication* rather than the
 // answer: a device that cannot export hands out immediate points, and one that can hands out points
 // on its own timeline. Which of those this machine is is the machine's business.
 GYRO_TEST(RenderImport, SyncPointsMatchWhatTheDeviceCanExport)
@@ -561,7 +561,7 @@ GYRO_TEST(RenderImport, SyncPointsMatchWhatTheDeviceCanExport)
 	else
 	{
 		// Immediate because the frame is *finished*, not because there was nothing to wait for. The
-		// distinction is the whole of decision 104 and the reason the wait is inside `Record`.
+		// distinction is the whole of decision 108 and the reason the wait is inside `Record`.
 		GYRO_CHECK(submission->Point.IsImmediate());
 	}
 
@@ -577,7 +577,7 @@ GYRO_TEST(RenderImport, SyncPointsMatchWhatTheDeviceCanExport)
 	GYRO_CHECK(submission->RecordCost >= Duration::zero());
 }
 
-// The other side of decision 104, on a machine that has one.
+// The other side of decision 108, on a machine that has one.
 //
 // **Skipped rather than failed where there is no GPU, and that is the honest shape.** lavapipe can
 // never take this branch — it cannot create an exportable semaphore at all — so a suite that only

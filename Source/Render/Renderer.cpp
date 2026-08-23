@@ -23,7 +23,7 @@ constexpr VkClearValue Nothing{ .color = { .float32 = { 0.0F, 0.0F, 0.0F, 1.0F }
 
 // How long the one blocking wait in this file will sit before giving up: a second, which is far
 // past any frame and far short of a hang. It is only reached on a device that cannot export a
-// timeline — decision 104 — where the alternative to waiting is handing out a point that says
+// timeline — decision 108 — where the alternative to waiting is handing out a point that says
 // *nothing to wait for* while the rasterizer is still running.
 constexpr std::uint64_t WaitLimitNanoseconds = 1'000'000'000;
 
@@ -118,7 +118,7 @@ VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device) : m_Cl
 
 	// Exportable only where the device said it could be. Asking unconditionally is what fails on
 	// lavapipe — `VK_ERROR_INVALID_EXTERNAL_HANDLE` from `vkCreateSemaphore`, not from the export —
-	// and a renderer that aborted there would take the floor tier out entirely. Decision 104.
+	// and a renderer that aborted there would take the floor tier out entirely. Decision 108.
 	const bool exportable = device.Description().ExportsTimeline;
 	const VkExportSemaphoreCreateInfo exportInfo{ .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
 		                                          .pNext = nullptr,
@@ -452,7 +452,7 @@ Result<void> VulkanRenderer::Settle()
 		return submitted;
 	}
 
-	// Waited for, and this one is not decision 104's wait: it is a bind, which the seam already
+	// Waited for, and this one is not decision 108's wait: it is a bind, which the seam already
 	// declares unbounded, and the alternative would be a first `Record` racing the layout transition
 	// its own barrier assumes has happened.
 	return Check(vkQueueWaitIdle(m_Device->Queue()), "vkQueueWaitIdle");
@@ -679,7 +679,7 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 	m_Submitted = value;
 	slot.LastSubmit = value;
 
-	// **Decision 104 in five lines.** A device that cannot export a timeline has no descriptor to put
+	// **Decision 108 in five lines.** A device that cannot export a timeline has no descriptor to put
 	// in a `SyncPoint`, and an invalid one there means *nothing to wait for* — which would be a lie
 	// while the rasterizer is still running. So the frame is finished here and the point is honestly
 	// immediate. That is not a workaround: a sync point exists so two devices can overlap, and the

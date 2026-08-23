@@ -627,7 +627,7 @@ nothing only proves the grep.
   predicted: on a machine with neither udmabuf nor an ICD, sixteen tests pass having asserted
   nothing.
 - **Whether the frame clock absorbs a blocking `Record` on the floor tier.**
-  [Decision 104](Decisions.md#104-a-device-that-cannot-export-a-timeline-finishes-the-frame-inside-record)
+  [Decision 108](Decisions.md#108-a-device-that-cannot-export-a-timeline-finishes-the-frame-inside-record)
   has a renderer that cannot export a timeline wait for its own submission before returning, which is
   the accurate thing to do on a device with no second processor to overlap with — but it means that
   on a machine with a real panel and no GPU driver, software rasterization happens inside the frame

@@ -28,7 +28,7 @@ constexpr std::uint32_t MaxModifiers = 64;
 // `VK_KHR_timeline_semaphore` is not here because it is core in 1.2 and the feature is enabled
 // below; `VK_KHR_external_semaphore_fd` is not here because it is optional — lavapipe advertises
 // it and then refuses to create an exportable semaphore, so what settles the question is the
-// capability query rather than the extension list. See decision 104.
+// capability query rather than the extension list. See decision 108.
 constexpr std::array<const char*, 4> RequiredExtensions{
 	VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
 	VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
@@ -118,7 +118,7 @@ constexpr std::array<const char*, 4> RequiredExtensions{
 	return false;
 }
 
-// Whether a timeline semaphore on this device can be exported as a descriptor. Decision 104's
+// Whether a timeline semaphore on this device can be exported as a descriptor. Decision 108's
 // whole question, asked of the driver rather than inferred from its extension list.
 [[nodiscard]] bool QueryTimelineExport(VkPhysicalDevice device) noexcept
 {
@@ -294,7 +294,7 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 
 	// The optional one. Asked for only where the capability query said the answer is yes, so that a
 	// driver which advertises the extension and refuses the semaphore does not fail device creation
-	// — decision 104's whole subject, and lavapipe's actual behaviour.
+	// — decision 108's whole subject, and lavapipe's actual behaviour.
 	std::array<const char*, RequiredExtensions.size() + 1> extensions{};
 	std::ranges::copy(RequiredExtensions, extensions.begin());
 	std::uint32_t extensionCount = RequiredExtensions.size();

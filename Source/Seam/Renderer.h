@@ -445,7 +445,7 @@ public:
 	// issued against work that has not run. Nothing in here may allocate, take a device-wide lock, or
 	// block on another output's work.
 	//
-	// **The qualification is decision 104 and it is narrower than it sounds.** *(Revised 2026-08-22.)*
+	// **The qualification is decision 108 and it is narrower than it sounds.** *(Revised 2026-08-22.)*
 	// A device that cannot export a timeline — lavapipe, measured, which is decision 40's permanent
 	// floor tier — has no descriptor to name in a `SyncPoint`, and an invalid one there means *nothing
 	// to wait for*. So such a renderer waits for its own submission here and reports an immediate

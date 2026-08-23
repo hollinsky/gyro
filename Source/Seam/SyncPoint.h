@@ -16,7 +16,7 @@
 // **That holds on a real driver and not on the floor tier, which was measured rather than assumed.**
 // *(Revised 2026-08-22.)* anv exports a timeline semaphore as an `anon_inode:syncobj_file`, exactly as
 // the paragraph above says; lavapipe refuses to *create* an exportable semaphore of any kind, so the
-// permanently occupied floor tier can produce no descriptor at all. Decision 104 is what that means
+// permanently occupied floor tier can produce no descriptor at all. Decision 108 is what that means
 // and it changes nothing here: a renderer on such a device finishes the frame before `Record` returns
 // and hands back `Immediate()`, which is the first of the two legitimate producers named below —
 // content that was complete on the CPU. Nothing widens this type, because a device with one processor

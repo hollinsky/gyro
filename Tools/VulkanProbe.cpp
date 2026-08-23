@@ -9,7 +9,7 @@
 // entry names four extensions lavapipe advertises and calls them *the complete set gyro asks of a
 // device*. The claim held. What did not hold is the sentence one file over — Seam/SyncPoint.h's *DRM
 // syncobj timelines throughout, exported from Vulkan timeline semaphores* — because lavapipe cannot
-// create an exportable semaphore of any kind, which is decision 104. Both of those were found by
+// create an exportable semaphore of any kind, which is decision 108. Both of those were found by
 // running this, and the triage rule the log already carries is the reason: an entry that names the
 // source its argument rests on can be retired by an afternoon of reading.
 //
@@ -380,7 +380,7 @@ int main()
 			}
 		}
 
-		// The line decision 104 turns on, stated rather than left to be read off the table above.
+		// The line decision 108 turns on, stated rather than left to be read off the table above.
 		VkSemaphoreTypeCreateInfo type{};
 		type.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
 		type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -398,7 +398,7 @@ int main()
 			"  => %s\n",
 			(exportable.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT) != 0 ?
 				"this device hands out waitable sync points; a presenter gets a real fence" :
-				"this device exports no timeline; the renderer finishes the frame in Record (decision 104)"
+				"this device exports no timeline; the renderer finishes the frame in Record (decision 108)"
 		);
 
 		auto destroyDevice = reinterpret_cast<PFN_vkDestroyDevice>(getDeviceProcAddr(logical, "vkDestroyDevice"));

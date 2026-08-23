@@ -98,7 +98,7 @@ CPMAddPackage(
 )
 
 # Vulkan, and every part of it arrives through CPM rather than pkg-config. See
-# Docs/Decisions.md decision 103; the short of it is that gyro never links the loader. volk resolves
+# Docs/Decisions.md decision 107; the short of it is that gyro never links the loader. volk resolves
 # it with `dlopen("libvulkan.so.1")` at startup, so a machine with a broken Vulkan install answers
 # `volkInitialize()` with a failure gyro can report and fall back from, rather than refusing to exec
 # a boot service. The headers are the only build input, and they are headers.
