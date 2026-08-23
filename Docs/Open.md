@@ -154,6 +154,15 @@ nothing only proves the grep.
   report and sleeps — so the conditional form is correct only with the step re-checking the ring after
   posting and before it returns `Never()`. Settle it by measuring the waste on a busy system rather
   than before.
+
+  **A different condition was taken and this one is untouched.** *(2026-08-23, by
+  [decision 128](Decisions.md#128-the-publication-doorbell-rings-when-a-snapshot-crossed-not-on-every-step).)*
+  The doorbell now rings when a snapshot actually crossed rather than on every step, which removes the
+  wakeups a *refused* publish would have caused and none of the ones this entry is about. The two are
+  not the same shape: that condition reads dispatch's own publication counter in its own thread, so
+  there is no window to lose a wakeup in, while the saving proposed here reads the frame thread's state
+  and races it. What still wants measuring is the waste on a busy system, where every publication is
+  accepted and every one of them wakes a frame thread that was already running.
 - **The return channel has no doorbell, so a deferred publish is retried on a timer.**
   [Decision 74](Decisions.md#74-the-forward-ring-recycles-only-below-the-watermark-and-a-full-ring-defers)'s refused publish is retained
   and retried, and what unblocks it is the frame thread posting a `FrameReport` — but
@@ -351,6 +360,15 @@ nothing only proves the grep.
   is drawn every frame and then stops. What it cannot assert is that the scene it runs is a scene
   anybody has — it is one window and one commit — which is this entry unchanged. The mechanism it
   needed is no longer in the way, so what is left is choosing the scene.
+
+  **And the assertion now runs against two threads and a real ring, which is where it will actually be
+  made.** *(2026-08-23, by
+  [decision 127](Decisions.md#127-idle-is-both-halves-at-rest-and-only-the-composition-root-sees-both).)*
+  `--frames=N --gym=settle` authors once, animates to completion, and ends because the machine went
+  quiet rather than because the counter ran out — the same claim as the integration test with a real
+  boundary and a real dispatch thread between the halves. What that makes CI-ready is the *harness*.
+  The scene is still one gyro authored for itself, so this entry is unchanged in the part that matters
+  and there is now somewhere obvious to put the answer once it is chosen.
 - **Backlight without a backlight.** Decision 58 dims via `/sys/class/backlight`, which external
   monitors do not have; DDC/CI is the usual answer and it is slow, unreliable, and needs I2C access.
   Whether an external output dims at all, and what the composite-side fallback is when it cannot, is

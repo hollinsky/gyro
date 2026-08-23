@@ -9470,3 +9470,181 @@ host.** What it costs is stated once at startup and again at shutdown, in the te
 this window runs a frame behind, and its pacing figures are not a measurement of the host's cadence.
 
 ---
+
+### 126. The dispatch thread's wait is a `ppoll` on one descriptor, and the root converts the wake
+
+*(Decided 2026-08-23, wiring [decision 80](#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait)'s
+producer-side twin into the composition root. Worth writing down rather than merely doing, because
+[Architecture.md](Architecture.md#the-dispatch-loop) opens that loop with "its own ring, its own
+thread" and this is not one.)*
+
+**The dispatch thread blocks in `ppoll` on a single eventfd, with a relative timeout the composition
+root derives from the `Wake` the step returned.** The ring in Architecture.md's sketch arrives with the
+things it multiplexes — client sockets, evdev, a control socket, round-robin demarshalling under a
+per-connection budget — and none of them has a producer. What is left to wait on today is one
+descriptor and one deadline, and a ring waiting on one descriptor is a ring with nothing to collapse.
+
+**Architecture.md already concedes the general point and this is the specific case of it.** *On the
+dispatch ring io_uring is a convenience and plain epoll would be defensible* — the argument that earns
+it is `DEFER_TASKRUN`, whose payoff is kernel completion work landing where gyro asked for it rather
+than preempting mid-render. That is jitter reduction for a thread with a deadline, and this thread
+does not have one. The ring arrives with the first client socket, which is also the first moment
+there is a set to collapse into one `io_uring_enter`.
+
+**The timeout is relative, which is the reverse of what the frame ring argues for itself.**
+[Compositor/Uring.h](../Source/Compositor/Uring.h) uses `IORING_TIMEOUT_ABS` and says why: a relative
+timeout is computed from a `now` read before the enter, so every preemption between the two lands on
+the far side of the deadline, and a late wake is the one error that contract does not permit. Dispatch
+has no vblank to be late for. What lateness costs here is set by
+[decision 89](#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete):
+a retarget is stamped with the instant it fell due rather than with now, so a wake served late renders
+the motion **already in progress by exactly the lateness** — the first frame or two of an animation,
+never its shape. `IGym::Advance` is documented to want precisely that, because a gym stamping `now`
+would hide the lateness it exists to expose.
+
+**`Wake::Kind::Continuous` has no meaning on this side, and the root is where it acquires one.** It
+means *a frame at `When` and another every `Interval` after it*, and a zero interval on the frame side
+is "every frame the output offers" — a rate a vblank supplies. Dispatch has no vblank, so the same
+value read literally is a spin at whatever rate a scene walk happens to take. The fastest panel in the
+set is what an author asking for it must have meant, since publishing faster than the quickest thing
+that can read it is work nobody sees. That number is the composition root's and nowhere else's:
+[decision 97](#97-an-outputs-placement-is-published-the-modes-half-of-the-view-meets-it-in-the-walk)
+gives the mode's extent to the frame side, and `Scene/Output.h` carries where an output *is* rather
+than when it scans, so a portable `Dispatch` has no source for a refresh rate and must not grow one.
+Nothing produces a `Continuous` today — a gym answers `Never()` or `At()`, and the serializer's
+republication is `Timed` by construction — which is exactly when the conversion is cheap to place.
+
+**Stopping is a sticky flag and a counter nothing drains**, which is the opposite of `Interrupt`'s
+rule and for the same underlying reason. The frame ring polls level-triggered every iteration, so an
+eventfd left readable there is a spin; here the only write this object will ever see is the last one,
+so leaving it readable is what makes every subsequent wait return at once rather than parking a thread
+the root is waiting to join.
+
+**Rejected: a second `io_uring` now.** There is no obstacle to it — `IORING_SETUP_SINGLE_ISSUER` binds
+a ring to one task, which is
+[decision 81](#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread)'s
+rule holding for the thing doing the pumping, and the frame ring already opens inside its own thread
+for that reason. The objection is that it buys nothing measurable and fixes the shape of a loop whose
+inputs do not exist: the round-robin discipline, the per-connection budget, and the drain-input-first
+ordering are all decisions the real sources will make, and a ring written before them is a ring
+written against guesses.
+
+**Rejected: a condition variable.** The cheapest thing that can wait with a timeout and be woken, and
+it cannot wait on a descriptor at all. The first client socket would replace the wait rather than add
+an entry to an array — and so would the return channel's doorbell, which [Open.md](Open.md) already
+wants and which is a descriptor by the same argument decision 83 makes in the other direction.
+
+**Rejected: a `timerfd` for an absolute deadline.** Two descriptors and a `timerfd_settime` per
+iteration, to buy a property the paragraph above establishes this thread does not need.
+
+**Rejected: `Dispatch` owning its own wait.** It is the same argument decision 80 makes for the frame
+loop, and the symmetry is the point: the composition root is the only thing in the process allowed to
+name a ring, a descriptor, or a thread, so both halves of the boundary hand it a `Wake` and let it do
+the sleeping. That is what keeps the producer side of the publication boundary runnable and testable
+on a machine with no GPU, no seat, and no compositor.
+
+---
+
+### 127. Idle is both halves at rest, and only the composition root sees both
+
+*(Decided 2026-08-23, on watching `--frames=N --gym=lanes` stop after one frame and print *idled*.)*
+
+**A bounded run stops at idle when three things hold at once: the frame thread folded to `Settled`,
+it is holding a published sequence, and the author's own last wake was `Never()`.** Without an author
+the first alone is the whole answer, and an empty ring folding to idle is correct rather than a stub.
+
+**The frame thread cannot see the third, and that is the publication boundary working rather than a
+gap in it.** What crosses is a scene and a wake schedule: what the world looks like, and when its
+channels come to rest. The author's *intent* is not in there and must not be — a gym that publishes a
+still scene, sleeps until the next lane falls due and retargets is, from the reading side, identical to
+a gym that has finished for good. `lanes` is exactly that shape, and it is the traffic decision 89's
+eager path is meant to be measured at. So the frame side's first idle would end the run after one still
+frame and report it as
+[doing nothing must cost nothing](Architecture.md#doing-nothing-must-cost-nothing) reached, which is
+the one claim in the design this instrument exists to keep honest.
+[Decision 58](#58-idle-is-a-ladder-gyro-executes-and-does-not-choose)'s invariant is not wrong here; it
+is being asked a question with half the information.
+
+**Holding a sequence is the second condition and answers a different question.** `settle` authors once
+and answers `Never()` from its first `Advance`, so the author is at rest before the frame thread has
+acquired anything — and a run that stopped in that window would report idle having drawn nothing at
+all, which is the same false pass arriving from the other end. A nonzero held sequence is the cheapest
+true statement that a scene ever reached this thread.
+
+**It is a flag rather than a channel.** The forward ring is dispatch → frame and the return channel is
+frame → dispatch; a third carrying state is what
+[decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) forbids and what
+[decision 75](#75-the-return-channel-is-one-report-per-frame-per-surface-facts-are-derived-not-sent)
+keeps meaningful. This carries no state: nothing renders from it, nothing is derived from it, and a
+lost update costs one iteration of a bounded run. It is read by `--frames` and by nothing else in the
+design, which is what keeps it out of the boundary's accounting rather than an exception to it.
+
+**Rejected: carrying the author's wake in the snapshot header.** The header already has a wake per
+output, so this looks like one more field. It is a different quantity. Dispatch's wake is
+`Sooner(authored, Republish())`, and `Republish` is the instant a channel comes to rest so that the
+scene can be re-serialised *smaller* — bookkeeping the frame thread must never arm a composite for.
+Merging the two puts a number in the forward channel that means one thing to the producer and would
+mean a frame to the consumer, which is the category error the two-wake split in
+[decision 122](#122-the-wake-fold-is-scene-wide-and-replicated-per-output-a-settled-channel-retires-where-it-is-published)
+exists to avoid.
+
+**Rejected: dropping the idle stop and letting `--frames=N` always run N.** It costs nothing to write
+and loses the only instrument there is for *doing nothing costs nothing*. `settle` exists to author
+once, animate to completion, and fold — and what makes that a measurement rather than a wait is the
+run ending because the machine went quiet rather than because a counter ran out.
+
+**Rejected: a timeout — no publication and no frame within some multiple of a period is idle.** A
+number where there is a fact, and the fact is one line away on each side. It also makes the wrong case
+silent: a gym between motions and a gym that has crashed produce the same quiet.
+
+**What it makes reachable is the two-thread half of [Open.md](Open.md)'s *idle CI assertion*.**
+`Source/Integration/SceneIdle.Test.cpp` asserts both ends of settling with a serializer and a frame
+loop on one thread; this is the same claim with a real boundary, a real ring and two real threads
+between them, and it is now one command line. What stays open is that entry unchanged: the scene being
+run is still one gyro authored for itself rather than one anybody has.
+
+---
+
+### 128. The publication doorbell rings when a snapshot crossed, not on every step
+
+*(Decided 2026-08-23, writing [decision 83](#83-dispatchs-publication-is-an-event-source)'s producer.
+It narrows 83's unconditional signal, and it is deliberately **not** the conditional form 83 defers.)*
+
+**Dispatch writes the eventfd when the publish succeeded and stays silent when the ring refused it.**
+
+**83's *unconditional* was true by construction when it was written and stopped being.** That entry
+prices the waste at dispatch's own iteration rate and observes it is zero on an idle machine, both of
+which still hold. What it did not have in front of it is
+[decision 74](#74-the-forward-ring-recycles-only-below-the-watermark-and-a-full-ring-defers)'s refused
+publish arriving in a running loop: the snapshot is retained rather than lost and retried on a timer,
+so nothing was added to the ring and the bell would be announcing a sequence the frame thread cannot
+acquire. And a refusal happens only when the frame thread is four publications behind — only when it
+is already late — so the wasted wakeups land entirely on the case least able to absorb them, at the
+retry cadence rather than at the scene's own.
+
+**It is not the optimisation 83 defers, and the difference is what is being read.** That one is
+*signal only when the frame thread last reported a `Settled` wake*, and its hazard is a lost wakeup:
+dispatch may read *not idle*, publish, and decline to signal, all inside the window before the frame
+thread posts its report and sleeps. The hazard exists because the thing being read is the **other**
+thread's state and it changes under the reader. This reads dispatch's own publication counter, in
+dispatch's own thread, between two statements, and nothing else writes it. There is no window to
+close, and the deferred optimisation stays deferred and stays in [Open.md](Open.md).
+
+**The invariant survives, which is the test 83 sets.** *When nothing is animating and nothing has
+committed, no timer is armed and the frame thread blocks indefinitely* — and the first commit after
+that has to reach it. A commit that resolves produces a publication; a publication the ring accepts
+rings the bell. The only silent one is a publication the ring refused, and the ring refuses exactly
+when the frame thread's reported watermark has not passed the slot being reused — which is a frame
+thread that has not drained what it was already given. The publications it has not drained each rang
+the bell on their way in, so a wakeup is already outstanding when the refusal happens. **A refused
+publish is never the first one**, and the first one is the only one the invariant is about.
+
+**Rejected: ringing on every step, which is 83's own position.** Kept here as the superseded form
+because the reasoning is still right for the case it was written against — a nudge that arrives while
+the frame thread is running is assessed and skipped, which decision 80 licenses in as many words. What
+changed is that a step now exists which publishes nothing at all, and "unconditional" quietly came to
+mean "including then".
+
+**Rejected: `DispatchLoop::Step` returning whether it published.** The counter it already keeps
+answers it, read either side of the call. A second return value would make every caller carry a fact
+only the doorbell wants, on the signature decision 80 spent an entry keeping to one `Wake`.

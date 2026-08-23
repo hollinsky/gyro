@@ -1919,6 +1919,16 @@ Its own ring, its own thread, and no deadline of its own:
 	reclaim snapshots the frame thread has released
 ```
 
+**What is built is the bottom of that, and it waits in a `ppoll` rather than in a ring.** The loop
+above arrives with the things it multiplexes and none of them has a producer yet, so what exists is
+the part underneath all of them and unchanged by their arrival: author, serialise, publish, reclaim.
+It is a *step* the composition root owns the wait for, exactly as
+[the frame loop](#the-frame-loop) is under
+[decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait), and
+[decision 126](Decisions.md#126-the-dispatch-threads-wait-is-a-ppoll-on-one-descriptor-and-the-root-converts-the-wake)
+is why one descriptor and one deadline do not want a ring yet. A gym stands where the clients will
+stand; `--gym` is what starts the thread at all, and without it nothing publishes.
+
 Input is drained ahead of client traffic because it is the only thing here whose latency the user
 feels directly — and it is drained before `wl_event_loop_dispatch` is called at all, so the ordering
 is a property of this loop rather than of the codec beneath it. The per-client budget is what stops

@@ -741,7 +741,7 @@ them on this side of the line: the loop is a step and the wait is the root's, so
 collects at the top instead of seeping into the module the
 [schedulability sweep](Architecture.md#outputs-are-independent-periodic-tasks) runs.
 
-Four things sit here and nowhere else, and each is a consequence of something above rather than a new
+Five things sit here and nowhere else, and each is a consequence of something above rather than a new
 choice.
 
 **The `while`, the ring, and the thread.** The shim arms one absolute `IORING_OP_TIMEOUT` for the
@@ -756,8 +756,23 @@ rather than failing.
 **The stop path is an `IEventSource`.** A `SIGINT` has to reach a frame thread that folded to idle,
 which is the same problem
 [decision 83](Decisions.md#83-dispatchs-publication-is-an-event-source) solves for a publication, so
-it gets the same answer and the machinery is written once. Dispatch's nudge will be a second instance
-rather than a second mechanism.
+it gets the same answer and the machinery is written once. Dispatch's nudge is a second instance of
+`Interrupt` rather than a second mechanism, and
+[decision 128](Decisions.md#128-the-publication-doorbell-rings-when-a-snapshot-crossed-not-on-every-step)
+is when it is written: a publication the ring accepted, and not a step that had one refused.
+
+**The other thread, and the other wait.** The dispatch thread is the root's for the frame thread's
+reason —
+[decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait) is a rule
+about who owns a wait rather than about which wait — so `Dispatch` is a step and the `while` around it
+is here. What is *not* symmetric is the wait itself: it is a `ppoll` on one descriptor rather than a
+second ring, and the deadline it computes is relative rather than absolute, both for reasons
+[decision 126](Decisions.md#126-the-dispatch-threads-wait-is-a-ppoll-on-one-descriptor-and-the-root-converts-the-wake)
+gives and neither of which survives the arrival of client sockets. The root also lays the outputs out
+in global space and converts a `Wake` the author answered into an instant, because a scene's position
+and a panel's rate are two things only this module holds at once. It runs at normal priority by
+omission: `PromoteToRealTime` is called inside the frame thread, and a scheduling policy is one
+thread's property.
 
 **Admission control's answer has to be turned back into two numbers.** `Admit` reasons about one `C`
 per output; [Budget](../Source/Frame/Budget.h) keeps a CPU mark and a GPU mark and
