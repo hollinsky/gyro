@@ -8,6 +8,7 @@
 
 #include "Core/Clock.h"
 #include "Core/FrameSection.h"
+#include "Core/Result.h"
 #include "Core/Signal.h"
 #include "Core/Time.h"
 #include "Core/Wake.h"
@@ -61,6 +62,19 @@
 // makes decision 35's skip safe. A skipped frame that dropped its damage would corrupt the next one,
 // so the region is cleared where the present succeeded and nowhere else — including on a refused
 // record and on a refused present, both of which leave the output owing exactly what it owed before.
+//
+// **A frame that was wanted and never reached the glass is counted and named.** The three ways it can
+// happen — a target the presenter listed but does not hold, a record the renderer would not make, a
+// commit the presenter would not take — are all a return with nothing said, and a run of them is a
+// black screen with every counter above it reporting success. That is the failure this loop is worst
+// placed to explain and best placed to notice, because the reason arrives as an `Error` from whoever
+// refused and is thrown away one line later. So the first one is kept and the rest are tallied.
+//
+// **Kept rather than logged, because Docs/Architecture.md#why-io_uring forbids the log call here.**
+// spdlog on the frame path is the blocking operation the whole thread exists to avoid, and an `Error`
+// is a code beside a `string_view` over a literal — trivially copyable, allocation-free, and legal
+// inside the frame section for exactly that reason. The composition root reads it afterwards, which
+// is the same route `Compositor.cpp` already carries a dispatch failure out on.
 //
 // **What turns a snapshot into something to draw is Frame/Evaluator.h**, which decision 82 puts on
 // this side of the render seam and which this loop calls once per output it serves. The interface is
@@ -141,6 +155,15 @@ public:
 	// the loop having to report through a channel that does not otherwise exist.
 	[[nodiscard]] const FrameDecision& Last() const noexcept { return m_Last; }
 
+	// How many frames this output was owed, was admitted for, and never got. Not a missed deadline and
+	// not a dropped frame: `Timing` said yes and something downstream said no.
+	[[nodiscard]] std::uint64_t Refused() const noexcept { return m_Refused; }
+
+	// Why the first one was refused, which is the one worth printing — a refusal is almost always a
+	// standing condition rather than an event, so the hundredth carries no information the first did
+	// not and the first is the one that names what the run started doing wrong.
+	[[nodiscard]] const std::optional<Error>& FirstRefusal() const noexcept { return m_FirstRefusal; }
+
 	// Damage from outside the scene — a backend that lost its targets, a console that drew over the
 	// output, a first frame with nothing behind it.
 	void AddDamage(const Region<DeviceSpace>& region) noexcept { m_Damage.Add(region); }
@@ -207,6 +230,18 @@ private:
 		DamageWholeOutput();
 	}
 
+	// Allocation-free by construction and deliberately so: this is called from inside the frame
+	// section, and `std::optional<Error>` holds an int and a `string_view` over a literal.
+	void Refuse(const Error& why) noexcept
+	{
+		++m_Refused;
+
+		if (!m_FirstRefusal)
+		{
+			m_FirstRefusal = why;
+		}
+	}
+
 	void Adopt(const OutputConfiguration& configuration) noexcept
 	{
 		m_Configuration = configuration;
@@ -234,6 +269,9 @@ private:
 	bool m_FlipPending = false;
 	Region<DeviceSpace> m_Damage{};
 	FrameDecision m_Last{};
+
+	std::uint64_t m_Refused = 0;
+	std::optional<Error> m_FirstRefusal{};
 
 	Connection<const PresentationInfo&> m_OnPresented;
 	Connection<> m_OnMissed;
@@ -421,6 +459,11 @@ private:
 
 		if (*target >= targets.size())
 		{
+			// A presenter handing out an index outside the set it published is the one refusal here that is
+			// a defect rather than a limit, and it is the one that would otherwise be indistinguishable
+			// from an output that simply had nothing to draw.
+			output.Refuse(Error{ ERANGE, "the presenter acquired a target outside the set it lists" });
+
 			return;
 		}
 
@@ -446,6 +489,11 @@ private:
 
 		if (!submission)
 		{
+			// Seam/Renderer.h's *an item the renderer cannot express* arriving: the draw list held
+			// something this backend refuses to draw wrong, so it drew none of it. The reason is the
+			// renderer's own words and this is the only place they exist.
+			output.Refuse(submission.error());
+
 			return;
 		}
 
@@ -465,8 +513,10 @@ private:
 			.Color = output.m_Configuration.Color,
 		};
 
-		if (!output.m_Presenter->Present({ &layer, 1 }))
+		if (const Result<void> presented = output.m_Presenter->Present({ &layer, 1 }); !presented)
 		{
+			output.Refuse(presented.error());
+
 			return;
 		}
 

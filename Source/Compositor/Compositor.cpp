@@ -1218,6 +1218,17 @@ private:
 			spdlog::info(
 				"             last {}, flip pending {}", m_Outputs[index].Last(), m_Outputs[index].IsFlipPending()
 			);
+
+			// **The frame thread's own refusals, said here because it may not say them itself.** Every
+			// line above this one reports success for a run that drew nothing: the schedule admitted the
+			// output, the loop assessed it, the walk cost what it cost, and then a renderer that cannot
+			// express one item in the list refused the whole frame and the loop returned in silence. A
+			// black window with a clean log is the worst shape a bug can take, because it sends the
+			// reader to the wiring — the presenter, the ring, the gym — before the one place that knew.
+			if (const std::optional<Error>& refusal = m_Outputs[index].FirstRefusal(); refusal)
+			{
+				spdlog::warn("             {} frame(s) refused, the first: {}", m_Outputs[index].Refused(), *refusal);
+			}
 		}
 
 		m_Backend->Report();

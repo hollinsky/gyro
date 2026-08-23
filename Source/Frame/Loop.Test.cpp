@@ -8,6 +8,7 @@
 #include <cstring>
 #include <optional>
 #include <span>
+#include <string_view>
 
 #include "Core/Clock.h"
 #include "Core/Time.h"
@@ -129,7 +130,7 @@ public:
 
 		if (Refuse)
 		{
-			return Failure(ENOMEM, "fake renderer refuses");
+			return Failure(Code, "fake renderer refuses");
 		}
 
 		return Submission{ .Point = SyncPoint::Immediate(), .RecordCost = Cost };
@@ -153,6 +154,7 @@ public:
 
 	int Records = 0;
 	bool Refuse = false;
+	int Code = ENOMEM;
 	Duration Cost = 2ms;
 	RenderMode RecordedMode = RenderMode::Planned;
 	std::uint32_t RecordedGeneration = 0;
@@ -395,6 +397,87 @@ GYRO_TEST(FrameLoop, ARefusedRecordPresentsNothingAndKeepsItsDamage)
 	GYRO_CHECK_EQ(harness.Renderer.Records, 1);
 	GYRO_CHECK_EQ(harness.Presenter.Presents, 0);
 	GYRO_CHECK(!harness.Output().Damage().IsEmpty());
+}
+
+// The whole point of the counter: a refusal is a standing condition, so the run that reports it has to
+// report the *first* reason rather than the latest, and it has to still be able to say how long it went
+// on. A renderer that starts refusing and never stops is what a gym authoring an item no backend can
+// draw looks like from here.
+GYRO_TEST(FrameLoop, ARefusedRecordIsCountedAndItsFirstReasonKept)
+{
+	Harness harness;
+
+	harness.Anchor();
+	harness.Renderer.Refuse = true;
+
+	GYRO_CHECK_EQ(harness.Output().Refused(), std::uint64_t{ 0 });
+	GYRO_CHECK(!harness.Output().FirstRefusal());
+
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE(harness.Output().FirstRefusal().has_value());
+	GYRO_CHECK_EQ(harness.Output().Refused(), std::uint64_t{ 1 });
+	GYRO_CHECK_EQ(harness.Output().FirstRefusal()->Code(), ENOMEM);
+	GYRO_CHECK_EQ(harness.Output().FirstRefusal()->Context(), std::string_view{ "fake renderer refuses" });
+
+	// A second refusal for a different reason leaves the first one standing, because that is the one
+	// that says what the run started doing wrong.
+	harness.Renderer.Code = EINVAL;
+	harness.Clock.Set(At(1012));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Output().Refused(), std::uint64_t{ 2 });
+	GYRO_CHECK_EQ(harness.Output().FirstRefusal()->Code(), ENOMEM);
+}
+
+// A commit the presenter would not take is the same silence one stage later, and it is counted the same
+// way: the frame did not reach the glass and the loop is the only party that saw why.
+GYRO_TEST(FrameLoop, ARefusedPresentIsCountedTheSameWay)
+{
+	Harness harness;
+
+	harness.Anchor();
+	harness.Presenter.Refuse = true;
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE(harness.Output().FirstRefusal().has_value());
+	GYRO_CHECK_EQ(harness.Output().Refused(), std::uint64_t{ 1 });
+	GYRO_CHECK_EQ(harness.Output().FirstRefusal()->Code(), EBUSY);
+}
+
+// A frame nobody wanted, a target nobody had, and a flip still outstanding are all returns too, and
+// none of them is a refusal. Counting them would make the figure mean *iterations that drew nothing*,
+// which is the ordinary state of an idle compositor and would bury the one line worth reading.
+GYRO_TEST(FrameLoop, NotDrawingIsNotBeingRefused)
+{
+	Harness harness;
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+
+	// Nothing owes a frame: no damage, and the empty ring's scene is settled.
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Renderer.Records, 0);
+	GYRO_CHECK_EQ(harness.Output().Refused(), std::uint64_t{ 0 });
+	GYRO_CHECK(!harness.Output().FirstRefusal());
+
+	// And a frame that is wanted but whose flip has not landed is held rather than refused.
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+	GYRO_REQUIRE(harness.Output().IsFlipPending());
+
+	harness.Clock.Set(At(1012));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Output().Refused(), std::uint64_t{ 0 });
 }
 
 GYRO_TEST(FrameLoop, AnIdleOutputArmsNothing)
