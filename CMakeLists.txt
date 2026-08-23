@@ -722,6 +722,7 @@ gyro_add_module(Compositor
 		Core
 		Geometry
 		Publication
+		Scene
 		Seam
 		Frame
 		Headless
@@ -729,10 +730,13 @@ gyro_add_module(Compositor
 		Virtual
 		Render
 		Nested
+		Gym
+		Dispatch
 	SOURCES
 		Compositor.cpp
 		RealTime.cpp
 		Uring.cpp
+		Wait.cpp
 	TESTS
 		Options.Test.cpp
 		Schedule.Test.cpp

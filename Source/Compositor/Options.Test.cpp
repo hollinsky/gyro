@@ -226,3 +226,43 @@ GYRO_TEST(Options, OutputsBelowWhatWasSpelledOutIsAContradiction)
 	GYRO_CHECK(!Parse({ "--outputs" }).has_value());
 	GYRO_CHECK(!Parse({ "--outputs=99" }).has_value());
 }
+
+// **The default is no world at all**, and the two cases below are the ones that would each ship a
+// compositor doing something nobody asked for: a gym running because a name was misread, and a gym
+// silently not running because one was.
+GYRO_TEST(Options, NoGymIsTheDefaultAndBareGymIsTheLanes)
+{
+	const Result<Options> none = Parse({});
+
+	GYRO_REQUIRE(none.has_value());
+	GYRO_CHECK(!none->Gym.has_value());
+
+	// Both spellings of *say nothing about which*, which is `--output`'s precedent rather than
+	// `--dump`'s: a directory has no default to fall back to and a gym does.
+	for (const std::string_view argument : { "--gym", "--gym=" })
+	{
+		const Result<Options> bare = Parse({ argument });
+
+		GYRO_REQUIRE(bare.has_value());
+		GYRO_REQUIRE(bare->Gym.has_value());
+		GYRO_CHECK(*bare->Gym == GymKind::Lanes);
+	}
+}
+
+// Over the vocabulary rather than over a list written here, so that a gym added to Gym/Gym.h is
+// covered by this the moment it exists — which is the same property `--help` gets by printing from
+// `AllGyms`, and the reason the parse's error message names no scenes of its own.
+GYRO_TEST(Options, EveryGymNameRoundTrips)
+{
+	for (const GymKind gym : AllGyms)
+	{
+		const std::string argument = std::format("--gym={}", Name(gym));
+		const Result<Options> options = Parse({ argument });
+
+		GYRO_REQUIRE(options.has_value());
+		GYRO_REQUIRE(options->Gym.has_value());
+		GYRO_CHECK(*options->Gym == gym);
+	}
+
+	GYRO_CHECK(!Parse({ "--gym=splines" }).has_value());
+}

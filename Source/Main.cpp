@@ -37,6 +37,8 @@ static void PrintUsage()
 			  << "                      The default is ./gyro-frames\n"
 			  << "  --output[=SPEC]     Add an output, as WIDTHxHEIGHT@REFRESH or a refresh rate\n"
 			  << "                      alone. Repeat for several; the default is one 1920x1080@60\n"
+			  << "  --gym[=NAME]        Author one of gyro's own scenes; bare is lanes. Without it\n"
+			  << "                      there is no world and the compositor draws nothing\n"
 			  << "  --cost=MS           What a planned composite is charged, in milliseconds\n"
 			  << "  --floor=MS          What a floor composite is charged, in milliseconds\n"
 			  << "  --frames=N          Run at most N iterations, stopping early once the loop\n"
@@ -44,7 +46,18 @@ static void PrintUsage()
 			  << "  --realtime          Ask for SCHED_FIFO even under a hosted backend\n"
 			  << "  --no-realtime       Do not ask for SCHED_FIFO\n"
 			  << "  --priority=N        SCHED_FIFO priority, 1 to 99\n"
-			  << "\n"
+			  << "\n";
+
+	// From the vocabulary rather than from a list written here, which is the whole reason `--gym`'s own
+	// error message declines to name the scenes: this is where somebody reads them, and it cannot drift.
+	std::cout << "Gyms:\n";
+
+	for (const GymKind gym : AllGyms)
+	{
+		std::cout << std::format("  {:<18}{}\n", Name(gym), Describe(gym));
+	}
+
+	std::cout << "\n"
 			  << "Running with no options starts the compositor.\n";
 }
 

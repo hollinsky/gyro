@@ -292,17 +292,43 @@ Result<void> FrameRing::WaitFor(Wake wake)
 		io_uring_sqe_set_data64(*sqe, Encode(Tag::Timeout, timeout));
 	}
 
-	// The enter, and the only one. `Settled` waits here indefinitely with nothing armed but the polls,
-	// which is Docs/Architecture.md#doing-nothing-must-cost-nothing reaching the bottom of the stack:
-	// no timer, no periodic wakeup, and the thread off the run queue until something happens.
-	const int result = io_uring_submit_and_wait(&m_Ring, 1);
+	// The enter. `Settled` waits here indefinitely with nothing armed but the polls, which is
+	// Docs/Architecture.md#doing-nothing-must-cost-nothing reaching the bottom of the stack: no timer, no
+	// periodic wakeup, and the thread off the run queue until something happens.
+	//
+	// **It is a loop because `io_uring_submit_and_wait` counts completions that are already sitting in
+	// the queue, and this ring deliberately leaves some there.** `Cancel` below submits a removal and
+	// does not wait for it, so an iteration woken early by a descriptor leaves two completions behind —
+	// the removal's, and the cancelled timeout's `-ECANCELED`. The next enter is satisfied by them
+	// instantly, reaps them, concludes its own timeout has not fired, and cancels it, leaving two more.
+	// That is self-sustaining: the ring spins at full rate for as long as the loop runs, having been
+	// woken once. The spin needs a descriptor to start it, which is why nothing saw it until decision
+	// 83's doorbell became the first source under a backend that can be run without hardware.
+	//
+	// So the wait is over when something the *caller* asked for arrives: this iteration's timeout, or a
+	// watched descriptor. Cancellation traffic is bookkeeping from an iteration that has already
+	// returned, and reaping it is not an event. `EINTR` also ends the wait — the contract permits a
+	// spurious return, and a signal is the one wakeup whose whole purpose is to let the caller look at
+	// something this object cannot see.
+	bool fired = false;
 
-	if (result < 0 && result != -EINTR && result != -ETIME)
+	while (true)
 	{
-		return Failure(-result, "waiting on the frame ring");
-	}
+		const int result = io_uring_submit_and_wait(&m_Ring, 1);
 
-	const bool fired = Reap(timeout);
+		if (result < 0 && result != -EINTR && result != -ETIME)
+		{
+			return Failure(-result, "waiting on the frame ring");
+		}
+
+		const Reaped reaped = Reap(timeout);
+		fired = reaped.Fired;
+
+		if (fired || reaped.Woke || result == -EINTR)
+		{
+			break;
+		}
+	}
 
 	if (timed && !fired)
 	{
@@ -316,9 +342,9 @@ Result<void> FrameRing::WaitFor(Wake wake)
 	return {};
 }
 
-bool FrameRing::Reap(std::uint64_t timeout)
+FrameRing::Reaped FrameRing::Reap(std::uint64_t timeout)
 {
-	bool fired = false;
+	Reaped reaped{};
 	std::size_t seen = 0;
 
 	io_uring_cqe* cqe = nullptr;
@@ -339,7 +365,7 @@ bool FrameRing::Reap(std::uint64_t timeout)
 			case Tag::Timeout:
 				// A tag that is not this iteration's is a timeout cancelled too late to stop, and is
 				// exactly what the generation exists to discard.
-				fired = fired || ValueOf(data) == timeout;
+				reaped.Fired = reaped.Fired || ValueOf(data) == timeout;
 				break;
 
 			case Tag::Poll:
@@ -354,7 +380,9 @@ bool FrameRing::Reap(std::uint64_t timeout)
 
 				// Nothing is read here and nothing is emitted. The loop drains every source on every
 				// iteration whatever woke it, so what a poll completion means to this object is only
-				// whether the poll is still standing.
+				// that the wait is over and whether the poll is still standing.
+				reaped.Woke = true;
+
 				if (!more)
 				{
 					m_Watched[index].Armed = false;
@@ -379,7 +407,7 @@ bool FrameRing::Reap(std::uint64_t timeout)
 		++m_Spurious;
 	}
 
-	return fired;
+	return reaped;
 }
 
 void FrameRing::Cancel(std::uint64_t timeout)

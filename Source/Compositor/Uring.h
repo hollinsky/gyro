@@ -152,7 +152,19 @@ private:
 
 	// The one reap site. Returns whether the armed timeout was among the completions, which is what
 	// decides whether it still has to be cancelled.
-	bool Reap(std::uint64_t timeout);
+	// What one enter produced, in the terms the caller asked in. The distinction is load-bearing rather
+	// than descriptive: see `WaitFor`, where a wait satisfied by neither is a wait that has not happened.
+	struct Reaped
+	{
+		// This iteration's timeout, by tag. A tag from an earlier one is a timeout cancelled too late to
+		// stop and is not this.
+		bool Fired = false;
+
+		// A watched descriptor had something to say.
+		bool Woke = false;
+	};
+
+	Reaped Reap(std::uint64_t timeout);
 
 	void Cancel(std::uint64_t timeout);
 

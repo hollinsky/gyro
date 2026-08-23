@@ -4,6 +4,7 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -11,6 +12,7 @@
 #include "Core/Result.h"
 #include "Core/Time.h"
 #include "Frame/Admission.h"
+#include "Gym/Gym.h"
 
 // What the composition root was asked to construct, parsed from the command line and nothing else.
 //
@@ -122,6 +124,19 @@ struct Options
 	// Stop after this many iterations rather than running until signalled. Zero is *until signalled*,
 	// which is the ordinary case; anything else is a smoke test that terminates on its own.
 	std::uint64_t Iterations = 0;
+
+	// Which scene gyro authors for itself, or nothing at all.
+	//
+	// **Nothing is the default and stays the default**, because a compositor whose only picture is an
+	// instrument is one somebody eventually ships. Absent, the dispatch thread is not started and the
+	// frame loop composites an empty scene, which is the floor case Docs/Architecture.md#doing-nothing-
+	// must-cost-nothing is about and has to keep being reachable in one command.
+	//
+	// **The kind rather than the name**, so that this header stays total: an unknown gym is an error
+	// naming itself here rather than a failure in the composition root, which is where an option that
+	// parses and then cannot be honoured always ends up. Gym/Gym.h owns the vocabulary and
+	// `GymNamed` is the parse, so there is no second spelling of the list to drift.
+	std::optional<GymKind> Gym{};
 
 	// The outputs actually requested, which is the default single 1080p60 when the command line named
 	// none. Returning a span keeps the "none means one" rule in one place rather than at each reader.
@@ -286,6 +301,33 @@ namespace Detail
 			{
 				return Failure(EINVAL, "--backend is one of auto, headless, nested, drm, dump");
 			}
+
+			continue;
+		}
+
+		if (Detail::Matches(argument, "--gym", value))
+		{
+			// Bare `--gym` is the lanes, which is the one that never settles and is therefore what
+			// somebody who typed the flag to *see something move* meant.
+			if (value.empty())
+			{
+				options.Gym = GymKind::Lanes;
+
+				continue;
+			}
+
+			const std::optional<GymKind> gym = GymNamed(value);
+
+			if (!gym)
+			{
+				// The vocabulary is deliberately not restated here. An `Error` carries a `string_view`,
+				// so a list in this message would be a literal that drifts the first time a gym is added
+				// — and Main.cpp prints the usage immediately after this sentence, from Gym/Gym.h's own
+				// names and descriptions.
+				return Failure(EINVAL, "--gym is not one of the scenes --help lists");
+			}
+
+			options.Gym = *gym;
 
 			continue;
 		}

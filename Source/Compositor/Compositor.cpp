@@ -28,13 +28,21 @@
 #include "Compositor/RealTime.h"
 #include "Compositor/Schedule.h"
 #include "Compositor/Uring.h"
+#include "Compositor/Wait.h"
 #include "Core/Clock.h"
 #include "Core/ColorState.h"
+#include "Core/Handle.h"
 #include "Core/Signal.h"
+#include "Core/SlotAllocator.h"
 #include "Core/Time.h"
+#include "Core/Wake.h"
+#include "Dispatch/Loop.h"
 #include "Frame/Evaluator.h"
 #include "Frame/Loop.h"
+#include "Geometry/AxisTransform.h"
+#include "Geometry/Scale.h"
 #include "Geometry/Space.h"
+#include "Gym/Gym.h"
 #include "Headless/Device.h"
 #include "Headless/Output.h"
 #include "Headless/Renderer.h"
@@ -45,6 +53,7 @@
 #include "Render/Allocator.h"
 #include "Render/Device.h"
 #include "Render/Renderer.h"
+#include "Scene/Output.h"
 #include "Seam/EventSource.h"
 #include "Seam/OutputConfiguration.h"
 #include "Seam/Presenter.h"
@@ -78,6 +87,37 @@ constexpr std::int64_t CpuShareOf = 4;
 	const Duration cpu = Duration{ cost.count() / CpuShareOf };
 
 	return { .Cpu = cpu, .Gpu = cost - cpu };
+}
+
+// How the panel is turned, in the world's vocabulary rather than the seam's.
+//
+// The two enumerations are value-identical today and this could be a cast. It is a switch with no
+// default label instead, so that the day one of them grows a case the other does not is a build failure
+// here rather than a monitor rendered upside down — which is a bug a reinterpretation cannot express
+// and a person would report as the panel being wrong.
+[[nodiscard]] constexpr AxisOrientation Orientation(OutputTransform transform) noexcept
+{
+	switch (transform)
+	{
+		case OutputTransform::Normal:
+			return AxisOrientation::Normal;
+		case OutputTransform::Rotate90:
+			return AxisOrientation::Rotate90;
+		case OutputTransform::Rotate180:
+			return AxisOrientation::Rotate180;
+		case OutputTransform::Rotate270:
+			return AxisOrientation::Rotate270;
+		case OutputTransform::Flipped:
+			return AxisOrientation::Flipped;
+		case OutputTransform::Flipped90:
+			return AxisOrientation::Flipped90;
+		case OutputTransform::Flipped180:
+			return AxisOrientation::Flipped180;
+		case OutputTransform::Flipped270:
+			return AxisOrientation::Flipped270;
+	}
+
+	return AxisOrientation::Normal;
 }
 
 // What the process is asked to stop by. A file-scope pointer because a signal handler takes no
@@ -594,6 +634,14 @@ public:
 			return ready;
 		}
 
+		// Decision 83's doorbell, opened whether or not there is anything to ring it. An unrung eventfd
+		// costs a descriptor and one armed poll; making it conditional would put a `nullptr` in the source
+		// array that every loop over it has to answer for, to save that.
+		if (const Result<void> ready = m_Publication.Open(); !ready)
+		{
+			return ready;
+		}
+
 		if (const Result<void> ready = Construct(); !ready)
 		{
 			return ready;
@@ -606,6 +654,7 @@ public:
 
 		m_Sources[0] = &m_Backend->Source();
 		m_Sources[1] = &m_Interrupt;
+		m_Sources[2] = &m_Publication;
 
 		m_Loop = std::make_unique<FrameLoop>(
 			m_Clock, m_Snapshots, m_Returns, m_Evaluator, Timing{ TimingPolicy{ .Safety = WakeupMargin } }
@@ -613,7 +662,9 @@ public:
 		m_Loop->Bind({ m_Outputs.data(), m_Count });
 		m_Loop->Listen({ m_Sources.data(), m_Sources.size() });
 
-		return {};
+		// Last, because it lays the world out against the modes the backend *achieved* rather than the
+		// ones that were asked for, and `Configure` above is where those stop differing.
+		return OpenDispatch();
 	}
 
 	[[nodiscard]] Result<void> Run()
@@ -627,12 +678,43 @@ public:
 			return installed;
 		}
 
+		// **Started first, so that the first thing the panel shows is the world rather than a black
+		// frame.** It is a head start and not a handshake: the frame thread composites whatever the ring
+		// holds, so losing the race costs one frame and the doorbell fetches the next one. What a
+		// handshake would buy is not worth a startup path that can deadlock.
+		std::thread world;
+
+		if (m_Dispatch)
+		{
+			world = std::thread{ [this] {
+				m_DispatchResult = Pump();
+
+				// A dispatch thread that stopped is a world that stopped changing, and the frame thread has
+				// no way to notice: it would go on compositing the last snapshot forever, at rate, with
+				// nothing to say why. So the failure ends the process through the path shutdown already
+				// takes rather than becoming a hang somebody has to attach a debugger to.
+				if (!m_DispatchResult)
+				{
+					m_Interrupt.Raise();
+				}
+			} };
+		}
+
 		// The thread is the root's, per decision 80, and so is everything platform about it: its
 		// priority, its page residency, and the `while` inside it. What it runs is one portable call in a
 		// loop.
 		std::thread frame{ [this] { m_Result = Iterate(); } };
 
 		frame.join();
+
+		// **After the frame thread and not beside it.** The frame thread is what decides a run is over —
+		// `--frames`, a signal, a host window closed — and stopping the author first would spend the last
+		// frames of the run compositing a world that had already been told to stop moving.
+		if (world.joinable())
+		{
+			m_DispatchWait.Stop();
+			world.join();
+		}
 
 		g_Stopping.store(nullptr, std::memory_order_release);
 
@@ -643,7 +725,11 @@ public:
 
 		Report();
 
-		return m_Result;
+		// The frame thread's answer first, because it is the one that carries what the run was for. A
+		// dispatch failure is only the return value when the frame side had nothing of its own to say —
+		// and by then it has already stopped the run through the interrupt above, so the two are one
+		// event reported once.
+		return m_Result ? m_DispatchResult : m_Result;
 	}
 
 private:
@@ -704,7 +790,23 @@ private:
 			// binary can block. The count is what catches the case where idle never arrives.
 			if (m_Options.Iterations != 0)
 			{
-				m_Idled = wake.Which == Wake::Kind::Settled;
+				// **With an author, idle is both halves at rest, and this thread can only see one of
+				// them.** A frame thread that folds to `Settled` has caught up with the scene it holds; it
+				// says nothing about whether the author is between motions. `lanes` is exactly that case —
+				// it publishes a still scene, sleeps until the next lane falls due, and retargets — so a
+				// bounded run that stopped at the frame side's first idle would end after one frame and
+				// report it as *doing nothing costs nothing*, which is the one claim in the design this
+				// flag exists to keep honest.
+				//
+				// Both conditions are needed and they answer different questions. Holding a sequence is the
+				// cheapest true statement that a scene ever reached this thread, and without it a `settle`
+				// gym would stop the run in the window between its first step and the frame thread's first
+				// acquire. `m_WorldSettled` is the author saying it owes nothing further. Without an author
+				// there is nothing to wait for and the empty ring folding to idle is the whole answer.
+				const bool world =
+					m_Dispatch == nullptr || (m_Loop->Held() != 0 && m_WorldSettled.load(std::memory_order_acquire));
+
+				m_Idled = wake.Which == Wake::Kind::Settled && world;
 
 				if (m_Idled || m_Iterations >= m_Options.Iterations)
 				{
@@ -727,6 +829,106 @@ private:
 		}
 
 		return {};
+	}
+
+	// Everything the dispatch thread does, and it is decision 80's shape again with the threads
+	// swapped: step, and wait for the wake the step returned.
+	//
+	// Normal priority, deliberately and by omission — `PromoteToRealTime` is called on the frame thread
+	// and a scheduling policy is one thread's property, so the author is preemptible by the compositor
+	// that reads it. That is decision 61's order, and it is what makes a scene walk that overruns cost a
+	// stale frame rather than a missed one.
+	[[nodiscard]] Result<void> Pump()
+	{
+		while (!m_DispatchWait.IsStopping())
+		{
+			const std::uint64_t before = m_Dispatch->Publications();
+			const Wake wake = m_Dispatch->Step();
+
+			// Published for the bounded run's benefit and nothing else. `Never()` on this side is *the
+			// world has stopped changing* — no author owes a retarget and no channel owes a retirement —
+			// which is the half of idle the frame thread cannot see, since what reaches it is a scene and
+			// not the intent behind one. Released before the store below so that a frame thread reading
+			// it has already seen everything the step published.
+			m_WorldSettled.store(wake.Which == Wake::Kind::Settled, std::memory_order_release);
+
+			// **Rung when a snapshot actually crossed, which is narrower than decision 83's unconditional
+			// signal** — and narrower for a case that decision did not have in front of it. A step whose
+			// publish the ring refused has nothing new for the frame thread to acquire, and it is reached
+			// only when the frame thread is already four publishes behind, so signalling there would wake a
+			// late thread to hand it what it already holds, at the retry cadence. This is not the
+			// conditional form that decision defers and leaves a lost wakeup in: that one reads the frame
+			// thread's idleness and races it. This reads dispatch's own counter, which nothing else writes.
+			if (m_Dispatch->Publications() != before)
+			{
+				m_Publication.Raise();
+			}
+
+			// Between the step and the wait, because the stop may have arrived during a scene walk and
+			// the alternative is a thread parked on a deadline the root is waiting out.
+			if (m_DispatchWait.IsStopping())
+			{
+				return {};
+			}
+
+			const Instant now = m_Clock.Now();
+
+			if (const Result<void> waited = m_DispatchWait.WaitUntil(DispatchDeadline(wake, now), now); !waited)
+			{
+				return waited;
+			}
+		}
+
+		return {};
+	}
+
+	// The wake dispatch answered, as an instant to sleep until.
+	//
+	// **`Continuous` is the one that needs an answer here rather than in `Wake`.** It means *now, and
+	// again every interval after* — and on the frame side a zero interval is "every frame the output
+	// offers", which is a rate a vblank supplies. Dispatch has no vblank, so the same value would be a
+	// spin at whatever rate a scene walk happens to take. The fastest panel in the set is what the author
+	// must have meant, since publishing faster than the quickest thing that can read it is work nobody
+	// sees, and the root is the only place holding that number — which is why the conversion is here and
+	// not in Dispatch/Loop.h.
+	//
+	// Nothing produces one today: a gym answers `Never()` or `At()`, and the serializer's republication is
+	// `Timed` by construction. This is what it will mean when something does.
+	[[nodiscard]] std::optional<Instant> DispatchDeadline(Wake wake, Instant now) const noexcept
+	{
+		switch (wake.Which)
+		{
+			case Wake::Kind::Settled:
+				return std::nullopt;
+
+			case Wake::Kind::Timed:
+				return wake.When;
+
+			case Wake::Kind::Continuous:
+			{
+				const Duration interval = wake.Interval > Duration::zero() ? wake.Interval : ShortestPeriod();
+
+				return std::max(wake.When, Advanced(now, interval));
+			}
+		}
+
+		return std::nullopt;
+	}
+
+	// The period of the quickest thing that can read a publication.
+	[[nodiscard]] Duration ShortestPeriod() const noexcept
+	{
+		Duration shortest = Duration::max();
+
+		for (std::size_t index = 0; index < m_Count; ++index)
+		{
+			shortest = std::min(shortest, m_Schedule.Plans()[index].Period);
+		}
+
+		// No outputs is not a rate, and the retry cadence is the only other honest interval in the
+		// process. Unreachable while `Configure` admits at least one; here so the fold above cannot
+		// return `Duration::max()` as a sleep.
+		return shortest == Duration::max() ? PublishRetryInterval : shortest;
 	}
 
 	// When the *simulated hardware* next moves, folded into the wake the loop asked for.
@@ -832,6 +1034,119 @@ private:
 		return {};
 	}
 
+	// The world's author, and the outputs it authors against.
+	//
+	// Nothing here runs without `--gym`: no dispatch thread is started, the ring stays empty, and the
+	// frame loop evaluates an empty scene every iteration — which is the floor case
+	// Docs/Architecture.md#doing-nothing-must-cost-nothing is about rather than a stub, and has to stay
+	// reachable in one command.
+	[[nodiscard]] Result<void> OpenDispatch()
+	{
+		if (!m_Options.Gym)
+		{
+			return {};
+		}
+
+		const GymKind gym = *m_Options.Gym;
+
+		spdlog::info("authoring the {} gym: {}", Name(gym), Describe(gym));
+
+		// The sentence Gym/Gym.h says a caller owes the person. `Blit` fails a whole record on one item it
+		// cannot express, so a gym authoring a material or a rotated quad under the CPU renderer writes no
+		// frames *at all* rather than frames missing a node — and the symptom is a directory that stays
+		// empty, which is what somebody would otherwise file as a bug against the dump backend. The test is
+		// the backend rather than a question put to `IRenderer`, because the seam has no verb for it and
+		// adding one for a warning would be an interface written for the fakes.
+		if (m_Options.Backend == BackendKind::Dump && !DrawsOnCpu(gym))
+		{
+			spdlog::warn("no CPU composite can draw it, so this run will write no frames at all");
+		}
+
+		Result<std::unique_ptr<IGym>> author = MakeGym(Name(gym));
+
+		if (!author)
+		{
+			return std::unexpected{ author.error() };
+		}
+
+		if (const Result<void> ready = m_DispatchWait.Open(); !ready)
+		{
+			return ready;
+		}
+
+		std::array<SceneOutput, MaxOutputs> outputs{};
+
+		if (const Result<void> laid = Layout(outputs); !laid)
+		{
+			return laid;
+		}
+
+		m_Dispatch = std::make_unique<DispatchLoop>(m_Clock, m_Snapshots, m_Returns);
+
+		if (const Result<void> opened = m_Dispatch->Open(std::move(*author), { outputs.data(), m_Count }); !opened)
+		{
+			return opened;
+		}
+
+		return {};
+	}
+
+	// Where the outputs sit in the space the world is laid out in.
+	//
+	// **Left to right in the order they were configured, edge to edge.** That is a placeholder with a
+	// person behind it rather than an arbitrary choice: it is what somebody with two monitors on a desk
+	// sees before they have said anything, and it is the arrangement a window dragged off the right edge
+	// of one screen has to arrive on the next under. It becomes a real layout — read from configuration,
+	// moved by a person dragging a monitor in a settings panel — when there is anything to read it from.
+	// Decision 87 already puts the answer here, in the one place holding both the mode the backend agreed
+	// to and the arrangement the world wants.
+	//
+	// **The order is load-bearing**, and `DispatchLoop::Open` says so from the other side: the snapshot's
+	// per-output wake and placement runs are positional, so index `i` here is the frame loop's output `i`.
+	[[nodiscard]] Result<void> Layout(std::span<SceneOutput> outputs)
+	{
+		double left = 0.0;
+
+		for (std::size_t index = 0; index < m_Count; ++index)
+		{
+			const OutputConfiguration& achieved = m_Bound[index].Configuration;
+
+			// **One logical pixel per device pixel until a scale is negotiated.** No backend reports a
+			// density and `--output` does not carry one, so a fraction invented here would be a layout
+			// nobody asked for — and decision 54's settled snap is measured against it, which would put the
+			// error on every animation rather than only on the arrangement.
+			const Scale density = Scale::FromInteger(1);
+			const double width =
+				static_cast<double>(density.LogicalFromDevice(achieved.Resolution.Width, Rounding::Nearest));
+			const double height =
+				static_cast<double>(density.LogicalFromDevice(achieved.Resolution.Height, Rounding::Nearest));
+
+			// Generational from the day there is one, rather than an index that a hotplug would hand to a
+			// different monitor. Nothing reads it yet; what makes it worth minting now is that the
+			// allocator is the thing hotplug releases into, and a second minting scheme written later is
+			// one to reconcile.
+			const std::optional<OutputId> id = m_OutputIds.Allocate();
+
+			if (!id)
+			{
+				return Failure(ENOSPC, "more outputs than the world has identities for");
+			}
+
+			outputs[index] = SceneOutput{
+				.Id = *id,
+				.Generation = achieved.Generation,
+				.Bounds = { { left, 0.0 }, { width, height } },
+				.Density = density,
+				.Grid = achieved.Resolution,
+				.Orientation = Orientation(achieved.Transform),
+			};
+
+			left += width;
+		}
+
+		return {};
+	}
+
 	[[nodiscard]] Result<void> AddOutput(std::size_t index, const OutputRequest& request, const OutputPlan& plan)
 	{
 		const OutputConfiguration wanted{
@@ -907,6 +1222,31 @@ private:
 
 		m_Backend->Report();
 
+		if (m_Dispatch)
+		{
+			spdlog::info(
+				"authored {} publication(s), {} deferred, {} frame report(s) collected",
+				m_Dispatch->Publications(),
+				m_Dispatch->Deferrals(),
+				m_Dispatch->Reports()
+			);
+
+			// Deferrals are retained rather than lost, so this is not a correctness report — it is the
+			// frame thread having been four publishes behind that many times, which is what
+			// Docs/Open.md's publication-pacing question wants counted rather than argued.
+			if (m_Dispatch->Deferrals() != 0)
+			{
+				spdlog::warn(
+					"the ring was full on {} publish(es); the frame thread is behind", m_Dispatch->Deferrals()
+				);
+			}
+
+			if (!m_DispatchResult)
+			{
+				spdlog::error("the world stopped being authored: {}", m_DispatchResult.error());
+			}
+		}
+
 		if (m_PriorityRefused)
 		{
 			spdlog::warn("running at normal priority: {}", *m_PriorityRefused);
@@ -954,14 +1294,35 @@ private:
 	Schedule m_Schedule{};
 
 	Interrupt m_Interrupt;
+
+	// Decision 83's source: dispatch writes, the frame thread reads, and nothing is read back across it.
+	// The descriptor says *something was published* and the ring says what.
+	Interrupt m_Publication;
+
 	FrameRing m_Ring;
-	std::array<IEventSource*, 2> m_Sources{};
+	std::array<IEventSource*, 3> m_Sources{};
 
 	std::unique_ptr<FrameLoop> m_Loop;
+
+	// The other thread's half. Declared after everything it points into — the ring, the return channel,
+	// the clock — so that it is destroyed before them, and after `m_Loop` so that the reader outlives
+	// nothing the writer still owns.
+	DispatchWait m_DispatchWait;
+	std::unique_ptr<DispatchLoop> m_Dispatch;
+
+	// Whether the author owes anything further. Written by dispatch, read by the frame thread, and read
+	// by nothing in the design — it exists for `--frames`' idle stop, which is the one place a run has to
+	// distinguish a world at rest from a world between motions. Not a channel: it carries no state
+	// anything renders from, and losing an update costs an iteration rather than a frame.
+	std::atomic<bool> m_WorldSettled{ false };
+
+	// One identity per output, minted where hotplug will release them.
+	SlotAllocator<OutputTag> m_OutputIds{ MaxOutputs };
 
 	bool m_RealTime = false;
 
 	Result<void> m_Result{};
+	Result<void> m_DispatchResult{};
 	std::optional<Error> m_PriorityRefused{};
 	std::uint64_t m_Iterations = 0;
 	bool m_Idled = false;

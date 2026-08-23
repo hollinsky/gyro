@@ -299,6 +299,72 @@ GYRO_TEST(FrameRing, DrainingTheInterruptStopsTheLevelTriggeredPollFiringAgain)
 	GYRO_FAIL("every wait after the drain came back interrupted, so none of them measured anything");
 }
 
+// **A wait woken early by a descriptor must not make every wait after it come back instantly.**
+//
+// The mechanism is one the test above works around rather than asserts on, and the difference between
+// the two is a spin. A timed wait woken by a descriptor cancels the timeout it armed, and the
+// cancellation leaves two completions behind — the removal's, and the cancelled timeout's
+// `-ECANCELED`. `io_uring_submit_and_wait` counts completions already sitting in the queue, so the
+// *next* enter is satisfied by them the instant it is made. That one then concludes its own timeout has
+// not fired, cancels it, and leaves two more. The frame thread spins at full rate for the rest of the
+// run, having been woken once, and nothing in the process says so: no wake is spurious, no source is
+// broken, every iteration does real work and the deadline it was arming for is simply ignored.
+//
+// It went unseen because it takes a descriptor to start, and until decision 83's publication doorbell
+// the only sources were a shutdown interrupt — raised once, at the end — and a backend descriptor no
+// backend runnable without hardware has.
+//
+// The deadline on the woken wait is long on purpose: the point is that it is *still standing* when the
+// descriptor ends the wait, since a timeout that fired is never cancelled and leaves nothing behind.
+GYRO_TEST(FrameRing, CancellationFromAnEarlyWakeupDoesNotSatisfyTheNextWait)
+{
+	const MonotonicClock clock;
+
+	Interrupt interrupt;
+
+	if (!Ready(interrupt.Open(), "the interrupt could not be opened"))
+	{
+		return;
+	}
+
+	FrameRing ring;
+
+	if (!Ready(ring.Open(), "the frame ring could not be opened"))
+	{
+		return;
+	}
+
+	GYRO_REQUIRE(ring.Watch(interrupt));
+
+	interrupt.Raise();
+
+	GYRO_REQUIRE(ring.WaitFor(Wake::At(Advanced(clock.Now(), 10s))));
+	GYRO_REQUIRE(interrupt.Drain());
+
+	constexpr Duration kSettle = 20ms;
+
+	// Retried past an interrupted wait for the reason the test above retries: an interrupted wait has
+	// measured nothing, and a bounded loop fails rather than quietly asserting nothing at all.
+	for (std::size_t attempt = 0; attempt < 4; ++attempt)
+	{
+		const std::uint64_t spurious = ring.Spurious();
+		const Instant entered = clock.Now();
+
+		GYRO_REQUIRE(ring.WaitFor(Wake::At(Advanced(entered, kSettle))));
+
+		if (ring.Spurious() != spurious)
+		{
+			continue;
+		}
+
+		GYRO_CHECK(Elapsed(entered, clock.Now()) >= kSettle);
+
+		return;
+	}
+
+	GYRO_FAIL("every wait after the early wakeup came back interrupted, so none of them measured anything");
+}
+
 // The counter is a diagnostic, and a diagnostic nobody pins is a number that quietly stops meaning
 // anything. `Spurious` exists so that a wasteful arming pattern is noticeable at all — the contract
 // permits this object to return with nothing to show for it, so no other assertion in the tree can
