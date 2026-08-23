@@ -346,6 +346,41 @@ gyro_add_module(Seam PORTABLE
 		SyncPoint.Test.cpp
 )
 
+# The Wayland wire codec: framing, the argument vocabulary, fd passing over SCM_RIGHTS, and the
+# per-connection object map. Docs/Decisions.md decision 119 for why it is a module rather than part of
+# the nested backend, and Docs/Structure.md for the row.
+#
+# PORTABLE, and that is decision 119's correction to the obvious reading rather than an oversight.
+# `sendmsg` with `SCM_RIGHTS` over `AF_UNIX` is POSIX — `<sys/socket.h>` and `<sys/un.h>` are not on
+# CheckPortability.cmake's list and should not be — so the tier costs nothing and buys what decision 6
+# is about: the codec is exercised over a socketpair by a peer the test wrote, on a machine with no
+# GPU, no seat, and no compositor. `Nested` stays platform for its own reasons.
+#
+# The Seam edge is `IEventSource` and nothing else, and it is what decision 119 did not have to
+# consider: a connection is drained by the frame loop alongside a DRM device and a simulated vblank,
+# so it is a source like any other rather than something Frame/Loop.h learns to poll specially. It is
+# declared here after Seam because target_link_libraries would otherwise take the name for a system
+# library rather than a target; the graph itself has Wire below both waists, which is where
+# Docs/Structure.md's table puts it.
+#
+# No DISPATCH_HALF. A connection is pumped by one thread for the whole of its life, which is decision
+# 81's rule per object rather than per module — so the module has no thread affinity, the way Core and
+# Geometry have none, and which thread a given connection belongs to is settled by whoever constructs
+# it.
+gyro_add_module(Wire PORTABLE
+	DEPENDS
+		Core
+		Seam
+	SOURCES
+		Connection.cpp
+	TESTS
+		Buffer.Test.cpp
+		Codec.Test.cpp
+		Connection.Test.cpp
+		Live.Test.cpp
+		Message.Test.cpp
+)
+
 # The CPU renderer, and PORTABLE is the load-bearing word here for a stronger reason than it is
 # anywhere else.
 #
