@@ -4,11 +4,15 @@
 #include <cstdint>
 #include <span>
 
+#include "Animation/Author/Bundle.h"
+#include "Animation/Author/Motion.h"
 #include "Animation/Author/Retarget.h"
+#include "Core/Clock.h"
 #include "Core/Time.h"
 #include "Geometry/Scale.h"
 #include "Publication/Publisher/Publisher.h"
 #include "Publication/Reader/Reader.h"
+#include "Scene/Commit.h"
 #include "Scene/Entity.h"
 #include "Scene/Output.h"
 #include "Scene/Store.h"
@@ -25,6 +29,10 @@
 
 namespace
 {
+// The scene's clock, parked at the epoch. A commit clamps its origin forward to dispatch's own now, so
+// a running clock here would move every `t₀` these tests write to whenever the suite happened to run.
+ManualClock Clock;
+
 [[nodiscard]] NodeProperties Panel(float width, float height)
 {
 	return { .Extent = { width, height } };
@@ -38,7 +46,7 @@ namespace
 
 GYRO_TEST(SceneSerializer, ASubtreeLengthCountsNodesAndNotChildren)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	// A menu holding its panel and an open submenu, which is holding its own — the same worked example
 	// World/Node.Test.cpp and Source/Integration/SceneRoundTrip.Test.cpp use.
@@ -74,7 +82,7 @@ GYRO_TEST(SceneSerializer, ASubtreeLengthCountsNodesAndNotChildren)
 
 GYRO_TEST(SceneSerializer, SiblingsAtTheTopLevelAreARunAndNotAForest)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	const EntityId first = store.CreateContainer({}, {}).value();
 	GYRO_CHECK(store.CreateSolid(first, Panel(4.0F, 4.0F), SolidContent{}).has_value());
@@ -93,7 +101,7 @@ GYRO_TEST(SceneSerializer, SiblingsAtTheTopLevelAreARunAndNotAForest)
 
 GYRO_TEST(SceneSerializer, OnlyAMovingChannelCrossesAsACoefficient)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	const EntityId still = store.CreateContainer({}, {}).value();
 	const EntityId moving = store.CreateContainer({}, {}).value();
@@ -107,9 +115,12 @@ GYRO_TEST(SceneSerializer, OnlyAMovingChannelCrossesAsACoefficient)
 	GYRO_CHECK_EQ(serializer.ActiveTranslations(), std::size_t{ 0 });
 	GYRO_CHECK(!serializer.Nodes()[0].IsTranslating());
 
-	Entity& entity = *store.Author(moving);
-	entity.Translation.AnimateTo(Vector3<double>{ 40.0, 0.0, 0.0 }, ParametersFromResponse(0.4, 1.0), Instant{});
-	entity.Opacity.AnimateTo(0.0F, ParametersFromResponse(0.4F, 1.0F), Instant{});
+	{
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+
+		GYRO_REQUIRE(commit.Move(moving, { 40.0, 0.0, 0.0 }, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Fade(moving, 0.0F, Animate(Motion::Standard)));
+	}
 
 	serializer.Serialize(store);
 
@@ -131,7 +142,7 @@ GYRO_TEST(SceneSerializer, OnlyAMovingChannelCrossesAsACoefficient)
 
 GYRO_TEST(SceneSerializer, TheContentIndexIsTranslatedAndNeverForwarded)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	ImageContent first{};
 	first.Frame = { { 1.0F, 0.0F }, { 2.0F, 2.0F } };
@@ -167,7 +178,7 @@ GYRO_TEST(SceneSerializer, TheContentIndexIsTranslatedAndNeverForwarded)
 
 GYRO_TEST(SceneSerializer, AReferenceResolvesBackwardsOrNotAtAll)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	const EntityId window = store.CreateImage({}, Panel(100.0F, 40.0F), ImageContent{}).value();
 	const EntityId tile = store.CreateReference({}, Panel(100.0F, 40.0F), window).value();
@@ -188,7 +199,7 @@ GYRO_TEST(SceneSerializer, AReferenceResolvesBackwardsOrNotAtAll)
 
 GYRO_TEST(SceneSerializer, AForwardReferenceNamesNothing)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	// Authored the wrong way round: the tile is emitted before the window it presents, because the top
 	// level is a list in the order it was built. What the overview actually does is put the real
@@ -212,7 +223,7 @@ GYRO_TEST(SceneSerializer, AForwardReferenceNamesNothing)
 
 GYRO_TEST(SceneSerializer, TheViewsRunIsOnePlacementPerOutputInOutputOrder)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	GYRO_CHECK(store.CreateContainer({}, {}).has_value());
 
@@ -237,20 +248,29 @@ GYRO_TEST(SceneSerializer, TheViewsRunIsOnePlacementPerOutputInOutputOrder)
 
 GYRO_TEST(SceneSerializer, ASecondSerialisationKeepsNothingOfTheFirst)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	const EntityId moving = store.CreateContainer({}, {}).value();
 	const EntityId panel = store.CreateImage(moving, Panel(10.0F, 10.0F), ImageContent{}).value();
 
-	Entity& entity = *store.Author(moving);
-	entity.Translation.AnimateTo(Vector3<double>{ 40.0, 0.0, 0.0 }, ParametersFromResponse(0.4, 1.0), Instant{});
+	{
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+
+		GYRO_REQUIRE(commit.Move(moving, { 40.0, 0.0, 0.0 }, Animate(Motion::Standard)));
+	}
 
 	SceneSerializer serializer;
 	serializer.Serialize(store);
 
 	GYRO_REQUIRE_EQ(serializer.ActiveTranslations(), std::size_t{ 1 });
 
-	entity.Translation.Settle();
+	// The same channel written again with no motion, which is how a commit spells *land it here*. What
+	// the serialisation has to notice is that the run it staged last time is not this scene's.
+	{
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+
+		GYRO_REQUIRE(commit.Move(moving, { 40.0, 0.0, 0.0 }, Immediate()));
+	}
 
 	const SnapshotBuffer buffer = serializer.Serialize(store).Build(2);
 	const SnapshotReader reader{ buffer.Bytes() };

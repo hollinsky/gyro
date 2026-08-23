@@ -2576,6 +2576,15 @@ no allocation, no lookup, since the commit's bundle resolved at open. And two re
 back identical `(x, v)` — so repeated writes to one channel inside one commit are arithmetic rather
 than motion, and the last target wins with no trace of the others.
 
+*(2026-08-22, on writing phase one.)* **Exactly** cost one line to be true rather than nearly true.
+Two of the three spring regimes return the initial condition from the closed form exactly at `t₀`;
+the overdamped branch recovers the offset as a sum of two coefficients it divided by the root span,
+which lands a unit in the last place away. So
+[`Animatable::PresentationState`](../Source/Animation/Author/Animatable.h) reads the initial condition
+back at the origin instead of solving for it. The regime is only reachable through a configured
+damping — the catalog is critical or underdamped throughout — but a property that drifts a ULP per
+write drifts once per input event, which is the rate this paragraph exists to make safe.
+
 **The model value is the spring target, and there is no second field.** `Animatable::Model()` returns
 `Spring::Target`, so a settled property and its model are one number by construction. Decision 14's
 `SetModel` implies a staged value resolved later, and staging is not observable — a commit is a
@@ -2704,6 +2713,17 @@ which is why the frame side needs no second check here, having plenty of its own
 [decision 90](#90-the-snapshots-runs-are-one-per-channel-and-the-frame-side-validates-the-tree-it-walks).
 The backward direction is self-limiting: a stale origin reads as a motion that has already finished,
 and a decaying exponential evaluated far along is settled rather than wrong.
+
+**The rule stands and the reason above is wrong, which is worth recording rather than editing away.**
+*(Corrected 2026-08-22, on writing the clamp.)* The frame side cannot see a growing exponential,
+because [`Spring::Evaluate`](../Source/Animation/Solve/Spring.h) takes its elapsed time through
+`Detail::SecondsSince`, which returns zero for any instant at or before the origin. A commit stamped
+ten seconds ahead therefore evaluates to the state the motion *began* in, for ten seconds, and then
+starts. So the failure is not unbounded coordinates: it is a window that was dragged and does not
+move, for exactly as long as the stamp was wrong, with nothing anywhere reporting anything. That is
+the same clamp for a worse-behaved reason — a defect that reads as the compositor having hung is
+harder to attribute than one that draws garbage — and it is decision 49's shape again, an answer that
+was right resting on an argument that was not.
 
 **Close is per wire transaction, and phase two runs there.** `wl_surface.commit` is atomic for one
 surface by Wayland's own definition, so it closes one commit; a shell's commit request closes

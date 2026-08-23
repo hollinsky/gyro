@@ -2,6 +2,7 @@
 
 #include <optional>
 
+#include "Core/Clock.h"
 #include "Core/Handle.h"
 #include "Geometry/Scale.h"
 #include "Scene/Entity.h"
@@ -15,6 +16,10 @@
 
 namespace
 {
+// The scene's clock. Nothing here reads it — a commit is what clamps an origin against dispatch's now —
+// but the store holds one for its whole life rather than taking one per transaction.
+ManualClock Clock;
+
 [[nodiscard]] NodeProperties Panel(float width, float height)
 {
 	return { .Extent = { width, height } };
@@ -23,7 +28,7 @@ namespace
 
 GYRO_TEST(SceneStore, TheTopLevelIsAListAndItKeepsTheOrderItWasBuiltIn)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	const EntityId first = store.CreateContainer({}, {}).value();
 	const EntityId second = store.CreateContainer({}, {}).value();
@@ -42,7 +47,7 @@ GYRO_TEST(SceneStore, TheTopLevelIsAListAndItKeepsTheOrderItWasBuiltIn)
 
 GYRO_TEST(SceneStore, AChildLinksUnderItsParentAndTheParentKnowsBothEnds)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	const EntityId menu = store.CreateContainer({}, {}).value();
 	const EntityId below = store.CreateImage(menu, Panel(100.0F, 40.0F), ImageContent{}).value();
@@ -60,7 +65,7 @@ GYRO_TEST(SceneStore, AChildLinksUnderItsParentAndTheParentKnowsBothEnds)
 
 GYRO_TEST(SceneStore, AKindArrivesWithItsPayloadAndNeverWithoutIt)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	ImageContent image{};
 	image.Frame = { { 1.0F, 2.0F }, { 3.0F, 4.0F } };
@@ -88,7 +93,7 @@ GYRO_TEST(SceneStore, AKindArrivesWithItsPayloadAndNeverWithoutIt)
 
 GYRO_TEST(SceneStore, AReferenceNamesAnIdAndNotACopy)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	const EntityId window = store.CreateImage({}, Panel(100.0F, 40.0F), ImageContent{}).value();
 	const EntityId tile = store.CreateReference({}, Panel(100.0F, 40.0F), window).value();
@@ -102,7 +107,7 @@ GYRO_TEST(SceneStore, AReferenceNamesAnIdAndNotACopy)
 
 GYRO_TEST(SceneStore, AReferenceTakesNoChildren)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	const EntityId window = store.CreateImage({}, Panel(100.0F, 40.0F), ImageContent{}).value();
 	const EntityId tile = store.CreateReference({}, {}, window).value();
@@ -116,7 +121,7 @@ GYRO_TEST(SceneStore, AReferenceTakesNoChildren)
 
 GYRO_TEST(SceneStore, AParentThatIsNotLiveIsARefusalRatherThanAPromotion)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	const EntityId forged{ .Index = 4, .Generation = 2 };
 
@@ -135,7 +140,7 @@ GYRO_TEST(SceneStore, AParentThatIsNotLiveIsARefusalRatherThanAPromotion)
 
 GYRO_TEST(SceneStore, TheIndexSpaceIsARefusalRatherThanAnEstimate)
 {
-	SceneStore store{ 2 };
+	SceneStore store{ Clock, 2 };
 
 	GYRO_CHECK(store.CreateContainer({}, {}).has_value());
 	GYRO_CHECK(store.CreateContainer({}, {}).has_value());
@@ -146,7 +151,7 @@ GYRO_TEST(SceneStore, TheIndexSpaceIsARefusalRatherThanAnEstimate)
 
 GYRO_TEST(SceneStore, AStaleIdResolvesToNothing)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	const EntityId live = store.CreateContainer({}, {}).value();
 	const EntityId stale{ .Index = live.Index, .Generation = live.Generation + 2 };
@@ -159,7 +164,7 @@ GYRO_TEST(SceneStore, AStaleIdResolvesToNothing)
 
 GYRO_TEST(SceneStore, TheOutputSetIsReplacedWholeAndTheGenerationSaysSo)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	GYRO_CHECK(store.Outputs().empty());
 	GYRO_CHECK_EQ(store.OutputGeneration(), std::uint64_t{ 0 });

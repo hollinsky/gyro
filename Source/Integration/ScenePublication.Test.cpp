@@ -3,6 +3,8 @@
 #include <vector>
 
 #include "Animation/Author/Animatable.h"
+#include "Animation/Author/Bundle.h"
+#include "Animation/Author/Motion.h"
 #include "Animation/Author/Retarget.h"
 #include "Animation/Solve/Spring.h"
 #include "Core/Clock.h"
@@ -14,6 +16,7 @@
 #include "Geometry/Scale.h"
 #include "Publication/Publisher/Publisher.h"
 #include "Publication/Reader/Reader.h"
+#include "Scene/Commit.h"
 #include "Scene/Output.h"
 #include "Scene/Serializer.h"
 #include "Scene/Store.h"
@@ -45,6 +48,11 @@ namespace
 {
 constexpr PixelSize<DeviceSpace> Screen{ 1920, 1080 };
 
+// The scene's clock, parked at the epoch so that the origins written below are the origins that land: a
+// commit clamps its `t₀` forward to dispatch's own now, which against a running clock would be every
+// origin in this file.
+ManualClock Clock;
+
 // A leaf that draws, so that what the walk reaches shows up as an item rather than only as a visit.
 [[nodiscard]] Node Panel(float width, float height)
 {
@@ -67,7 +75,7 @@ constexpr PixelSize<DeviceSpace> Screen{ 1920, 1080 };
 // path, so what is published is what a commit would have published.
 struct Authored
 {
-	SceneStore Store;
+	SceneStore Store{ Clock };
 	EntityId Submenu{};
 };
 
@@ -83,8 +91,11 @@ struct Authored
 	[[maybe_unused]] const EntityId inner =
 		authored.Store.CreateImage(authored.Submenu, PanelProperties(80.0F, 30.0F), ImageContent{}).value();
 
-	authored.Store.Author(authored.Submenu)
-		->Translation.AnimateTo(Vector3<double>{ 40.0, 4.0, 0.0 }, ParametersFromResponse(0.4, 1.0), origin);
+	{
+		SceneCommit commit{ authored.Store, CommitAuthor::Shell, origin };
+
+		commit.Move(authored.Submenu, { 40.0, 4.0, 0.0 }, Animate(Motion::Standard));
+	}
 
 	const SceneOutput primary{ .Density = Scale::FromInteger(1), .Grid = Screen };
 	const SceneOutput outputs[] = { primary };
@@ -189,7 +200,7 @@ GYRO_TEST(ScenePublication, TheAuthoredSceneDrawsWhatTheHandBuiltOneDraws)
 
 GYRO_TEST(ScenePublication, AHiddenSubtreeCostsOneStepWhereverItWasAuthored)
 {
-	SceneStore store;
+	SceneStore store{ Clock };
 
 	const EntityId menu = store.CreateContainer({}, {}).value();
 	GYRO_REQUIRE(store.CreateImage(menu, NodeProperties{ .Extent = { 100.0F, 40.0F } }, ImageContent{}).has_value());

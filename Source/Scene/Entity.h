@@ -33,12 +33,15 @@
 // `Geometry/Region.h` alone is a quarter of a kilobyte at its fixed capacity. Two unrelated arguments,
 // one layout, which is what makes the publisher's per-kind emission a copy rather than a build.
 //
-// **What is deliberately absent, so neither absence reads as an oversight.** There is no mutation API:
-// decision 89 makes setting a model value *be* a retarget under the commit's shared origin, so a
-// setter that staged a value is the shape that decision killed, and the whole of it — the commit scope
-// of decision 112, the differ, the retiring flag of decision 114 — arrives together or not at all. And
-// there is no client damage: decision 113 puts a `Region<BufferSpace>` on the image entity and a run
-// of its own on the wire, and both land when `Protocol` mints the first rectangle.
+// **Mutation is `Scene/Commit.h`'s and there is no setter here.** Decision 89 makes setting a model
+// value *be* a retarget under the commit's shared origin, so a staged value is the shape that decision
+// killed — and what a channel below offers is `AnimateTo`, which is that retarget and nothing else.
+// What has not arrived with it is decision 89's phase two, the half whose inputs are the rest of the
+// commit: the differ, the match set, the atlas reservation, and the retiring flag of decision 114.
+//
+// **And there is no client damage**, which is a different kind of absence: decision 113 puts a
+// `Region<BufferSpace>` on the image entity and a run of its own on the wire, and both land when
+// `Protocol` mints the first rectangle.
 
 // What an author says a node is: everything an entity carries that is not the tree, the kind, or the
 // payload the kind selects.

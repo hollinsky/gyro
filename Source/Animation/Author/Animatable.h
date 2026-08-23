@@ -124,7 +124,24 @@ public:
 	// and a 60 Hz projector in the same iteration.
 	[[nodiscard]] constexpr SpringState<V> PresentationState(Instant at) const noexcept
 	{
-		return IsAtRest() ? SpringState<V>{ m_Spring.Target, V{} } : m_Spring.Evaluate(at);
+		if (IsAtRest())
+		{
+			return { m_Spring.Target, V{} };
+		}
+
+		// **At the origin the answer is the initial condition, and it is read rather than solved.** The
+		// closed form is *defined* by passing through (target + offset, velocity) at t0, and two of the
+		// three regimes return exactly that from the arithmetic — the third reconstructs the offset as a
+		// sum of two coefficients it divided by the root span, which lands a unit in the last place away.
+		//
+		// What that costs is the one claim this type owes the differ. Docs/Decisions.md decision 89 has
+		// two retargets at one t0 be *exactly* idempotent, so that repeated writes to a property inside
+		// one commit are arithmetic rather than motion and the last target wins with no trace of the
+		// others — and a property that drifts a ULP per write drifts once per input event, on a channel a
+		// shell may write at device rate. Reading the initial condition back makes the claim true in
+		// every regime instead of in the ones the catalog happens to reach.
+		return at == m_Spring.Origin ? SpringState<V>{ m_Spring.Target + m_Spring.Offset, m_Spring.Velocity } :
+		                               m_Spring.Evaluate(at);
 	}
 
 	// What is drawn. Defined through the state above rather than beside it, so the two cannot
@@ -181,6 +198,31 @@ public:
 	constexpr void AnimateTo(const V& target, SpringParameters<Scalar> motion, Instant t0, const V& velocity) noexcept
 	{
 		m_Spring = Begin(motion, Presentation(t0), velocity, target, t0);
+	}
+
+	// The same transition, entered from a state the caller computed rather than from the one this
+	// property is holding.
+	//
+	// **The one channel this exists for is rotation, and it is a chart change rather than a liberty.**
+	// A rotation springs the geodesic deviation from the orientation the node record carries, so a new
+	// orientation re-anchors the chart and both the position *and* the velocity have to be restated in
+	// it — Geometry/NodeTransform.h owns all three conversions and shows the velocity term is first
+	// order in the change of deviation, which is a window that changes direction when it is
+	// interrupted if it is dropped. The overload above cannot express that: it reads this property's
+	// own position, which is a coordinate in the chart being left behind.
+	//
+	// Deliberately not the general escape hatch it looks like. Every other channel is flat, so its
+	// interrupted state is the one this property already holds, and reaching for this there would be a
+	// caller computing something Animatable computes correctly.
+	constexpr void AnimateFrom(
+		const V& position,
+		const V& velocity,
+		const V& target,
+		SpringParameters<Scalar> motion,
+		Instant t0
+	) noexcept
+	{
+		m_Spring = Begin(motion, position, velocity, target, t0);
 	}
 
 	// This value, now, with no motion. What a property that is not being animated is set through.

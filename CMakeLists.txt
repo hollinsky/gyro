@@ -305,6 +305,7 @@ gyro_add_module(Scene PORTABLE DISPATCH
 		Animation
 		Publication
 	TESTS
+		Commit.Test.cpp
 		Entity.Test.cpp
 		Output.Test.cpp
 		Serializer.Test.cpp
@@ -666,6 +667,7 @@ add_executable(IntegrationTests
 	Source/Integration/PublicationRoundTrip.Test.cpp
 	Source/Integration/PublicationSoak.Test.cpp
 	Source/Integration/RenderImport.Test.cpp
+	Source/Integration/SceneCommit.Test.cpp
 	Source/Integration/ScenePublication.Test.cpp
 	Source/Integration/SceneRoundTrip.Test.cpp
 	Source/Integration/Schedulability.Test.cpp
