@@ -102,6 +102,17 @@ public:
 		Presented.Emit({ .PresentedAt = at, .Period = period, .Sequence = sequence });
 	}
 
+	[[nodiscard]] std::uint32_t Held() const { return m_Held; }
+
+	// The images are gone, so nothing is out on loan any more — a presenter that kept counting the old
+	// set as held would be modelling a state that cannot exist. The signal alone leaves the free set
+	// wrong, which is why this is a verb rather than an `Emit` at the call site.
+	void InvalidateTargets()
+	{
+		m_Held = 0;
+		TargetsInvalidated.Emit();
+	}
+
 	int Presents = 0;
 	bool Refuse = false;
 	Region<DeviceSpace> PresentedDamage{};
@@ -124,6 +135,7 @@ public:
 	[[nodiscard]] Result<Submission> Record(const RecordRequest& request) override
 	{
 		++Records;
+		RecordedTarget = request.Target;
 		RecordedMode = request.Mode;
 		RecordedGeneration = request.CostGeneration;
 		RecordedDamage = request.Damage;
@@ -155,6 +167,7 @@ public:
 	int Records = 0;
 	bool Refuse = false;
 	int Code = ENOMEM;
+	std::uint32_t RecordedTarget = 0;
 	Duration Cost = 2ms;
 	RenderMode RecordedMode = RenderMode::Planned;
 	std::uint32_t RecordedGeneration = 0;
@@ -454,6 +467,92 @@ GYRO_TEST(FrameLoop, ARefusedPresentIsCountedTheSameWay)
 // A frame nobody wanted, a target nobody had, and a flip still outstanding are all returns too, and
 // none of them is a refusal. Counting them would make the figure mean *iterations that drew nothing*,
 // which is the ordinary state of an idle compositor and would bury the one line worth reading.
+// The one that was silently killing --gym=materials. A target comes out of the presenter's free set on
+// acquire and only goes back by being presented, so a loop that acquired and then refused used to burn
+// one per iteration: three targets, three attempts, and then an output that never tried again for the
+// rest of the run. Holding the acquired index makes a standing refusal cost one target rather than all
+// of them, which is what lets the count above mean *frames* rather than *buffers*.
+GYRO_TEST(FrameLoop, ARefusedRecordKeepsItsTargetRatherThanBurningOne)
+{
+	Harness harness;
+
+	harness.Anchor();
+	harness.Renderer.Refuse = true;
+
+	// One more iteration than the presenter has targets, which is exactly where it used to stop.
+	constexpr int attempts = 6;
+
+	for (int attempt = 0; attempt < attempts; ++attempt)
+	{
+		harness.Clock.Set(At(1002 + 10 * attempt));
+		harness.Output().DamageWholeOutput();
+		(void)harness.Loop.Step();
+	}
+
+	GYRO_CHECK_EQ(harness.Renderer.Records, attempts);
+	GYRO_CHECK_EQ(harness.Output().Refused(), static_cast<std::uint64_t>(attempts));
+
+	// The same image every time, and only ever one of them out of the presenter's hands.
+	GYRO_CHECK_EQ(harness.Renderer.RecordedTarget, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(harness.Presenter.Held(), std::uint32_t{ 1 });
+
+	// And the output recovers the moment the renderer does, which is the half a latch would have got
+	// wrong: nothing here is remembered about the refusal except the count.
+	harness.Renderer.Refuse = false;
+	harness.Clock.Set(At(1002 + 10 * attempts));
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
+	GYRO_CHECK(harness.Output().Damage().IsEmpty());
+	GYRO_CHECK_EQ(harness.Output().Refused(), static_cast<std::uint64_t>(attempts));
+}
+
+// A refused present has not been accepted, so the presenter did not take the image either — the loop is
+// still holding it and the next attempt draws into the same one.
+GYRO_TEST(FrameLoop, ARefusedPresentKeepsItsTargetToo)
+{
+	Harness harness;
+
+	harness.Anchor();
+	harness.Presenter.Refuse = true;
+
+	for (int attempt = 0; attempt < 6; ++attempt)
+	{
+		harness.Clock.Set(At(1002 + 10 * attempt));
+		harness.Output().DamageWholeOutput();
+		(void)harness.Loop.Step();
+	}
+
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 6);
+	GYRO_CHECK_EQ(harness.Presenter.Held(), std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(harness.Output().Refused(), std::uint64_t{ 6 });
+}
+
+// A target set that went away takes the held index with it, because the index named an image in the old
+// set and the new set is not obliged to have one there at all.
+GYRO_TEST(FrameLoop, LosingTheTargetsDropsTheHeldOne)
+{
+	Harness harness;
+
+	harness.Anchor();
+	harness.Renderer.Refuse = true;
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE_EQ(harness.Presenter.Held(), std::uint32_t{ 1 });
+
+	harness.Presenter.InvalidateTargets();
+	harness.Renderer.Refuse = false;
+	harness.Clock.Set(At(1012));
+	(void)harness.Loop.Step();
+
+	// Asked for again rather than reused: one out for the frame in flight, and the presenter was the
+	// party that got to choose which.
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
+	GYRO_CHECK_EQ(harness.Presenter.Held(), std::uint32_t{ 1 });
+}
+
 GYRO_TEST(FrameLoop, NotDrawingIsNotBeingRefused)
 {
 	Harness harness;
@@ -543,7 +642,7 @@ GYRO_TEST(FrameLoop, LosingTheTargetsDamagesTheWholeOutputAndDropsTheCommitment)
 
 	GYRO_REQUIRE_EQ(harness.Output().Committed(), std::uint64_t{ 8 });
 
-	harness.Presenter.TargetsInvalidated.Emit();
+	harness.Presenter.InvalidateTargets();
 
 	// Nothing recorded against a target that no longer exists survives it, and there is no previous
 	// frame left for damage to be relative to.
@@ -614,7 +713,7 @@ GYRO_TEST(FrameLoop, AModeSetThatGrewTheOutputDamagesTheWholeNewMode)
 
 	harness.Anchor();
 
-	harness.Presenter.TargetsInvalidated.Emit();
+	harness.Presenter.InvalidateTargets();
 	GYRO_CHECK_EQ(harness.Output().Damage().Bounds(), (PixelRect<DeviceSpace>{ {}, { 2560, 1440 } }));
 
 	OutputConfiguration achieved = Panel();

@@ -255,6 +255,11 @@ private:
 	{
 		m_FlipPending = false;
 		m_Committed = FrameClock::NoSequence;
+
+		// An index into a set that no longer exists. `OnTargetsInvalidated` is the case this is here for
+		// — the images are released before the new ones exist, so a held index names memory that is gone
+		// and the next attempt has to ask the new set for one of its own.
+		m_Acquired.reset();
 	}
 
 	IPresenter* m_Presenter = nullptr;
@@ -272,6 +277,10 @@ private:
 
 	std::uint64_t m_Refused = 0;
 	std::optional<Error> m_FirstRefusal{};
+
+	// Held between iterations only while an attempt is owed one: acquired above, released by a present
+	// or by a discard, and empty everywhere else.
+	std::optional<std::uint32_t> m_Acquired{};
 
 	Connection<const PresentationInfo&> m_OnPresented;
 	Connection<> m_OnMissed;
@@ -446,23 +455,44 @@ private:
 			return;
 		}
 
-		const std::optional<std::uint32_t> target = output.m_Presenter->AcquireTarget();
+		// **Acquired once and held until it is presented, which is the whole of the fix and reads as an
+		// omission until you follow the other path out of here.** `AcquireTarget` is the loop taking a
+		// target *out* of the presenter's free set, and the only way one goes back is by being presented.
+		// So an iteration that acquires and then refuses has taken an image nobody can hand out again,
+		// and a standing refusal empties the set one frame at a time: on a triple-buffered output the
+		// third refusal is the last thing that output ever attempts. What that looks like on screen is a
+		// panel that goes black and stays black, and what it looks like in the log is a refusal count of
+		// three for a run of thousands — a number small enough to read as a hiccup.
+		//
+		// Holding it is not a workaround for a release verb `IPresenter` does not have. The loop *does*
+		// own this image, it will render into it on the next attempt, and the bug was only ever that it
+		// forgot. `Discard` drops it, because a target set that was invalidated took this index with it.
+		if (!output.m_Acquired)
+		{
+			output.m_Acquired = output.m_Presenter->AcquireTarget();
+		}
 
-		if (!target)
+		if (!output.m_Acquired)
 		{
 			// Decision 30's lead, bounded from the other side: an output with no free target cannot run
 			// ahead, so a double-buffered one cannot run ahead at all. Not an error, and not damage lost.
 			return;
 		}
 
+		const std::uint32_t target = *output.m_Acquired;
 		const std::span<const RenderTarget> targets = output.m_Presenter->Targets();
 
-		if (*target >= targets.size())
+		if (target >= targets.size())
 		{
 			// A presenter handing out an index outside the set it published is the one refusal here that is
 			// a defect rather than a limit, and it is the one that would otherwise be indistinguishable
 			// from an output that simply had nothing to draw.
+			//
+			// Dropped rather than held, unlike every refusal below it: those keep an index that is good and
+			// will be drawn into next time, and this one is an index that names nothing. Holding it would
+			// retry the same bad number forever and never ask the presenter again.
 			output.Refuse(Error{ ERANGE, "the presenter acquired a target outside the set it lists" });
+			output.m_Acquired.reset();
 
 			return;
 		}
@@ -479,7 +509,7 @@ private:
 		(void)output.m_Cost.ObserveIrreducibleCpu(list.EvaluateCost);
 		output.m_Damage.Add(list.Damage);
 
-		const RecordRequest request{ .Target = *target,
+		const RecordRequest request{ .Target = target,
 			                         .Mode = decision.Mode(),
 			                         .CostGeneration = output.m_Cost.Generation(),
 			                         .Damage = output.m_Damage,
@@ -502,9 +532,9 @@ private:
 		free = decision.DeviceFreeAt;
 		(void)output.m_Cost.ObserveCpu(decision.Mode(), submission->RecordCost);
 
-		const PixelSize<DeviceSpace> size = targets[*target].Size;
+		const PixelSize<DeviceSpace> size = targets[target].Size;
 		const PresentLayer layer{
-			.Target = *target,
+			.Target = target,
 			.Blend = BlendMode::Opaque,
 			.Acquire = submission->Point,
 			.Source = { {}, { static_cast<float>(size.Width), static_cast<float>(size.Height) } },
@@ -519,6 +549,10 @@ private:
 
 			return;
 		}
+
+		// Presented, so the presenter has it back and the loop is not holding one any more. Beside the
+		// damage clear for the same reason: this is the one exit that put a frame on its way to the glass.
+		output.m_Acquired.reset();
 
 		output.m_Committed = decision.Sequence;
 		output.m_FlipPending = true;
