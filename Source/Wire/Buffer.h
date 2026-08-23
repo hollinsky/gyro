@@ -44,7 +44,9 @@ struct PendingFd
 {
 	Fd Descriptor;
 
-	// Offset into `Pending()`, one past the last byte of the message this descriptor belongs to.
+	// Offset into `m_Bytes`, one past the last byte of the message this descriptor belongs to. Only
+	// meaningful once `Commit` has stamped it, and which descriptors those are is a count rather than
+	// a value here — see `m_FdsCommitted`.
 	std::size_t Boundary = 0;
 };
 
@@ -106,15 +108,23 @@ public:
 	// being written and the offset it is owed by is not known until the message ends.
 	void PutFd(Fd descriptor) { m_Fds.push_back(PendingFd{ .Descriptor = std::move(descriptor), .Boundary = 0 }); }
 
-	// One message has ended. Every descriptor still without a boundary belongs to it, and everything
+	// One message has ended. Every descriptor past the committed count belongs to it, and everything
 	// written so far is now whole enough to send.
+	//
+	// **Which descriptors are committed is a count rather than a sentinel boundary**, and the
+	// difference is a bug this file used to have. A boundary of zero once meant "not yet committed",
+	// but `Reclaim` rebases every boundary onto what is left of the buffer — so a descriptor whose
+	// message had just been sent could land back on zero and be adopted by the *next* message, going
+	// out one message late and putting the far end's queue permanently out of step. A count cannot be
+	// rebased into meaning something else.
 	void Commit() noexcept
 	{
-		for (std::size_t index = m_Fds.size(); index > 0 && m_Fds[index - 1].Boundary == 0; --index)
+		for (std::size_t index = m_FdsCommitted; index < m_Fds.size(); ++index)
 		{
-			m_Fds[index - 1].Boundary = m_Bytes.size();
+			m_Fds[index].Boundary = m_Bytes.size();
 		}
 
+		m_FdsCommitted = m_Fds.size();
 		m_Committed = m_Bytes.size();
 	}
 
@@ -125,6 +135,7 @@ public:
 		m_Bytes.resize(mark.Bytes);
 		m_Fds.resize(mark.Fds);
 		m_Committed = std::min(m_Committed, mark.Bytes);
+		m_FdsCommitted = std::min(m_FdsCommitted, mark.Fds);
 		m_Open = false;
 	}
 
@@ -163,18 +174,19 @@ public:
 	// bytes would put its message on the wire with nothing behind it, and the far end would demarshal
 	// a `new_id` for a buffer it will never receive. So a batch stops at the end of the last message it
 	// can still carry the descriptors for, and the rest goes next time round.
+	//
+	// **The split always exists, and that is Wire/Writer.h's doing rather than luck.** Stopping at a
+	// message boundary is only possible if one falls inside the first 28 descriptors, which is false
+	// for a single message carrying 29 — it would go out whole with 28 behind it, which is the
+	// misalignment this clamp exists to prevent. `MessageWriter::Send` refuses that message instead,
+	// so by the time a descriptor is committed here its message has at most 28 of them.
 	[[nodiscard]] Batch NextBatch() noexcept
 	{
 		std::span<const std::byte> bytes = Committed();
 
 		// Committed descriptors are a prefix: commits happen in order, so an uncommitted one belongs to
 		// the message still open and there are never any before a committed one.
-		std::size_t count = 0;
-
-		while (count < m_Fds.size() && m_Fds[count].Boundary != 0 && m_Fds[count].Boundary <= m_Committed)
-		{
-			++count;
-		}
+		std::size_t count = m_FdsCommitted;
 
 		if (count > MaxFdsPerMessage)
 		{
@@ -208,6 +220,7 @@ public:
 	void Sent(std::size_t bytes, std::size_t fds)
 	{
 		m_Fds.erase(m_Fds.begin(), m_Fds.begin() + static_cast<std::ptrdiff_t>(fds));
+		m_FdsCommitted -= std::min(m_FdsCommitted, fds);
 		m_Sent += std::min(bytes, m_Bytes.size() - m_Sent);
 
 		Reclaim();
@@ -284,6 +297,10 @@ private:
 	// hold a mark across a flush.
 	std::size_t m_Sent = 0;
 	std::size_t m_Committed = 0;
+
+	// How many of `m_Fds` belong to a message that has ended. A count rather than a mark on the
+	// descriptor, for `Commit`'s reason.
+	std::size_t m_FdsCommitted = 0;
 
 	bool m_Open = false;
 };

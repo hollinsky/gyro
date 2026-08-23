@@ -439,13 +439,16 @@ Result<void> Connection::DispatchAvailable()
 
 		Entry* entry = Find(header.Target);
 
-		// **An event for an id nothing is bound to is a connection error**, which is the runtime half
-		// of decision 2's argument that a dispatch table cannot have a hole. The alternative — discard
-		// it and carry on — is what libwayland does, and it can only do it because it knows each
-		// event's signature and can close exactly the descriptors the discarded message carried. This
-		// module has no signatures by construction, so discarding would leave the descriptor queue one
-		// entry out of step and the *next* message would take a buffer belonging to a dead object.
-		if (entry == nullptr || entry->State != Slot::Live)
+		// **An event for an id that has never had a dispatcher is a connection error**, which is the
+		// runtime half of decision 2's argument that a dispatch table cannot have a hole. The
+		// alternative — discard it and carry on — is one this module cannot take: it has no signatures
+		// by construction, so a message whose arguments go unread leaves the descriptor queue one
+		// entry out of step and the *next* message takes a buffer belonging to something else.
+		//
+		// An id whose *proxy* is gone is a different thing and the ordinary one — the host had the
+		// event on the wire before it read the destroy — so `Unbind` leaves the dispatcher behind and
+		// the message is read with a null `self`. See Wire/Connection.h's `Dispatcher`.
+		if (entry == nullptr || entry->Dispatch == nullptr)
 		{
 			return Fail(EPROTO, "the wayland host sent an event for an object nothing is bound to");
 		}
@@ -453,7 +456,10 @@ Result<void> Connection::DispatchAvailable()
 		// Copied out before the call, because a dispatcher routinely allocates an id — every request
 		// that creates an object does — and that grows the table this entry points into.
 		const Dispatcher dispatch = entry->Dispatch;
-		void* const self = entry->Self;
+		//
+		// `Retired` is the only state that loses its object: `Deleted` means the host has freed the id
+		// while the proxy is still there to be told, which is the order a `wl_callback` arrives in.
+		void* const self = entry->State == Slot::Retired ? nullptr : entry->Self;
 
 		dispatch(self, header.Opcode, reader);
 
@@ -661,11 +667,22 @@ void Connection::Unbind(ObjectId id) noexcept
 			break;
 
 		case Slot::Reserved:
+			// Allocated and never bound, so the id has never been marshalled and the host has never
+			// heard of it: there is no `delete_id` coming and nothing in flight to answer. Retiring it
+			// would strand it for the life of the connection. See `Allocate`.
+			*entry = Entry{};
+			m_Recycled.push_back(id);
+			break;
+
 		case Slot::Live:
 			// Out of circulation until `delete_id`. The proxy is gone but the id is not free, because
 			// the host may have events in flight naming it and a reuse would answer them with the
 			// wrong object.
-			*entry = Entry{ .Self = nullptr, .Dispatch = nullptr, .State = Slot::Retired };
+			//
+			// **The dispatcher stays and the object goes.** Those in-flight events still have to be
+			// read, or the descriptors they carry are never taken off the queue and every message
+			// after them takes the wrong one.
+			*entry = Entry{ .Self = nullptr, .Dispatch = entry->Dispatch, .State = Slot::Retired };
 			break;
 
 		case Slot::Free:

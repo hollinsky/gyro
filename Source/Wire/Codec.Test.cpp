@@ -393,6 +393,60 @@ GYRO_TEST(Codec, TheDescriptorLimitClampsAtAMessageBoundary)
 
 // A writer that never sends leaves nothing behind, including in the middle of a stream of messages
 // that did. The message either arrives whole or does not exist.
+// **A message with more descriptors than one `sendmsg` carries is refused where it is written.**
+// Wire/Buffer.h's batch stops at a message boundary so nothing reaches the far end ahead of its
+// descriptors; a message with 29 of its own offers no boundary to stop at, so it would go out whole
+// with 28 behind it and every descriptor after it would be taken by the wrong message. Latched on the
+// buffer like the size cap, because the call site that wrote it is generated code with nowhere to put
+// an error.
+GYRO_TEST(Codec, RefusesAMessageCarryingMoreDescriptorsThanOneSend)
+{
+	OutputBuffer out;
+
+	{
+		MessageWriter writer{ out, ObjectId{ 2 }, 0 };
+
+		for (std::size_t index = 0; index <= MaxFdsPerMessage; ++index)
+		{
+			writer.PutFd(Descriptor());
+		}
+
+		writer.Send();
+	}
+
+	GYRO_REQUIRE(out.Fault().has_value());
+	GYRO_CHECK_EQ(out.Fault()->Code(), E2BIG);
+
+	// Rolled back whole: no bytes, and every descriptor it took closed rather than left for the next
+	// message to adopt.
+	GYRO_CHECK(out.Pending().empty());
+	GYRO_CHECK(out.Fds().empty());
+}
+
+// And 28 exactly is the message that still goes, so the refusal above is a boundary rather than a
+// ceiling somebody guessed at.
+GYRO_TEST(Codec, TwentyEightDescriptorsInOneMessageStillGo)
+{
+	OutputBuffer out;
+
+	{
+		MessageWriter writer{ out, ObjectId{ 2 }, 0 };
+
+		for (std::size_t index = 0; index < MaxFdsPerMessage; ++index)
+		{
+			writer.PutFd(Descriptor());
+		}
+
+		writer.Send();
+	}
+
+	GYRO_CHECK(!out.Fault().has_value());
+
+	const OutputBuffer::Batch batch = out.NextBatch();
+	GYRO_CHECK_EQ(batch.Bytes.size(), HeaderBytes);
+	GYRO_CHECK_EQ(batch.Fds.size(), MaxFdsPerMessage);
+}
+
 GYRO_TEST(Codec, AnAbandonedMessageLeavesNoTrace)
 {
 	OutputBuffer out;

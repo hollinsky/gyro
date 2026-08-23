@@ -9,7 +9,6 @@
 
 #include "Core/Fd.h"
 #include "Wire/Buffer.h"
-#include "Wire/Connection.h"
 #include "Wire/Message.h"
 
 // One request, being assembled.
@@ -27,15 +26,21 @@
 // code is a straight run of `Put` calls with no error handling in it, so a message that cannot be
 // written latches a failure on the buffer and the next `Flush` reports it. There is nothing at a call
 // site to check and nothing it could usefully do if there were.
+//
+// **`Connection` is forward-declared and the constructor that takes one lives in Writer.cpp**, so
+// that marshalling a request does not include the control waist. Wire/Connection.h names
+// `Seam/EventSource.h` — a connection is drained by the frame loop like any other source — and every
+// generated `Put` call site would otherwise inherit that, which is the opposite of what puts this
+// module below both waists. One out-of-line constructor is what the separation costs.
 
 namespace Wire
 {
+class Connection;
+
 class MessageWriter
 {
 public:
-	MessageWriter(Connection& connection, ObjectId target, std::uint16_t opcode)
-		: MessageWriter{ connection.Output(), target, opcode }
-	{}
+	MessageWriter(Connection& connection, ObjectId target, std::uint16_t opcode);
 
 	// The buffer form, so the codec can be exercised with no connection and therefore no socket. Both
 	// constructors are the same constructor; this is the one that does the work.
@@ -134,6 +139,7 @@ public:
 		if (m_Buffer != nullptr)
 		{
 			m_Buffer->PutFd(std::move(descriptor));
+			++m_Fds;
 		}
 	}
 
@@ -157,6 +163,23 @@ public:
 			return;
 		}
 
+		// **One message may not carry more descriptors than one `sendmsg` can**, and the reason is
+		// Wire/Buffer.h's clamp rather than the kernel's limit. A batch stops at a message boundary so
+		// that no message reaches the far end ahead of its descriptors; a message with 29 of its own
+		// offers no boundary to stop at, so it would go out whole with 28 behind it and every
+		// descriptor after it would be taken by the wrong message. Refused where it is written, which
+		// is the only place that can still say which request it was.
+		if (m_Fds > MaxFdsPerMessage)
+		{
+			m_Buffer->Rollback(m_Mark);
+			m_Buffer->RecordFault(
+				E2BIG, "marshalling a wayland request with more descriptors than one sendmsg carries"
+			);
+			m_Buffer = nullptr;
+
+			return;
+		}
+
 		m_Buffer->PatchWord(m_Mark.Bytes + 4, PackSizeAndOpcode(size, m_Opcode));
 		m_Buffer->Commit();
 		m_Buffer->End();
@@ -166,6 +189,11 @@ public:
 private:
 	OutputBuffer* m_Buffer = nullptr;
 	OutputBuffer::Mark m_Mark;
+
+	// This message's own descriptors, which is not the same as the buffer's: the buffer may still be
+	// holding descriptors for messages queued ahead of this one.
+	std::size_t m_Fds = 0;
+
 	std::uint16_t m_Opcode = 0;
 };
 } // namespace Wire

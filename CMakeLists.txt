@@ -408,6 +408,7 @@ gyro_add_module(Wire PORTABLE
 		Seam
 	SOURCES
 		Connection.cpp
+		Writer.cpp
 	TESTS
 		Buffer.Test.cpp
 		Codec.Test.cpp

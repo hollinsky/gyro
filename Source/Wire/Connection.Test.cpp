@@ -11,6 +11,7 @@
 #include <cstring>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -97,6 +98,11 @@ struct Marshaller
 
 // What a bound proxy is, for a runtime that has no idea what a proxy is: a `void*` and a function
 // pointer. The generated bindings are this with a `switch` in the middle.
+//
+// **Every case reads first and records second**, which is Wire/Connection.h's `Dispatcher` contract
+// written out: `self` is null once the proxy has been unbound, and the arguments still have to come
+// off the wire or the descriptor queue is left out of step for every message after this one. This is
+// the shape the generator emits.
 struct Recorder
 {
 	std::vector<std::uint32_t> Values;
@@ -107,33 +113,98 @@ struct Recorder
 
 	static void Dispatch(void* self, std::uint16_t opcode, MessageReader& reader)
 	{
-		Recorder& recorder = *static_cast<Recorder*>(self);
-		recorder.LastOpcode = opcode;
+		Recorder* const recorder = static_cast<Recorder*>(self);
+
+		if (recorder != nullptr)
+		{
+			recorder->LastOpcode = opcode;
+		}
 
 		switch (opcode)
 		{
 			case 0:
-				recorder.Values.push_back(reader.GetUint());
+			{
+				const std::uint32_t value = reader.GetUint();
+
+				if (recorder != nullptr)
+				{
+					recorder->Values.push_back(value);
+				}
+
 				break;
+			}
 
 			case 1:
-				recorder.Text.emplace_back(reader.GetString());
+			{
+				const std::string_view text = reader.GetString();
+
+				if (recorder != nullptr)
+				{
+					recorder->Text.emplace_back(text);
+				}
+
 				break;
+			}
 
 			case 2:
-				recorder.Descriptors.push_back(reader.GetFd());
+			{
+				Fd descriptor = reader.GetFd();
+
+				if (recorder != nullptr)
+				{
+					recorder->Descriptors.push_back(std::move(descriptor));
+				}
+
 				break;
+			}
 
 			default:
+			{
 				// Reads two words whatever the message carries, which is what a generated dispatcher
 				// does: the signature comes from the protocol file, not from the bytes.
-				recorder.Values.push_back(reader.GetUint());
-				recorder.Values.push_back(reader.GetUint());
-				recorder.ReadPastTheEnd = reader.Failed();
+				const std::uint32_t first = reader.GetUint();
+				const std::uint32_t second = reader.GetUint();
+
+				if (recorder != nullptr)
+				{
+					recorder->Values.push_back(first);
+					recorder->Values.push_back(second);
+					recorder->ReadPastTheEnd = reader.Failed();
+				}
+
 				break;
+			}
 		}
 	}
 };
+
+// The peer's `sendmsg`, since `Marshaller::WriteTo` is a plain write and cannot carry descriptors.
+// The client's own `Flush` is the thing under test elsewhere, so this end does it by hand.
+[[nodiscard]] bool SendWithDescriptors(RawFd socket, const OutputBuffer::Batch& batch)
+{
+	alignas(::cmsghdr) std::array<std::byte, CMSG_SPACE(MaxFdsPerMessage * sizeof(int))> control{};
+
+	::iovec vector{ .iov_base = const_cast<std::byte*>(batch.Bytes.data()), .iov_len = batch.Bytes.size() };
+
+	::msghdr message{};
+	message.msg_iov = &vector;
+	message.msg_iovlen = 1;
+	message.msg_control = control.data();
+	message.msg_controllen = CMSG_SPACE(batch.Fds.size() * sizeof(int));
+
+	::cmsghdr* header = CMSG_FIRSTHDR(&message);
+	header->cmsg_level = SOL_SOCKET;
+	header->cmsg_type = SCM_RIGHTS;
+	header->cmsg_len = CMSG_LEN(batch.Fds.size() * sizeof(int));
+
+	for (std::size_t index = 0; index < batch.Fds.size(); ++index)
+	{
+		const int descriptor = batch.Fds[index].Descriptor.Get();
+		std::memcpy(CMSG_DATA(header) + index * sizeof(int), &descriptor, sizeof descriptor);
+	}
+
+	return ::sendmsg(socket.Value, &message, MSG_NOSIGNAL) == static_cast<::ssize_t>(batch.Bytes.size());
+}
 
 [[nodiscard]] Fd Descriptor(std::byte mark)
 {
@@ -229,6 +300,118 @@ GYRO_TEST(Connection, ARetiredIdStaysOutOfCirculation)
 	connection.Unbind(first);
 
 	GYRO_CHECK(connection.Allocate() != first);
+}
+
+// **An event for a proxy the client has already destroyed is read and dropped, not a disconnect.**
+// Both ends talk at once, so the host has an event on the wire before it has read the request
+// destroying its object — every time, for one round trip. Failing there would end the connection on
+// the ordinary case rather than on a host misbehaving.
+//
+// The descriptor is the point. It arrives out of band and comes off a queue in the order messages
+// consume it, so the stale event has to be *read* rather than skipped; the assertion is that the next
+// event's descriptor is the next one the peer sent, which is only true if the dead object's was taken
+// off the queue first.
+GYRO_TEST(Connection, AnEventForARetiredProxyIsReadAndDropped)
+{
+	Pair pair;
+	GYRO_REQUIRE(Connect(pair));
+
+	Recorder gone;
+	Recorder living;
+
+	const ObjectId retired = pair.Client.Allocate();
+	GYRO_REQUIRE(pair.Client.Bind(retired, &gone, &Recorder::Dispatch).has_value());
+
+	const ObjectId live = pair.Client.Allocate();
+	GYRO_REQUIRE(pair.Client.Bind(live, &living, &Recorder::Dispatch).has_value());
+
+	// The proxy goes. The id does not, because the host has not said `delete_id` yet.
+	pair.Client.Unbind(retired);
+
+	// Two events each carrying a descriptor, the first for the object that is already gone.
+	Marshaller peer;
+	{
+		MessageWriter stale{ peer.Buffer, retired, 2 };
+		stale.PutFd(Descriptor(std::byte{ 0xa1 }));
+		stale.Send();
+	}
+	{
+		MessageWriter fresh{ peer.Buffer, live, 2 };
+		fresh.PutFd(Descriptor(std::byte{ 0xb2 }));
+		fresh.Send();
+	}
+
+	{
+		const OutputBuffer::Batch batch = peer.Buffer.NextBatch();
+		GYRO_REQUIRE_EQ(batch.Fds.size(), std::size_t{ 2 });
+		GYRO_REQUIRE(SendWithDescriptors(pair.Peer.Borrow(), batch));
+		peer.Buffer.Sent(batch.Bytes.size(), batch.Fds.size());
+	}
+
+	GYRO_REQUIRE(pair.Client.Drain().has_value());
+
+	// Nothing reached the destroyed proxy.
+	GYRO_CHECK(gone.Descriptors.empty());
+
+	// And the living one got its own descriptor rather than the dead object's, which is what says the
+	// queue never went out of step.
+	GYRO_REQUIRE_EQ(living.Descriptors.size(), std::size_t{ 1 });
+
+	std::byte mark{ 0x00 };
+	GYRO_REQUIRE_EQ(::read(living.Descriptors[0].Get(), &mark, 1), static_cast<::ssize_t>(1));
+	GYRO_CHECK_EQ(mark, std::byte{ 0xb2 });
+}
+
+// And `delete_id` still puts a retired id back, with the dispatcher it was holding for those stale
+// events let go with it.
+GYRO_TEST(Connection, DeleteIdClearsTheRetiredDispatcher)
+{
+	Pair pair;
+	GYRO_REQUIRE(Connect(pair));
+
+	Recorder recorder;
+	const ObjectId id = pair.Client.Allocate();
+	GYRO_REQUIRE(pair.Client.Bind(id, &recorder, &Recorder::Dispatch).has_value());
+
+	pair.Client.Unbind(id);
+
+	Marshaller peer;
+	{
+		MessageWriter deleted{ peer.Buffer, ObjectId::Display, 1 };
+		deleted.PutUint(static_cast<std::uint32_t>(id));
+		deleted.Send();
+	}
+	GYRO_REQUIRE(peer.WriteTo(pair.Peer.Borrow()));
+	GYRO_REQUIRE(pair.Client.Drain().has_value());
+
+	GYRO_CHECK_EQ(pair.Client.Allocate(), id);
+
+	// Free again rather than merely reusable: an event for it now is a host talking about an object
+	// this end has never bound.
+	Marshaller stale;
+	{
+		MessageWriter event{ stale.Buffer, id, 0 };
+		event.PutUint(1);
+		event.Send();
+	}
+	GYRO_REQUIRE(stale.WriteTo(pair.Peer.Borrow()));
+
+	const Result<void> drained = pair.Client.Drain();
+	GYRO_REQUIRE(!drained.has_value());
+	GYRO_CHECK_EQ(drained.error().Code(), EPROTO);
+}
+
+// An id that was allocated and never bound comes straight back, because nothing on the wire has ever
+// named it: there is no `delete_id` coming for it and nothing in flight to answer. Retiring it would
+// strand it for the life of the connection.
+GYRO_TEST(Connection, AnIdThatWasNeverBoundComesBackImmediately)
+{
+	Connection connection;
+
+	const ObjectId first = connection.Allocate();
+	connection.Unbind(first);
+
+	GYRO_CHECK_EQ(connection.Allocate(), first);
 }
 
 // And `delete_id` is what puts it back. The host's word rather than the client's.

@@ -48,6 +48,31 @@ namespace Wire
 // What a bound object does with an event. A plain function pointer with a `void*` beside it rather
 // than a `std::function`, because the generated dispatcher is a captureless `switch` and this is what
 // a proxy costs: two pointers, no allocation, no indirect call through a type-erased wrapper.
+//
+// **`self` may be null, and a dispatcher must read the message anyway.** That is the whole handling
+// of an event for an object the client has already destroyed. Both ends talk at once, so the host
+// routinely has an event for an object on the wire before it has read the request destroying it —
+// which means a stale event is the ordinary case rather than a host misbehaving. It cannot simply be
+// skipped: descriptors travel out of band and are taken from a queue in the order messages consume
+// them, so a message whose arguments are never read leaves that queue one entry out of step and the
+// *next* message takes a descriptor belonging to the one thrown away. Nothing detects that — it is a
+// valid descriptor for the wrong buffer.
+//
+// So the runtime keeps the dispatcher when a proxy is unbound and calls it with a null `self`. The
+// generated code reads its arguments exactly as it always does — which is what consumes the
+// descriptors and closes them — and guards only the call into the proxy:
+//
+//     const std::uint32_t name = reader.GetUint();
+//     const std::string_view interface = reader.GetString();
+//
+//     if (self != nullptr)
+//     {
+//         static_cast<Registry*>(self)->Global(name, interface);
+//     }
+//
+// Not a second generated function that reads and discards: two decoders for one interface can drift
+// apart when an argument is added to one of them, and the symptom of that is the misaligned
+// descriptor queue this exists to prevent. One decoder and one branch cannot drift.
 using Dispatcher = void (*)(void* self, std::uint16_t opcode, MessageReader& reader);
 
 // What the host said before it hung up. Held by the connection because `Error` cannot own the text.
@@ -93,6 +118,11 @@ public:
 	// The next unused client id, reserved but not yet bound. `ObjectId::None` where the id space is
 	// exhausted, which takes four billion live objects and is here so the caller has something to
 	// check rather than a wrapped id.
+	//
+	// **Bind before marshalling the id.** Not enforceable here — the request that names a new id is
+	// generated code and this module never sees it — but it is what lets `Unbind` tell an id the host
+	// has never heard of from one it may still be sending events for, and every client in the tree
+	// already writes it this way.
 	[[nodiscard]] ObjectId Allocate();
 
 	// Points an id at a proxy. A client id must have come from `Allocate` and not yet be bound; a
@@ -102,7 +132,12 @@ public:
 
 	// The proxy is gone. **The id is not free yet**, and that is the protocol rather than caution: a
 	// client may not reuse an id until the host has sent `delete_id` for it, because the host may
-	// still have events in flight naming the old object. The slot stays reserved until then.
+	// still have events in flight naming the old object. The slot stays reserved until then, and its
+	// dispatcher stays with it so those events can still be read — see `Dispatcher`.
+	//
+	// An id that was allocated and never bound is the one case that frees immediately: nothing on the
+	// wire has ever named it, so there is no `delete_id` coming and nothing in flight to answer. That
+	// rests on `Allocate`'s rule that a proxy is bound before its id is marshalled.
 	void Unbind(ObjectId id) noexcept;
 
 	// Where a `MessageWriter` marshals. Public because that is the whole relationship between the two
@@ -123,6 +158,10 @@ private:
 	// `Deleted` is the one worth naming: the host frees an id as soon as it destroys the object, which
 	// for a `wl_callback` is immediately after it sends `done` — so `delete_id` routinely arrives
 	// while the proxy is still bound and the client destroys it a moment later.
+	//
+	// `Retired` keeps its dispatcher and loses its object, which is what makes an event arriving in
+	// that window readable rather than fatal. Whether a slot can be dispatched to is therefore
+	// `Dispatch != nullptr` rather than a state: `Free` and `Reserved` have never had one.
 	enum class Slot : std::uint8_t
 	{
 		Free,
