@@ -1189,7 +1189,14 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 	std::array<DrawItem, 4> refused{ drawable, drawable, drawable, drawable };
 	refused[0].Content = DrawTexture{};
 	refused[1].Content = DrawGroup{ .Count = 0 };
+
+	// **A lifted node is no longer refused; a lifted *turned* one is.** The shadow is analytic over a
+	// rect, and whether a node out of the plane sheds a sheared shadow or carries one on its own quad
+	// is a question Docs/Open.md leaves to the first transition that turns a node. Drawing either
+	// answer meanwhile would settle it by accident, so the quad the producer projected is checked for
+	// being upright and the frame is refused where it is not.
 	refused[2].Lift = Cast(Elevation::Resting);
+	refused[2].Shape.Corners[1] = { refused[2].Shape.Corners[1].X, refused[2].Shape.Corners[1].Y + 4.0F };
 
 	// **The colour-state refusal is now one transfer function rather than every conversion**, and HLG
 	// is the one because converting it needs a display peak luminance `ColorState` does not carry.
@@ -1215,6 +1222,16 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 	dressed.Dress = Material::Glass;
 
 	GYRO_CHECK_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &dressed, 1 })).has_value(), true);
+
+	// And the elevation from the same side: an upright node at either lifted level draws, because the
+	// shadow it casts is arithmetic over its own rect with nothing read and no pass of its own.
+	for (const Elevation level : AllElevations)
+	{
+		DrawItem lifted = drawable;
+		lifted.Lift = Cast(level);
+
+		GYRO_CHECK_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &lifted, 1 })).has_value(), true);
+	}
 
 	// The branch that used to be here, from the other side: an item whose light is not the output's
 	// is drawn rather than refused, because `Prepare` built the variant that converts it.
@@ -1536,4 +1553,120 @@ GYRO_TEST(RenderImport, AnExportingDeviceHandsOutAWaitablePoint)
 	GYRO_REQUIRE_EQ(next.has_value(), true);
 	GYRO_CHECK_EQ(next->Point.Value, std::uint64_t{ 2 });
 	GYRO_CHECK_EQ(next->Point.Timeline, submission->Point.Timeline);
+}
+
+// **Decision 104's shadow, and what has to be true of it is that it has a direction.**
+//
+// A white field with one lifted node on it. Below the node the field is darker than it was; the same
+// distance above, it is darker by less. That difference *is* the one light — a shadow with no offset
+// is a glow, and a shadow whose offset came from where the node sits on the screen would be a
+// different picture for the same node moved sideways, which is the collage of toolkit shadows decision
+// 104 exists to end. Stated as an ordering rather than as numbers because the numbers are
+// Seam/Dressing.h's two constants and Docs/Open.md has not tuned them yet.
+GYRO_TEST(RenderImport, AShadowFallsBelowTheLiftedNodeAndNotEquallyAbove)
+{
+	std::optional<Fixture> fixture = Available("AShadowFallsBelowTheLiftedNodeAndNotEquallyAbove");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
+
+	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+	GYRO_REQUIRE(acquired.has_value());
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	// A field to cast onto, because the target is cleared to nothing and a shadow on black is not a
+	// picture anybody can check. The node sits above the middle so that the offset has room under it.
+	const Rect<DeviceSpace> field{ {}, { 64.0F, 32.0F } };
+	const Rect<DeviceSpace> where{ { 24.0F, 8.0F }, { 16.0F, 10.0F } };
+
+	std::array<DrawItem, 2> items{ Solid(field, DrawSolid{ 1.0F, 1.0F, 1.0F, 1.0F }),
+		                           Solid(where, DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F }) };
+	items[1].Lift = Cast(Elevation::Resting);
+
+	GYRO_REQUIRE_EQ(fixture->Renderer().Record(Composite(*acquired, damage, items)).has_value(), true);
+
+	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+	GYRO_REQUIRE(buffer != nullptr);
+
+	const BufferReader reader{ *buffer };
+	GYRO_REQUIRE(reader.IsValid());
+
+	constexpr Rgba16 White = Rgb8(255, 255, 255);
+
+	// Four pixels outside the node on the axis the light works along, at equal distance either side.
+	const Rgba16 below = reader.Image().At(32, 22);
+	const Rgba16 above = reader.Image().At(32, 4);
+
+	GYRO_CHECK(below.Red < White.Red);
+	GYRO_CHECK(above.Red < White.Red);
+
+	// The whole of the direction claim: nearer the light's own displacement is darker. A shadow drawn
+	// centred on the node would make these two equal and pass every other check here.
+	GYRO_CHECK(below.Red < above.Red);
+
+	// Grey rather than tinted, because the shadow is premultiplied black — the one fill that needs no
+	// colour conversion, and the reason the shadow pipeline has no variant lattice behind it. A
+	// conversion applied to it by accident would show up here as a cast.
+	GYRO_CHECK_EQ(below.Red, below.Green);
+	GYRO_CHECK_EQ(below.Red, below.Blue);
+
+	// And it runs out. The corner is further from the node than Seam/Dressing.h's expansion reaches,
+	// so what is left there is below what the target can hold and the field is untouched.
+	GYRO_CHECK_EQ(reader.Image().At(0, 31), White);
+}
+
+// **A node does not stand on its own shadow**, which decision 104 spends a section on because the
+// symptom does not look like elevation. Within one item the material samples the target as of before
+// the item began, and a shadow left underneath breaks that from the other side: whatever is drawn over
+// it that is not fully opaque — a glass panel, a window mid-fade, decision 34's floored tint — is
+// darkened at its own edges by its own shadow.
+//
+// The node here draws nothing at all, so what is under it is only ever the shadow. Its rect comes back
+// exactly as the field was, and the pixels just outside do not.
+GYRO_TEST(RenderImport, ALiftedNodeIsNotDarkenedByItsOwnShadow)
+{
+	std::optional<Fixture> fixture = Available("ALiftedNodeIsNotDarkenedByItsOwnShadow");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
+
+	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+	GYRO_REQUIRE(acquired.has_value());
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	const Rect<DeviceSpace> field{ {}, { 64.0F, 32.0F } };
+	const Rect<DeviceSpace> where{ { 24.0F, 8.0F }, { 16.0F, 12.0F } };
+
+	std::array<DrawItem, 2> items{ Solid(field, DrawSolid{ 1.0F, 1.0F, 1.0F, 1.0F }),
+		                           Solid(where, DrawSolid{ 0.0F, 0.0F, 0.0F, 0.0F }) };
+	items[1].Lift = Cast(Elevation::Floating);
+
+	GYRO_REQUIRE_EQ(fixture->Renderer().Record(Composite(*acquired, damage, items)).has_value(), true);
+
+	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+	GYRO_REQUIRE(buffer != nullptr);
+
+	const BufferReader reader{ *buffer };
+	GYRO_REQUIRE(reader.IsValid());
+
+	constexpr Rgba16 White = Rgb8(255, 255, 255);
+
+	// Inside the node's own rect, well clear of the edge the mask feathers over.
+	GYRO_CHECK(reader.Image().IsUniform(PixelRect<DeviceSpace>{ { 26, 10 }, { 12, 8 } }, White));
+
+	// And immediately below it, where the shadow is at its darkest, so that the check above is about
+	// the punch-out rather than about a shadow that never drew.
+	GYRO_CHECK(reader.Image().At(32, 22).Red < White.Red);
 }

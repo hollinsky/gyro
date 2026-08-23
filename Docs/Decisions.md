@@ -9731,3 +9731,84 @@ cannot leave a trail.
 than both at `Floating`. Ranking one height against another means having both under the same moving
 lanes at the same moment — one level twice shows a shadow and settles nothing, which is the same
 argument decision 103's two materials are laid side by side under.
+
+### 130. The shadow is drawn in device space over an upright quad, and a turned one is refused
+
+*(Decided 2026-08-23, building
+[decision 104](#104-an-elevation-is-a-height-under-one-light-and-the-shadow-is-analytic)'s analytic
+shadow in the Vulkan renderer, the first thing to draw from
+[decision 129](#129-a-height-is-the-offset-and-the-light-is-two-constants-its-size-and-its-weight)'s
+table.)*
+
+The shadow is one draw over the item's own rect grown by the light's reach: a rounded-rect distance
+field read through the normal distribution's integral, in device pixels, with `gl_FragCoord` as the
+coordinate. **No pass, no offscreen, no cache, no read of anything** — which is what decision 104
+promised and what keeps a level off decision 34's ladder, so a floored frame keeps every shadow on
+screen and gives up the blur behind a panel instead.
+
+#### One pipeline and no lattice, because black needs no conversion
+
+A shadow is the backdrop darkened, which is premultiplied black — and premultiplied black is the
+*same four components in every transfer function and every set of primaries*. So there is nothing for
+a specialization constant to select and nothing for
+[decision 62](#62-a-pointwise-chain-is-fused-into-one-pass-and-a-gathering-one-is-not)'s variant
+lattice to enumerate: one pipeline per attachment format, about three milliseconds at a binding
+against the quad program's twenty-five. The blend is the same `over`
+[decision 95](#95-a-node-carries-one-material-and-one-elevation-and-both-are-fields) fixes for
+everything else, which is why the two programs share their fixed-function state rather than each
+declaring it.
+
+#### Nothing stands on its own shadow, and the rule is wider than the material
+
+Decision 104 states it for the material: within one item the material samples the target as of before
+the item began, or a glass panel darkens itself at its own edges. **The same failure arrives by
+transparency rather than by sampling**, and it reaches items with no material at all — a window
+mid-fade, decision 34's floored tint, anything whose alpha is not one — because a shadow left lying
+under the node shows *through* it.
+
+So the shadow's own rect is punched out of it: the closed form is evaluated twice, once displaced by
+the light and once not, and the second masks the first. One multiply per fragment, against a ring of
+eight triangles that would save the fragments the mask discards.
+
+The ordering follows from the same place. A shadow is drawn immediately before the item's **first
+write to the target**, which for a plain item is simply first and for a dressed one is after the
+chain has extracted — because the extract reads the target back, and a shadow composited before it
+would be blurred and pulled in under the panel. That is a dark fringe inside every piece of glass,
+worst where it reads through most, and nobody would attribute it to elevation.
+
+#### A turned node's shadow is refused rather than guessed
+
+[Open.md](Open.md) leaves open whether a rotated node's shadow shears across the plane it falls on or
+rides the node's own quad, and says it arrives with the first transition that turns a node. There is
+no such transition. **Drawing either answer meanwhile decides the question by accident**, in favour
+of whichever was easier to write — so a lifted item whose quad is not upright is `EINVAL`, and
+Seam/Renderer.h's *an item the renderer cannot express* keeps the question open by construction.
+
+The test is a tolerance rather than an equality, at a sixty-fourth of a pixel: an axis-aligned chain
+puts two corners at one `y` exactly today, and an exact test would turn a later chain's millionth of a
+degree of skew into a black screen.
+
+**Rejected: drawing the shadow around the quad's bounding box.** It is what a device-space rect gives
+for free, and it is neither answer — a diamond would get a square shadow the size of its diagonal,
+which is worse than either thing the open entry is choosing between and would look like a bug rather
+than like a decision.
+
+#### What the closed form gives up
+
+Coverage is exact for a straight edge and an approximation at a corner, where reading the distance
+field through the normal integral treats the occluder as continuing around. *(Measured 2026-08-23,
+against dense quadrature of the true convolution: the error is **11 to 20 eight-bit code points**, not
+the "slight" this paragraph first claimed.* At a square corner the field reads zero where a quarter of
+the neighbourhood is occluded, so the closed form says half coverage against a true quarter —
+**exactly twice the darkness, at any softness** — and rounding the corner only softens that to about
+0.14 of coverage. The corner is darker and squarer than the shape casting it.
+
+**The exact separable rectangle is the cheap correction and is not built yet.** A Gaussian is
+separable and a rectangle is the product of two intervals, so a plain rect's blurred coverage is
+exact in four `erf` calls with no loop — 0.1 code points against this form's 20. Applied to a rounded
+rect it ignores the arc and lands within 1 to 5 code points, still four times better than what is
+here. Whether the residual wants the arc corrected as well is the question left, and quadrature per
+fragment is the answer that needs measuring rather than assuming: a crude sixteen-sample rule is
+*worse* than the separable form it was supposed to improve on. `Blit` still refuses a shadow
+outright, beside the corner radius it also refuses — the floor beneath the floor tier draws neither,
+and both are the same missing arithmetic.

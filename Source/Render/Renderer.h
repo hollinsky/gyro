@@ -20,14 +20,16 @@
 
 // The Vulkan renderer: `Seam/Renderer.h`'s `Record` half, against images the presenter allocated.
 //
-// **It draws solids and it dresses them, and it still refuses what it cannot express.** Render/Pipeline.h is the quad
-// pipeline and it covers one alternative of `DrawContent`: a fill, over a projected quad, with a
-// corner radius and a per-node opacity. A `DrawTexture`, a `DrawGroup`, a node dressed in a material
-// or lifted to an elevation is `EINVAL` — Seam/Renderer.h's *an item the renderer cannot express* —
-// rather than a window that silently comes out as a flat rectangle or vanishes. The refusal is the
-// half of this file worth keeping as the pipeline set grows: the alternative failure mode is a
-// screen that is subtly wrong with nothing in any log saying why, which nobody can report and nobody
-// can bisect.
+// **It draws solids, it dresses them, and it lifts them — and it still refuses what it cannot
+// express.** Render/Pipeline.h is the quad pipeline and it covers one alternative of `DrawContent`: a
+// fill, over a projected quad, with a corner radius and a per-node opacity. Beside it are the two
+// dressings: Render/Backdrop.h's chain for a material, and the shadow pipeline for decision 104's
+// elevation, which reads nothing and costs one draw. A `DrawTexture` and a `DrawGroup` are `EINVAL` —
+// Seam/Renderer.h's *an item the renderer cannot express* — rather than a window that silently comes
+// out as a flat rectangle or vanishes, and so is a shadow asked of a turned quad, whose direction
+// Docs/Open.md has not settled. The refusal is the half of this file worth keeping as the pipeline
+// set grows: the alternative failure mode is a screen that is subtly wrong with nothing in any log
+// saying why, which nobody can report and nobody can bisect.
 //
 // **The colour-state conversion is the next thing owed, and it is why a mismatch is refused.**
 // Decision 47 composites in linear light at wide primaries; nothing here converts anything yet, so an
@@ -174,6 +176,25 @@ private:
 	// because it cannot fail in a way a caller should act on: what a failure costs is decision 34's
 	// third rung on this output, not a bind.
 	void Reserve(std::span<const RenderTarget> targets, ColorState output);
+
+	// One item's shadow: decision 104's closed form, over the item's rect grown by the light's reach.
+	//
+	// **Drawn immediately before the item's own first write to the target, which is not the same as
+	// first.** For a plain item those are the same moment. For a dressed one they are not: the chain
+	// reads the target back, so a shadow composited before the extract would be blurred and pulled in
+	// under the panel — a dark fringe inside every piece of glass, which decision 104 forbids in as
+	// many words and which nobody would attribute to elevation. So `Dress` calls this after its
+	// extract, and the loop calls it only for items that have no chain to wait for.
+	//
+	// Nothing to fail: the pipeline's existence is checked with every other item's before recording
+	// begins, for the reason `Record` states there.
+	void Shade(
+		VkCommandBuffer command,
+		const Slot& slot,
+		const DrawItem& item,
+		std::span<const VkClearRect> rects,
+		VkPipeline& bound
+	) const noexcept;
 
 	// One dressed item: the chain, and then the quad that composites its result.
 	//

@@ -78,6 +78,73 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 	};
 }
 
+// Whether a quad is an upright rectangle on the device grid, which is what lets a shadow be a centre
+// and a half-extent rather than a homography to extrapolate.
+//
+// **A tolerance rather than an equality, and it is sixty-fourths of a pixel.** An axis-aligned chain
+// puts the two top corners at one `y` exactly — the coefficient that would separate them is zero, not
+// small — so this would hold at equality today. The tolerance is against the composed chain that
+// grows a term later and leaves a millionth of a degree of skew: an exact test would turn that into a
+// refused frame, which is a black screen for a difference no eye and no framebuffer can hold.
+[[nodiscard]] bool Upright(const Quad& quad) noexcept
+{
+	constexpr float Tolerance = 1.0F / 64.0F;
+
+	for (const float weight : quad.Weights)
+	{
+		if (std::abs(weight - 1.0F) > Tolerance)
+		{
+			return false;
+		}
+	}
+
+	return std::abs(quad.Corners[0].Y - quad.Corners[1].Y) <= Tolerance &&
+	       std::abs(quad.Corners[3].Y - quad.Corners[2].Y) <= Tolerance &&
+	       std::abs(quad.Corners[0].X - quad.Corners[3].X) <= Tolerance &&
+	       std::abs(quad.Corners[1].X - quad.Corners[2].X) <= Tolerance;
+}
+
+// What one shadow draw is told: the item's rect, the light's three numbers, and how far past the rect
+// the quad has to reach.
+//
+// **The radius crosses in device pixels while `DrawItem` states it in the node's own extent**, and the
+// conversion is here because this is where both are known. The smaller of the two axis scales, so an
+// anisotropically scaled node's shadow rounds less than its content rather than more — a shadow whose
+// corner is rounder than the window's shows as a light gap at four corners, and the other direction
+// hides under the node instead.
+[[nodiscard]] ShadowConstants ShadowFor(const DrawItem& item, PixelSize<DeviceSpace> target) noexcept
+{
+	const Rect<DeviceSpace> bounds = item.Shape.Bounds();
+	const float width = bounds.Extent.Width;
+	const float height = bounds.Extent.Height;
+
+	const float horizontal = item.Extent.Width > 0.0F ? width / item.Extent.Width : 1.0F;
+	const float vertical = item.Extent.Height > 0.0F ? height / item.Extent.Height : 1.0F;
+	const float radius = std::min({ item.Radius * std::min(horizontal, vertical), 0.5F * width, 0.5F * height });
+
+	ShadowConstants constants{};
+
+	constants.Rect[0] = bounds.Origin.X + 0.5F * width;
+	constants.Rect[1] = bounds.Origin.Y + 0.5F * height;
+	constants.Rect[2] = 0.5F * width;
+	constants.Rect[3] = 0.5F * height;
+
+	constants.Shape[0] = radius;
+	constants.Shape[1] = item.Lift.Offset;
+	constants.Shape[2] = item.Lift.Softness;
+
+	// The node's own opacity takes its shadow with it, which is the whole of what decision 105 means
+	// by the shadow having to animate: a window that fades out and leaves its shadow behind is the
+	// artefact that entry is about, at the one moment the eye is on the window.
+	constants.Shape[3] = item.Lift.Opacity * item.Opacity;
+
+	constants.Target[0] = static_cast<float>(target.Width);
+	constants.Target[1] = static_cast<float>(target.Height);
+	constants.Target[2] = Expansion(item.Lift);
+
+	return constants;
+}
+
 // What the quad pipeline can express, asked of one item.
 //
 // **Every branch here is a picture somebody would otherwise have to notice was wrong.** A texture
@@ -98,9 +165,18 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 		return Failure(EINVAL, "this renderer flattens no groups yet; decision 60's offscreen is not built");
 	}
 
-	if (item.Lift.Draws())
+	// **A turned node's shadow is an open question rather than an unbuilt feature**, which is why this
+	// refuses instead of drawing something. One light and a node out of the plane disagree: the
+	// physical answer shears the shadow across the plane it is cast on, and the cheap one carries it
+	// on the quad, where a card mid-flip lights itself from the side. Docs/Open.md leaves it to the
+	// first transition that turns a node, and there is none — so what would be shipped meanwhile is
+	// whichever answer happened to be easier to write, which is the way a question gets decided by
+	// accident.
+	if (item.Lift.Draws() && !Upright(item.Shape))
 	{
-		return Failure(EINVAL, "this renderer draws no shadows yet");
+		return Failure(
+			EINVAL, "this renderer casts no shadow from a turned quad; Docs/Open.md has not settled which way it goes"
+		);
 	}
 
 	// **What is left of the colour-state branch, and it is a missing number rather than missing
@@ -837,6 +913,11 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		{
 			return Failure(EINVAL, "no pipeline was built for this item's colour conversion on this target's format");
 		}
+
+		if (item.Lift.Draws() && m_Pipeline.Shadow(slot.Format) == VK_NULL_HANDLE)
+		{
+			return Failure(EINVAL, "no shadow pipeline was built for this target's format");
+		}
 	}
 
 	// Nothing to redraw. The seam is explicit that this is not the same as the caller skipping the
@@ -985,6 +1066,14 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 				{
 					return std::unexpected{ dressed.error() };
 				}
+			}
+			else if (item.Lift.Draws())
+			{
+				// Nothing here reads the target, so the shadow simply goes first — under the item, which
+				// is what preorder already means for the tile and the window above it in decision 99's
+				// overview thumbnail. The dressed case is `Dress`'s, because a chain has to have read the
+				// target before this darkens it.
+				Shade(command, slot, item, std::span{ rects.data(), count }, bound);
 			}
 
 			const DrawSolid* solid = std::get_if<DrawSolid>(&item.Content);
@@ -1416,6 +1505,40 @@ void VulkanRenderer::BeginTarget(VkCommandBuffer command, const Slot& slot, cons
 	vkCmdBeginRendering(command, &renderingInfo);
 }
 
+void VulkanRenderer::Shade(
+	VkCommandBuffer command,
+	const Slot& slot,
+	const DrawItem& item,
+	std::span<const VkClearRect> rects,
+	VkPipeline& bound
+) const noexcept
+{
+	const VkPipeline pipeline = m_Pipeline.Shadow(slot.Format);
+
+	vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+	// The outer loop's memo is invalidated rather than updated, for `Dress`'s reason: what is bound now
+	// belongs to a different layout, so the next item has to bind again whatever it wanted.
+	bound = VK_NULL_HANDLE;
+
+	const ShadowConstants constants = ShadowFor(item, slot.Size);
+
+	vkCmdPushConstants(
+		command,
+		m_Pipeline.ShadowLayout(),
+		VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+		0,
+		sizeof constants,
+		&constants
+	);
+
+	for (const VkClearRect& rect : rects)
+	{
+		vkCmdSetScissor(command, 0, 1, &rect.rect);
+		vkCmdDraw(command, 6, 1, 0, 0);
+	}
+}
+
 Result<void> VulkanRenderer::Dress(
 	VkCommandBuffer command,
 	const Slot& slot,
@@ -1439,6 +1562,15 @@ Result<void> VulkanRenderer::Dress(
 		// frame cannot afford.
 		DrawItem tinted = item;
 		tinted.Color = ChainState(m_Output);
+
+		// No chain, so nothing has read the target and the shadow can go down before the tint. It has
+		// to: decision 34's third rung draws the material as a translucent fill rather than an opaque
+		// one, so a shadow left under it would show *through* the panel — the same darkening at the
+		// same edges that the chained path avoids by ordering, arriving by transparency instead.
+		if (item.Lift.Draws())
+		{
+			Shade(command, slot, item, rects, bound);
+		}
 
 		// The tint is an ordinary fill, so it takes whichever execution this renderer draws fills
 		// with. The *chained* branch below is not offered the same choice and does not need it: a
@@ -1593,6 +1725,17 @@ Result<void> VulkanRenderer::Dress(
 		                       .minDepth = 0.0F,
 		                       .maxDepth = 1.0F };
 	vkCmdSetViewport(command, 0, 1, &viewport);
+
+	// **Here, and this is the position decision 104 spends a section on.** The extract above has
+	// already sampled the target, so what the blur carries is the picture as of before this item
+	// began — and the shadow lands after it, where the panel about to be drawn cannot read it. A line
+	// earlier and every glass panel on screen has a dark halo just inside its own edge, worst where it
+	// is most transparent, which is exactly where a person is looking when they judge whether the
+	// glass is any good.
+	if (item.Lift.Draws())
+	{
+		Shade(command, slot, item, rects, bound);
+	}
 
 	const VkPipeline pipeline = m_Backdrop.Dress(rounded);
 	vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);

@@ -646,6 +646,8 @@ gyro_add_shaders(Render
 		Dress.frag
 		Element.vert
 		Element.frag
+		Shadow.vert
+		Shadow.frag
 )
 
 # PUBLIC for Compositor's reason below: the module's own tests compile against volk's prototypes too,

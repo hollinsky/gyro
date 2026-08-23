@@ -199,6 +199,29 @@ struct QuadConstants
 	float Target[4]{ 1.0F, 1.0F, 1.0F, 1.0F };
 };
 
+// What one shadow draw is told. A second block rather than more fields on `QuadConstants`, because
+// the two programs share no argument but the target's extent: a shadow has no fill, no colour state
+// and no corners, and a quad has no light.
+//
+// **Forty-eight bytes and no variants behind it**, which is the whole of what decision 104's analytic
+// shadow costs a renderer. Shadow.frag argues why there is no lattice here: premultiplied black is
+// the same four components in every colour state, so there is nothing for a specialization constant
+// to select.
+struct ShadowConstants
+{
+	// The item's rect in device pixels: centre in the first two, half-extent in the last two.
+	float Rect[4]{};
+
+	// The corner radius in device pixels, the light's downward offset, the penumbra's standard
+	// deviation, and the umbra's alpha — Seam/Dressing.h's `Shadow` with the radius put beside it,
+	// since the closed form needs the shape and the light in one place.
+	float Shape[4]{};
+
+	// The target's extent in pixels in the first two, which the vertex stage divides by, and the
+	// expansion in the third — how far past the rect the drawn quad reaches.
+	float Target[4]{ 1.0F, 1.0F, 0.0F, 0.0F };
+};
+
 // The shader modules, the layout, and one pipeline per format seen.
 //
 // Neither copied nor moved for `IRenderer`'s reason one layer up: every handle in here belongs to a
@@ -243,6 +266,17 @@ public:
 
 	[[nodiscard]] VkPipelineLayout Layout() const noexcept { return m_Layout; }
 
+	// The shadow program for this attachment format, or `VK_NULL_HANDLE` where `Prepare` built none.
+	//
+	// **Held by this class rather than by one of its own, and the two programs are why.** They differ
+	// in their push block and in nothing else that a pipeline states: the same two triangles, the same
+	// `over`, the same culled-nothing rasterizer, the same dynamic viewport and scissor. A second
+	// class would be that state block copied, and the copy would drift the first time either side
+	// gained a blend — which is a shadow that composites differently from the thing casting it.
+	[[nodiscard]] VkPipeline Shadow(VkFormat format) const noexcept;
+
+	[[nodiscard]] VkPipelineLayout ShadowLayout() const noexcept { return m_ShadowLayout; }
+
 	void Destroy() noexcept;
 
 private:
@@ -256,8 +290,18 @@ private:
 		VkPipeline Pipeline = VK_NULL_HANDLE;
 	};
 
+	// One format and the shadow pipeline built for it. No variant, because there is none.
+	struct Shaded
+	{
+		VkFormat Format = VK_FORMAT_UNDEFINED;
+		VkPipeline Pipeline = VK_NULL_HANDLE;
+	};
+
 	// One variant, built with the specialization the key names.
 	[[nodiscard]] Result<void> Build(VkFormat format, QuadVariant variant);
+
+	// The one shadow pipeline this format wants.
+	[[nodiscard]] Result<void> BuildShadow(VkFormat format);
 
 	VulkanDevice* m_Device = nullptr;
 
@@ -265,8 +309,15 @@ private:
 	VkShaderModule m_Fragment = VK_NULL_HANDLE;
 	VkPipelineLayout m_Layout = VK_NULL_HANDLE;
 
+	VkShaderModule m_ShadowVertex = VK_NULL_HANDLE;
+	VkShaderModule m_ShadowFragment = VK_NULL_HANDLE;
+	VkPipelineLayout m_ShadowLayout = VK_NULL_HANDLE;
+
 	std::array<Built, MaxCompositeFormats * QuadVariantsPerBinding> m_Built{};
 	std::size_t m_BuiltCount = 0;
+
+	std::array<Shaded, MaxCompositeFormats> m_Shaded{};
+	std::size_t m_ShadedCount = 0;
 };
 
 // The layout the shaders were compiled against, held where a change to either side fails the build
@@ -277,6 +328,13 @@ static_assert(sizeof(QuadConstants) == 112, "The block the shaders declare, byte
 static_assert(offsetof(QuadConstants, Fill) == 64);
 static_assert(offsetof(QuadConstants, Shape) == 80);
 static_assert(offsetof(QuadConstants, Target) == 96);
+
+// The same for the shadow block, which both of its stages declare whole. glslang reports it at 48
+// bytes with `Rect` at 0, `Shape` at 16, and `Target` at 32.
+static_assert(std::is_trivially_copyable_v<ShadowConstants> && std::is_standard_layout_v<ShadowConstants>);
+static_assert(sizeof(ShadowConstants) == 48, "The block Shadow.vert and Shadow.frag declare");
+static_assert(offsetof(ShadowConstants, Shape) == 16);
+static_assert(offsetof(ShadowConstants, Target) == 32);
 
 // Well inside the 128 bytes every Vulkan implementation guarantees, which is what makes a push
 // constant the right carrier rather than a gamble on a limit. Sixteen bytes of headroom is also the

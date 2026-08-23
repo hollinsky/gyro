@@ -3,11 +3,14 @@
 #include <array>
 #include <cerrno>
 #include <cstdint>
+#include <span>
 
 #include "Core/ColorState.h"
 #include "Core/Result.h"
 #include "Render/Shaders/Quad.frag.h"
 #include "Render/Shaders/Quad.vert.h"
+#include "Render/Shaders/Shadow.frag.h"
+#include "Render/Shaders/Shadow.vert.h"
 #include "Render/Vulkan.h"
 
 namespace
@@ -32,194 +35,21 @@ constexpr VkPipelineColorBlendAttachmentState Over{
 // than by the frame: the topology is two triangles, the blend is `over`, and there is no depth to
 // bias. Damage is what varies within a recording, and it varies as a scissor.
 constexpr std::array<VkDynamicState, 2> Dynamics{ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-} // namespace
 
-Result<void> QuadPipeline::Create(VulkanDevice& device)
+// Everything about a pipeline here that is not its program: two triangles, `over`, one sample, no
+// depth, no cull, and a viewport and scissor supplied per recording.
+//
+// **Shared by both programs on purpose.** The quad and the shadow differ in their shaders and their
+// push block and in nothing else, and the two must composite the same way — a shadow blended by any
+// other rule than the thing casting it is a fringe at every panel's edge. Written once here, they
+// cannot drift; written twice, the second copy is the one somebody forgets.
+[[nodiscard]] Result<VkPipeline> Assemble(
+	VulkanDevice& device,
+	VkPipelineLayout layout,
+	std::span<const VkPipelineShaderStageCreateInfo> stages,
+	VkFormat format
+)
 {
-	if (!device.IsValid())
-	{
-		return Failure(ENODEV, "pipelines built against an unopened device");
-	}
-
-	m_Device = &device;
-
-	const VkShaderModuleCreateInfo vertexInfo{ .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-		                                       .pNext = nullptr,
-		                                       .flags = 0,
-		                                       .codeSize = sizeof QuadVertexSpirv,
-		                                       .pCode = QuadVertexSpirv };
-
-	if (Result<void> created =
-	        Check(vkCreateShaderModule(device.Handle(), &vertexInfo, nullptr, &m_Vertex), "vkCreateShaderModule");
-	    !created)
-	{
-		return created;
-	}
-
-	const VkShaderModuleCreateInfo fragmentInfo{ .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-		                                         .pNext = nullptr,
-		                                         .flags = 0,
-		                                         .codeSize = sizeof QuadFragmentSpirv,
-		                                         .pCode = QuadFragmentSpirv };
-
-	if (Result<void> created =
-	        Check(vkCreateShaderModule(device.Handle(), &fragmentInfo, nullptr, &m_Fragment), "vkCreateShaderModule");
-	    !created)
-	{
-		return created;
-	}
-
-	// Both stages read the whole block. Splitting it — corners to the vertex stage, fill and shape to
-	// the fragment one — would save nothing and would make the two offsets a thing to keep in step
-	// with two shaders instead of one struct.
-	const VkPushConstantRange range{ .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-		                             .offset = 0,
-		                             .size = sizeof(QuadConstants) };
-
-	// No descriptor sets at all, which is what an untextured quad needs and is worth noticing while
-	// it is true: the first `DrawTexture` is what puts a sampled image behind a set here.
-	const VkPipelineLayoutCreateInfo layoutInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-		                                         .pNext = nullptr,
-		                                         .flags = 0,
-		                                         .setLayoutCount = 0,
-		                                         .pSetLayouts = nullptr,
-		                                         .pushConstantRangeCount = 1,
-		                                         .pPushConstantRanges = &range };
-
-	return Check(vkCreatePipelineLayout(device.Handle(), &layoutInfo, nullptr, &m_Layout), "vkCreatePipelineLayout");
-}
-
-VkPipeline QuadPipeline::For(VkFormat format, QuadVariant variant) const noexcept
-{
-	for (std::size_t index = 0; index < m_BuiltCount; ++index)
-	{
-		if (m_Built[index].Format == format && m_Built[index].Variant == variant)
-		{
-			return m_Built[index].Pipeline;
-		}
-	}
-
-	return VK_NULL_HANDLE;
-}
-
-Result<void> QuadPipeline::Prepare(VkFormat format, ColorState output)
-{
-	if (m_Device == nullptr || m_Layout == VK_NULL_HANDLE)
-	{
-		return Failure(ENODEV, "no pipeline layout; the renderer did not come up");
-	}
-
-	if (format == VK_FORMAT_UNDEFINED)
-	{
-		return Failure(EINVAL, "no pipeline is built for a format the renderer cannot name");
-	}
-
-	// Refused at the binding rather than per item, because an output nothing can be encoded to is a
-	// black screen either way and this is the call that can say so out loud. Chain.glsl carries the
-	// argument: HLG's scene-to-display step needs the display's peak luminance and a `ColorState`
-	// states a reference white, so an implementation without one has picked a peak on the user's
-	// behalf and the picture is wrong in a way nobody can attribute.
-	if (output.Transfer == TransferFunction::Hlg)
-	{
-		return Failure(EINVAL, "this renderer encodes no HLG output; ColorState carries no display peak luminance");
-	}
-
-	// Every source state that can reach this output, plus the pair that converts nothing. Enumerated
-	// rather than built on demand because a frame may not compile — decision 62 — so `For` has to be
-	// total over what an item can ask for, and the closed vocabulary is what makes that finite.
-	for (std::uint32_t rounded = 0; rounded < 2; ++rounded)
-	{
-		if (Result<void> built = Build(format, QuadVariant{ .Run = rounded != 0 ? QuadRunCorner : 0U }); !built)
-		{
-			return built;
-		}
-	}
-
-	constexpr std::array<TransferFunction, 3> Transfers{ TransferFunction::Srgb,
-		                                                 TransferFunction::Linear,
-		                                                 TransferFunction::Pq };
-	constexpr std::array<ColorPrimaries, 3> Primaries{ ColorPrimaries::Bt709,
-		                                               ColorPrimaries::DciP3,
-		                                               ColorPrimaries::Bt2020 };
-
-	for (const TransferFunction transfer : Transfers)
-	{
-		for (const ColorPrimaries primaries : Primaries)
-		{
-			for (std::uint32_t rounded = 0; rounded < 2; ++rounded)
-			{
-				const QuadVariant variant{ .Run = QuadRunConvert | (rounded != 0 ? QuadRunCorner : 0U),
-					                       .SourceTransfer = transfer,
-					                       .SourcePrimaries = primaries,
-					                       .TargetTransfer = output.Transfer,
-					                       .TargetPrimaries = output.Primaries };
-
-				if (Result<void> built = Build(format, variant); !built)
-				{
-					return built;
-				}
-			}
-		}
-	}
-
-	return {};
-}
-
-Result<void> QuadPipeline::Build(VkFormat format, QuadVariant variant)
-{
-	if (For(format, variant) != VK_NULL_HANDLE)
-	{
-		return {};
-	}
-
-	if (m_BuiltCount == m_Built.size())
-	{
-		return Failure(EINVAL, "more distinct bindings at once than this renderer builds pipelines for");
-	}
-
-	// The five constants Quad.frag declares, laid out contiguously so that one entry per constant can
-	// name an offset into this object. Four bytes each and no padding to state: a specialization
-	// entry is a size and an offset rather than a struct the front end has to agree about.
-	const std::array<std::int32_t, 5> values{ static_cast<std::int32_t>(variant.Run),
-		                                      static_cast<std::int32_t>(variant.SourceTransfer),
-		                                      static_cast<std::int32_t>(variant.SourcePrimaries),
-		                                      static_cast<std::int32_t>(variant.TargetTransfer),
-		                                      static_cast<std::int32_t>(variant.TargetPrimaries) };
-	std::array<VkSpecializationMapEntry, 5> entries{};
-
-	for (std::uint32_t constant = 0; constant < entries.size(); ++constant)
-	{
-		entries[constant] =
-			VkSpecializationMapEntry{ .constantID = constant,
-			                          .offset = constant * static_cast<std::uint32_t>(sizeof(std::int32_t)),
-			                          .size = sizeof(std::int32_t) };
-	}
-
-	const VkSpecializationInfo specialization{ .mapEntryCount = static_cast<std::uint32_t>(entries.size()),
-		                                       .pMapEntries = entries.data(),
-		                                       .dataSize = sizeof(values),
-		                                       .pData = values.data() };
-
-	// The vertex stage takes none of it. Nothing it does varies by variant — it places four corners
-	// the producer already projected — and specializing it anyway would be one more vertex module per
-	// variant for a program that is byte for byte the same.
-	const std::array<VkPipelineShaderStageCreateInfo, 2> stages{
-		VkPipelineShaderStageCreateInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-		                                 .pNext = nullptr,
-		                                 .flags = 0,
-		                                 .stage = VK_SHADER_STAGE_VERTEX_BIT,
-		                                 .module = m_Vertex,
-		                                 .pName = "main",
-		                                 .pSpecializationInfo = nullptr },
-		VkPipelineShaderStageCreateInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-		                                 .pNext = nullptr,
-		                                 .flags = 0,
-		                                 .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-		                                 .module = m_Fragment,
-		                                 .pName = "main",
-		                                 .pSpecializationInfo = &specialization },
-	};
-
 	// Nothing bound and nothing described. The corners arrive as push constants and the six vertices
 	// are `gl_VertexIndex`, so there is no buffer for the frame thread to fill and none for the
 	// driver to fence.
@@ -325,28 +155,344 @@ Result<void> QuadPipeline::Build(VkFormat format, QuadVariant variant)
 		                                             .pDepthStencilState = nullptr,
 		                                             .pColorBlendState = &blending,
 		                                             .pDynamicState = &dynamic,
-		                                             .layout = m_Layout,
+		                                             .layout = layout,
 		                                             .renderPass = VK_NULL_HANDLE,
 		                                             .subpass = 0,
 		                                             .basePipelineHandle = VK_NULL_HANDLE,
 		                                             .basePipelineIndex = -1 };
 
-	// Counted after it is filled, which is the opposite of `BindTargets`'s rule and right for the
-	// opposite reason: a failed creation writes nothing, so an entry incremented first would be a
-	// null pipeline that `For` hands back as if it had been built.
 	VkPipeline pipeline = VK_NULL_HANDLE;
 
 	if (Result<void> created = Check(
-			vkCreateGraphicsPipelines(m_Device->Handle(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline),
+			vkCreateGraphicsPipelines(device.Handle(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline),
 			"vkCreateGraphicsPipelines"
+		);
+	    !created)
+	{
+		return std::unexpected{ created.error() };
+	}
+
+	return pipeline;
+}
+} // namespace
+
+Result<void> QuadPipeline::Create(VulkanDevice& device)
+{
+	if (!device.IsValid())
+	{
+		return Failure(ENODEV, "pipelines built against an unopened device");
+	}
+
+	m_Device = &device;
+
+	const VkShaderModuleCreateInfo vertexInfo{ .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		                                       .pNext = nullptr,
+		                                       .flags = 0,
+		                                       .codeSize = sizeof QuadVertexSpirv,
+		                                       .pCode = QuadVertexSpirv };
+
+	if (Result<void> created =
+	        Check(vkCreateShaderModule(device.Handle(), &vertexInfo, nullptr, &m_Vertex), "vkCreateShaderModule");
+	    !created)
+	{
+		return created;
+	}
+
+	const VkShaderModuleCreateInfo fragmentInfo{ .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		                                         .pNext = nullptr,
+		                                         .flags = 0,
+		                                         .codeSize = sizeof QuadFragmentSpirv,
+		                                         .pCode = QuadFragmentSpirv };
+
+	if (Result<void> created =
+	        Check(vkCreateShaderModule(device.Handle(), &fragmentInfo, nullptr, &m_Fragment), "vkCreateShaderModule");
+	    !created)
+	{
+		return created;
+	}
+
+	// Both stages read the whole block. Splitting it — corners to the vertex stage, fill and shape to
+	// the fragment one — would save nothing and would make the two offsets a thing to keep in step
+	// with two shaders instead of one struct.
+	const VkPushConstantRange range{ .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+		                             .offset = 0,
+		                             .size = sizeof(QuadConstants) };
+
+	// No descriptor sets at all, which is what an untextured quad needs and is worth noticing while
+	// it is true: the first `DrawTexture` is what puts a sampled image behind a set here.
+	const VkPipelineLayoutCreateInfo layoutInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+		                                         .pNext = nullptr,
+		                                         .flags = 0,
+		                                         .setLayoutCount = 0,
+		                                         .pSetLayouts = nullptr,
+		                                         .pushConstantRangeCount = 1,
+		                                         .pPushConstantRanges = &range };
+
+	if (Result<void> created =
+	        Check(vkCreatePipelineLayout(device.Handle(), &layoutInfo, nullptr, &m_Layout), "vkCreatePipelineLayout");
+	    !created)
+	{
+		return created;
+	}
+
+	// The shadow program, brought up beside the quad and for the same reason: a device that refuses
+	// this SPIR-V says so at startup rather than at the first window with a shadow under it.
+	const VkShaderModuleCreateInfo shadowVertexInfo{ .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		                                             .pNext = nullptr,
+		                                             .flags = 0,
+		                                             .codeSize = sizeof ShadowVertexSpirv,
+		                                             .pCode = ShadowVertexSpirv };
+
+	if (Result<void> created = Check(
+			vkCreateShaderModule(device.Handle(), &shadowVertexInfo, nullptr, &m_ShadowVertex), "vkCreateShaderModule"
 		);
 	    !created)
 	{
 		return created;
 	}
 
-	m_Built[m_BuiltCount] = Built{ .Format = format, .Variant = variant, .Pipeline = pipeline };
+	const VkShaderModuleCreateInfo shadowFragmentInfo{ .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		                                               .pNext = nullptr,
+		                                               .flags = 0,
+		                                               .codeSize = sizeof ShadowFragmentSpirv,
+		                                               .pCode = ShadowFragmentSpirv };
+
+	if (Result<void> created = Check(
+			vkCreateShaderModule(device.Handle(), &shadowFragmentInfo, nullptr, &m_ShadowFragment),
+			"vkCreateShaderModule"
+		);
+	    !created)
+	{
+		return created;
+	}
+
+	// Its own layout, because the block is a different size — and no descriptor sets here either, which
+	// is stronger than the quad's case: an analytic shadow reads nothing at all, so there is no image
+	// a future feature could put behind a set without changing what decision 104 promised.
+	const VkPushConstantRange shadowRange{ .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+		                                   .offset = 0,
+		                                   .size = sizeof(ShadowConstants) };
+	const VkPipelineLayoutCreateInfo shadowLayoutInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+		                                               .pNext = nullptr,
+		                                               .flags = 0,
+		                                               .setLayoutCount = 0,
+		                                               .pSetLayouts = nullptr,
+		                                               .pushConstantRangeCount = 1,
+		                                               .pPushConstantRanges = &shadowRange };
+
+	return Check(
+		vkCreatePipelineLayout(device.Handle(), &shadowLayoutInfo, nullptr, &m_ShadowLayout), "vkCreatePipelineLayout"
+	);
+}
+
+VkPipeline QuadPipeline::For(VkFormat format, QuadVariant variant) const noexcept
+{
+	for (std::size_t index = 0; index < m_BuiltCount; ++index)
+	{
+		if (m_Built[index].Format == format && m_Built[index].Variant == variant)
+		{
+			return m_Built[index].Pipeline;
+		}
+	}
+
+	return VK_NULL_HANDLE;
+}
+
+VkPipeline QuadPipeline::Shadow(VkFormat format) const noexcept
+{
+	for (std::size_t index = 0; index < m_ShadedCount; ++index)
+	{
+		if (m_Shaded[index].Format == format)
+		{
+			return m_Shaded[index].Pipeline;
+		}
+	}
+
+	return VK_NULL_HANDLE;
+}
+
+Result<void> QuadPipeline::Prepare(VkFormat format, ColorState output)
+{
+	if (m_Device == nullptr || m_Layout == VK_NULL_HANDLE || m_ShadowLayout == VK_NULL_HANDLE)
+	{
+		return Failure(ENODEV, "no pipeline layout; the renderer did not come up");
+	}
+
+	if (format == VK_FORMAT_UNDEFINED)
+	{
+		return Failure(EINVAL, "no pipeline is built for a format the renderer cannot name");
+	}
+
+	// Refused at the binding rather than per item, because an output nothing can be encoded to is a
+	// black screen either way and this is the call that can say so out loud. Chain.glsl carries the
+	// argument: HLG's scene-to-display step needs the display's peak luminance and a `ColorState`
+	// states a reference white, so an implementation without one has picked a peak on the user's
+	// behalf and the picture is wrong in a way nobody can attribute.
+	if (output.Transfer == TransferFunction::Hlg)
+	{
+		return Failure(EINVAL, "this renderer encodes no HLG output; ColorState carries no display peak luminance");
+	}
+
+	// One shadow pipeline and no lattice, which is what an analytic shadow costs a binding: three
+	// milliseconds against the quad's twenty-five, because there is nothing to enumerate. Shadow.frag
+	// carries the reason — premultiplied black is the same in every colour state.
+	if (Result<void> built = BuildShadow(format); !built)
+	{
+		return built;
+	}
+
+	// Every source state that can reach this output, plus the pair that converts nothing. Enumerated
+	// rather than built on demand because a frame may not compile — decision 62 — so `For` has to be
+	// total over what an item can ask for, and the closed vocabulary is what makes that finite.
+	for (std::uint32_t rounded = 0; rounded < 2; ++rounded)
+	{
+		if (Result<void> built = Build(format, QuadVariant{ .Run = rounded != 0 ? QuadRunCorner : 0U }); !built)
+		{
+			return built;
+		}
+	}
+
+	constexpr std::array<TransferFunction, 3> Transfers{ TransferFunction::Srgb,
+		                                                 TransferFunction::Linear,
+		                                                 TransferFunction::Pq };
+	constexpr std::array<ColorPrimaries, 3> Primaries{ ColorPrimaries::Bt709,
+		                                               ColorPrimaries::DciP3,
+		                                               ColorPrimaries::Bt2020 };
+
+	for (const TransferFunction transfer : Transfers)
+	{
+		for (const ColorPrimaries primaries : Primaries)
+		{
+			for (std::uint32_t rounded = 0; rounded < 2; ++rounded)
+			{
+				const QuadVariant variant{ .Run = QuadRunConvert | (rounded != 0 ? QuadRunCorner : 0U),
+					                       .SourceTransfer = transfer,
+					                       .SourcePrimaries = primaries,
+					                       .TargetTransfer = output.Transfer,
+					                       .TargetPrimaries = output.Primaries };
+
+				if (Result<void> built = Build(format, variant); !built)
+				{
+					return built;
+				}
+			}
+		}
+	}
+
+	return {};
+}
+
+Result<void> QuadPipeline::Build(VkFormat format, QuadVariant variant)
+{
+	if (For(format, variant) != VK_NULL_HANDLE)
+	{
+		return {};
+	}
+
+	if (m_BuiltCount == m_Built.size())
+	{
+		return Failure(EINVAL, "more distinct bindings at once than this renderer builds pipelines for");
+	}
+
+	// The five constants Quad.frag declares, laid out contiguously so that one entry per constant can
+	// name an offset into this object. Four bytes each and no padding to state: a specialization
+	// entry is a size and an offset rather than a struct the front end has to agree about.
+	const std::array<std::int32_t, 5> values{ static_cast<std::int32_t>(variant.Run),
+		                                      static_cast<std::int32_t>(variant.SourceTransfer),
+		                                      static_cast<std::int32_t>(variant.SourcePrimaries),
+		                                      static_cast<std::int32_t>(variant.TargetTransfer),
+		                                      static_cast<std::int32_t>(variant.TargetPrimaries) };
+	std::array<VkSpecializationMapEntry, 5> entries{};
+
+	for (std::uint32_t constant = 0; constant < entries.size(); ++constant)
+	{
+		entries[constant] =
+			VkSpecializationMapEntry{ .constantID = constant,
+			                          .offset = constant * static_cast<std::uint32_t>(sizeof(std::int32_t)),
+			                          .size = sizeof(std::int32_t) };
+	}
+
+	const VkSpecializationInfo specialization{ .mapEntryCount = static_cast<std::uint32_t>(entries.size()),
+		                                       .pMapEntries = entries.data(),
+		                                       .dataSize = sizeof(values),
+		                                       .pData = values.data() };
+
+	// The vertex stage takes none of it. Nothing it does varies by variant — it places four corners
+	// the producer already projected — and specializing it anyway would be one more vertex module per
+	// variant for a program that is byte for byte the same.
+	const std::array<VkPipelineShaderStageCreateInfo, 2> stages{
+		VkPipelineShaderStageCreateInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+		                                 .pNext = nullptr,
+		                                 .flags = 0,
+		                                 .stage = VK_SHADER_STAGE_VERTEX_BIT,
+		                                 .module = m_Vertex,
+		                                 .pName = "main",
+		                                 .pSpecializationInfo = nullptr },
+		VkPipelineShaderStageCreateInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+		                                 .pNext = nullptr,
+		                                 .flags = 0,
+		                                 .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+		                                 .module = m_Fragment,
+		                                 .pName = "main",
+		                                 .pSpecializationInfo = &specialization },
+	};
+
+	// Counted after it is filled, which is the opposite of `BindTargets`'s rule and right for the
+	// opposite reason: a failed creation writes nothing, so an entry incremented first would be a
+	// null pipeline that `For` hands back as if it had been built.
+	const Result<VkPipeline> pipeline = Assemble(*m_Device, m_Layout, std::span{ stages }, format);
+
+	if (!pipeline)
+	{
+		return std::unexpected{ pipeline.error() };
+	}
+
+	m_Built[m_BuiltCount] = Built{ .Format = format, .Variant = variant, .Pipeline = *pipeline };
 	++m_BuiltCount;
+
+	return {};
+}
+
+Result<void> QuadPipeline::BuildShadow(VkFormat format)
+{
+	if (Shadow(format) != VK_NULL_HANDLE)
+	{
+		return {};
+	}
+
+	if (m_ShadedCount == m_Shaded.size())
+	{
+		return Failure(EINVAL, "more distinct formats at once than this renderer builds shadow pipelines for");
+	}
+
+	// Neither stage is specialized, and there is nothing to specialize: the whole program is one
+	// distance field and one blend, with no element a variant could compile out.
+	const std::array<VkPipelineShaderStageCreateInfo, 2> stages{
+		VkPipelineShaderStageCreateInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+		                                 .pNext = nullptr,
+		                                 .flags = 0,
+		                                 .stage = VK_SHADER_STAGE_VERTEX_BIT,
+		                                 .module = m_ShadowVertex,
+		                                 .pName = "main",
+		                                 .pSpecializationInfo = nullptr },
+		VkPipelineShaderStageCreateInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+		                                 .pNext = nullptr,
+		                                 .flags = 0,
+		                                 .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+		                                 .module = m_ShadowFragment,
+		                                 .pName = "main",
+		                                 .pSpecializationInfo = nullptr },
+	};
+
+	const Result<VkPipeline> pipeline = Assemble(*m_Device, m_ShadowLayout, std::span{ stages }, format);
+
+	if (!pipeline)
+	{
+		return std::unexpected{ pipeline.error() };
+	}
+
+	m_Shaded[m_ShadedCount] = Shaded{ .Format = format, .Pipeline = *pipeline };
+	++m_ShadedCount;
 
 	return {};
 }
@@ -365,6 +511,20 @@ void QuadPipeline::Destroy() noexcept
 	}
 
 	m_BuiltCount = 0;
+
+	for (std::size_t index = 0; index < m_ShadedCount; ++index)
+	{
+		vkDestroyPipeline(m_Device->Handle(), m_Shaded[index].Pipeline, nullptr);
+		m_Shaded[index] = Shaded{};
+	}
+
+	m_ShadedCount = 0;
+
+	if (m_ShadowLayout != VK_NULL_HANDLE)
+	{
+		vkDestroyPipelineLayout(m_Device->Handle(), m_ShadowLayout, nullptr);
+		m_ShadowLayout = VK_NULL_HANDLE;
+	}
 
 	if (m_Layout != VK_NULL_HANDLE)
 	{
@@ -385,5 +545,17 @@ void QuadPipeline::Destroy() noexcept
 	{
 		vkDestroyShaderModule(m_Device->Handle(), m_Vertex, nullptr);
 		m_Vertex = VK_NULL_HANDLE;
+	}
+
+	if (m_ShadowFragment != VK_NULL_HANDLE)
+	{
+		vkDestroyShaderModule(m_Device->Handle(), m_ShadowFragment, nullptr);
+		m_ShadowFragment = VK_NULL_HANDLE;
+	}
+
+	if (m_ShadowVertex != VK_NULL_HANDLE)
+	{
+		vkDestroyShaderModule(m_Device->Handle(), m_ShadowVertex, nullptr);
+		m_ShadowVertex = VK_NULL_HANDLE;
 	}
 }
