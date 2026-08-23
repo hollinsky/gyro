@@ -436,7 +436,36 @@ nothing only proves the grep.
   sessions through `pam_systemd`, and decision 37 has no VTs to give it. Needs testing, not
   assuming.
 - **BGRT reproduction.** Scaling and placement from the firmware's mode into gyro's, and what to do
-  when the firmware framebuffer and the native mode disagree about aspect ratio.
+  when the firmware framebuffer and the native mode disagree about aspect ratio. *(Narrowed
+  2026-08-22.)* `simpledrm` offers exactly one mode and it is the firmware's
+  (`drm_connector_helper_get_modes_fixed`), so at the first modeset the reproduction is a blit at
+  the recorded offsets with no scaling in it at all. The scale-and-place lands at the migration to
+  the real driver instead — under Vulkan, where there is a device to do it. What is left of this
+  entry is the aspect-ratio half, and the two entries below are where the cost of that migration
+  actually shows.
+- **The seams at the driver handoff that cannot be hidden.** Two of them, wanting one answer
+  because the lever is the same. The `simpledrm`-to-real-driver migration reprograms the pipe
+  during the new driver's probe, before gyro holds an fd on it; and where the firmware's mode is
+  not the panel's native mode, adopting native re-locks the panel. Ramping the backlight down
+  before the commit and up after hides both, and gyro owns the backlight because it is the system
+  layer — but an external display has no lever fast enough to time against a modeset, so there the
+  honest answer is a stated exception in [Experience.md](Experience.md#one-continuous-image)
+  rather than a mechanism. Fading pixels to black is *not* the answer: nothing can be painted
+  during the blank, so it hides only the entry into it and makes the dark period longer. Surfaced
+  by [decision 110](Decisions.md#110-blit-never-reads-its-target-and-nothing-moves-under-it-until-there-is-a-real-flip), which records the probe half as unread.
+- **The wire colorimetry, and when it is chosen.** A framebuffer format change flips freely and
+  costs nothing; changing a connector's colorimetry and `HDR_OUTPUT_METADATA` makes the sink
+  re-lock, which is a real black period and the one transition at the handoff that genuinely
+  breaks [one continuous image](Experience.md#one-continuous-image). So it cannot be a login-time
+  or preference-time event. The candidate answer is that colorimetry is a property of the panel,
+  read from EDID at the first modeset and never a setting — an HDR-capable panel driven in PQ
+  from the very first frame, logo included, with
+  [decision 47](Decisions.md#47-compositing-happens-in-linear-light-at-wide-primaries)'s
+  brightness-relative composite space making SDR content on that wire definitional rather than a
+  conversion. Against it: some panels are genuinely worse in HDR mode — raised blacks, forced
+  processing, backlight behaviour — which is per-panel characterisation and wants the same review
+  with a screen the dressing numbers do. It also decides which formats `Blit` encodes, which
+  [decision 110](Decisions.md#110-blit-never-reads-its-target-and-nothing-moves-under-it-until-there-is-a-real-flip) leaves open.
 - **`LP_NUM_THREADS` sizing, and the shader compilation worker with it.** Decision 40 bounds
   interference by reserving cores rather than capping time, which turns "how many" into a number
   that wants measuring on machines with 4, 8, and 16 cores. Decision 62's compilation worker is

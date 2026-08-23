@@ -271,7 +271,12 @@ since.
 
 Sources per backend:
 
-- **DRM** — page-flip event timestamps, with `DRM_CAP_TIMESTAMP_MONOTONIC`.
+- **DRM** — page-flip event timestamps, with `DRM_CAP_TIMESTAMP_MONOTONIC`. *(Revised
+  2026-08-22.)* Not on every DRM device: `simpledrm` registers no vblank, so its completion is
+  `drm_atomic_helper_fake_vblank`'s and arrives at commit time rather than at a boundary. That
+  device takes a synthesized timeline like the headless one below, which
+  [decision 110](Decisions.md#110-blit-never-reads-its-target-and-nothing-moves-under-it-until-there-is-a-real-flip)
+  is what makes harmless.
 - **Nested** — `wp_presentation_feedback.presented`, which carries presentation time, refresh
   period, sequence, and flags including `VSYNC` / `HW_CLOCK` / `ZERO_COPY`. Structurally identical
   to KMS.
@@ -475,6 +480,15 @@ no text shaping. It is a permanent subsystem rather than a bootstrap, because fo
 out to be one piece of code: BGRT continuation, verbose boot output, the recovery console that
 replaces VTs, and the failure display when Vulkan will not initialize.
 
+**There is no page flip underneath it at boot, and that is what bounds what it may do.**
+`simpledrm` has one buffer and no vblank, so a commit is a damage-clipped `memcpy` into the
+framebuffer the display is currently scanning. Nothing gyro can do makes that not tear. So nothing
+*moves* until the real driver has replaced it — the logo is static and boot output is
+damage-clipped text, neither of which shows a tear — and the animation into the greeter waits for
+a device with a real flip.
+[Decision 110](Decisions.md#110-blit-never-reads-its-target-and-nothing-moves-under-it-until-there-is-a-real-flip)
+has the reading and the rest of what the CPU blitter may assume.
+
 This is not the in-process UI that [Locking](#locking) refuses. That refusal is about UI with a
 *design* — text shaping, layout, styling. A fixed grid of pre-rendered glyphs is what a recovery
 console should be, precisely because it must work when nothing else does.
@@ -553,6 +567,13 @@ At boot the content is a static logo, so it is invisible; mid-session GPU loss b
 holds, then resumes". It is an **admitted multi-frame stall**, outside the promises in
 [decision 35](Decisions.md#35-a-miss-costs-one-frame-bounded-by-the-floor-composite), and what is
 guaranteed instead is that the last frame stays on glass throughout.
+
+*(Narrowed 2026-08-22.)* That is the mid-session shape, where gyro holds both devices. The boot
+instance of it has a half nobody has read: the real driver displaces `simpledrm` through the
+aperture helpers and brings the pipe up during its own probe, *before* gyro holds an fd on it, so
+what survives across that moment is a property of that driver rather than of anything gyro does.
+[Decision 110](Decisions.md#110-blit-never-reads-its-target-and-nothing-moves-under-it-until-there-is-a-real-flip)
+records it as unverified and [Open.md](Open.md) carries the question.
 
 Three things it forces, none retrofittable:
 

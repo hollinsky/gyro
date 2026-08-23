@@ -7700,3 +7700,135 @@ direction that matters: a shader edit that was never recompiled ships the old pi
 No dependency at all, and it makes the SPIR-V depend on whichever SDK the build machine happens to
 have — which is decision 107's rejected *distribution headers where they exist* arriving one tool
 over, with the same consequence that a build is reproducible only by accident.
+
+### 110. `Blit` never reads its target, and nothing moves under it until there is a real flip
+
+*(Decided 2026-08-22, on asking whether the `SketchRenderer` in
+[VirtualComposite.Test.cpp](../Source/Integration/VirtualComposite.Test.cpp) should become the console
+renderer [decision 79](#79-the-console-is-a-renderer-not-a-presenter) names. It should, and most of
+this entry is not about that: the question was settled by reading `drivers/gpu/drm/sysfb/`, which
+found that the boot path has no page flip and no vblank — and two paragraphs written elsewhere had
+assumed both.)*
+
+**The pivot is the shell rather than the file.** The sketch's seam-facing half is carried over whole,
+because it is the half where being wrong is invisible and it has already been read: it refuses a
+dmabuf rather than casting, it takes `LOAD` semantics so what lies outside the damage is what was
+there, it paints in list order because
+[decision 55](#55-transforms-are-3d-the-scene-is-a-painters-algorithm) makes preorder the painter's
+order, it answers with an immediate point for
+[decision 108](#108-a-device-that-cannot-export-a-timeline-finishes-the-frame-inside-record)'s
+reason, and it charges no GPU cost. The inner loop is thrown away. Filling each item clipped to each
+damage rectangle is full overdraw, which is the one thing a CPU compositor cannot afford at a panel's
+resolution, and what replaces it is spans.
+
+**The boot scene is authored to what `Blit` draws, rather than `Blit` grown to meet a scene it never
+sees.** No material, no elevation, no `Reference`, and quads that are axis-aligned with subpixel
+edges — a scaled and translated logo needs coverage on the boundary spans and nothing more, so a
+rotated or projective quad is refused. `DrawGroup` is kept, because
+[decision 60](#60-group-opacity-requires-flattening-per-node-alpha-is-not-a-group-fade)'s offscreen
+is the one thing a flat list cannot be widened into later and because the scratch below supplies it
+for free. `DrawTexture` is required and is not the console's half of the vocabulary: the firmware
+logo is an image, and [Architecture.md](Architecture.md#from-firmware-to-gyro) makes its reproduction
+a scale-and-place where getting it wrong is a visible jump at the one moment the design exists to
+make seamless. Both texture consumers are gyro's own CPU images, so there is no import path and no
+lifetime problem — a far smaller table than the Vulkan renderer's.
+
+**Refusing is safe here in a way it is not one tier up, and only for one reason.**
+[Seam/Renderer.h](../Source/Seam/Renderer.h)'s *a renderer refuses what it cannot express* rests on
+there being something below to fall to. Below `Blit` there is nothing: it is what runs when Vulkan
+will not initialize at all, so a refusal is a dark machine that cannot say why. What makes it safe is
+that `Blit` only ever composites gyro's own scene — the console's, never a client's — and that has to
+stay true by construction rather than by habit.
+
+**`Blit` never reads its target, and the reason differs by driver.** A dumb buffer from a real KMS
+driver is write-combined: writes stream, reads are one to two orders slower, and blending a
+translucent item over what is beneath it is a read-modify-write of the framebuffer. So the composite
+happens in cached memory and the damage is copied out. On `simpledrm` the buffer gyro maps is
+`drm_gem_shmem` — ordinary cached pages — so the composite happens in place and the write-combined
+cost is paid inside the driver's own copy instead. One renderer either way, and the difference is a
+property of the mapping, so `RenderTarget`'s `MappedImage` carries one field saying whether reading
+it is cheap. The presenter allocated it and is the only party that knows.
+
+#### What the reading found
+
+`drivers/gpu/drm/sysfb/`, which is where `simpledrm` now lives:
+
+- **There is no page flip.** `drm_sysfb_plane_helper_atomic_update` walks the damage clips and
+  `memcpy`s from the shadow buffer into `sysfb->fb_addr`, which `simpledrm.c` obtains through
+  `devm_ioremap_wc`. There is one buffer, the display is scanning it, and nothing is synchronized to
+  the raster.
+- **There is no vblank.** Nothing in `sysfb` calls `drm_vblank_init`, so
+  `drm_atomic_helper_check_modeset` sets `no_vblank = true` and `drm_atomic_helper_fake_vblank`
+  delivers the completion event at commit time. The commit is synchronous and the driver's copy is
+  charged to whoever called it.
+- **There is one mode and its refresh rate is fiction.** `drm_sysfb_mode()` builds a 60 Hz mode with
+  no relation to what the panel does, and `drm_connector_helper_get_modes_fixed` offers only that.
+
+**So tearing at boot is real and is not gyro's to fix — which makes it a scheduling constraint rather
+than a mechanism.** Nothing moves under `Blit`. The logo is static, boot output is damage-clipped
+text, and both tear invisibly. The animation into the greeter is the first moving thing and it runs
+after the migration [decision 41](#41-device-migration-is-exercised-on-every-boot) already sequences
+on every boot, on a driver with a real flip.
+[Experience.md](Experience.md#one-continuous-image)'s *the whole boot is one picture* is kept by that
+ordering rather than despite it.
+
+**One target, not three.** A flip queue buys nothing where there is no flip; a second dumb buffer is
+a buffer the driver copies out of. On a no-vblank device the presenter binds one, `AcquireTarget`
+never stalls, and the loop's stall path is dead there.
+
+**The frame clock synthesizing a period is not new.**
+[Virtual/Output.h](../Source/Virtual/Output.h) already includes `Headless/Vblank.h`, so a platform
+presenter borrowing the synthetic timeline is the shape that is in the tree. What is new is that a
+real panel is scanning at a rate nobody reports while the mode claims 60. It does not matter, for the
+paragraph above's reason: nothing is moving, so a wandering tear line has nothing to tear.
+
+**The console publishes one `DrawTexture` and not one item per cell.** A 4K panel at a 16×32 cell is
+about sixteen thousand cells, so per-cell items is a megabyte of draw list republished through the
+ring every frame and sixteen thousand walk iterations to report that one line changed. One texture
+keeps the grid in the console's own image, where a printed line is a few hundred kilobytes of damage
+and a scroll is a `memmove` in cached memory. The scene is the wrong place to hold a text grid.
+
+**Rejected: deleting the sketch and substituting `Blit` into the integration test**, which is what
+that file's own comment says will happen. It would turn four tests about *frame delivery* —
+acquisition, presentation, the ring turning, damage outliving a stall — into tests about a renderer,
+so a coverage-antialiased edge or a linear-light blend would fail assertions that are about neither,
+and one `Blit` bug would fail all of them at once. The flat painter stays where it is; `Blit` gets
+its own tests and one `Integration` file pairing it with `Virtual`, the way
+[RenderImport.Test.cpp](../Source/Integration/RenderImport.Test.cpp) pairs the Vulkan one.
+
+**Rejected: `Blit` as a `DeviceClass` under `Render`.**
+[Decision 40](#40-software-rendering-is-a-device-not-a-backend-and-it-is-the-floor-tier) makes
+software rendering a device selection, which reads as though lavapipe already covers this. It does
+not: `Blit` runs before the real driver has loaded on every boot, and permanently on a machine where
+Vulkan will not initialize at all. It is the floor beneath the floor tier, which is what decision 79
+already said and what this entry declines to re-open.
+
+**Rejected: a general edge-function rasterizer, so that `Blit` draws every quad the walk can
+produce.** It is a rasterizer's worth of code in service of content that does not exist — the boot
+scene is gyro's own and can be authored not to rotate. The refusal costs a branch and is caught by a
+test rather than by a user.
+
+**Rejected: double-buffering the dumb buffer on a no-vblank device**, for symmetry with the real
+driver. It costs a full-screen copy per frame and buys nothing: the commit returns after the driver's
+`memcpy`, so the buffer is free the instant the ioctl is.
+
+**Rejected: compositing directly into the target on every driver**, which is what the sketch does and
+what is correct on `simpledrm`. On a real driver it is the read-modify-write above, on the memory
+that is worst at it.
+
+*(Not verified: what the `simpledrm`-to-real-driver handoff itself costs on screen. The real driver
+displaces `simpledrm` through the aperture helpers and brings the pipe up its own way, before gyro
+holds an fd on it, so whether the picture survives is a property of that driver's probe — i915
+fastboot reads hardware state back and can skip the modeset, and amdgpu is believed not to. Neither
+was read. It is the same class of exposure as the mode difference and the wire colorimetry below, and
+all three want one entry.)*
+
+**What this deliberately does not settle**, each of which is its own question: which formats `Blit`
+encodes, now that *XR24 only* has been rejected as an accident of what dumb buffers usually are; the
+wire colorimetry, which is the one seam at the handoff that genuinely blanks a panel; and the
+per-target damage accumulation
+[VirtualComposite.Test.cpp](../Source/Integration/VirtualComposite.Test.cpp) characterises, which
+`Blit` is what finally makes worth closing —
+[decision 101](#101-damage-is-the-whole-output-while-anything-moves-and-per-node-damage-needs-an-identity-the-record-does-not-carry)
+reports the whole output while anything moves, and a whole-output CPU composite is the expensive
+case by a wide margin.
