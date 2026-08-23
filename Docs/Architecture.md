@@ -1575,6 +1575,10 @@ A surface declares a **material** from a closed vocabulary — `Material::Glass`
 `Material::Smoke` — and gyro decides what that means this frame. The shell names no radius, no pass
 count, no chain resolution, exactly as it names no spring parameters.
 
+The radius, the tint, and `Smoke`'s contrast floor live in `Seam`, beside the tier table, because two
+renderers have to produce one picture and a number in either of them is a number the other can
+disagree with. The shell cannot reach any of them.
+
 The set is named by what each material does to light rather than by the role it is put to, which is
 what keeps `Sidebar` and `Titlebar` out of it: the moment the vocabulary knows what a sidebar is, the
 arrangements that are not sidebars stop being sayable about, and that is
@@ -1596,6 +1600,16 @@ A material renders at a tier. For blur the ladder is **chain internal resolution
 not render the material**, in that order. The first rung is close to invisible, since the result is
 about to be blurred anyway. Radius is not on the ladder; it is a design property, and moving it
 changes what the system looks like rather than what that look costs.
+
+The chain is a downscale into linear light, a run of separable box passes, and a composite back over
+the node — and the per-pass kernel width is *solved* from the material's radius and the tier's
+structure rather than stored per tier, which is what makes "the tier never changes the look" a check
+rather than a promise. The obvious implementation does not have that property: a dual-Kawase chain
+halves the resolution per pass, so the two rungs become one lever and the radius falls out of the
+structure. See [decision 117](Decisions.md#117-a-gather-reads-the-target-it-is-drawing-into-the-numbers-live-in-seam-and-the-tier-rides-the-request).
+
+The third rung is `RenderMode::Floor` rather than a tier of its own — decision 35's record-time check
+already picks a mode per frame, and a material at the floor paints its tint with no chain under it.
 
 A **startup capability probe** runs the real pass chain at two or three sizes and picks a tier,
 which is then stable. Stability is the point: a quality level that drifts with load reads as cheap
@@ -1654,6 +1668,14 @@ bandwidth on the pass chain [Effects and quality](#effects-and-quality) identifi
 term in `C`. It is not, because the chain needs no alpha. Rec.2020 is what makes the packed float
 usable — it has no sign bit, so it wants a primary set wide enough that ordinary content stays
 non-negative.
+
+*(That last sentence is now belt over braces rather than the load-bearing argument. A blur chain does
+not convert primaries at all: it decodes the composite target into linear light in the **output's**
+own primaries, and a matrix commutes with a weighted sum, so blurring in Rec.2020 and blurring in the
+output's primaries are the same picture. A value that came out of the target's own encoding is
+non-negative before any matrix touches it, which is what the packed float actually needs. See
+[decision 117](Decisions.md#117-a-gather-reads-the-target-it-is-drawing-into-the-numbers-live-in-seam-and-the-tier-rides-the-request)
+— 2026-08-22.)*
 
 ### Premultiplied alpha is the sharp edge
 

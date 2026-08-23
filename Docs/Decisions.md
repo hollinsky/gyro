@@ -4979,6 +4979,12 @@ A material renders at a quality tier. The ladder, for blur:
 1. **Internal resolution of the pass chain.** The cheapest lever and very nearly invisible — the
    result is about to be blurred anyway.
 2. **Pass count.**
+   *(Built 2026-08-22, and the arithmetic sharpened both rungs. The first is exactly invisible only
+   in the sense that the sigma is preserved; the second preserves the sigma and changes the kernel's
+   shape, because three boxes make a near-Gaussian and two make a triangle — which is why this order
+   is right and not merely conventional. And the ladder bottoms out below a chain divisor of eight,
+   where the extract and the final composite dominate what a material costs and the blur itself is a
+   fraction of one pass over the panel. Decision 117.)*
 3. **The material is not rendered** — an opaque or simply tinted fill.
 
 Radius is not on the ladder. It is a design property of the material; varying it changes what the
@@ -5016,6 +5022,14 @@ and at rung 3 that is a backdrop snapping flat and back inside one period — th
 paragraph above rejects, arriving through another door, and correlated with animation because that is
 when the check fires. Whether the answer is that the floor composite is defined to be visually
 continuous rather than absent, or that flooring inherits the stickiness above, is [open](Open.md).
+
+*(The artefact is now reachable rather than predicted —
+[decision 117](#117-a-gather-reads-the-target-it-is-drawing-into-the-numbers-live-in-seam-and-the-tier-rides-the-request)
+makes `RenderMode::Floor` mean *this material draws its tint alone*, which is the first behaviour
+either renderer attaches to that enumerator. Two frames either side of a floored one are a blurred
+backdrop, a flat tint, and a blurred backdrop again. Nothing has been drawn on a panel yet to watch it
+happen on, which is why this stays open rather than being settled by the change that produced it —
+2026-08-22.)*
 
 **The cut point is computed at commit time, not per frame.** Effects are recorded in declared
 priority order against a running cost sum; where that sum crosses the allocation is where optional
@@ -8464,3 +8478,180 @@ split, whose only distinguishing property is the round-trip rounding decision 62
 The comparison that is worth running today is the elided variant against the unelided one, which
 needs no target and tests the thing this change actually introduces: whether the run mask elides
 something that was not a no-op.
+
+### 117. A gather reads the target it is drawing into; the numbers live in `Seam` and the tier rides the request
+
+*(Decided 2026-08-22, on building
+[decision 103](#103-a-dressing-is-named-by-what-it-does-to-light-the-material-set-is-glass-and-smoke)'s
+first gathering material. Four questions were open at once and each of the four had an obvious wrong
+answer, which is why they are one entry.)*
+
+#### `Material::Glass` gets the offscreen, and decision 60's group will not want the same one
+
+The two look like one mechanism — *a gather needs a backdrop, so the renderer allocates an offscreen*
+— and they read in opposite directions.
+
+**A group *writes* an offscreen.** Decision 60 renders a subtree into a cleared, full-resolution,
+alpha-carrying target so that it is opaque to itself, then composites it once at `g`.
+
+**A material *reads the attachment it is already drawing into*.** It needs no target of its own for
+the backdrop at all. Decision 60's own rule is what collapses the two cases: glass inside a
+flattening subtree samples the composite as of the group's base, which is exactly *whatever
+attachment is bound right now, as it stands*. So a material never learns what a group is, and a group
+never learns what a material is — and the sentence in decision 60 that reads as a special case turns
+out to be the thing that makes them independent.
+
+What is genuinely shared, and is what would otherwise get built twice, is the **reservation**:
+decision 46's discipline of storage taken when an output is configured and never allocated at the
+moment a transition starts. [Backdrop.h](../Source/Render/Backdrop.h) is that reservation with the
+chain on top of it, and flattening takes its full-resolution images from the same call.
+
+**What the split costs, stated rather than discovered.** Vulkan cannot sample the colour attachment
+it is rendering into with a neighbourhood read — an input attachment reads one fragment's own
+coordinate and a blur reads its neighbours — so a dressed item ends the render pass, barriers the
+target to a shader read, runs the chain, barriers back, and resumes with `LOAD_OP_LOAD`. One split
+per dressed item. Decision 116 said the pass-based form was not built because no gather was
+expressible; this is the gather that made it expressible.
+
+**Rejected: batching the non-overlapping dressed items into one split.** Two glass panels that do not
+overlap could share an extract, and on a screen with a dock and a top bar that is every frame. It is
+an optimization on top of a correct path, which is decision 62's own shape, and taking it first would
+make the reference the thing nobody runs.
+
+**Rejected: extracting into a second full-resolution copy of the target.** It avoids the pass split
+by copying once at the top of the frame, and it spends a full-resolution write plus a full-resolution
+read on every frame with any glass on it — against a split whose cost is a tile flush, on a panel's
+own area. It also samples a backdrop as of *before the frame*, not as of below the item, which is a
+different picture wherever anything below a panel moved.
+
+#### The damage path knows nothing about expansion, and this does not compensate for that
+
+[Decision 63](#63-effects-declare-their-kind-and-their-damage-the-verifier-keeps-them-honest) makes
+expansion a declared property and spends it three times. Read against the tree, the second of those
+three has nowhere to land: [Evaluator.h](../Source/Frame/Evaluator.h) reports the whole output or
+nothing under
+[decision 101](#101-damage-is-the-whole-output-while-anything-moves-and-per-node-damage-needs-an-identity-the-record-does-not-carry),
+[Loop.h](../Source/Frame/Loop.h) unions that per output, and `Region::Expand` has no caller anywhere
+near either. So the expansion is **satisfied vacuously**: a whole-output region already contains
+every neighbourhood a chain can read.
+
+**The number is declared anyway and it is not idle.** It has a consumer today and it is the renderer's
+own read: a dressed item's chain extracts its bound *grown by exactly that figure*, because a pixel at
+the item's edge needs a whole neighbourhood behind it. Same number, two jobs — which is decision 63's
+*three uses of one declaration* showing up one use earlier than expected. What is owed is the damage
+job, and it arrives with per-node damage rather than before it.
+
+**Rejected: clamping the chain's sampling to the damage region instead.** It would make the renderer
+correct under a narrower damage rule without anybody writing that rule, and it would put a
+correctness invariant in the one file nobody would look in for it. When per-node damage lands and the
+expansion is forgotten, the failure should be a visible fringe at a panel's edge — attributable, and
+fixed — rather than a renderer silently absorbing it.
+
+**A box chain is what makes the declaration exact.** A Gaussian has infinite support, so declaring a
+bound for one means choosing a number of standard deviations and accepting a fringe below it, which is
+the under-declaration decision 63 says leaves a trail. `passes` boxes of half-width `w` reach exactly
+`passes · w` and not one texel further. That is an argument for boxes beyond their cost, and it was
+not the reason they were picked.
+
+#### The numbers live in `Seam/Dressing.h`, in two tables that share no column
+
+**Not `World/Material.h`.** Decision 33 forbids the call site naming a radius, and that header is what
+the authoring side includes in order to say `Material::Glass` — so a radius in it is decision 33 lost
+by proximity rather than by argument, one `#include` from the thing it exists to prevent.
+
+**Not `Render`.** Decision 62's oracle draws one frame two ways and asserts they agree, and decision
+40 makes software rendering a device rather than a backend — so `Blit` and the Vulkan renderer are two
+implementations of one look, and a number in either is a number the other can disagree with.
+
+`Seam` is *every interface with more than one implementation and the data crossing it*, and this is
+the second half of that sentence. `MaterialTable` holds the sigma, the tint, `Smoke`'s contrast floor
+and decision 63's kind; `TierTable` holds decision 34's two rungs. **The per-pass half-width is
+solved rather than stored**, from the material's sigma and the tier's structure, so *the tier changes
+the pass structure and never the look* is an assertion a test makes rather than a promise a comment
+makes.
+
+**The obvious implementation is the one that breaks decision 34.** A dual-Kawase chain — what KWin and
+Hyprland use — halves the resolution *per pass*, so rungs one and two become one lever and the sigma
+falls out of the structure instead of being an input to it. Decision 34 cannot survive that, and it
+is what a first cut written from the prior art would have been.
+
+**Two things the arithmetic said that the entries did not.** *Equal sigma is not an identical kernel*
+— three boxes make a near-Gaussian and two make a triangle, so rung two has the same spread with a
+harder falloff, which is why decision 34's order is right and not merely conventional. And *the
+ladder bottoms out*: the extract reads the panel's area once at full resolution and the dressing
+writes it once, so about two passes over that area are owed whatever the tier is, and below a divisor
+of eight the blur itself is a fraction of one. Rung one buys most of what there is, rung two buys a
+little, and what buys the rest is the third rung.
+
+#### Decision 34's third rung is `RenderMode::Floor`, and this is the first behaviour either renderer
+attaches to it
+
+That entry ends its ladder at *the material is not rendered — an opaque or simply tinted fill*, and
+decision 35's record-time check already picks a mode per frame. A tier enumerator meaning the same
+thing would be a second spelling of one fact. So a **tier** says how a chain is built and a **mode**
+says whether there is one, and at `Floor` every material paints its tint alone: no offscreen, no read
+of the backdrop, nothing a floored frame cannot afford.
+
+Both renderers carried `RecordRequest::Mode` and ignored it until now; only the simulated headless one
+charged a different cost for it. A gather is what gives it a picture.
+
+**The same rung catches what a device will not do.** A machine whose driver has no floating-point
+offscreen, or whose target modifier does not list `SAMPLED_IMAGE`, draws its materials as tints and
+everything else exactly as before. Refusing the bind instead would turn a look into a black screen.
+
+#### The tier rides `RecordRequest`, beside the mode
+
+[Decision 116](#116-the-pointwise-lattice-is-two-run-bits-and-a-conversion-selector-and-the-outputs-colour-state-moves-to-the-binding)
+moved the output's colour state to `BindTargets` because the target end of a conversion decides which
+pipelines must exist and a frame may not compile. **That argument does not reach a tier**, which
+decides a loop count and an image extent and opens no pipeline — every one it can name is built at the
+binding.
+
+What decides it instead is decision 63: **the party that expands damage for a material must be using
+the same tier as the party that draws it**, and the only arrangement that guarantees that is for the
+tier to travel on the request whose damage was expanded. Decision 34's stickiness is a rule on
+whatever *chooses* a tier, which is a startup probe nobody has written; until then it is `High` from
+one end of a session to the other.
+
+**Rejected: a third verb on `IRenderer`.** It matches the seam's existing contract split and it costs
+a rebind's worth of ceremony for a byte, and it puts the tier somewhere the damage expansion cannot
+see it.
+
+#### Two Open.md entries take defaults, and both are forced rather than chosen
+
+**Blur order against tone mapping** — blur in linear, and there is no tone map to order against.
+Nothing in the tree tone maps; [Chain.glsl](../Source/Render/Shaders/Chain.glsl) is a decode, a
+matrix, a gamut clip and an encode. The chain decodes the target to linear, blurs, and re-encodes.
+A tone map lands after this when it arrives, and the entry stays open.
+
+**Blur across colour-state boundaries** — the physically correct one, by omission. The backdrop is the
+composite target, and every item was converted into the output's state on the way in, so there are no
+colour-state boundaries left in what is sampled: a 1000-nit highlight bleeds through the glass exactly
+as far as linear arithmetic says. The entry now has a price attached, which is the useful half —
+answering it *no* costs a per-pixel provenance channel the composite does not carry.
+
+**Neither is an answer and both are recorded as defaults**, because either could be settled the other
+way by a screen and neither is settled by this.
+
+#### The chain does not convert primaries, and that is a saving rather than a shortcut
+
+Decision 47 fixes the composite space as linear at wide primaries, and the chain is neither: it holds
+the *output's* primaries, made linear. A blur is a weighted sum, a primaries change is a matrix, and a
+matrix commutes with a weighted sum — so blurring in the output's own primaries and blurring in
+Rec.2020 are the same picture, and the two matrices this would otherwise spend are two that cancel.
+It also retires the reason [Architecture.md](Architecture.md#precision-and-why-the-blur-chain-is-affordable)
+gives for wanting Rec.2020 in the packed float: a value decoded out of the target's own encoding is
+non-negative before any matrix touches it.
+
+#### What is left undone, named
+
+**`Blit` still refuses a material**, so decision 35's floor composite cannot yet draw a scene with
+glass in it on the CPU renderer. The rung it needs is the tint alone and it is small; it was left out
+because `Blit` was being rewritten in the tree at the same time and adding to it would have collided.
+It is the next thing owed here.
+
+**Decision 63's verifier is not written**, because with whole-output damage it has nothing to
+contradict. It arrives with per-node damage, alongside the expansion's second consumer.
+
+**Nothing probes.** Decision 34's startup capability probe is still the thing that should choose a
+tier, and until it exists every output runs at the top of the ladder.

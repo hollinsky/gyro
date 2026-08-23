@@ -2,6 +2,9 @@
 
 // One quad, placed by the four corners its producer already projected.
 //
+// **The placement itself is in Quad.glsl**, shared with the dressing pass that draws the same quad
+// on the far side of a gather. What is here is this pass's block and its one varying.
+//
 // **Nothing is read from a buffer and nothing is bound.** Seam/Renderer.h hands a `Quad` whose
 // corners are device-space positions, so the vertex work is a lookup and a divide rather than a
 // transform, and six indices off `gl_VertexIndex` are two triangles. A vertex buffer here would be
@@ -13,6 +16,10 @@
 // discarded; putting it back as `w` — with the position pre-multiplied by it so the divide lands
 // where it started — makes every varying interpolate perspective-correctly instead of
 // affine-per-triangle. It costs nothing on the orthographic case, where the weight is one.
+
+#extension GL_GOOGLE_include_directive : require
+
+#include "Quad.glsl"
 
 layout(push_constant) uniform Item
 {
@@ -40,16 +47,5 @@ layout(location = 0) out vec2 Local;
 
 void main()
 {
-	// Top-left, top-right, bottom-right, then top-left, bottom-right, bottom-left. Both triangles
-	// wind the same way, and neither winding is asked about: decision 55 culls back faces at the
-	// producer, so the pipeline culls nothing and a mirrored output is drawn rather than dropped.
-	const int order[6] = int[6](0, 1, 2, 0, 2, 3);
-
-	int index = order[gl_VertexIndex];
-	vec2 local[4] = vec2[4](vec2(0.0, 0.0), vec2(item.Shape.x, 0.0), item.Shape.xy, vec2(0.0, item.Shape.y));
-	vec4 placed = item.Corner[index];
-	vec2 clip = placed.xy / item.Target.xy * 2.0 - 1.0;
-
-	Local = local[index];
-	gl_Position = vec4(clip * placed.z, 0.0, placed.z);
+	gl_Position = QuadPlace(gl_VertexIndex, item.Corner, item.Shape.xy, item.Target.xy, Local);
 }

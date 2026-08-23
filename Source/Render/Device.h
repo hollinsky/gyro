@@ -161,6 +161,18 @@ public:
 	// The memory type an imported dmabuf must be allocated against, as a bitmask. Zero where the
 	// descriptor is not importable at all, which is the honest answer for a buffer from a device this
 	// one cannot share with.
+	// Whether a target in this format and modifier can also be *sampled*, which is what a gathering
+	// material needs of the image it is drawing into: Render/Backdrop.h reads the backdrop out of the
+	// composite target, so the target has to be legible to a shader as well as writable by one.
+	//
+	// **Separate from `Supports` and answered separately, because a false here is not a refusal.** A
+	// target that cannot be sampled is still a target — solids, textures and everything pointwise
+	// draw into it unchanged — and what it loses is the blur behind a panel, which is exactly decision
+	// 34's third rung and exactly what `RenderMode::Floor` already draws. So this decides a tier for
+	// that output rather than whether the output comes up, and a compressed modifier that refuses
+	// sampling costs a look rather than a screen.
+	[[nodiscard]] bool SupportsSampling(PixelFormat format) const noexcept;
+
 	[[nodiscard]] std::uint32_t ImportableMemoryTypes(RawFd descriptor) const noexcept;
 
 private:

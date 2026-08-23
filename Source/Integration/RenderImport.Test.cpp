@@ -167,11 +167,15 @@ private:
 
 // One request, every field named. `-Wmissing-field-initializers` wants all of them and the tests
 // want to vary two, so the naming happens once here rather than eight times below.
-[[nodiscard]] RecordRequest
-Composite(std::uint32_t target, const Region<DeviceSpace>& damage = {}, std::span<const DrawItem> items = {})
+[[nodiscard]] RecordRequest Composite(
+	std::uint32_t target,
+	const Region<DeviceSpace>& damage = {},
+	std::span<const DrawItem> items = {},
+	RenderMode mode = RenderMode::Planned
+)
 {
 	return RecordRequest{
-		.Target = target, .Mode = RenderMode::Planned, .CostGeneration = 0, .Damage = damage, .Items = items
+		.Target = target, .Mode = mode, .Quality = Tier::High, .CostGeneration = 0, .Damage = damage, .Items = items
 	};
 }
 
@@ -493,6 +497,132 @@ GYRO_TEST(RenderImport, ARadiusCutsTheCornersAndNothingElse)
 	);
 }
 
+// **The first gathering material, and what it has to be true of is that the backdrop moved.**
+//
+// A hard red-to-blue edge down the middle of the output with a `Material::Glass` panel across it.
+// Inside the panel the chain has pulled blue across into the red side and red across into the blue
+// side, because a blur is a weighted sum over a neighbourhood; outside it the edge is exactly where
+// it was. Stated as *more of the other colour than the same frame at the floor* rather than as a
+// number, because the number is the tint and the sigma and belongs to Seam/Dressing.h.
+//
+// **The comparison against `RenderMode::Floor` is the assertion that matters.** Decision 34's third
+// rung is *the material is not rendered — an opaque or simply tinted fill*, so the floored frame
+// paints the same tint over an edge that is still hard. One scene, two modes, and the difference
+// between them is exactly the chain. That is also the first behaviour either renderer has ever
+// attached to `RenderMode`, which until now was carried and ignored.
+GYRO_TEST(RenderImport, GlassBlursWhatIsBehindItAndTheFloorTintDoesNot)
+{
+	std::optional<Fixture> fixture = Available("GlassBlursWhatIsBehindItAndTheFloorTintDoesNot");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	// Left half red, right half blue, and a panel across the seam between them.
+	DrawItem panel = Solid({ { 16.0F, 8.0F }, { 32.0F, 16.0F } }, DrawSolid{});
+	panel.Content = DrawDressing{};
+	panel.Dress = Material::Glass;
+
+	const std::array<DrawItem, 3> items{
+		Solid({ { 0.0F, 0.0F }, { 32.0F, 32.0F } }, DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F }),
+		Solid({ { 32.0F, 0.0F }, { 32.0F, 32.0F } }, DrawSolid{ 0.0F, 0.0F, 1.0F, 1.0F }),
+		panel,
+	};
+
+	const auto draw = [&](RenderMode mode) -> std::optional<std::array<Rgba16, 4>> {
+		const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+
+		if (!acquired)
+		{
+			return std::nullopt;
+		}
+
+		if (!fixture->Renderer().Record(Composite(*acquired, damage, items, mode)))
+		{
+			return std::nullopt;
+		}
+
+		const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+
+		if (buffer == nullptr)
+		{
+			return std::nullopt;
+		}
+
+		const BufferReader reader{ *buffer };
+
+		if (!reader.IsValid())
+		{
+			return std::nullopt;
+		}
+
+		// Two points inside the panel, eight pixels either side of the seam, and two outside it.
+		return std::array<Rgba16, 4>{
+			reader.Image().At(24, 16), reader.Image().At(40, 16), reader.Image().At(24, 2), reader.Image().At(40, 2)
+		};
+	};
+
+	const std::optional<std::array<Rgba16, 4>> planned = draw(RenderMode::Planned);
+	GYRO_REQUIRE(planned.has_value());
+
+	const std::optional<std::array<Rgba16, 4>> floored = draw(RenderMode::Floor);
+	GYRO_REQUIRE(floored.has_value());
+
+	// Outside the panel, the edge is untouched in both — which is what says the chain wrote where it
+	// was asked to and nowhere else, and is the half that would fail if the dressing's quad were
+	// placed by different arithmetic from the content's.
+	GYRO_CHECK_EQ((*planned)[2], Red);
+	GYRO_CHECK_EQ((*planned)[3], Blue);
+	GYRO_CHECK_EQ((*floored)[2], Red);
+	GYRO_CHECK_EQ((*floored)[3], Blue);
+
+	// Inside it, eight pixels into the red side there is measurably more blue than the floor's tint
+	// put there, and eight pixels into the blue side measurably more red. Both directions, because a
+	// chain that only ran horizontally in one direction would pass one of them.
+	GYRO_CHECK((*planned)[0].Blue > (*floored)[0].Blue);
+	GYRO_CHECK((*planned)[1].Red > (*floored)[1].Red);
+
+	// And the floored frame still shows the seam it was drawn over, which is what makes the two
+	// readings a comparison rather than one of them being blank.
+	GYRO_CHECK((*floored)[0].Red > (*floored)[1].Red);
+	GYRO_CHECK((*floored)[1].Blue > (*floored)[0].Blue);
+
+	// **`Smoke` is the same chain and a different obligation.** Decision 103's difference between the
+	// two is not weight, it is what each must survive: `Smoke` sits over content gyro did not choose,
+	// so its opacity comes from a worst-case contrast floor rather than from taste. What that has to
+	// look like here is a panel that hides more of what is behind it than `Glass` does, at the same
+	// place in the same scene — which is an arithmetic difference between two table rows and not a
+	// second mechanism.
+	std::array<DrawItem, 3> smoked{ items[0], items[1], items[2] };
+	smoked[2].Dress = Material::Smoke;
+
+	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+	GYRO_REQUIRE(acquired.has_value());
+	GYRO_REQUIRE(fixture->Renderer().Record(Composite(*acquired, damage, smoked)).has_value());
+
+	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+	GYRO_REQUIRE(buffer != nullptr);
+
+	const BufferReader reader{ *buffer };
+	GYRO_REQUIRE(reader.IsValid());
+
+	const Rgba16 smoke = reader.Image().At(24, 16);
+
+	GYRO_CHECK(smoke.Red < (*planned)[0].Red);
+	GYRO_CHECK(smoke.Green < (*planned)[0].Green);
+	GYRO_CHECK(smoke.Blue < (*planned)[0].Blue);
+
+	// Still blurred, though, which is what says the heavier tint did not simply paint over the chain:
+	// there is more blue eight pixels into the red side than the floored tint ever put there.
+	GYRO_CHECK(smoke.Blue > (*floored)[0].Blue);
+}
+
 // **The list is the painter's order, and opacity is `over`.** Two items that overlap: the later one
 // wins where they meet, which is decision 55's strict tree order arriving at the renderer as nothing
 // more than the order of a span. The half-opaque third is what says the blend is `over` with a
@@ -669,18 +799,17 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 	// The baseline, so that the refusals below are about what changed rather than about the fixture.
 	GYRO_REQUIRE_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &drawable, 1 })).has_value(), true);
 
-	std::array<DrawItem, 5> refused{ drawable, drawable, drawable, drawable, drawable };
+	std::array<DrawItem, 4> refused{ drawable, drawable, drawable, drawable };
 	refused[0].Content = DrawTexture{};
 	refused[1].Content = DrawGroup{ .Count = 0 };
-	refused[2].Dress = Material::Glass;
-	refused[3].Lift = Elevation::Resting;
+	refused[2].Lift = Elevation::Resting;
 
 	// **The colour-state refusal is now one transfer function rather than every conversion**, and HLG
 	// is the one because converting it needs a display peak luminance `ColorState` does not carry.
 	// Everything else — a solid authored in linear light at wide primaries, drawn onto an sRGB
 	// output — is a specialization constant and a matrix that exist, and the check below is that it
 	// draws rather than that it is refused.
-	refused[4].Color = ColorState{ ColorPrimaries::Bt2020, TransferFunction::Hlg, AlphaMode::Premultiplied, 0, 203.0F };
+	refused[3].Color = ColorState{ ColorPrimaries::Bt2020, TransferFunction::Hlg, AlphaMode::Premultiplied, 0, 203.0F };
 
 	for (const DrawItem& item : refused)
 	{
@@ -688,6 +817,17 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 		GYRO_REQUIRE_EQ(answer.has_value(), false);
 		GYRO_CHECK_EQ(answer.error().Code(), EINVAL);
 	}
+
+	// **A material is no longer among them**, and it is the second branch to leave this list rather
+	// than the first. `Material::Glass` reads the composite back, blurs it, and composites the result
+	// — Render/Backdrop.h — and where the device or the target's modifier will not have that, it draws
+	// decision 34's third rung instead of refusing. So the refusal that used to be here is a picture
+	// that is *dimmer* than it should be rather than a frame that never reached the glass, which is
+	// the trade decision 35 makes everywhere else.
+	DrawItem dressed = drawable;
+	dressed.Dress = Material::Glass;
+
+	GYRO_CHECK_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &dressed, 1 })).has_value(), true);
 
 	// The branch that used to be here, from the other side: an item whose light is not the output's
 	// is drawn rather than refused, because `Prepare` built the variant that converts it.

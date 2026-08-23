@@ -335,6 +335,7 @@ gyro_add_module(Seam PORTABLE
 		Geometry
 		World
 	TESTS
+		Dressing.Test.cpp
 		EventSource.Test.cpp
 		OutputConfiguration.Test.cpp
 		Pixel.Test.cpp
@@ -492,10 +493,12 @@ gyro_add_module(Render
 		Geometry
 		Seam
 	SOURCES
+		Backdrop.cpp
 		Device.cpp
 		Pipeline.cpp
 		Renderer.cpp
 	TESTS
+		Backdrop.Test.cpp
 		Device.Test.cpp
 		Pipeline.Test.cpp
 )
@@ -504,6 +507,11 @@ gyro_add_shaders(Render
 	SOURCES
 		Quad.vert
 		Quad.frag
+		Backdrop.vert
+		Extract.frag
+		Blur.frag
+		Dress.vert
+		Dress.frag
 )
 
 # PUBLIC for Compositor's reason below: the module's own tests compile against volk's prototypes too,

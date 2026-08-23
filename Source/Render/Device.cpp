@@ -351,6 +351,72 @@ void VulkanDevice::Reset() noexcept
 	m_Queue = VK_NULL_HANDLE;
 }
 
+namespace
+{
+// The modifier entry for one format, or nothing where the driver does not list it.
+[[nodiscard]] bool Features(VkPhysicalDevice physical, PixelFormat format, VkFormatFeatureFlags& into) noexcept
+{
+	if (format.Modifier == ModifierInvalid)
+	{
+		return false;
+	}
+
+	const VkFormat vulkan = VulkanFormat(format.Code);
+
+	if (vulkan == VK_FORMAT_UNDEFINED)
+	{
+		return false;
+	}
+
+	std::array<VkDrmFormatModifierPropertiesEXT, MaxModifiers> entries{};
+	VkDrmFormatModifierPropertiesListEXT list{ .sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+		                                       .pNext = nullptr,
+		                                       .drmFormatModifierCount = MaxModifiers,
+		                                       .pDrmFormatModifierProperties = entries.data() };
+	VkFormatProperties2 properties{ .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+		                            .pNext = &list,
+		                            .formatProperties = {} };
+	vkGetPhysicalDeviceFormatProperties2(physical, vulkan, &properties);
+
+	const std::uint32_t written = std::min(list.drmFormatModifierCount, MaxModifiers);
+
+	for (std::uint32_t index = 0; index < written; ++index)
+	{
+		if (entries[index].drmFormatModifier != format.Modifier)
+		{
+			continue;
+		}
+
+		// Single-plane only, and it is a real limit rather than a placeholder: every format a
+		// composite is recorded into is one plane, which Virtual/Buffer.h states from the allocating
+		// side. A multi-plane tiling of an RGB format is an auxiliary compression plane, and reading
+		// one back on the CPU is not something a target this module hands out supports yet.
+		if (entries[index].drmFormatModifierPlaneCount != 1)
+		{
+			continue;
+		}
+
+		into = entries[index].drmFormatModifierTilingFeatures;
+
+		return true;
+	}
+
+	return false;
+}
+} // namespace
+
+bool VulkanDevice::SupportsSampling(PixelFormat format) const noexcept
+{
+	VkFormatFeatureFlags features = 0;
+
+	if (!IsValid() || !format.IsValid() || !Features(m_Physical, format, features))
+	{
+		return false;
+	}
+
+	return (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+}
+
 bool VulkanDevice::Supports(PixelFormat format) const noexcept
 {
 	if (!IsValid() || !format.IsValid())

@@ -1,6 +1,7 @@
 #include "Render/Renderer.h"
 
 #include <fcntl.h>
+#include <spdlog/spdlog.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -17,6 +18,7 @@
 #include "Geometry/Region.h"
 #include "Render/Pipeline.h"
 #include "Render/Vulkan.h"
+#include "Seam/Dressing.h"
 #include "World/Elevation.h"
 #include "World/Material.h"
 
@@ -97,11 +99,6 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 		return Failure(EINVAL, "this renderer flattens no groups yet; decision 60's offscreen is not built");
 	}
 
-	if (item.Dress != Material::None)
-	{
-		return Failure(EINVAL, "this renderer draws no materials yet");
-	}
-
 	if (item.Lift != Elevation::None)
 	{
 		return Failure(EINVAL, "this renderer draws no shadows yet");
@@ -120,6 +117,81 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 	}
 
 	return {};
+}
+
+// The colour state the chain's own arithmetic lands in: linear light in the *output's* primaries.
+//
+// **Not the composite space, and Extract.frag argues the difference.** Decision 47 fixes the
+// composite space as linear at Rec.2020 and a blur does not need to be there — a blur is a weighted
+// sum, a primaries change is a matrix, and a matrix commutes with a weighted sum, so the two matrices
+// the chain would otherwise spend are two that cancel. What this is used for is the tint: a
+// material's tint is stated in linear light, and this is what says so to the quad pipeline when
+// decision 34's third rung draws that tint with no chain under it.
+[[nodiscard]] ColorState ChainState(ColorState output) noexcept
+{
+	return ColorState{
+		output.Primaries, TransferFunction::Linear, AlphaMode::Premultiplied, 0, output.ReferenceLuminance
+	};
+}
+
+// A material's tint as a solid the quad pipeline can fill with, which is decision 34's third rung
+// drawn: no chain, no offscreen, no read of the backdrop at all — the fill an item would have had if
+// the machine could not afford to look at what was behind it.
+[[nodiscard]] DrawSolid TintFill(Material material) noexcept
+{
+	const MaterialTint tint = ResolvedTint(Facts(material));
+
+	return { .Red = tint.Red, .Green = tint.Green, .Blue = tint.Blue, .Alpha = tint.Alpha };
+}
+
+// What the chain has to read so that every pixel of a dressed item has a whole neighbourhood behind
+// it: the item's device-space bound grown by decision 63's declared expansion, clipped to the target.
+//
+// **This is that declaration's first consumer, and it is not the damage path.** Decision 63 spends
+// one property three times — fusibility, damage expansion, and cacheability — and the second has
+// nowhere to land yet, because Frame/Evaluator.h reports the whole output or nothing under decision
+// 101. The number is load-bearing here regardless: it is exactly how far past itself a dressed item
+// must read, and getting it wrong is a fringe at the panel's own edge rather than a trail behind
+// something that moved.
+[[nodiscard]] VkRect2D Neighbourhood(const DrawItem& item, Tier tier, PixelSize<DeviceSpace> size) noexcept
+{
+	const PixelRect<DeviceSpace> bound = item.Shape.PixelBounds();
+	const auto reach = static_cast<std::int32_t>(std::ceil(Expansion(item.Dress, tier)));
+
+	return Clip(
+		PixelRect<DeviceSpace>::FromEdges(
+			{ bound.Left() - reach, bound.Top() - reach }, { bound.Right() + reach, bound.Bottom() + reach }
+		),
+		size
+	);
+}
+
+// One image dependency, spelled out per use because every one of them in this file is different in
+// all four of the ways that matter and a helper that took fewer arguments would be a helper that hid
+// the interesting half.
+void Depend(
+	VkCommandBuffer command,
+	VkImage image,
+	VkImageLayout from,
+	VkImageLayout to,
+	VkPipelineStageFlags sourceStage,
+	VkAccessFlags source,
+	VkPipelineStageFlags destinationStage,
+	VkAccessFlags destination
+) noexcept
+{
+	const VkImageMemoryBarrier barrier{ .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+		                                .pNext = nullptr,
+		                                .srcAccessMask = source,
+		                                .dstAccessMask = destination,
+		                                .oldLayout = from,
+		                                .newLayout = to,
+		                                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		                                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		                                .image = image,
+		                                .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+
+	vkCmdPipelineBarrier(command, sourceStage, destinationStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
 // One item's push constant block.
@@ -269,6 +341,14 @@ VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device) : m_Cl
 	// refuses the SPIR-V says so at startup rather than at the first frame with a window in it. The
 	// per-format pipelines are not built here — a format is a target's property and no target is
 	// bound yet — which is why `BindTargets` is where `Prepare` runs.
+	// **Non-fatal, and it is decision 34's third rung again.** A device that refuses the chain's
+	// modules is one whose materials draw as their tint; refusing to construct the renderer would
+	// give up every solid on screen for a blur nobody may have asked for.
+	if (Result<void> created = m_Backdrop.Create(device); !created)
+	{
+		spdlog::info("gather falls to its tint on this device: {}", created.error().Context());
+	}
+
 	if (Result<void> created = m_Pipeline.Create(device); !created)
 	{
 		m_Status = created;
@@ -348,7 +428,55 @@ Result<void> VulkanRenderer::BindTargets(std::span<const RenderTarget> targets, 
 		return settled;
 	}
 
+	Reserve(targets, output);
+
 	return {};
+}
+
+void VulkanRenderer::Reserve(std::span<const RenderTarget> targets, ColorState output)
+{
+	// **A failure here is a tier and not an error, which is why nothing above checks it.** Decision
+	// 34's third rung is *the material is not rendered — an opaque or simply tinted fill*, so an
+	// output whose device will not give it a floating-point offscreen, or whose targets carry a
+	// modifier that cannot be sampled, draws every material as its tint and everything else exactly
+	// as before. Refusing the bind instead would turn a look into a black screen, which is the
+	// trade decision 35 makes in the other direction all the way down.
+	if (m_TargetCount == 0)
+	{
+		return;
+	}
+
+	if (Result<void> reserved =
+	        m_Backdrop.Reserve(m_Slots[0].Size, m_Slots[0].Format, output, static_cast<std::uint32_t>(targets.size()));
+	    !reserved)
+	{
+		spdlog::info("gather falls to its tint on this output: {}", reserved.error().Context());
+
+		return;
+	}
+
+	for (std::uint32_t index = 0; index < m_TargetCount; ++index)
+	{
+		if (!m_Slots[index].Samplable)
+		{
+			spdlog::info("gather falls to its tint on this output: a target's modifier cannot be sampled");
+			m_Backdrop.Release();
+
+			return;
+		}
+
+		Result<VkDescriptorSet> set = m_Backdrop.AllocateTargetSet(m_Slots[index].View);
+
+		if (!set)
+		{
+			spdlog::info("gather falls to its tint on this output: {}", set.error().Context());
+			m_Backdrop.Release();
+
+			return;
+		}
+
+		m_Slots[index].Backdrop = *set;
+	}
 }
 
 Result<void> VulkanRenderer::Import(const RenderTarget& target, ColorState output, Slot& slot)
@@ -359,6 +487,8 @@ Result<void> VulkanRenderer::Import(const RenderTarget& target, ColorState outpu
 	}
 
 	const DmabufImage* image = target.AsDmabuf();
+
+	const bool samplable = m_Device->SupportsSampling(target.Format);
 
 	// One plane, which `VulkanDevice::Supports` has already agreed to for this modifier. Checked
 	// again because the two facts have different owners: the driver said the *tiling* is one plane,
@@ -399,7 +529,13 @@ Result<void> VulkanRenderer::Import(const RenderTarget& target, ColorState outpu
 		.arrayLayers = 1,
 		.samples = VK_SAMPLE_COUNT_1_BIT,
 		.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
-		.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+		// **`SAMPLED` where the modifier permits it, because a gather reads the target back.**
+		// Render/Backdrop.h extracts the backdrop out of the composite itself rather than out of a
+		// second copy of it, so a dressed output needs its own target legible to a shader. Asking for
+		// it unconditionally would refuse the bind on a compressed modifier that renders fine, so it
+		// is asked for where the driver lists it and the material falls to its tint where it does not.
+		.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+		         (samplable ? VkImageUsageFlags{ VK_IMAGE_USAGE_SAMPLED_BIT } : VkImageUsageFlags{ 0 }),
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 		.queueFamilyIndexCount = 0,
 		.pQueueFamilyIndices = nullptr,
@@ -498,6 +634,7 @@ Result<void> VulkanRenderer::Import(const RenderTarget& target, ColorState outpu
 	slot.Size = target.Size;
 	slot.LastSubmit = 0;
 	slot.Format = VulkanFormat(target.Format.Code);
+	slot.Samplable = samplable;
 
 	// **Here rather than at the first `Record`, because a bind is where building one is legal.** The
 	// seam declares this call unbounded and allocating and says in as many words that it may build
@@ -716,32 +853,7 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		&acquire
 	);
 
-	// `LOAD` rather than `CLEAR`, and it is the whole of what damage means. The target holds the
-	// previous composite — that is why a ring is worth having and why the caller accumulates damage
-	// across the frames since this image was last drawn — so everything outside the region must
-	// survive. A `CLEAR` here would repaint the whole target every frame and make the damage
-	// argument decorative.
-	const VkRenderingAttachmentInfo attachment{ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-		                                        .pNext = nullptr,
-		                                        .imageView = slot.View,
-		                                        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-		                                        .resolveMode = VK_RESOLVE_MODE_NONE,
-		                                        .resolveImageView = VK_NULL_HANDLE,
-		                                        .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-		                                        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-		                                        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-		                                        .clearValue = Nothing };
-	const VkRenderingInfo renderingInfo{ .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-		                                 .pNext = nullptr,
-		                                 .flags = 0,
-		                                 .renderArea = Clip(request.Damage.Bounds(), slot.Size),
-		                                 .layerCount = 1,
-		                                 .viewMask = 0,
-		                                 .colorAttachmentCount = 1,
-		                                 .pColorAttachments = &attachment,
-		                                 .pDepthAttachment = nullptr,
-		                                 .pStencilAttachment = nullptr };
-	vkCmdBeginRendering(command, &renderingInfo);
+	BeginTarget(command, slot, request);
 
 	// The arena is a member-sized array rather than anything grown here: decision 36 forbids
 	// allocating inside the frame section, and a damage region holds at most `Region::Capacity`
@@ -790,49 +902,66 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 			                       .maxDepth = 1.0F };
 		vkCmdSetViewport(command, 0, 1, &viewport);
 
-		// **Rectangles outside and items inside, which is the ordering that costs the least of
-		// what is scarce.** The damage rectangles are disjoint, so drawing the whole list into each
-		// of them preserves the painter's order within every pixel — and the alternative, one scissor
-		// per item, is the per-item set intersection Seam/Renderer.h declines. It is a draw per item
-		// per rectangle, which is the honest first cut: a region holds at most sixteen rectangles and
-		// a frame's damage is usually one, and narrowing it means testing each item's bound against
-		// each rectangle, which is arithmetic worth adding when there is a scene large enough to
-		// measure it on.
-		for (std::uint32_t index = 0; index < count; ++index)
+		// **Items outside and rectangles inside, and a gather is what decided the nesting.**
+		// *(Inverted 2026-08-22.)* It was rectangles outside — one scissor set, the whole list drawn
+		// into it, repeated per rectangle — which preserves the painter's order within every pixel
+		// because the rectangles are disjoint, and which a gather makes wrong: a material reads a
+		// neighbourhood that can cross into a damage rectangle the loop has not reached yet, so it
+		// would blur last frame's pixels into this frame's panel along an edge nobody drew. Items
+		// outside means everything below a dressed item has been drawn *everywhere* before the chain
+		// extracts, which is the property decision 60's backdrop rule already assumes. It is also
+		// cheaper on the axis the old comment cared about — a pipeline bind per item instead of one
+		// per item per rectangle, against a scissor set per rectangle, and a scissor is the cheap one.
+		for (const DrawItem& item : request.Items)
 		{
-			vkCmdSetScissor(command, 0, 1, &rects[index].rect);
+			const bool gathering = item.Dress != Material::None && Facts(item.Dress).Gathering;
 
-			for (const DrawItem& item : request.Items)
+			// **The dressing draws first and the content over it**, which is what a material *is*: a
+			// panel's background, with whatever the node carries on top. Decision 104 fixes the order
+			// from the other end — within one item the material samples the target as of before the
+			// item began — and the reverse is a blurred backdrop covering the label that was supposed
+			// to sit on it.
+			if (gathering)
 			{
-				const DrawSolid* solid = std::get_if<DrawSolid>(&item.Content);
-
-				// A dressing with nothing to draw. `Expressible` has already refused the ones that
-				// carry a material or an elevation, so what is left is an item whose whole content was
-				// a dressing nobody set — a caller's bug that draws nothing, which is the same answer
-				// Seam/Renderer.h gives an empty `DrawGroup`.
-				if (solid == nullptr)
+				if (Result<void> dressed = Dress(command, slot, item, request, std::span{ rects.data(), count }, bound);
+				    !dressed)
 				{
-					continue;
+					return std::unexpected{ dressed.error() };
 				}
+			}
 
-				const VkPipeline pipeline =
-					m_Pipeline.For(slot.Format, QuadVariant::For(item.Color, m_Output, item.Radius > 0.0F));
+			const DrawSolid* solid = std::get_if<DrawSolid>(&item.Content);
 
-				if (pipeline != bound)
-				{
-					vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-					bound = pipeline;
-				}
+			// A dressing with nothing to draw. What is left after the branch above is an item whose
+			// whole content was a dressing nobody set — a caller's bug that draws nothing, which is
+			// the same answer Seam/Renderer.h gives an empty `DrawGroup`.
+			if (solid == nullptr)
+			{
+				continue;
+			}
 
-				const QuadConstants constants = Constants(item, *solid, slot.Size, m_Output);
-				vkCmdPushConstants(
-					command,
-					m_Pipeline.Layout(),
-					VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-					0,
-					sizeof constants,
-					&constants
-				);
+			const VkPipeline pipeline =
+				m_Pipeline.For(slot.Format, QuadVariant::For(item.Color, m_Output, item.Radius > 0.0F));
+
+			if (pipeline != bound)
+			{
+				vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+				bound = pipeline;
+			}
+
+			const QuadConstants constants = Constants(item, *solid, slot.Size, m_Output);
+			vkCmdPushConstants(
+				command,
+				m_Pipeline.Layout(),
+				VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+				0,
+				sizeof constants,
+				&constants
+			);
+
+			for (std::uint32_t index = 0; index < count; ++index)
+			{
+				vkCmdSetScissor(command, 0, 1, &rects[index].rect);
 				vkCmdDraw(command, 6, 1, 0, 0);
 			}
 		}
@@ -914,6 +1043,345 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 
 	return Submission{ .Point = SyncPoint{ .Timeline = m_TimelineFd.Borrow(), .Value = value },
 		               .RecordCost = Elapsed(started, m_Clock->Now()) };
+}
+
+void VulkanRenderer::Pass(
+	VkCommandBuffer command,
+	VkPipeline pipeline,
+	VkDescriptorSet source,
+	std::uint32_t destination,
+	VkRect2D used,
+	const VkViewport& pane,
+	const PassConstants& constants,
+	VkImage read
+) const noexcept
+{
+	// The image this pass is about to read was written as an attachment by the pass before it, and
+	// the descriptor set naming it was written with the sampled layout — so this is a real transition
+	// and not only a dependency. The extract passes null because its source is the target, which the
+	// caller transitioned once for the whole chain.
+	if (read != VK_NULL_HANDLE)
+	{
+		Depend(
+			command,
+			read,
+			VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			VK_ACCESS_SHADER_READ_BIT
+		);
+	}
+
+	// **`UNDEFINED` as the old layout, deliberately, and it is a discard rather than an oversight.**
+	// Every pass writes the whole region it is given, so nothing already in the destination survives
+	// or is wanted — which lets the transition throw the contents away instead of preserving a
+	// tiling the driver would otherwise have to keep. The dependency is still real: it is the
+	// write-after-read against the pass two steps back, which read this same image.
+	Depend(
+		command,
+		m_Backdrop.ChainImage(destination),
+		VK_IMAGE_LAYOUT_UNDEFINED,
+		VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+	);
+
+	// `DONT_CARE` for the same reason: the pass covers its whole render area, so loading what was
+	// there is bandwidth spent on pixels about to be overwritten.
+	const VkRenderingAttachmentInfo attachment{ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+		                                        .pNext = nullptr,
+		                                        .imageView = m_Backdrop.ChainView(destination),
+		                                        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		                                        .resolveMode = VK_RESOLVE_MODE_NONE,
+		                                        .resolveImageView = VK_NULL_HANDLE,
+		                                        .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		                                        .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+		                                        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+		                                        .clearValue = Nothing };
+	const VkRenderingInfo rendering{ .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+		                             .pNext = nullptr,
+		                             .flags = 0,
+		                             .renderArea = used,
+		                             .layerCount = 1,
+		                             .viewMask = 0,
+		                             .colorAttachmentCount = 1,
+		                             .pColorAttachments = &attachment,
+		                             .pDepthAttachment = nullptr,
+		                             .pStencilAttachment = nullptr };
+
+	vkCmdBeginRendering(command, &rendering);
+	vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+	vkCmdBindDescriptorSets(
+		command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_Backdrop.PassLayout(), 0, 1, &source, 0, nullptr
+	);
+	vkCmdSetViewport(command, 0, 1, &pane);
+	vkCmdSetScissor(command, 0, 1, &used);
+	vkCmdPushConstants(command, m_Backdrop.PassLayout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants, &constants);
+	vkCmdDraw(command, 3, 1, 0, 0);
+	vkCmdEndRendering(command);
+}
+
+void VulkanRenderer::BeginTarget(VkCommandBuffer command, const Slot& slot, const RecordRequest& request) const noexcept
+{
+	// `LOAD` rather than `CLEAR`, and it is the whole of what damage means. The target holds the
+	// previous composite — that is why a ring is worth having and why the caller accumulates damage
+	// across the frames since this image was last drawn — so everything outside the region must
+	// survive. A `CLEAR` here would repaint the whole target every frame and make the damage
+	// argument decorative. It is also what makes `Dress` able to resume: the pass it split has
+	// already written pixels this one must not lose.
+	//
+	// **`GENERAL` rather than `COLOR_ATTACHMENT_OPTIMAL`**, which is what lets a gather read the
+	// target back with an execution barrier and no layout transition — Render/Backdrop.cpp's
+	// descriptor comment is the other half.
+	const VkRenderingAttachmentInfo attachment{ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+		                                        .pNext = nullptr,
+		                                        .imageView = slot.View,
+		                                        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+		                                        .resolveMode = VK_RESOLVE_MODE_NONE,
+		                                        .resolveImageView = VK_NULL_HANDLE,
+		                                        .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		                                        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+		                                        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+		                                        .clearValue = Nothing };
+	const VkRenderingInfo renderingInfo{ .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+		                                 .pNext = nullptr,
+		                                 .flags = 0,
+		                                 .renderArea = Clip(request.Damage.Bounds(), slot.Size),
+		                                 .layerCount = 1,
+		                                 .viewMask = 0,
+		                                 .colorAttachmentCount = 1,
+		                                 .pColorAttachments = &attachment,
+		                                 .pDepthAttachment = nullptr,
+		                                 .pStencilAttachment = nullptr };
+	vkCmdBeginRendering(command, &renderingInfo);
+}
+
+Result<void> VulkanRenderer::Dress(
+	VkCommandBuffer command,
+	const Slot& slot,
+	const DrawItem& item,
+	const RecordRequest& request,
+	std::span<const VkClearRect> rects,
+	VkPipeline& bound
+)
+{
+	const bool rounded = item.Radius > 0.0F;
+	const ChainPlan plan = ChainPlan::For(item.Dress, request.Quality);
+	const bool chained = request.Mode == RenderMode::Planned && m_Backdrop.IsReady() &&
+	                     slot.Backdrop != VK_NULL_HANDLE && plan.Passes > 0 &&
+	                     m_Backdrop.Extract(plan.Divisor) != VK_NULL_HANDLE;
+
+	if (!chained)
+	{
+		// Decision 34's third rung, and the quad pipeline is what draws it: the material's tint as an
+		// ordinary fill, converted out of linear light by the same chain every other item goes
+		// through. No offscreen, no read of the backdrop, nothing on the frame path that a floored
+		// frame cannot afford.
+		DrawItem tinted = item;
+		tinted.Color = ChainState(m_Output);
+
+		const VkPipeline pipeline = m_Pipeline.For(slot.Format, QuadVariant::For(tinted.Color, m_Output, rounded));
+
+		if (pipeline == VK_NULL_HANDLE)
+		{
+			return Failure(EINVAL, "no pipeline was built for a material's tint on this target's format");
+		}
+
+		if (pipeline != bound)
+		{
+			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+			bound = pipeline;
+		}
+
+		const QuadConstants constants = Constants(tinted, TintFill(item.Dress), slot.Size, m_Output);
+		vkCmdPushConstants(
+			command,
+			m_Pipeline.Layout(),
+			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+			0,
+			sizeof constants,
+			&constants
+		);
+
+		for (const VkClearRect& rect : rects)
+		{
+			vkCmdSetScissor(command, 0, 1, &rect.rect);
+			vkCmdDraw(command, 6, 1, 0, 0);
+		}
+
+		return {};
+	}
+
+	const VkRect2D region = Neighbourhood(item, request.Quality, slot.Size);
+
+	if (region.extent.width == 0 || region.extent.height == 0)
+	{
+		return {};
+	}
+
+	const PixelSize<DeviceSpace> chain = m_Backdrop.ChainSize();
+	const VkRect2D used{ .offset = { 0, 0 },
+		                 .extent = { (region.extent.width + plan.Divisor - 1) / plan.Divisor,
+		                             (region.extent.height + plan.Divisor - 1) / plan.Divisor } };
+	const VkViewport pane{ .x = 0.0F,
+		                   .y = 0.0F,
+		                   .width = static_cast<float>(used.extent.width),
+		                   .height = static_cast<float>(used.extent.height),
+		                   .minDepth = 0.0F,
+		                   .maxDepth = 1.0F };
+
+	vkCmdEndRendering(command);
+
+	// The target's writes have to land before the extract reads them, and the layout does not change
+	// — `GENERAL` is already legible to a shader. An execution and memory dependency, nothing more.
+	Depend(
+		command,
+		slot.Image,
+		VK_IMAGE_LAYOUT_GENERAL,
+		VK_IMAGE_LAYOUT_GENERAL,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		VK_ACCESS_SHADER_READ_BIT
+	);
+
+	PassConstants constants{};
+
+	constants.Source[0] = static_cast<float>(region.offset.x);
+	constants.Source[1] = static_cast<float>(region.offset.y);
+	constants.Source[2] = 1.0F / static_cast<float>(slot.Size.Width);
+	constants.Source[3] = 1.0F / static_cast<float>(slot.Size.Height);
+	constants.Step[0] = static_cast<float>(plan.Divisor);
+	constants.Step[1] = static_cast<float>(plan.Divisor);
+
+	Pass(command, m_Backdrop.Extract(plan.Divisor), slot.Backdrop, 0, used, pane, constants);
+
+	// Then the separable passes, alternating direction and ping-ponging between the two images. The
+	// count is twice the tier's, because a box is separable and each of its passes is two.
+	constants.Source[0] = 0.0F;
+	constants.Source[1] = 0.0F;
+	constants.Source[2] = 1.0F / static_cast<float>(chain.Width);
+	constants.Source[3] = 1.0F / static_cast<float>(chain.Height);
+	constants.Step[0] = 1.0F;
+	constants.Step[1] = 1.0F;
+	constants.Kernel[0] = plan.HalfWidth;
+
+	std::uint32_t source = 0;
+
+	for (std::uint32_t index = 0; index < plan.Passes * 2; ++index)
+	{
+		constants.Step[2] = index % 2 == 0 ? 1.0F : 0.0F;
+		constants.Step[3] = index % 2 == 0 ? 0.0F : 1.0F;
+
+		Pass(
+			command,
+			m_Backdrop.Blur(),
+			m_Backdrop.ChainSet(source),
+			1 - source,
+			used,
+			pane,
+			constants,
+			m_Backdrop.ChainImage(source)
+		);
+
+		source = 1 - source;
+	}
+
+	// The last write has to land before the dressing samples it, and this one *is* a layout change:
+	// a chain image is written as an attachment and read as a sampled image, and the descriptor sets
+	// were written naming the read layout.
+	Depend(
+		command,
+		m_Backdrop.ChainImage(source),
+		VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		VK_ACCESS_SHADER_READ_BIT
+	);
+
+	// And the extract's read of the target has to be finished before the resumed pass writes over it.
+	Depend(
+		command,
+		slot.Image,
+		VK_IMAGE_LAYOUT_GENERAL,
+		VK_IMAGE_LAYOUT_GENERAL,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+	);
+
+	BeginTarget(command, slot, request);
+
+	const VkViewport viewport{ .x = 0.0F,
+		                       .y = 0.0F,
+		                       .width = static_cast<float>(slot.Size.Width),
+		                       .height = static_cast<float>(slot.Size.Height),
+		                       .minDepth = 0.0F,
+		                       .maxDepth = 1.0F };
+	vkCmdSetViewport(command, 0, 1, &viewport);
+
+	const VkPipeline pipeline = m_Backdrop.Dress(rounded);
+	vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+	// The outer loop's memo is invalidated rather than updated: what is bound now belongs to a
+	// different layout, so the next content item has to bind again whatever it wanted.
+	bound = VK_NULL_HANDLE;
+
+	const VkDescriptorSet set = m_Backdrop.ChainSet(source);
+	vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_Backdrop.DressLayout(), 0, 1, &set, 0, nullptr);
+
+	const MaterialTint tint = ResolvedTint(Facts(item.Dress));
+	DressConstants dress{};
+
+	for (std::size_t corner = 0; corner < 4; ++corner)
+	{
+		dress.Corner[corner][0] = item.Shape.Corners[corner].X;
+		dress.Corner[corner][1] = item.Shape.Corners[corner].Y;
+		dress.Corner[corner][2] = item.Shape.Weights[corner];
+	}
+
+	dress.Tint[0] = tint.Red;
+	dress.Tint[1] = tint.Green;
+	dress.Tint[2] = tint.Blue;
+	dress.Tint[3] = tint.Alpha;
+
+	dress.Shape[0] = item.Extent.Width;
+	dress.Shape[1] = item.Extent.Height;
+	dress.Shape[2] = item.Radius;
+	dress.Shape[3] = item.Opacity;
+
+	dress.Target[0] = static_cast<float>(slot.Size.Width);
+	dress.Target[1] = static_cast<float>(slot.Size.Height);
+	dress.Target[2] = 1.0F / static_cast<float>(chain.Width);
+	dress.Target[3] = 1.0F / static_cast<float>(chain.Height);
+
+	dress.Chain[0] = static_cast<float>(region.offset.x);
+	dress.Chain[1] = static_cast<float>(region.offset.y);
+	dress.Chain[2] = static_cast<float>(plan.Divisor);
+
+	vkCmdPushConstants(
+		command,
+		m_Backdrop.DressLayout(),
+		VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+		0,
+		sizeof dress,
+		&dress
+	);
+
+	for (const VkClearRect& rect : rects)
+	{
+		vkCmdSetScissor(command, 0, 1, &rect.rect);
+		vkCmdDraw(command, 6, 1, 0, 0);
+	}
+
+	return {};
 }
 
 bool VulkanRenderer::Reached(std::uint64_t value) const noexcept

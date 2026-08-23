@@ -9,6 +9,7 @@
 #include "Core/Fd.h"
 #include "Core/Result.h"
 #include "Geometry/Space.h"
+#include "Render/Backdrop.h"
 #include "Render/Device.h"
 #include "Render/Pipeline.h"
 #include "Render/Vulkan.h"
@@ -18,7 +19,7 @@
 
 // The Vulkan renderer: `Seam/Renderer.h`'s `Record` half, against images the presenter allocated.
 //
-// **It draws solids, and it still refuses what it cannot express.** Render/Pipeline.h is the quad
+// **It draws solids and it dresses them, and it still refuses what it cannot express.** Render/Pipeline.h is the quad
 // pipeline and it covers one alternative of `DrawContent`: a fill, over a projected quad, with a
 // corner radius and a per-node opacity. A `DrawTexture`, a `DrawGroup`, a node dressed in a material
 // or lifted to an elevation is `EINVAL` — Seam/Renderer.h's *an item the renderer cannot express* —
@@ -109,6 +110,16 @@ private:
 		VkImageView View = VK_NULL_HANDLE;
 		PixelSize<DeviceSpace> Size{};
 
+		// The set the chain samples this target through, allocated once at the binding and never
+		// updated — Render/Backdrop.h's whole descriptor argument. Null where the target's modifier
+		// cannot be sampled, which falls this output's materials to their tint.
+		VkDescriptorSet Backdrop = VK_NULL_HANDLE;
+
+		// Whether this target's modifier lists `SAMPLED_IMAGE`, which is what the set above needs of
+		// it. Held per slot rather than per renderer because a target set is one format in practice
+		// and nothing says it has to be.
+		bool Samplable = false;
+
 		// What the pipeline for this target was built against. Kept here rather than re-derived from
 		// the `RenderTarget` at record time because the target set is the presenter's and this slot
 		// outlives the span `BindTargets` was handed.
@@ -128,6 +139,53 @@ private:
 	// change that would be an unmatched pair. It is here rather than in `Record` because the
 	// transition out of `VK_IMAGE_LAYOUT_UNDEFINED` is the one the driver is permitted to discard
 	// contents across, and a target's contents are gyro's the moment it has been bound.
+	// Everything a gather needs, taken at the binding and never inside a frame. Returns nothing
+	// because it cannot fail in a way a caller should act on: what a failure costs is decision 34's
+	// third rung on this output, not a bind.
+	void Reserve(std::span<const RenderTarget> targets, ColorState output);
+
+	// One dressed item: the chain, and then the quad that composites its result.
+	//
+	// **It splits the render pass, and that is what a gather costs structurally.** Vulkan cannot
+	// sample the colour attachment it is rendering into with a neighbourhood read — an input
+	// attachment reads one fragment's own coordinate and a blur reads its neighbours — so this ends
+	// the pass, barriers the target to a shader read, runs the chain, barriers back, and resumes with
+	// `LOAD_OP_LOAD`. One split per dressed item. Decision 116 said this pass-based form was not built
+	// because no gather was expressible; this is the gather that made it expressible.
+	//
+	// **At `RenderMode::Floor`, or where the chain could not be reserved, it draws the tint alone.**
+	// That is decision 34's third rung and it is why this returns without a chain rather than
+	// refusing: a floored frame keeps every item and gives up the blur behind a panel, which is the
+	// degradation Docs/Experience.md#how-it-degrades promises.
+	[[nodiscard]] Result<void> Dress(
+		VkCommandBuffer command,
+		const Slot& slot,
+		const DrawItem& item,
+		const RecordRequest& request,
+		std::span<const VkClearRect> rects,
+		VkPipeline& bound
+	);
+
+	// One pass of the chain: a barrier onto the destination, a rendering instance over the region in
+	// use, and the full-viewport triangle Render/Shaders/Backdrop.vert draws.
+	//
+	// `read` is the image this pass samples, and null for the extract — whose source is the composite
+	// target, which the caller has already made legible and must not transition per pass.
+	void Pass(
+		VkCommandBuffer command,
+		VkPipeline pipeline,
+		VkDescriptorSet source,
+		std::uint32_t destination,
+		VkRect2D used,
+		const VkViewport& pane,
+		const PassConstants& constants,
+		VkImage read = VK_NULL_HANDLE
+	) const noexcept;
+
+	// Begin a rendering instance against one target, loading what is already there. Two callers: the
+	// start of a recording, and `Dress` resuming after a split.
+	void BeginTarget(VkCommandBuffer command, const Slot& slot, const RecordRequest& request) const noexcept;
+
 	[[nodiscard]] Result<void> Settle();
 
 	[[nodiscard]] bool Reached(std::uint64_t value) const noexcept;
@@ -144,6 +202,12 @@ private:
 	// recording ever creates one — decision 62's *no frame blocks on compilation*, holding at the one
 	// place it is currently possible to break it.
 	QuadPipeline m_Pipeline;
+
+	// The gathering half. It is a member rather than a thing constructed per frame for decision 46's
+	// reason: the images it holds are reserved when the output is configured, and a transition that
+	// allocated a render target at the moment it started would be a stutter exactly where one is most
+	// visible.
+	class Backdrop m_Backdrop;
 
 	// What the composite is encoded to, from the binding rather than from the frame. Held because
 	// every item's variant and its two luminance factors are a function of this and the item's own

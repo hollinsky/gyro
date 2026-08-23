@@ -54,10 +54,29 @@ nothing only proves the grep.
   costs a full-resolution map after the chain; tone mapping first and blurring afterwards is cheaper
   and temporally steadier and is wrong. A real number attached to a real artefact, so it wants
   measuring rather than arguing — the same standing as the virtual-output color question below.
+
+  **A default is now in the tree and it is the correct order, taken because there is nothing to order
+  against.** *(2026-08-22, by
+  [decision 117](Decisions.md#117-a-gather-reads-the-target-it-is-drawing-into-the-numbers-live-in-seam-and-the-tier-rides-the-request).)*
+  [Render/Backdrop.h](../Source/Render/Backdrop.h)'s chain decodes the composite to linear, blurs, and
+  re-encodes; nothing in the tree tone maps, so the cheap-and-wrong arrangement is not available to be
+  chosen yet. What that fixes is where a tone map *lands* when it arrives — after this — and what it
+  does not fix is whether that is affordable, which is still the measurement.
 - **Blur across color-state boundaries.** `Material::Glass` samples a backdrop that may hold an HDR
   video window beside an SDR text editor, and physically correct linear blur bleeds a 1000-nit
   highlight through the glass into the region over the SDR window. Correct, and startling. There is
   no obviously right answer, which is what makes it a decision rather than an implementation detail.
+
+  **The default is the correct-and-startling one, and building it put a price on the alternative.**
+  *(2026-08-22, by
+  [decision 117](Decisions.md#117-a-gather-reads-the-target-it-is-drawing-into-the-numbers-live-in-seam-and-the-tier-rides-the-request).)*
+  The backdrop a gather reads is the composite target, into which every item has already been
+  converted — so there are no colour-state boundaries left in what is sampled, and the bleed happens
+  exactly as linear arithmetic says. That is the entry's own first branch taken by omission rather
+  than by argument. What is new is the cost of the other branch: knowing which region of the backdrop
+  came from which state means a per-pixel provenance channel the composite does not carry and which
+  nothing else wants, so *soften the bleed* is not a shader change but a second attachment. Still a
+  decision, and now one with a number on the far side of it.
 - **Mip generation's place in `C`.** Decision 56 makes minification the common case rather than the
   exception, so a mip chain is rebuilt for animating client content on the frames it changes — real
   bandwidth, roughly a third of the surface again, on the budget decision 29 defends and which does

@@ -16,6 +16,7 @@
 #include "Geometry/AxisTransform.h"
 #include "Geometry/Region.h"
 #include "Geometry/Space.h"
+#include "Seam/Dressing.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/SyncPoint.h"
 #include "World/Elevation.h"
@@ -335,6 +336,22 @@ struct RecordRequest
 	std::uint32_t Target = 0;
 
 	RenderMode Mode = RenderMode::Planned;
+
+	// Decision 34's quality tier: which structure every gathering material's pass chain has this
+	// frame. Seam/Dressing.h holds what it means.
+	//
+	// **Per frame, beside the mode, rather than per binding beside the output's colour state.**
+	// Decision 116 moved that state to `BindTargets` because the target end of a conversion decides
+	// which pipelines have to exist and a frame may not compile; a tier decides a loop count and an
+	// image extent and opens no pipeline, so the argument does not reach it. What decides it instead
+	// is decision 63: the party that expands damage for a material must be using the same tier as the
+	// party that draws it, and the only arrangement that guarantees that is for the tier to travel on
+	// the request the damage was expanded for.
+	//
+	// Decision 34's stickiness — down quickly, up slowly, never during an animation — is a rule on
+	// whatever *chooses* a tier, which is a startup probe nobody has written. Until then this is
+	// `High` from one end of a session to the other.
+	Tier Quality = Tier::High;
 
 	// `Budget::Generation()`, stamped onto whatever timestamp query this frame writes so that a sample
 	// resolving after a mode set can be dropped rather than filed against an output it does not

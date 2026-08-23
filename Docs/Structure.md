@@ -299,6 +299,26 @@ Which also keeps the two waists from touching. `Publication` and `Seam` both res
 from one to the other, added for the benefit of a single interface, is the kind that is never removed
 afterwards. See [decision 82](Decisions.md#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene).
 
+### A material's numbers are in Seam, and the enum naming it is not
+
+`World/Material.h` says which materials exist and `Seam/Dressing.h` says what each one *is* — the
+radius, the tint, `Smoke`'s contrast floor, and the tier table that decides a chain's structure. The
+split is not a tidiness preference; each half is somewhere the other may not be.
+
+The numbers cannot go up beside the enum, because
+[decision 33](Decisions.md#33-effects-are-named-materials-not-parameterized-filter-calls) forbids the
+call site naming a radius and `World/Material.h` is precisely the header a call site includes in order
+to say `Material::Glass`. They cannot go into `Render` either, because
+[decision 40](Decisions.md#40-software-rendering-is-a-device-not-a-backend-and-it-is-the-floor-tier)
+makes software rendering a device rather than a backend — so `Blit` and the Vulkan renderer are two
+implementations of one look, and a number in either is a number the other can disagree with. `Seam`'s
+charter is *every interface with more than one implementation and the data crossing it*, and this is
+the second half of that sentence with no interface attached.
+
+Same shape as `Pixel` one file over: what a fourcc means in memory lives at the waist because a
+renderer encodes through it and a test decodes through it.
+[Decision 117](Decisions.md#117-a-gather-reads-the-target-it-is-drawing-into-the-numbers-live-in-seam-and-the-tier-rides-the-request).
+
 ### The quad builder is in Frame, and neither type it joins could take it
 
 `Seam/Renderer.h`'s `Quad` and `Geometry/NodeTransform.h`'s `ComposedTransform` are the two ends of
