@@ -13,6 +13,7 @@
 #include "Core/Result.h"
 #include "Core/Texture.h"
 #include "Geometry/Space.h"
+#include "Seam/Importer.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/Renderer.h"
 #include "Seam/SyncPoint.h"
@@ -69,33 +70,7 @@
 // makes the whole renderer testable on a machine with no GPU, no seat, and no panel — the machine it
 // exists to draw on.
 
-// A CPU image this renderer samples — the firmware logo, the console's text grid — described the way
-// Seam/RenderTarget.h describes the memory on the other end of the composite.
-//
-// **Borrowed rather than copied, and the caller keeps the pixels alive.** The console's grid is the
-// panel's size, which is thirty megabytes at 4K, and printing a line into it is a `memmove` inside
-// memory it already owns; a renderer that copied on adoption would copy the whole grid every time a
-// line appeared, and one that copied at each frame would be the full-size scratch Blit/Band.h exists
-// to refuse. So `Adopt` records a pointer and `Forget` is what has to happen before the pixels go
-// away. Core/Texture.h's generational id protects against a *stale id*, which resolves to nothing; it
-// cannot protect against memory freed underneath a live one.
-struct SourceImage
-{
-	const std::byte* Pixels = nullptr;
-
-	// The allocation's own length rather than `Stride * Height`, for `MappedImage`'s reason: the two
-	// differ wherever the buffer is page-rounded, and a sampler that derived the bound itself would
-	// derive it from the wrong number.
-	std::size_t Length = 0;
-
-	std::uint32_t Stride = 0;
-
-	PixelSize<BufferSpace> Size{};
-
-	PixelFormat Format{};
-};
-
-class Blit final : public IRenderer
+class Blit final : public IRenderer, public ITextureImporter
 {
 public:
 	// A ring three deep plus the one being scanned, which is what a DRM presenter binds at its
@@ -148,28 +123,28 @@ public:
 
 	void ReleaseTargets() noexcept override;
 
-	// **The renderer's other half, in the one form this renderer needs one.** Seam/Renderer.h keeps
-	// *how a texture comes to exist* off `IRenderer` because import is dispatch-side and differs per
-	// device; here there is nothing to import — decision 110's two consumers are both gyro's own CPU
-	// images — so this is a concrete method on the concrete renderer and there is no lifetime table
-	// underneath it.
+	// Seam/Importer.h's dispatch half, and on this renderer there is nothing to import: every source it
+	// can take is already CPU pixels, so adoption is a table entry rather than a device allocation.
+	// Descriptors are `EINVAL` — a blitter handed a dmabuf is the composition-root miswiring
+	// Seam/RenderTarget.h names at the other end of the composite, arriving at this end.
 	//
-	// **The id is minted elsewhere and this only holds an image against one.** Core/Texture.h puts
-	// minting on the dispatch side, and it has to stay there for a reason that outlives this
-	// renderer: the same scene is handed to the Vulkan renderer a moment later, across the migration
-	// decision 41 sequences on every boot, so an id space owned by whichever renderer is current
-	// would rename every image at exactly the handoff this module exists to make invisible.
+	// **Borrowed rather than copied, and the caller keeps the pixels alive.** The console's grid is the
+	// panel's size, which is thirty megabytes at 4K, and printing a line into it is a `memmove` inside
+	// memory it already owns; a renderer that copied on adoption would copy the whole grid every time a
+	// line appeared, and one that copied at each frame would be the full-size scratch Blit/Band.h exists
+	// to refuse. So this records a pointer and `Forget` is what has to happen before the pixels go away.
+	// Core/Texture.h's generational id protects against a *stale id*, which resolves to nothing; it
+	// cannot protect against memory freed underneath a live one, which is why the seam puts the lifetime
+	// on the caller and ties it to the watermark.
 	//
-	// Allocates nothing and belongs beside `BindTargets` rather than inside a frame. `EINVAL` for a
-	// null id, for pixels that do not describe the image they claim to, for a format or a layout this
-	// cannot sample, and when there is no slot left. Re-adopting a live id replaces what it names,
-	// which is what a console re-laying its grid across a mode change does.
-	[[nodiscard]] Result<void> Adopt(TextureId id, const SourceImage& image);
+	// Allocates nothing, whatever the seam permits — the table is fixed at `MaxImages`. `EINVAL` for a
+	// null id, for pixels that do not describe the image they claim, for a format or a layout this
+	// cannot sample, and when there is no slot left.
+	[[nodiscard]] Result<void> Adopt(TextureId id, const TextureSource& source) override;
 
-	// Drops what an id names, and says nothing about an id this does not hold — the same answer a
-	// frame gives one. Deliberately not done by `ReleaseTargets`: an image outlives the target set it
-	// was drawn into, and a mode change that rebinds targets does not change which logo is on them.
-	void Forget(TextureId id) noexcept;
+	// Deliberately not done by `ReleaseTargets`: an image outlives the target set it was drawn into, and
+	// a mode change that rebinds targets does not change which logo is on them.
+	void Forget(TextureId id) noexcept override;
 
 	// **Two passes over the item list, and the first one draws nothing.** An item this cannot express
 	// is `EINVAL`, and refusing it after painting half the list would leave a target that is neither

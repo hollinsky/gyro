@@ -334,49 +334,63 @@ const Blit::Image* Blit::Find(TextureId id) const noexcept
 	return nullptr;
 }
 
-Result<void> Blit::Adopt(TextureId id, const SourceImage& image)
+Result<void> Blit::Adopt(TextureId id, const TextureSource& source)
 {
 	if (id.IsNull())
 	{
 		return Failure(EINVAL, "a null id names no image");
 	}
 
-	if (image.Pixels == nullptr || image.Size.Width <= 0 || image.Size.Height <= 0)
+	// Refused before anything is read out of the variant, because a source describing an image with no
+	// extent is one whose stride arithmetic below has nothing to check against.
+	if (!source.IsValid())
 	{
 		return Failure(EINVAL, "an image with no pixels or no extent");
 	}
 
-	if (DecodableBytesPerPixel(image.Format.Code) != 4)
+	// Seam/Importer.h's discriminated memory, at the end that has no device. A dmabuf is not a mapping
+	// this can read rows out of, and there is nothing here to import it onto — so it is the composition
+	// root wiring a client's dmabuf pool at a renderer that cannot take one, which is a branch somebody
+	// wrote rather than a cast that happens to work.
+	const MappedPixels* const pixels = source.AsMapped();
+
+	if (pixels == nullptr)
+	{
+		return Failure(EINVAL, "a CPU sampler has no device to import a dmabuf onto");
+	}
+
+	if (DecodableBytesPerPixel(source.Format.Code) != 4)
 	{
 		return Failure(EINVAL, "no CPU composite samples this pixel format");
 	}
 
 	// A tiled source is a source whose rows are not rows, exactly as a tiled target is — see
 	// `BindTargets`, which refuses it for the same reason at the other end of the composite.
-	if (image.Format.Modifier != ModifierLinear && image.Format.Modifier != ModifierInvalid)
+	if (source.Format.Modifier != ModifierLinear && source.Format.Modifier != ModifierInvalid)
 	{
 		return Failure(EINVAL, "a CPU sampler reads rows, so the layout has to be linear");
 	}
 
-	const std::size_t row = static_cast<std::size_t>(image.Size.Width) * 4;
+	const std::size_t row = static_cast<std::size_t>(source.Size.Width) * 4;
 	const std::size_t needed =
-		static_cast<std::size_t>(image.Stride) * static_cast<std::size_t>(image.Size.Height - 1) + row;
+		static_cast<std::size_t>(pixels->Stride) * static_cast<std::size_t>(source.Size.Height - 1) + row;
 
-	if (image.Stride < row || image.Length < needed)
+	if (pixels->Stride < row || pixels->Length < needed)
 	{
 		return Failure(EINVAL, "the allocation is shorter than the image it describes");
 	}
 
 	const Image held{ .Id = id,
-		              .Pixels = image.Pixels,
-		              .Stride = image.Stride,
-		              .Code = image.Format.Code,
-		              .Bits = BitsPerChannel(image.Format.Code),
-		              .Size = image.Size };
+		              .Pixels = pixels->Pixels,
+		              .Stride = pixels->Stride,
+		              .Code = source.Format.Code,
+		              .Bits = BitsPerChannel(source.Format.Code),
+		              .Size = source.Size };
 
 	// Re-adopting a live id replaces what it names rather than taking a second slot: a console that
 	// re-lays its grid across a mode change has the same grid at a new address, and the scene that
-	// names it did not change.
+	// names it did not change. Seam/Importer.h has that under the same watermark rule as `Forget`,
+	// because it stops the id naming what a frame in flight may still be reading.
 	for (std::size_t index = 0; index < m_Held; ++index)
 	{
 		if (m_Images[index].Id == id)

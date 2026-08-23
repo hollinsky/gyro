@@ -400,6 +400,7 @@ gyro_add_module(Seam PORTABLE
 		Buffer.Test.cpp
 		Dressing.Test.cpp
 		EventSource.Test.cpp
+		Importer.Test.cpp
 		OutputConfiguration.Test.cpp
 		Pixel.Test.cpp
 		PresentationInfo.Test.cpp

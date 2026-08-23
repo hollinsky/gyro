@@ -9812,3 +9812,94 @@ fragment is the answer that needs measuring rather than assuming: a crude sixtee
 *worse* than the separable form it was supposed to improve on. `Blit` still refuses a shadow
 outright, beside the corner radius it also refuses — the floor beneath the floor tier draws neither,
 and both are the same missing arithmetic.
+
+### 131. Texture import is a second interface, and a texture retires on the watermark
+
+*(Decided 2026-08-23, answering the shape half of Open.md's *how a texture is minted, and who holds
+it*, whose layering half
+[decision 87](#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam) already
+settled by moving `TextureId` to `Core`.)*
+
+`ITextureImporter` in [Seam/Importer.h](../Source/Seam/Importer.h): `Adopt(TextureId, const
+TextureSource&)` and `Forget(TextureId)`, implemented by the same object that implements `IRenderer`
+and called on the dispatch thread. The entry asked three things and each has a different kind of
+answer.
+
+**The verb is a second interface rather than two more methods on `IRenderer`, because the thread is
+the difference.** Every verb on `IRenderer` runs on the frame thread — `Record` inside the frame
+section, `BindTargets` and `ReleaseTargets` outside it at an invalidation — and import runs on
+dispatch, while the frame thread is compositing from the last snapshot. Putting a dispatch verb on a
+frame-side interface is the shape
+[decision 73](#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it) caught on
+`IPresenter`, and the repair there was a second path rather than a wider first one. A separate type
+makes the thread a property of what a caller holds rather than a sentence in a comment; one object
+implementing both is `Publication`'s `Reader` and `Publisher` and `Animation`'s `Solve` and `Author`,
+split by direction rather than by purity.
+
+**The importer is handed an id and never mints one, and device migration is what forces it.**
+[Decision 41](#41-device-migration-is-exercised-on-every-boot) destroys and
+reconstructs the renderer, so an id space owned by whichever renderer is current would renumber every
+image at exactly the handoff that is supposed to be invisible — a window whose texture changed
+identity is a different node, and
+[Docs/Animation.md](Animation.md#exit-pixels)'s live-surface-becomes-a-snapshot depends on it not
+being. `Blit` had already written that argument into its private `Adopt`; what the entry missed was
+that a private verb is one the composition root cannot call, so migration cost is what moved it to
+the waist rather than a protocol layer arriving. What a migration costs instead is a re-adoption of
+every live texture against the same ids, driven by the root because it is the only party that sees
+both renderers.
+
+**Retirement needs nothing built, which is the part the entry had wrong.** It reads as the hard half
+— a release that must be safe while the frame thread may still hold the id in a list it is recording
+from — and the mechanism already exists for something else.
+[Publication/Return.h](../Source/Publication/Return.h)'s watermark is the sequence the frame thread is
+rendering from, and everything strictly below it is the dispatch side's to reclaim. A texture last
+named by a snapshot below the watermark is one no frame can still be sampling, so `Forget` is an
+ordinary dispatch-side reclamation beside the buffer releases and frame callbacks already derived
+from that number. A replacing `Adopt` is the same hazard under a different verb and carries the same
+rule.
+
+**A failed import is a surface that never reaches a frame.** `Adopt` reports to the dispatch thread,
+and the dispatch thread decides whether a snapshot names the id at all — so a refusal is answered by
+not publishing the surface, or by answering the client's commit with a protocol error, and the frame
+path never learns there was a question.
+
+**The source carries discriminated memory, for `RenderTarget`'s reason pointed the other way.** A
+`wl_shm` buffer is a mapping and a `zwp_linux_dmabuf` buffer is descriptors, and unlike a target —
+where the kind is the backend's and constant for a binding — the kind here is the individual client
+buffer's, so both implementations will be handed both. `MappedPixels` is spelled apart from
+`MappedImage` over one word: a source is somebody else's memory, and handing a writer a mutable
+pointer into a client's buffer is the kind of thing that works for years and then corrupts a window's
+own picture.
+
+**Rejected: a texture table above the renderers, holding pixels the current one uploads from.** It
+makes migration a re-upload from a copy gyro owns rather than a re-import from what the client still
+holds, which doubles the resident footprint of every window on the machine to save the composition
+root a loop it has to write anyway for the targets.
+
+**Rejected: a third channel carrying texture releases frame → dispatch.**
+[Decision 45](#45-protocol-dispatch-is-a-thread-not-a-task) makes a third channel a design error
+rather than an addition, and Return.h says why it would be one here specifically: dispatch authored
+the snapshot, so it already knows which textures sequence S contained and can derive the retirement
+itself. The per-buffer hold is the one thing the watermark cannot express, and a texture is not one —
+a hold is an exit blit deferred past the surface's death, which is a snapshot the renderer minted and
+therefore a texture dispatch never has to reclaim on the client's behalf.
+
+**Rejected: refcounting the table so `Forget` is safe at any moment.** It buys the caller nothing it
+does not already have — the watermark arrives once per dispatch iteration either way — and costs an
+atomic on the frame thread's sampling path, which is the one place
+[decision 36](#36-frame-path-discipline-is-enforced-mechanically-not-by-review)'s whole apparatus
+exists to keep clear.
+
+**The build does not enforce the thread split, and `Blit` is why.** The straddler partition runs at
+directory granularity, which fits `Render` — Structure.md already named its dispatch half `Import`
+before one existed — and does not fit the CPU renderer, whose import is a table entry into the same
+array `Record` samples from. Splitting it into a subdirectory would put two halves of one array in two
+places to satisfy a check. What stands in its place is that `Forget` is defined in terms of a number
+the frame thread does not have: a caller on the wrong thread has no watermark to be below.
+
+**What is not built.** The Vulkan implementation, which is the dmabuf arm and is where the interesting
+half lives — an external-memory image, a format and modifier the device will accept, and whether a
+staging copy is wanted for `wl_shm`. `Blit` implements the mapping arm and refuses descriptors, which
+is enough to draw a client's shm buffer on a machine with no GPU and is what the seam is tested
+through. Nobody mints an id yet either: that is the protocol layer's, and the snapshot atlas is the
+second minter, which is why the id space is not `Protocol`'s to own.

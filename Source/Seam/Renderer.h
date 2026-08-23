@@ -51,13 +51,16 @@
 // caller asks. A renderer therefore needs no `IEventSource`, which is also what makes the null
 // renderer the schedulability sweep runs a few lines of arithmetic rather than a fake device.
 //
-// **What is deliberately not here: how a texture comes to exist.** `DrawTexture` names one and
-// nothing in this file mints one. Import is dispatch-side — a `wl_buffer` arrives on the dispatch
-// thread and turns into a device image there, never inside the frame section — which makes it the
-// renderer's *other* half, in the sense Publication and Animation already use the word: `Reader` and
-// `Publisher`, `Solve` and `Author`, split by direction rather than by purity. That half is written
-// when there is a protocol layer to call it. Naming the limit rather than guessing at it is
-// Seam/Presenter.h's treatment of the promoted client buffer, one seam over.
+// **How a texture comes to exist is not here, and now has a file of its own.** *(2026-08-23, by
+// decision 131.)* `DrawTexture` names an id and nothing in this file mints or fills one, because
+// import is dispatch-side — a `wl_buffer` arrives on the dispatch thread and turns into a device image
+// there, never inside the frame section. That is the renderer's *other* half in the sense Publication
+// and Animation already use the word: `Reader` and `Publisher`, `Solve` and `Author`, split by
+// direction rather than by purity. It is `ITextureImporter` in Seam/Importer.h, a second interface
+// rather than two more methods here, so that the thread a verb runs on is a property of the type a
+// caller holds rather than a sentence in a comment. What forced it out of a renderer's private API was
+// device migration: decision 41 rebuilds the renderer on every boot, and the composition root has to
+// re-adopt every live image against the same ids across that.
 
 // Which composite ran. The axis a cost is split along before it is split by device.
 //

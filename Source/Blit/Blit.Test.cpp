@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <variant>
 #include <vector>
 
 #include "Blit/Transfer.h"
@@ -14,6 +15,7 @@
 #include "Geometry/AxisTransform.h"
 #include "Geometry/Region.h"
 #include "Geometry/Space.h"
+#include "Seam/Importer.h"
 #include "Seam/Pixel.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/Renderer.h"
@@ -121,13 +123,13 @@ public:
 		StoreWord(m_Bytes.data() + offset, EncodePixel(pixel, m_Format.Code));
 	}
 
-	[[nodiscard]] SourceImage Image() const noexcept
+	[[nodiscard]] TextureSource Image() const noexcept
 	{
-		return { .Pixels = m_Bytes.data(),
-			     .Length = m_Bytes.size(),
-			     .Stride = static_cast<std::uint32_t>(m_Size.Width) * 4,
-			     .Size = m_Size,
-			     .Format = m_Format };
+		return { .Size = m_Size,
+			     .Format = m_Format,
+			     .Memory = MappedPixels{ .Pixels = m_Bytes.data(),
+			                             .Stride = static_cast<std::uint32_t>(m_Size.Width) * 4,
+			                             .Length = m_Bytes.size() } };
 	}
 
 private:
@@ -135,6 +137,12 @@ private:
 	PixelSize<BufferSpace> m_Size{};
 	PixelFormat m_Format{};
 };
+
+// The mapping inside a source, so a refusal case can bend one field of it and leave the rest alone.
+[[nodiscard]] MappedPixels& Mapping(TextureSource& source) noexcept
+{
+	return std::get<MappedPixels>(source.Memory);
+}
 
 // One id, minted the way a dispatch side would mint one: a slot and the generation it carried.
 constexpr TextureId Logo{ 3, 2 };
@@ -837,25 +845,33 @@ GYRO_TEST(Blit, AnImageThisCannotSampleIsRefusedAtAdoption)
 
 	GYRO_CHECK_EQ(blit.Adopt(TextureId{}, picture.Image()).has_value(), false);
 
-	SourceImage empty = picture.Image();
-	empty.Pixels = nullptr;
+	TextureSource empty = picture.Image();
+	Mapping(empty).Pixels = nullptr;
 	GYRO_CHECK_EQ(blit.Adopt(Logo, empty).has_value(), false);
 
-	SourceImage planar = picture.Image();
+	TextureSource planar = picture.Image();
 	planar.Format = PixelFormat{ FormatNv12, 0, ModifierLinear };
 	GYRO_CHECK_EQ(blit.Adopt(Logo, planar).has_value(), false);
 
-	SourceImage tiled = picture.Image();
+	TextureSource tiled = picture.Image();
 	tiled.Format = PixelFormat{ FormatXrgb8888, 0, 0x0100000000000001ULL };
 	GYRO_CHECK_EQ(blit.Adopt(Logo, tiled).has_value(), false);
 
-	SourceImage short_ = picture.Image();
-	short_.Length -= 1;
+	TextureSource short_ = picture.Image();
+	Mapping(short_).Length -= 1;
 	GYRO_CHECK_EQ(blit.Adopt(Logo, short_).has_value(), false);
 
-	SourceImage narrow = picture.Image();
-	narrow.Stride = 4;
+	TextureSource narrow = picture.Image();
+	Mapping(narrow).Stride = 4;
 	GYRO_CHECK_EQ(blit.Adopt(Logo, narrow).has_value(), false);
+
+	// Seam/Importer.h's other memory kind, refused at the end with no device to import it onto. This
+	// is the composition root having wired a client's dmabuf pool at the CPU renderer, which is the
+	// same class of miswiring `BindTargets` refuses a dmabuf *target* for.
+	TextureSource descriptors = picture.Image();
+	descriptors.Memory = DmabufImage{ .Planes = { DmabufPlane{ .Descriptor = RawFd{ 0 }, .Offset = 0, .Stride = 16 } },
+		                              .PlaneCount = 1 };
+	GYRO_CHECK_EQ(blit.Adopt(Logo, descriptors).has_value(), false);
 
 	// The bound is a stated refusal rather than an estimate of a working set, and re-adopting a live
 	// id replaces what it names rather than spending another slot on it.

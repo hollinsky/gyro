@@ -21,7 +21,8 @@ splitting, or being renamed changes this file and nothing else. If a change here
 > `Seam`, and `Testing` are built — `World` being the published node record, the dressing enums, and
 > the content records, which are there because `Frame` walks them and `Scene` writes them and neither
 > may name the other, and `Seam` in its two frame-side halves, which is `IPresenter` and `IRenderer`,
-> the data their verbs take and report, and the source the presenter's completions arrive on — and
+> the data their verbs take and report, and the source the presenter's completions arrive on, plus its
+> first dispatch-side one in `ITextureImporter` — and
 > `Frame` now holds the step those interfaces are driven from and the walk that turns a published
 > scene into draw items. `Scene` is the other end of that walk, in its first half: the entity store,
 > the output model, and the serializer that turns the two into a snapshot — construction and
@@ -49,8 +50,8 @@ per-buffer hold. It is
 given somewhere to live.
 
 **`Seam` is the control waist** — every interface with more than one implementation, and the plain
-data that crosses them: `IPresenter`, `IEventSource`, `IRenderer`, `ISession`, `IInput`, alongside
-`RenderTarget`, `SyncPoint`, and `PresentationInfo`. It is [the seam](Architecture.md#the-seam) plus
+data that crosses them: `IPresenter`, `IEventSource`, `IRenderer`, `ITextureImporter`, `ISession`,
+`IInput`, alongside `RenderTarget`, `TextureSource`, `SyncPoint`, and `PresentationInfo`. It is [the seam](Architecture.md#the-seam) plus
 the one interface that is not platform at all, for the reason under
 [Frame is portable](#frame-is-portable).
 
@@ -330,6 +331,30 @@ Which also keeps the two waists from touching. `Publication` and `Seam` both res
 `Geometry` alone and the composition root is the only thing that knows both sides of either; an edge
 from one to the other, added for the benefit of a single interface, is the kind that is never removed
 afterwards. See [decision 82](Decisions.md#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene).
+
+### The importer is the first waist interface the dispatch thread calls
+
+`IRenderer` and `IPresenter` are frame-side entire, so reading the table above as *`Seam` straddles
+because two threads each own some of it* was true only of the plain data until now.
+[`ITextureImporter`](../Source/Seam/Importer.h) is the first interface here whose verbs run on the
+dispatch thread, and the reason it is an interface of its own rather than two more methods on
+`IRenderer` is exactly that: a caller holding one holds a type whose thread is settled, where a caller
+holding the other would be reading a comment.
+
+[The straddler table](#threads-are-a-second-partition) already predicted this — `Render`'s dispatch
+half is named `Import` there, against nothing that existed — and what writing it found is that the
+prediction is right about `Render` and does not reach `Blit`. A Vulkan import creates images, uploads,
+and negotiates modifiers, which is a directory's worth of code the partition can be declared over. The
+CPU renderer's is a table entry into the same array `Record` samples from: splitting it out would put
+two halves of one array in two places to satisfy a check.
+
+**So `Blit` straddles and the build does not say so, and that is the limit worth stating rather than
+papering over.** Nothing stops the frame thread calling `Adopt` there. What stands in for the check is
+the discipline in [Seam/Importer.h](../Source/Seam/Importer.h), and it is not a convention: `Forget` is
+safe only below `Publication`'s watermark, so a caller on the wrong thread does not have the number the
+verb is defined in terms of.
+
+See [decision 131](Decisions.md#131-texture-import-is-a-second-interface-and-a-texture-retires-on-the-watermark).
 
 ### A dressing's numbers are in Seam, and the enums naming it are not
 

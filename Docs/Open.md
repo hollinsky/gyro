@@ -680,21 +680,34 @@ nothing only proves the grep.
   composition root owns the import as it owns migration, which is a third party in a per-frame
   decision. This blocks nothing today and blocks plane assignment entirely, so it wants answering
   before that is written rather than during.
-- **How a texture is minted, and who holds it.** [Decision 82](Decisions.md#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene)
+- **How a texture is minted, and who holds it.** *(Shape answered 2026-08-23; the Vulkan arm and the
+  minter remain.)* [Decision 82](Decisions.md#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene)
   has a draw item name a `TextureId` and nothing in `IRenderer` creates one, on the grounds that a
   `wl_buffer` arrives on the dispatch thread and turning it into a device image must not happen inside
   the frame section — so import is the renderer's dispatch half, written when there is a protocol
-  layer to call it. **The layering half of this is now answered, and was worse than it looked**:
+  layer to call it. **The layering half was answered first, and was worse than it looked**:
   [decision 87](Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)
   found `TextureId` sitting in `Seam`, which neither `Protocol` nor `Scene` may name, so the import
-  verb had no legal caller rather than merely no design — and moves the type to `Core`. What stays
-  open is the shape, and it is the promoted-buffer entry above wearing different clothes: the
-  import verb, the release that has to be safe while the frame
-  thread may still hold the id in a list it is recording from, and whether a failed import is a frame
-  that draws nothing there or a surface that is refused at commit. The snapshot atlas is the case that
-  says it cannot simply be deferred to whoever writes `Protocol` — an exit snapshot is minted by the
-  *renderer* from pixels that are about to stop existing, which is an import with no client on the
-  other end of it. It blocks nothing until the first surface is drawn, and blocks that entirely.
+  verb had no legal caller rather than merely no design — and moves the type to `Core`.
+
+  **The shape is now
+  [decision 131](Decisions.md#131-texture-import-is-a-second-interface-and-a-texture-retires-on-the-watermark),
+  and one of the three things this entry called open turned out to be built already.** The release
+  that has to be safe while the frame thread may still hold the id needs no mechanism: Return.h's
+  watermark is the sequence the frame thread is rendering from, so a texture last named below it is
+  one no frame can be sampling, and retirement rides beside the buffer releases dispatch already
+  derives from that number. A failed import is a surface that is never published rather than a frame
+  that draws nothing there. What also came out of writing it is that the entry had the *trigger*
+  wrong — it reads as though a protocol layer is what forces the verb to the waist, and what actually
+  forces it is device migration, since `Blit` had grown the verb privately and a private verb is one
+  the composition root cannot call across a rebuild.
+
+  **What is left is the half with the device in it.** The Vulkan implementation is the dmabuf arm —
+  an external-memory image, the format and modifier negotiation an import has to survive, and whether
+  `wl_shm` wants a staging copy — and nothing mints an id yet. The minter is where the entry's own
+  observation still stands: the snapshot atlas is minted by the *renderer* from pixels that are about
+  to stop existing, which is an import with no client on the other end, so the id space cannot simply
+  belong to whoever writes `Protocol`.
 - **The cursor is a commit that is not a frame.** [Decision 29](Decisions.md#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)
   exempts the cursor plane from the budget on the grounds that it updates independently of the
   composite. That is a claim about the *rate* — the pointer moves at the input device's rate and not
