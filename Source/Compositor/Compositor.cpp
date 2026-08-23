@@ -182,16 +182,69 @@ struct BoundOutput
 	std::unique_ptr<IRenderer> Renderer;
 	OutputConfiguration Configuration{};
 	Connection<> OnTargetsInvalidated;
+	Connection<const OutputConfiguration&> OnReconfigured;
+
+	// Why the targets could not be bound, kept rather than printed. `Reconfigured` is emitted from the
+	// presenter's settle, which runs inside the frame loop's drain — so this arrives on the frame
+	// thread, where this file's own rule is that nothing is logged and a failure is carried out to
+	// whoever can. `Report` is that.
+	//
+	// **Kept even though the loop's refusal counter would eventually speak**, because what that says is
+	// `record names an unbound target` — the symptom. A bind that failed on device memory or on a
+	// modifier the device vetoed would still print a sentence about a target index, and send the reader
+	// to the loop rather than to the import.
+	std::optional<Error> BindFailure{};
 
 	// The root's half of decision 41: the images went away, so whatever holds them has to be told before
 	// the next record names one. `FrameOutput` has already damaged the whole output by the time this
 	// runs; what is left is the binding, which is the root's because the root is what paired this
 	// renderer with this presenter.
+	//
+	// **Two verbs rather than one, because the seam has two signals and they mean different things.**
+	// Seam/Presenter.h fixes the order: the imports go on `TargetsInvalidated`, since the presenter is
+	// about to close those descriptors, and the new set exists only by `Reconfigured`. `Targets()` is
+	// empty in between and says so. Binding that empty span was not *wrong* — Seam/Renderer.h has a bind
+	// imply a release and Render/Renderer.cpp does it first — but it said *release* by doing something
+	// else that happens to, one line away from the half that was actually missing.
+	void Release() noexcept
+	{
+		if (Renderer)
+		{
+			Renderer->ReleaseTargets();
+		}
+	}
+
+	// **The other half, and its absence is what blackened every nested output after its first resize.**
+	// A window manager configures gyro's toplevel before it has drawn a pixel, so a resize is not an
+	// occasional event on that backend — it is the second thing that happens. `TargetsInvalidated`
+	// dropped the imports, `Reconfigured` built a new set, and nothing bound it: every record from then
+	// on named a target the renderer did not have, the loop returned in silence, and the window held its
+	// first frame for the rest of the run.
+	//
+	// The configuration is adopted here rather than left at what was asked for, for the reason this
+	// struct's own comment gives about construction: a host hands back the size and the modifier it
+	// actually gave, and binding a new target set under the old colour state is that same mismatch one
+	// signal later.
+	void Adopt(const OutputConfiguration& achieved) noexcept
+	{
+		Configuration = achieved;
+		Rebind();
+	}
+
 	void Rebind() noexcept
 	{
-		if (Presenter != nullptr && Renderer)
+		if (Presenter == nullptr || !Renderer)
 		{
-			(void)Renderer->BindTargets(Presenter->Targets(), Configuration.Color);
+			return;
+		}
+
+		// The first one is kept, for Frame/Loop.h's reason on the refusal beside it: a renderer that
+		// cannot bind is a standing condition, and the reason it first could not is the one that names
+		// what the run started doing wrong.
+		if (const Result<void> bound = Renderer->BindTargets(Presenter->Targets(), Configuration.Color);
+		    !bound && !BindFailure)
+		{
+			BindFailure = bound.error();
 		}
 	}
 };
@@ -1170,7 +1223,8 @@ private:
 		}
 
 		bound.Rebind();
-		bound.OnTargetsInvalidated.ConnectTo<&BoundOutput::Rebind>(bound.Presenter->TargetsInvalidated, bound);
+		bound.OnTargetsInvalidated.ConnectTo<&BoundOutput::Release>(bound.Presenter->TargetsInvalidated, bound);
+		bound.OnReconfigured.ConnectTo<&BoundOutput::Adopt>(bound.Presenter->Reconfigured, bound);
 
 		m_Outputs[index].Bind(*bound.Presenter, *bound.Renderer, 0, bound.Configuration, {}, plan.Budget());
 
@@ -1228,6 +1282,14 @@ private:
 			if (const std::optional<Error>& refusal = m_Outputs[index].FirstRefusal(); refusal)
 			{
 				spdlog::warn("             {} frame(s) refused, the first: {}", m_Outputs[index].Refused(), *refusal);
+			}
+
+			// After the refusals rather than before, because it is the cause and they are what a reader
+			// actually saw. A renderer with nothing bound refuses every record it is handed, so this line
+			// is what collapses the hundreds above it into one sentence.
+			if (const std::optional<Error>& failure = m_Bound[index].BindFailure; failure)
+			{
+				spdlog::error("             the targets were never bound: {}", *failure);
 			}
 		}
 
