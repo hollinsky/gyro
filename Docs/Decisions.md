@@ -7867,7 +7867,13 @@ one moment the window is also fading, which is the only moment a group exists fo
 [World/Elevation.h](../Source/World/Elevation.h) gives about the node: a glass panel casts a shadow
 too, so it is a second field rather than more enumerators in the first. Both enums carry one
 enumerator today, so what is settled here is where a dressing lands rather than what any of them look
-like — which is still [Open.md](Open.md)'s review with a screen.
+like — which is still [Open.md](Open.md)'s review with a screen. *(Revised 2026-08-23: the field is
+the shadow itself rather than the level, which
+[decision 104](#104-an-elevation-is-a-height-under-one-light-and-the-shadow-is-analytic) called for
+and [decision 129](#129-a-height-is-the-offset-and-the-light-is-two-constants-its-size-and-its-weight)
+built. It is still a second field beside `Material` and this paragraph's argument for that is
+untouched — what changed is that the second field carries numbers, so no renderer switches on a
+level.)*
 
 ### 100. The walk drops a subtree rather than a frame, and it does so three times over
 
@@ -9648,3 +9654,80 @@ mean "including then".
 **Rejected: `DispatchLoop::Step` returning whether it published.** The counter it already keeps
 answers it, read either side of the call. A second return value would make every caller carry a fact
 only the doorbell wants, on the signature decision 80 spent an entry keeping to one `Wake`.
+
+### 129. A height *is* the offset, and the light is two constants: its size and its weight
+
+*(Decided 2026-08-23, on building
+[decision 104](#104-an-elevation-is-a-height-under-one-light-and-the-shadow-is-analytic)'s consequence
+that a draw list carries the derived shadow. Fixes the shape of the derivation and none of the values,
+which stay in [Open.md](Open.md)'s *the dressing numbers*.)*
+
+Decision 104 says a height becomes an **offset, a softness and an opacity** by **two constants held
+for the whole system**, and that is three outputs from one height and two numbers. It closes exactly
+one way: one of the three has to *be* the height, and one has to be a constant that does not vary
+with it.
+
+```
+Offset    = height
+Softness  = height · LightSpread     the light's angular size
+Opacity   = LightWeight              the umbra's alpha, flat across levels
+```
+
+**The height is the offset because that is the number a person can see.** A height in abstract units
+with a displacement constant beside it is a table nobody can tune in front of a screen — the sitting
+Open.md wants is somebody moving a window and saying *that is too far*, and *too far* is measured in
+pixels of displacement. Stating a level as five pixels and twelve pixels puts the tuning knob where
+the eye already is, and the softness follows it by one ratio.
+
+**The alpha is flat across levels, and the physics is what pays for it.** A higher node's shadow
+reads lighter, and the analytic form already does that: the same darkness spread over a wider
+penumbra has a lower peak, so the falloff is a property of the closed form rather than a row in a
+table. Material Design arrives at the same place from the other direction — its key and ambient
+alphas are fixed and only the blur and the offset move with elevation.
+
+**Rejected: an alpha per level, which is the obvious third constant.** It is the number that would
+let two levels stop being one light. A table with a darkness column drifts into a *look* per level
+one tuning session at a time, which is decision 104's collage of toolkit shadows re-created inside
+gyro — and every step of the drift is individually defensible, which is what makes it the failure to
+design out rather than to watch for.
+
+**Rejected: `DrawItem` keeping the level and each renderer deriving from it.** Decision 104 already
+calls for the derived shadow; the reason is sharper once there are two renderers with a shared
+oracle. `Blit` and the Vulkan renderer are two implementations of one look (decision 40), so a level
+each of them interprets is a depth the picture has two answers for — and decision 62's oracle, which
+draws one frame twice and asserts the two agree, is comparing the interpretations rather than the
+rendering. Resolving once on the walk that reads the node means neither renderer is ever told which
+level it is drawing.
+
+**Rejected: the light table beside `Elevation` in `World`.** It is decision 33 lost by proximity, and
+[Dressing.h](../Source/Seam/Dressing.h) already argues the same case for the material numbers:
+`World/Elevation.h` is the header the authoring side opens in order to say `Elevation::Floating`, so
+an offset in it is one `#include` from the call site the rule exists to keep it away from. The enum
+stays where a shell can reach it and the numbers sit on the far side of a waist neither `Scene` nor
+`Protocol` may name.
+
+#### The shadow's expansion is a truncation, and the cutoff is argued in code points
+
+Decision 63's expansion is exact for a material because a box chain is compactly supported. A
+penumbra is a Gaussian and has infinite support, so its bound is a *choice* of where to stop, which
+is the thing that entry warns leaves a trail at the edge of something that moved.
+
+**Three standard deviations, because that is where the shadow falls below what the target can
+represent.** A blurred step edge at 3σ is at 0.00135 of full, so at the umbra's alpha the light left
+outside the bound is under an eighth of an eight-bit code point — the same threshold
+[Settle.h](../Source/Scene/Settle.h) retires an opacity channel at, and the argument is the same one:
+a difference the framebuffer cannot hold is not a difference. Stated in sigmas it is a convention;
+stated in code points it is a fact about the panel.
+
+**Declared symmetric, and therefore over-declared on three sides.** The shadow is displaced downward,
+so it reaches further below the quad than above it. The larger figure on all four sides costs a band
+of fragments that evaluate to nothing and buys a scalar no caller can apply to the wrong axis;
+decision 63's rule is that an expansion may not be *under*-declared, and this is the direction that
+cannot leave a trail.
+
+#### The gym is what the numbers get looked at on
+
+[Lanes.cpp](../Source/Gym/Lanes.cpp)'s two material panels now sit at the two lifted levels rather
+than both at `Floating`. Ranking one height against another means having both under the same moving
+lanes at the same moment — one level twice shows a shadow and settles nothing, which is the same
+argument decision 103's two materials are laid side by side under.

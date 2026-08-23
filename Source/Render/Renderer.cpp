@@ -19,7 +19,6 @@
 #include "Render/Pipeline.h"
 #include "Render/Vulkan.h"
 #include "Seam/Dressing.h"
-#include "World/Elevation.h"
 #include "World/Material.h"
 
 namespace
@@ -99,7 +98,7 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 		return Failure(EINVAL, "this renderer flattens no groups yet; decision 60's offscreen is not built");
 	}
 
-	if (item.Lift != Elevation::None)
+	if (item.Lift.Draws())
 	{
 		return Failure(EINVAL, "this renderer draws no shadows yet");
 	}

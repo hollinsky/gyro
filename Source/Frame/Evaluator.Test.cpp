@@ -787,7 +787,7 @@ GYRO_TEST(Evaluator, ALiftedReferenceDrawsTheTilesShadowUnderItsExpansion)
 	// The shadow first and the window on top of it, because preorder is the painter's order. Reversed,
 	// an overview would lay every tile's shadow over the tile beside it.
 	GYRO_CHECK(std::holds_alternative<DrawDressing>(list.Items[0].Content));
-	GYRO_CHECK_EQ(list.Items[0].Lift, Elevation::Resting);
+	GYRO_CHECK_EQ(list.Items[0].Lift, Cast(Elevation::Resting));
 	GYRO_CHECK_EQ(list.Items[0].Dress, Material::None);
 
 	// On the tile's own extent rather than on the expansion's, which is the rest of decision 99: the
@@ -827,8 +827,8 @@ GYRO_TEST(Evaluator, ALiftedGroupCastsOneShadowAndNotTwo)
 	// exists for.
 	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 2 });
 	GYRO_CHECK(AsGroup(list.Items[0]) != nullptr);
-	GYRO_CHECK_EQ(list.Items[0].Lift, Elevation::Floating);
-	GYRO_CHECK_EQ(list.Items[1].Lift, Elevation::None);
+	GYRO_CHECK_EQ(list.Items[0].Lift, Cast(Elevation::Floating));
+	GYRO_CHECK(!list.Items[1].Lift.Draws());
 }
 
 GYRO_TEST(Evaluator, AContentIndexPastItsRunDrawsNothing)

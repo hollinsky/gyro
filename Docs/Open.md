@@ -397,7 +397,9 @@ nothing only proves the grep.
   [Decisions 103 and 104](Decisions.md#103-a-dressing-is-named-by-what-it-does-to-light-the-material-set-is-glass-and-smoke)
   fix which materials and which levels exist and what each is for, and deliberately fix no value:
   `Glass`'s radius and tint, `Smoke`'s radius and the worst-case contrast floor its opacity is derived
-  from, the two heights, and the two constants the one light turns a height into. The contrast floor
+  from, the two heights, and the two constants the one light turns a height into —
+  [decision 129](Decisions.md#129-a-height-is-the-offset-and-the-light-is-two-constants-its-size-and-its-weight)
+  fixes what those two constants *are* and leaves every value here. The contrast floor
   is the only one of these that is not taste — it is a legibility threshold against a video frame,
   and it wants measuring rather than choosing. The rest want GTK, Qt, and an Xwayland application on
   a screen at once, which is the same sitting the entry below wants.

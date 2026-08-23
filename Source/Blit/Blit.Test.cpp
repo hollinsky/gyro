@@ -423,7 +423,7 @@ GYRO_TEST(Blit, WhatItCannotExpressIsRefusedBeforeAnythingIsDrawn)
 	GYRO_CHECK_EQ(refused(dressed), false);
 
 	DrawItem lifted = Solid(square, 1.0F, 1.0F, 1.0F);
-	lifted.Lift = Elevation::Resting;
+	lifted.Lift = Cast(Elevation::Resting);
 	GYRO_CHECK_EQ(refused(lifted), false);
 
 	DrawItem rounded = Solid(square, 1.0F, 1.0F, 1.0F);

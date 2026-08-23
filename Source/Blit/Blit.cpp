@@ -9,7 +9,6 @@
 #include "Core/Time.h"
 #include "Geometry/Region.h"
 #include "Seam/Pixel.h"
-#include "World/Elevation.h"
 #include "World/Material.h"
 
 namespace
@@ -109,7 +108,7 @@ Result<Blit::Painted> Blit::Classify(const DrawItem& item) const noexcept
 		return Failure(EINVAL, "no CPU composite draws a material");
 	}
 
-	if (item.Lift != Elevation::None)
+	if (item.Lift.Draws())
 	{
 		return Failure(EINVAL, "no CPU composite draws a shadow");
 	}

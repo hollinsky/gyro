@@ -5,10 +5,12 @@
 #include <cstdint>
 #include <string_view>
 
+#include "World/Elevation.h"
 #include "World/Material.h"
 
-// What a material *is*, in numbers: the radius, the tint, `Smoke`'s contrast floor, decision 63's
-// kind and expansion, and decision 34's ladder.
+// What a dressing *is*, in numbers: a material's radius, tint, `Smoke`'s contrast floor, decision
+// 63's kind and expansion, and decision 34's ladder — and, at the bottom of the file, decision 104's
+// one light, which is the same table for the other dressing.
 //
 // **It is in `Seam` because two renderers have to produce one picture.** Decision 62's oracle draws
 // the same frame twice and asserts the two agree, and decision 40 makes software rendering a device
@@ -348,3 +350,148 @@ struct ChainPlan
 
 	return reach * static_cast<float>(plan.Divisor);
 }
+
+// What a *height* does to light, which is the other half of a dressing and the same kind of table.
+//
+// **It is here for the reason the material numbers are here**, and the reason is sharper on this
+// side: decision 62's oracle draws one frame twice, and two renderers that disagree about a shadow
+// disagree about the depth of the whole picture rather than about one panel. The enum stays in
+// `World` where a shell can reach it and the numbers sit on the far side of a waist neither `Scene`
+// nor `Protocol` may name — decision 33 again, and `Elevation` has as little room for an offset as
+// `Material` has for a radius.
+
+// The shadow one level casts, in device pixels: decision 104's *derived* shadow, which is what
+// crosses to a renderer instead of the level itself.
+//
+// **Nothing downstream switches on a level, which is why this type exists at all.** Decision 104's
+// consequence in as many words, and decision 82's direction for a draw list: an item carries numbers
+// a renderer can draw rather than a vocabulary it has to interpret. The two renderers cannot then
+// hold different opinions about what `Floating` means, because neither of them is ever told.
+struct Shadow
+{
+	// How far the shadow is displaced, straight down the screen. A scalar rather than a vector
+	// because the light is parallel and the direction is the system's rather than the node's — two
+	// windows at one level cast the same shadow wherever they sit, which is the whole of decision
+	// 104's one light.
+	float Offset = 0.0F;
+
+	// The penumbra's standard deviation, in device pixels, and a sigma for `MaterialFacts::Sigma`'s
+	// reason: it is a property of the look rather than of a kernel somebody chose to draw it with.
+	// The shadow is analytic, so nothing here is a pass count and no tier reaches it.
+	float Softness = 0.0F;
+
+	// The umbra's alpha — what the shadow would be at its darkest with no penumbra spreading it.
+	// **Constant across levels on purpose**: a higher node's shadow reads lighter because the closed
+	// form spreads the same darkness over more screen, not because a table told it to. That is one
+	// fewer number to tune and the physical answer, and it is what lets two heights and two constants
+	// produce all three of these.
+	float Opacity = 0.0F;
+
+	friend constexpr bool operator==(Shadow, Shadow) noexcept = default;
+
+	// A shadow that reaches no pixel, which is what `Elevation::None` derives to and what a default
+	// item carries. The predicate is here rather than at three call sites comparing against `{}`.
+	[[nodiscard]] constexpr bool Draws() const noexcept { return Opacity > 0.0F; }
+};
+
+// SPEC: the two constants, and they are unmeasured in the way Facts(Material)'s rows are.
+//
+// Decision 104 fixes that a height becomes an offset, a softness, and an opacity by two constants
+// held for the whole system, and fixes no value; Open.md's *the dressing numbers* is the sitting that
+// picks them. What is decided and built here is the shape — configuration retunes these two, which
+// moves every level together, and configuration cannot reach a level because a level has nowhere to
+// put a radius.
+
+// Penumbra per pixel of height: the light's angular size, and the only thing that separates a crisp
+// shadow from a diffuse one.
+inline constexpr float LightSpread = 1.4F;
+
+// The umbra's alpha. One number for the system, and see `Shadow::Opacity` for why it does not vary
+// with the height.
+inline constexpr float LightWeight = 0.32F;
+
+// A level's height, in device pixels — and the height *is* the offset, which is what keeps decision
+// 104's arithmetic at two constants rather than three. A height stated in pixels of displacement is
+// a number a person can see directly on a screen, which is what the sitting that tunes these will
+// have in front of it.
+//
+// **Decision 105's relief multiplies this**, when the channel exists: a window at half relief is half
+// its level's height and half its floor radius. Nothing carries a relief yet — `Node` has no such
+// coefficient slot filled — so this is the full-relief height and the multiply lands at the one call
+// site that derives the shadow.
+[[nodiscard]] constexpr float Height(Elevation level) noexcept
+{
+	switch (level)
+	{
+		case Elevation::None:
+			return 0.0F;
+		case Elevation::Resting:
+			return 5.0F;
+		case Elevation::Floating:
+			return 12.0F;
+	}
+
+	return 0.0F;
+}
+
+// The one light, applied to one height. This is the whole of the derivation decision 104 describes,
+// and every caller of it is a walk that is about to build a draw item.
+[[nodiscard]] constexpr Shadow Cast(Elevation level) noexcept
+{
+	const float height = Height(level);
+
+	if (height <= 0.0F)
+	{
+		return {};
+	}
+
+	return { .Offset = height, .Softness = height * LightSpread, .Opacity = LightWeight };
+}
+
+// Decision 63's expansion for the other dressing: how far past its own extent a shadow reaches, in
+// device pixels, so that the geometry drawn covers it and a change behind it dirties the right region.
+//
+// **Truncated rather than exact, and the cutoff is argued in code points rather than in sigmas.** The
+// material expansion above can be exact because a box chain is compactly supported; a penumbra is a
+// Gaussian and has none, so a bound means choosing where to stop. At three standard deviations past
+// the edge a blurred step is at 0.00135 of its full value, so with `LightWeight` at 0.32 the alpha
+// left outside this bound is under 0.12 of an eight-bit code point — under half of what the target
+// can represent, which is the same threshold Scene/Settle.h retires an opacity channel at.
+//
+// **Symmetric, and over-declared on three sides.** The shadow is displaced downward, so it reaches
+// `Offset + 3σ` below and `3σ − Offset` above; declaring the larger figure for all four sides costs a
+// band of fragments that evaluate to nothing and buys a scalar that no caller can apply to the wrong
+// axis. Decision 63's rule is that an expansion may not be under-declared, and this is the direction
+// that cannot leave a trail behind something that moved.
+[[nodiscard]] constexpr float Expansion(Shadow shadow) noexcept
+{
+	if (!shadow.Draws())
+	{
+		return 0.0F;
+	}
+
+	return shadow.Offset + 3.0F * shadow.Softness;
+}
+
+// The contract everything downstream assumes.
+
+// The enumeration order is the height order, which World/Elevation.h states as a rule and this is the
+// table satisfying it. A level added out of order reads correctly at every call site and reverses two
+// shadows on screen.
+static_assert(Height(Elevation::None) < Height(Elevation::Resting));
+static_assert(Height(Elevation::Resting) < Height(Elevation::Floating));
+
+// `None` derives to a shadow that draws nothing, which is what makes the level check downstream a
+// property of the numbers rather than a second switch on the enum.
+static_assert(Cast(Elevation::None) == Shadow{} && !Cast(Elevation::None).Draws());
+static_assert(Cast(Elevation::Resting).Draws() && Cast(Elevation::Floating).Draws());
+
+// The two lifted levels are visibly different, which is decision 104's perceptual cap read the other
+// way: a level that costs nothing to have still has to be one a person can rank against its
+// neighbour. Two pixels of offset is the smallest difference worth asserting is present.
+static_assert(Cast(Elevation::Floating).Offset - Cast(Elevation::Resting).Offset >= 2.0F);
+
+// A shadow reaches past its own quad or it is not a shadow, and the expansion is what says so to the
+// geometry that draws it.
+static_assert(Expansion(Cast(Elevation::None)) == 0.0F);
+static_assert(Expansion(Cast(Elevation::Resting)) > Cast(Elevation::Resting).Offset);

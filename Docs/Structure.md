@@ -331,11 +331,15 @@ Which also keeps the two waists from touching. `Publication` and `Seam` both res
 from one to the other, added for the benefit of a single interface, is the kind that is never removed
 afterwards. See [decision 82](Decisions.md#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene).
 
-### A material's numbers are in Seam, and the enum naming it is not
+### A dressing's numbers are in Seam, and the enums naming it are not
 
 `World/Material.h` says which materials exist and `Seam/Dressing.h` says what each one *is* — the
-radius, the tint, `Smoke`'s contrast floor, and the tier table that decides a chain's structure. The
-split is not a tidiness preference; each half is somewhere the other may not be.
+radius, the tint, `Smoke`'s contrast floor, and the tier table that decides a chain's structure.
+`World/Elevation.h` and the light table below it in the same file are that split a second time, for
+the other dressing: the levels are up where a shell can name one, and the height each becomes is
+down here with a renderer that is never told which level it drew
+([decision 129](Decisions.md#129-a-height-is-the-offset-and-the-light-is-two-constants-its-size-and-its-weight)).
+The split is not a tidiness preference; each half is somewhere the other may not be.
 
 The numbers cannot go up beside the enum, because
 [decision 33](Decisions.md#33-effects-are-named-materials-not-parameterized-filter-calls) forbids the

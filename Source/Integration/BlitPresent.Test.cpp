@@ -84,7 +84,7 @@ constexpr std::byte Untouched{ 0xAB };
 		             .Opacity = 1.0F,
 		             .Radius = 0.0F,
 		             .Dress = Material::None,
-		             .Lift = Elevation::None,
+		             .Lift = {},
 		             .Color = ColorState::Srgb(),
 		             .Sampling = {} };
 }

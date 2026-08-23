@@ -425,7 +425,11 @@ private:
 		float own = inherited * opacity;
 		float descend = own;
 		Material dress = node.Dress;
-		Elevation lift = node.Lift;
+
+		// **The one place a level becomes numbers.** Decision 104 has the draw list carry the derived
+		// shadow rather than the elevation, so the resolution happens here, on the walk that is already
+		// reading the node — and a renderer is never told which level it is drawing.
+		Shadow lift = Cast(node.Lift);
 		std::uint32_t group = NoItem;
 
 		// **A group takes the node's dressing along with its opacity, and for the same reason.** Both
@@ -450,7 +454,7 @@ private:
 			own = 1.0F;
 			descend = 1.0F;
 			dress = Material::None;
-			lift = Elevation::None;
+			lift = {};
 		}
 
 		Drawn drawn{};
@@ -469,7 +473,7 @@ private:
 		// **Both are the locals rather than the node's own predicates**, because a group above has
 		// already taken them and zeroed them here. Reading `node.IsLifted()` would draw the shadow a
 		// second time, inside the offscreen it was just lifted out of.
-		if (node.HasContent() || dress != Material::None || lift != Elevation::None)
+		if (node.HasContent() || dress != Material::None || lift.Draws())
 		{
 			drawn = Draw(node, chain, view, own, dress, lift, runs);
 
@@ -569,7 +573,7 @@ private:
 		const OutputView& view,
 		float opacity,
 		Material dress,
-		Elevation lift,
+		Shadow lift,
 		const Runs& runs
 	)
 	{

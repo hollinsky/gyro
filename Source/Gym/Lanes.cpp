@@ -269,6 +269,11 @@ Result<MaterialOverlay> AuthorMaterialOverlay(SceneStore& scene, const LaneScene
 	// materials differ in what they owe rather than in weight — `Glass` sits over content the user
 	// arranged and `Smoke` over content gyro did not choose — and reading that difference means seeing
 	// the same moving lanes through both at once.
+	//
+	// **The two panels also sit at the two lifted levels**, which is the only way the light table gets
+	// looked at: decision 104's heights and its two constants are numbers Open.md leaves to a sitting
+	// with a screen, and ranking one height against another means having both under the same lanes at
+	// the same moment. One level twice would show a shadow and settle nothing.
 	const double panelTop = height * 0.06;
 	const double panelHeight = height * 0.88;
 	const double panelWidth = width * 0.24;
@@ -290,7 +295,7 @@ Result<MaterialOverlay> AuthorMaterialOverlay(SceneStore& scene, const LaneScene
 		{ .Position = At(width * 0.62, panelTop),
 	      .Extent = Extent(panelWidth, panelHeight),
 	      .Dress = Material::Smoke,
-	      .Lift = Elevation::Floating }
+	      .Lift = Elevation::Resting }
 	);
 
 	if (!builder.Ok())

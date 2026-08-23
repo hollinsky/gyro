@@ -214,7 +214,7 @@ constexpr std::uint32_t Filled = 0xABABABAB;
 		             .Opacity = opacity,
 		             .Radius = radius,
 		             .Dress = Material::None,
-		             .Lift = Elevation::None,
+		             .Lift = {},
 		             .Color = ColorState::Srgb(),
 		             .Sampling = {} };
 }
@@ -1189,7 +1189,7 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 	std::array<DrawItem, 4> refused{ drawable, drawable, drawable, drawable };
 	refused[0].Content = DrawTexture{};
 	refused[1].Content = DrawGroup{ .Count = 0 };
-	refused[2].Lift = Elevation::Resting;
+	refused[2].Lift = Cast(Elevation::Resting);
 
 	// **The colour-state refusal is now one transfer function rather than every conversion**, and HLG
 	// is the one because converting it needs a display peak luminance `ColorState` does not carry.

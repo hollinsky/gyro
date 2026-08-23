@@ -19,7 +19,6 @@
 #include "Seam/Dressing.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/SyncPoint.h"
-#include "World/Elevation.h"
 #include "World/Material.h"
 
 // The render half of the seam: what produces the pixels a presenter puts on the glass.
@@ -291,9 +290,16 @@ struct DrawItem
 
 	Material Dress = Material::None;
 
-	// How far the item sits off what is behind it, which the renderer draws as a shadow around this
-	// item's quad. It is a field beside `Dress` rather than more enumerators inside it for
-	// World/Elevation.h's reason: a glass panel casts a shadow too.
+	// The shadow the item casts around its own quad: an offset, a softness and an alpha, already
+	// derived from the node's level by Seam/Dressing.h's one light. It is a field beside `Dress`
+	// rather than more enumerators inside it for World/Elevation.h's reason: a glass panel casts a
+	// shadow too.
+	//
+	// **Numbers rather than the level, which is decision 104's own consequence and decision 82's
+	// direction.** Nothing in a renderer switches on `Resting` against `Floating` — what it does with
+	// either is arithmetic — so the level is resolved once on the walk that builds the list, and two
+	// renderers cannot then disagree about what a level means. It is also what keeps `Elevation` out
+	// of this header, which is the edge that entry says the draw list should lose.
 	//
 	// **It is the emitting node's own, and it emits on its own.** Decision 99 places a dressing on the
 	// node's own extent whatever the node's kind, and decision 95 puts both dressings in one slot
@@ -306,10 +312,16 @@ struct DrawItem
 	// **A group takes it along with the opacity**, since both belong to the flattened result, and the
 	// member it was taken from does not draw it again.
 	//
-	// Decision 104 is what the renderer derives from it: a height under one light, drawn as an
-	// analytic rounded rect rather than as a blurred silhouette, which is why this costs no pass of
-	// its own and stays off decision 34's quality ladder.
-	Elevation Lift = Elevation::None;
+	// Decision 104 is what it is drawn as: an analytic rounded rect rather than a blurred silhouette,
+	// which is why this costs no pass of its own and stays off decision 34's quality ladder — a
+	// floored frame keeps every shadow and gives up the blur behind a panel.
+	//
+	// **The item's own material must not sample it.** Within one item the shadow is drawn around the
+	// quad while the material samples what is behind, and a material that sampled the target after
+	// this landed would darken the panel at its own edges — a dark halo inside every translucent
+	// panel, worst where it reads through most. Decision 60's rule does not reach it, because a node's
+	// own shadow is not below it in tree order; it is the same item.
+	Shadow Lift{};
 
 	// What the item's texels or components mean as light. Per item rather than per request because a
 	// composite mixes content that arrived in different states — decision 47 is that untagged content
@@ -588,7 +600,7 @@ static_assert(std::formattable<Quad, char>);
 // rectangle over somebody's screen.
 static_assert(std::holds_alternative<DrawDressing>(DrawContent{}));
 static_assert(DrawItem{}.Shape.Bounds().IsEmpty());
-static_assert(DrawItem{}.Dress == Material::None && DrawItem{}.Lift == Elevation::None);
+static_assert(DrawItem{}.Dress == Material::None && !DrawItem{}.Lift.Draws());
 static_assert(!DrawItem{}.Sampling.MapsRectangles(), "A transform that did not reduce classifies as nothing");
 
 // A rectangle round-trips through the quad, which is the group item's whole path.

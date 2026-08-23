@@ -214,3 +214,55 @@ GYRO_TEST(Dressing, EveryMaterialInTheSetGathers)
 		GYRO_CHECK(Facts(material).Gathering);
 	}
 }
+
+// Decision 104's one light, asserted as the thing that would break if it stopped being one: every
+// lifted level's shadow has to be the *same* shadow scaled by its own height. A table that grew a
+// per-level softness would pass every other test in this file and produce the collage of lights that
+// entry exists to end — a menu lit one way over a window lit another, which is what a Linux desktop
+// looks like today and is visible in a screenshot before anything moves.
+GYRO_TEST(Dressing, EveryLevelIsTheSameLightAtADifferentHeight)
+{
+	for (const Elevation level : AllElevations)
+	{
+		const Shadow shadow = Cast(level);
+
+		if (!shadow.Draws())
+		{
+			GYRO_CHECK_EQ(Height(level), 0.0F);
+			continue;
+		}
+
+		GYRO_CHECK_EQ(shadow.Offset, Height(level));
+		GYRO_CHECK(std::abs(shadow.Softness - shadow.Offset * LightSpread) < 1.0e-5F);
+
+		// The alpha is the constant rather than a function of the height, which is the half of the
+		// derivation that would be tempting to make a third number. A higher node reads lighter
+		// because the penumbra spreads the same darkness over more screen.
+		GYRO_CHECK_EQ(shadow.Opacity, LightWeight);
+	}
+}
+
+// The truncation the Gaussian forces, checked in the units the target can actually represent rather
+// than in standard deviations. A box chain is compactly supported and a penumbra is not, so the
+// shadow's expansion is a *choice* of where to stop — and the only defensible place to stop is below
+// what an eight-bit framebuffer can hold, which is what makes the trail this leaves unobservable
+// rather than merely small.
+GYRO_TEST(Dressing, WhatFallsOutsideTheShadowsExpansionIsBelowACodePoint)
+{
+	for (const Elevation level : AllElevations)
+	{
+		const Shadow shadow = Cast(level);
+
+		if (!shadow.Draws())
+		{
+			continue;
+		}
+
+		// A blurred step edge at the declared bound: the expansion less the displacement, in standard
+		// deviations, is how far past the quad's own edge the penumbra has been followed.
+		const float sigmas = (Expansion(shadow) - shadow.Offset) / shadow.Softness;
+		const float coverage = 0.5F * std::erfc(sigmas / std::sqrt(2.0F));
+
+		GYRO_CHECK((coverage * shadow.Opacity) * 255.0F < 0.5F);
+	}
+}
