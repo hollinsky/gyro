@@ -1,3 +1,5 @@
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -286,6 +288,54 @@ void CheckThePlacement(const ImageView& image)
 	return items;
 }
 
+// The exported dmabuf, wrapped in the owner Virtual/Buffer.h already has, so that reading it back is
+// the same instrument every other test in this file uses: the mapping, the kernel's cache maintenance
+// around it, and Virtual/Pixels.h's predicates over the result.
+//
+// **A duplicate of the descriptor rather than the descriptor**, because `ExportedImage` owns its own
+// and `DmabufBuffer` owns what it is handed — which is the same `dup` the renderer's import does, for
+// the same reason, one layer up.
+//
+// `nullopt` where the buffer cannot be mapped, which is a real answer rather than a failure: a
+// descriptor a GPU exported is not obliged to be CPU-visible, and what that costs here is the
+// readback rather than the round trip.
+[[nodiscard]] std::optional<DmabufBuffer> Readable(const ExportedImage& exported)
+{
+	const RenderTarget& target = exported.Target();
+	const DmabufImage* image = target.AsDmabuf();
+
+	// One plane at offset zero, which is what a linear export is and all `Mapping` can express — it
+	// owns the address it unmaps, so a plane that started partway into the buffer would need the
+	// mapping and the pixels to be two different pointers.
+	if (image == nullptr || image->PlaneCount != 1 || image->Planes[0].Offset != 0)
+	{
+		return std::nullopt;
+	}
+
+	const std::size_t length =
+		static_cast<std::size_t>(image->Planes[0].Stride) * static_cast<std::size_t>(target.Size.Height);
+	void* pixels = ::mmap(nullptr, length, PROT_READ | PROT_WRITE, MAP_SHARED, exported.Descriptor().Value, 0);
+
+	if (pixels == MAP_FAILED)
+	{
+		return std::nullopt;
+	}
+
+	Fd duplicated{ ::fcntl(exported.Descriptor().Value, F_DUPFD_CLOEXEC, 0) };
+
+	if (!duplicated.IsValid())
+	{
+		::munmap(pixels, length);
+
+		return std::nullopt;
+	}
+
+	return std::optional<DmabufBuffer>{
+		std::in_place, std::move(duplicated),   target.Size,
+		target.Format, image->Planes[0].Stride, Mapping{ static_cast<std::byte*>(pixels), length }
+	};
+}
+
 // **Decision 62's oracle: one scene, both executions, and the difference between them measured
 // rather than asserted away.**
 //
@@ -564,6 +614,186 @@ GYRO_TEST(RenderImport, ASolidLandsInTheSamePlaceOnHardware)
 	GYRO_REQUIRE(buffer != nullptr);
 
 	const BufferReader reader{ *buffer };
+	GYRO_REQUIRE(reader.IsValid());
+
+	CheckThePlacement(reader.Image());
+}
+
+// **The export path, round-tripped against the import path that already works.**
+//
+// A nested output has no GBM device and no swapchain, so nothing on the machine allocates its targets
+// for it and it has to ask the rendering device — `VulkanDevice::Export`. What that produces is a
+// dmabuf, which is the same thing `udmabuf` produces one file over, so the claim worth testing is
+// that the two are interchangeable: the descriptor the device handed out goes straight back in
+// through `BindTargets`, the renderer imports it under the modifier the export chose, and the solid
+// lands exactly where it lands in every other test in this file.
+//
+// **The oracle is `CheckThePlacement`, shared with the allocated case on purpose.** Two assertions
+// that could drift apart would let an exported target be *nearly* right — half a pixel off, or read
+// at a stride the export reported and the import ignored — and pass. One function, two sources of
+// memory, one picture.
+//
+// **Skipped rather than failed where the device will not export**, which is the same shape decision
+// 108's timeline test has and for a related reason: a driver may render into a modifier and decline
+// to hand out a descriptor for it, and lavapipe's dmabuf support is a Mesa build option rather than a
+// promise. The skip prints what the device said.
+GYRO_TEST(RenderImport, AnExportedTargetImportsBackAndDraws)
+{
+	std::optional<Fixture> fixture = Available("AnExportedTargetImportsBackAndDraws");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	// Linear alone, because this is the modifier the readback below can make sense of — a tiled
+	// export would import and draw correctly and produce bytes no CPU predicate can read.
+	constexpr std::array<std::uint64_t, 1> Candidates{ ModifierLinear };
+
+	const Result<ExportedImage> exported = fixture->Device().Export(Resolution, FormatXrgb8888, Candidates);
+
+	if (!exported)
+	{
+		std::println(
+			"  skipped RenderImport.AnExportedTargetImportsBackAndDraws: {} ({})",
+			exported.error().Context(),
+			std::strerror(exported.error().Code())
+		);
+
+		return;
+	}
+
+	GYRO_REQUIRE(exported->IsValid());
+	GYRO_CHECK_EQ(exported->Format(), Linear);
+	GYRO_CHECK(exported->Descriptor().IsValid());
+
+	const RenderTarget& target = exported->Target();
+	GYRO_REQUIRE(target.IsValid());
+
+	const DmabufImage* image = target.AsDmabuf();
+	GYRO_REQUIRE(image != nullptr);
+	GYRO_CHECK_EQ(image->PlaneCount, 1U);
+	GYRO_CHECK_EQ(image->Planes[0].Descriptor, exported->Descriptor());
+
+	// The stride is the driver's and may be padded past the width; what it may not be is smaller than
+	// a row, which is the failure a layout read back through the wrong aspect produces.
+	GYRO_CHECK(image->Planes[0].Stride >= static_cast<std::uint32_t>(Resolution.Width) * 4U);
+
+	// The round trip: a descriptor this device allocated, imported by this device.
+	GYRO_REQUIRE(fixture->Renderer().BindTargets({ &target, 1 }, ColorState::Srgb()).has_value());
+	GYRO_CHECK_EQ(fixture->Renderer().BoundTargets(), 1U);
+
+	std::optional<DmabufBuffer> readable = Readable(*exported);
+
+	if (!readable)
+	{
+		std::println("  this device's exported buffer cannot be mapped; the placement is not checked");
+
+		return;
+	}
+
+	// After the bind, for `Fixture::Prefill`'s reason: the import transitions the image out of
+	// `VK_IMAGE_LAYOUT_UNDEFINED`, and a driver is entitled to discard whatever it held across that.
+	{
+		const DmabufBuffer::CpuRead write{ *readable };
+		std::ranges::fill(readable->Pixels(), Untouched);
+	}
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	const DrawItem item = Solid({ { 16.0F, 8.0F }, { 24.0F, 12.0F } }, DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F });
+	const Result<Submission> submission = fixture->Renderer().Record(Composite(0, damage, { &item, 1 }));
+	GYRO_REQUIRE_EQ(submission.has_value(), true);
+
+	while (!fixture->Renderer().IsComplete(submission->Point))
+	{
+		// Deliberately empty, for the reason the hardware placement test gives: a poll rather than a
+		// wait is what the frame loop does.
+	}
+
+	const BufferReader reader{ *readable };
+	GYRO_REQUIRE(reader.IsValid());
+
+	CheckThePlacement(reader.Image());
+
+	// **The descriptor is closed with the image, which is the ownership claim the header makes and the
+	// one a sanitizer cannot see.** Repeated, because one stranded descriptor is invisible and a few
+	// hundred is a process that cannot open a file — the same instrument, and the same reasoning, as
+	// `AHalfImportedSetLeavesNothingBehind` uses on the import side.
+	const std::size_t before = OpenDescriptors();
+
+	for (int attempt = 0; attempt < 256; ++attempt)
+	{
+		const Result<ExportedImage> again = fixture->Device().Export(Resolution, FormatXrgb8888, Candidates);
+		GYRO_REQUIRE_EQ(again.has_value(), true);
+	}
+
+	GYRO_CHECK_EQ(OpenDescriptors(), before);
+}
+
+// The same claim on a real driver, which is where an export is anything other than a formality:
+// lavapipe's memory is the heap and a GPU's is not, so the modifier the device picks, the stride it
+// lays the rows out at, and whether the descriptor can be mapped at all are only real questions here.
+GYRO_TEST(RenderImport, AnExportedTargetImportsBackOnHardware)
+{
+	std::optional<Fixture> fixture = Available("AnExportedTargetImportsBackOnHardware", DeviceClass::Hardware);
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	std::println("  {}", fixture->Device().Description());
+
+	constexpr std::array<std::uint64_t, 1> Candidates{ ModifierLinear };
+
+	const Result<ExportedImage> exported = fixture->Device().Export(Resolution, FormatXrgb8888, Candidates);
+
+	if (!exported)
+	{
+		std::println(
+			"  skipped RenderImport.AnExportedTargetImportsBackOnHardware: {} ({})",
+			exported.error().Context(),
+			std::strerror(exported.error().Code())
+		);
+
+		return;
+	}
+
+	GYRO_REQUIRE(exported->IsValid());
+	GYRO_CHECK_EQ(exported->Format(), Linear);
+
+	const RenderTarget& target = exported->Target();
+	GYRO_REQUIRE(fixture->Renderer().BindTargets({ &target, 1 }, ColorState::Srgb()).has_value());
+
+	std::optional<DmabufBuffer> readable = Readable(*exported);
+
+	if (!readable)
+	{
+		std::println("  this device's exported buffer cannot be mapped; the placement is not checked");
+
+		return;
+	}
+
+	{
+		const DmabufBuffer::CpuRead write{ *readable };
+		std::ranges::fill(readable->Pixels(), Untouched);
+	}
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	const DrawItem item = Solid({ { 16.0F, 8.0F }, { 24.0F, 12.0F } }, DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F });
+	const Result<Submission> submission = fixture->Renderer().Record(Composite(0, damage, { &item, 1 }));
+	GYRO_REQUIRE_EQ(submission.has_value(), true);
+
+	while (!fixture->Renderer().IsComplete(submission->Point))
+	{
+		// Deliberately empty.
+	}
+
+	const BufferReader reader{ *readable };
 	GYRO_REQUIRE(reader.IsValid());
 
 	CheckThePlacement(reader.Image());

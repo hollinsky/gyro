@@ -9,6 +9,7 @@
 
 #include "Core/Fd.h"
 #include "Core/Result.h"
+#include "Geometry/Space.h"
 #include "Render/Vulkan.h"
 #include "Seam/RenderTarget.h"
 
@@ -87,6 +88,157 @@ struct DeviceDescription
 // rather than at link time. What this answers is the first of the two questions — is there a loader
 // — and `VulkanDevice::Open` answers the second by opening one.
 [[nodiscard]] bool IsVulkanLoaderPresent() noexcept;
+
+// An image this device allocated, and the dmabuf it was handed out as.
+//
+// **The other direction, and it exists because a nested output has nothing else to allocate with.**
+// Seam/RenderTarget.h's rule is that the presenter owns the images: a KMS output allocates through
+// GBM, a virtual output allocates through `udmabuf`, and both hand descriptions to a renderer that
+// imports them. A nested output has neither — no GBM device, no swapchain, and a parent compositor
+// that states a format and a modifier list and expects buffers back — so the only thing on the
+// machine that can produce one is the device that is about to draw into it. Asking it here keeps the
+// seam's rule intact rather than bending it: the presenter still owns the target, it just had to ask
+// somebody else to make it.
+//
+// **Everything in here is the caller's, and Core/Fd.h's two types are how that is said.** This object
+// destroys the `VkImage` and frees its memory, and it *owns* the descriptor — an `Fd`. What the
+// description carries is a `RawFd` into that same descriptor, because a `RenderTarget` is copied by
+// value every frame and an owner cannot live there. So the description is valid for exactly as long
+// as this object is, which is the lifetime a presenter already announces with `TargetsInvalidated`.
+//
+// **There is no view and nothing draws through this handle.** The renderer imports the descriptor
+// back through the path it already has and builds its own image over it; this one exists only because
+// Vulkan will not allocate modifier-tiled memory without an image to lay it out. Round-tripping
+// rather than sharing the handle is what leaves `IRenderer` untouched — it imports every target it
+// draws into already, and a second way in would be a second set of layout transitions to get wrong.
+//
+// **Destroyed before the device that made it**, which is Docs/Structure.md's rule for every Vulkan
+// handle here. The `VkDevice` below is borrowed for the destructor's use and nothing else.
+class ExportedImage
+{
+public:
+	ExportedImage() = default;
+
+	~ExportedImage() { Reset(); }
+
+	ExportedImage(const ExportedImage&) = delete;
+	ExportedImage& operator=(const ExportedImage&) = delete;
+
+	ExportedImage(ExportedImage&& other) noexcept
+		: m_Device{ std::exchange(other.m_Device, VK_NULL_HANDLE) },
+		  m_Image{ std::exchange(other.m_Image, VK_NULL_HANDLE) },
+		  m_Memory{ std::exchange(other.m_Memory, VK_NULL_HANDLE) }, m_Descriptor{ std::move(other.m_Descriptor) },
+		  m_Target{ std::exchange(other.m_Target, RenderTarget{}) }
+	{}
+
+	ExportedImage& operator=(ExportedImage&& other) noexcept
+	{
+		if (this != &other)
+		{
+			Reset();
+			m_Device = std::exchange(other.m_Device, VK_NULL_HANDLE);
+			m_Image = std::exchange(other.m_Image, VK_NULL_HANDLE);
+			m_Memory = std::exchange(other.m_Memory, VK_NULL_HANDLE);
+			m_Descriptor = std::move(other.m_Descriptor);
+			m_Target = std::exchange(other.m_Target, RenderTarget{});
+		}
+
+		return *this;
+	}
+
+	[[nodiscard]] bool IsValid() const noexcept { return m_Image != VK_NULL_HANDLE && m_Target.IsValid(); }
+
+	// The description, ready to go into a presenter's target set. Its planes borrow the descriptor
+	// this object owns, so a copy of it outlives nothing.
+	[[nodiscard]] const RenderTarget& Target() const noexcept { return m_Target; }
+
+	// The modifier the device actually chose out of the candidates, with the caller's fourcc. Worth
+	// reading back rather than assuming: a nested output has to tell the parent which one it got.
+	[[nodiscard]] PixelFormat Format() const noexcept { return m_Target.Format; }
+
+	// Borrowed. The consumer that is handed this — a `zwp_linux_buffer_params_v1`, an `AddFB2` — must
+	// duplicate it if it means to keep it, exactly as the import path duplicates what it is given.
+	[[nodiscard]] RawFd Descriptor() const noexcept { return m_Descriptor.Borrow(); }
+
+	// The allocating image. Not drawn into by anything here; exposed because a caller that wants to
+	// destroy this in a particular order relative to its own work needs to be able to name it.
+	[[nodiscard]] VkImage Handle() const noexcept { return m_Image; }
+
+private:
+	friend class VulkanDevice;
+
+	void Reset() noexcept;
+
+	// Not owned; the device outlives every image it made, which is the rule stated above.
+	VkDevice m_Device = VK_NULL_HANDLE;
+
+	VkImage m_Image = VK_NULL_HANDLE;
+	VkDeviceMemory m_Memory = VK_NULL_HANDLE;
+	Fd m_Descriptor;
+	RenderTarget m_Target{};
+};
+
+// A timeline semaphore and the DRM syncobj descriptor that names it.
+//
+// **One representation, three consumers**, which is Seam/SyncPoint.h's premise and measured rather
+// than assumed: anv exports a timeline semaphore as an `anon_inode:syncobj_file`, which is what
+// `wp_linux_drm_syncobj_v1` imports and what a KMS commit programs as `IN_FENCE_FD`. The handle type
+// asked for is `OPAQUE_FD` because Vulkan has no syncobj enumerator — on the drivers that matter the
+// opaque handle *is* the syncobj, and on the ones where it is not there is no timeline to export at
+// all.
+//
+// Owned and destroyed together for `ExportedImage`'s reason, and before the device for the same one.
+class ExportedTimeline
+{
+public:
+	ExportedTimeline() = default;
+
+	~ExportedTimeline() { Reset(); }
+
+	ExportedTimeline(const ExportedTimeline&) = delete;
+	ExportedTimeline& operator=(const ExportedTimeline&) = delete;
+
+	ExportedTimeline(ExportedTimeline&& other) noexcept
+		: m_Device{ std::exchange(other.m_Device, VK_NULL_HANDLE) },
+		  m_Semaphore{ std::exchange(other.m_Semaphore, VK_NULL_HANDLE) }, m_Descriptor{ std::move(other.m_Descriptor) }
+	{}
+
+	ExportedTimeline& operator=(ExportedTimeline&& other) noexcept
+	{
+		if (this != &other)
+		{
+			Reset();
+			m_Device = std::exchange(other.m_Device, VK_NULL_HANDLE);
+			m_Semaphore = std::exchange(other.m_Semaphore, VK_NULL_HANDLE);
+			m_Descriptor = std::move(other.m_Descriptor);
+		}
+
+		return *this;
+	}
+
+	[[nodiscard]] bool IsValid() const noexcept { return m_Semaphore != VK_NULL_HANDLE; }
+
+	// What a submission signals against, for a caller that is going to hand points on it out.
+	[[nodiscard]] VkSemaphore Handle() const noexcept { return m_Semaphore; }
+
+	// Borrowed, which is what `SyncPoint::Timeline` already is and for the same reason: a point sits
+	// by value in a layer list that is copied per frame, and the timeline outlives every point on it.
+	[[nodiscard]] RawFd Descriptor() const noexcept { return m_Descriptor.Borrow(); }
+
+	// Where the timeline has got to. A poll rather than a wait — the frame loop never blocks — and the
+	// answer a release timeline is read for: a point that has been reached is a buffer the parent has
+	// finished with.
+	[[nodiscard]] Result<std::uint64_t> Counter() const noexcept;
+
+private:
+	friend class VulkanDevice;
+
+	void Reset() noexcept;
+
+	VkDevice m_Device = VK_NULL_HANDLE;
+	VkSemaphore m_Semaphore = VK_NULL_HANDLE;
+	Fd m_Descriptor;
+};
 
 // The instance, the physical device, the logical device and its queue, owned together.
 //
@@ -175,6 +327,57 @@ public:
 
 	[[nodiscard]] std::uint32_t ImportableMemoryTypes(RawFd descriptor) const noexcept;
 
+	// Allocate an image of this size and format under the first workable modifier, and export it as a
+	// dmabuf.
+	//
+	// **The list is the caller's preference order and the first survivor wins.** A nested output's
+	// candidates come from the parent compositor, which has already ranked them against its own
+	// scanout hardware; re-ranking here would be this file second-guessing a negotiation it was not
+	// part of. What the device contributes is the veto, and there are four of them: a modifier it does
+	// not list for this format, one whose tiling cannot be a colour attachment — this is a render
+	// target, so that feature bit is checked before the modifier is chosen rather than discovered at
+	// `vkCreateImage` — one whose plane count is more than Seam/RenderTarget.h's `MaxImagePlanes` can
+	// describe, and one the driver will not create an *exportable* image with at this extent. The
+	// fourth is a separate query from the first three and not implied by them: a tiling that renders
+	// is not automatically a tiling the driver will hand out a descriptor for.
+	//
+	// **`ModifierInvalid` is refused wherever it appears in the list**, for the reason `Supports`
+	// gives from the other side. Unknown is not linear. An image laid out by a tiling nobody stated is
+	// one where this device's guess and the consumer's have to agree by luck, and a target gyro
+	// declines to allocate is better than a window that is diagonally sheared on somebody else's
+	// machine.
+	//
+	// `EINVAL` where no candidate survives — which includes an empty list and a fourcc
+	// Render/Vulkan.h cannot name — and `ENOMEM` where the allocation itself failed. Unbounded and
+	// allocating, like `Open`: it runs when an output is configured or reconfigured, never inside a
+	// frame.
+	[[nodiscard]] Result<ExportedImage>
+	Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t> modifiers) const;
+
+	// A timeline semaphore this device signals, exported as a DRM syncobj descriptor.
+	//
+	// **What it is for is the half of explicit sync the renderer does not already cover.** The acquire
+	// point — when the composite has landed — is the renderer's own timeline and reaches a presenter
+	// inside a `SyncPoint`. The *release* point is the other direction: `wp_linux_drm_syncobj_v1`
+	// requires a surface to name both, and nothing on the machine holds the timeline the parent
+	// compositor signals when it has finished reading a buffer. That one is the nested output's to
+	// create, and this is where it comes from. The same descriptor is what a KMS commit will later
+	// program as `IN_FENCE_FD`.
+	//
+	// **`ENOTSUP` where the device cannot, and that path is measured rather than hypothetical.**
+	// lavapipe advertises `VK_KHR_external_semaphore_fd` and then refuses to create an exportable
+	// semaphore of either kind, which is why `Open` only enables the extension where
+	// `vkGetPhysicalDeviceExternalSemaphoreProperties` said yes — see decision 108. So this reports
+	// rather than asserts, and `Description().ExportsTimeline` is the same answer asked in advance.
+	//
+	// **What a caller does without one.** It waits on the CPU: poll `IRenderer::IsComplete` until the
+	// frame has actually landed, and only then commit. That costs the overlap between drawing this
+	// frame and handing the last one over — the parent is told about a frame after it is finished
+	// rather than while it is being drawn, which lands as latency on a nested session and as nothing
+	// at all on the floor tier, where the renderer has already finished inside `Record`. It is the
+	// fallback a nested output takes, not a reason for one to refuse to come up.
+	[[nodiscard]] Result<ExportedTimeline> ExportTimeline() const;
+
 private:
 	void Reset() noexcept;
 
@@ -225,6 +428,14 @@ static_assert(
 	"Device migration is a move at the composition root, and a throwing one leaves two owners"
 );
 static_assert(std::formattable<DeviceDescription, char>);
+
+// The same contract, for the two things a nested presenter is handed. A copied `ExportedImage` would
+// destroy one `VkImage` twice and close one descriptor twice, and the second close lands on a number
+// the kernel has since given to somebody else.
+static_assert(!std::is_copy_constructible_v<ExportedImage> && !std::is_copy_assignable_v<ExportedImage>);
+static_assert(!std::is_copy_constructible_v<ExportedTimeline> && !std::is_copy_assignable_v<ExportedTimeline>);
+static_assert(std::is_nothrow_move_constructible_v<ExportedImage>, "A target set is built by moving these into it");
+static_assert(std::is_nothrow_move_constructible_v<ExportedTimeline>);
 
 // A default description names no device and claims nothing, which is what keeps a failed `Open` from
 // reading as a working software device.

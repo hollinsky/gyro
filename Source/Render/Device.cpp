@@ -4,6 +4,8 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
+#include <limits>
+#include <span>
 #include <vector>
 
 #include "Core/Result.h"
@@ -353,8 +355,20 @@ void VulkanDevice::Reset() noexcept
 
 namespace
 {
-// The modifier entry for one format, or nothing where the driver does not list it.
-[[nodiscard]] bool Features(VkPhysicalDevice physical, PixelFormat format, VkFormatFeatureFlags& into) noexcept
+// The driver's own entry for one format under one modifier, or nothing where it lists neither.
+//
+// **`ModifierInvalid` is refused here rather than at each caller, and Seam/RenderTarget.h is why.**
+// Invalid means the modifier is *unknown*, not that there is none — an implicitly-tiled legacy
+// allocation carries it. An image laid out under a tiling nobody stated is one the driver and the
+// allocator have each guessed at separately, and the two guesses agreeing is what makes it work on
+// the machine it was written on. So gyro neither imports one nor allocates one.
+//
+// **One query, three callers**: whether a target can be drawn into, whether it can also be sampled,
+// and which modifier an export should pick. They differ in the feature bit they read and in the plane
+// count they will accept; none of them differs in how the list is fetched, and three copies of a
+// sixty-four-entry query is three places for the cap to drift.
+[[nodiscard]] bool
+ModifierEntry(VkPhysicalDevice physical, PixelFormat format, VkDrmFormatModifierPropertiesEXT& into) noexcept
 {
 	if (format.Modifier == ModifierInvalid)
 	{
@@ -382,39 +396,47 @@ namespace
 
 	for (std::uint32_t index = 0; index < written; ++index)
 	{
-		if (entries[index].drmFormatModifier != format.Modifier)
+		if (entries[index].drmFormatModifier == format.Modifier)
 		{
-			continue;
+			into = entries[index];
+
+			return true;
 		}
-
-		// Single-plane only, and it is a real limit rather than a placeholder: every format a
-		// composite is recorded into is one plane, which Virtual/Buffer.h states from the allocating
-		// side. A multi-plane tiling of an RGB format is an auxiliary compression plane, and reading
-		// one back on the CPU is not something a target this module hands out supports yet.
-		if (entries[index].drmFormatModifierPlaneCount != 1)
-		{
-			continue;
-		}
-
-		into = entries[index].drmFormatModifierTilingFeatures;
-
-		return true;
 	}
 
 	return false;
+}
+
+// Single-plane only, and it is a real limit rather than a placeholder: every format a composite is
+// recorded into is one plane, which Virtual/Buffer.h states from the allocating side. A multi-plane
+// tiling of an RGB format is an auxiliary compression plane, and reading one back on the CPU is not
+// something a target this module hands out supports yet.
+//
+// The export path below accepts more, because what constrains it is what a description can *say*
+// rather than what this renderer will import — a nested output negotiates modifiers with a parent
+// compositor, and refusing the description before the negotiation gets there would be answering a
+// question that has not been asked.
+[[nodiscard]] bool Renderable(VkPhysicalDevice physical, PixelFormat format, VkFormatFeatureFlags wanted) noexcept
+{
+	VkDrmFormatModifierPropertiesEXT entry{};
+
+	if (!ModifierEntry(physical, format, entry) || entry.drmFormatModifierPlaneCount != 1)
+	{
+		return false;
+	}
+
+	return (entry.drmFormatModifierTilingFeatures & wanted) == wanted;
 }
 } // namespace
 
 bool VulkanDevice::SupportsSampling(PixelFormat format) const noexcept
 {
-	VkFormatFeatureFlags features = 0;
-
-	if (!IsValid() || !format.IsValid() || !Features(m_Physical, format, features))
+	if (!IsValid() || !format.IsValid())
 	{
 		return false;
 	}
 
-	return (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+	return Renderable(m_Physical, format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
 }
 
 bool VulkanDevice::Supports(PixelFormat format) const noexcept
@@ -424,58 +446,9 @@ bool VulkanDevice::Supports(PixelFormat format) const noexcept
 		return false;
 	}
 
-	// **`ModifierInvalid` is refused, and Seam/RenderTarget.h is why.** Invalid means the modifier is
-	// *unknown*, not that there is none — an implicitly-tiled legacy allocation carries it. An image
-	// imported under a layout nobody stated is an image whose tiling the driver and the allocator
-	// have each guessed at separately, and the two guesses agreeing is what makes it work on the
-	// machine it was written on. A target whose modifier is unknown is one gyro declines to draw
-	// into rather than one it draws into wrong.
-	if (format.Modifier == ModifierInvalid)
-	{
-		return false;
-	}
-
-	const VkFormat vulkan = VulkanFormat(format.Code);
-
-	if (vulkan == VK_FORMAT_UNDEFINED)
-	{
-		return false;
-	}
-
-	std::array<VkDrmFormatModifierPropertiesEXT, MaxModifiers> entries{};
-	VkDrmFormatModifierPropertiesListEXT list{ .sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
-		                                       .pNext = nullptr,
-		                                       .drmFormatModifierCount = MaxModifiers,
-		                                       .pDrmFormatModifierProperties = entries.data() };
-	VkFormatProperties2 properties{ .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
-		                            .pNext = &list,
-		                            .formatProperties = {} };
-	vkGetPhysicalDeviceFormatProperties2(m_Physical, vulkan, &properties);
-
-	const std::uint32_t written = std::min(list.drmFormatModifierCount, MaxModifiers);
-
-	for (std::uint32_t index = 0; index < written; ++index)
-	{
-		if (entries[index].drmFormatModifier != format.Modifier)
-		{
-			continue;
-		}
-
-		// Single-plane only, and it is a real limit rather than a placeholder: every format a
-		// composite is recorded into is one plane, which Virtual/Buffer.h states from the allocating
-		// side. A multi-plane tiling of an RGB format is an auxiliary compression plane, and reading
-		// one back on the CPU is not something a target this module hands out supports yet.
-		if (entries[index].drmFormatModifierPlaneCount != 1)
-		{
-			continue;
-		}
-
-		// Drawn into, which is the usage that matters — a target this device can sample but not
-		// render to is one `BindTargets` must refuse rather than discover at the first frame.
-		return (entries[index].drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0;
-	}
-
-	return false;
+	// Drawn into, which is the usage that matters — a target this device can sample but not render to
+	// is one `BindTargets` must refuse rather than discover at the first frame.
+	return Renderable(m_Physical, format, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
 }
 
 std::uint32_t VulkanDevice::ImportableMemoryTypes(RawFd descriptor) const noexcept
@@ -497,4 +470,460 @@ std::uint32_t VulkanDevice::ImportableMemoryTypes(RawFd descriptor) const noexce
 	}
 
 	return properties.memoryTypeBits;
+}
+
+namespace
+{
+// What an exported target is created with, and the one conditional bit is the same conditional the
+// import path already applies.
+//
+// `COLOR_ATTACHMENT` because this is a render target and nothing else. `TRANSFER_DST` and `SAMPLED`
+// because the renderer that imports the descriptor back asks for exactly those — Render/Backdrop.h
+// reads the composite it is drawing into — and an image allocated under a narrower usage than the one
+// it will be imported under is a difference the driver is entitled to notice. `SAMPLED` only where
+// the tiling lists it, for the reason the import states: demanding it unconditionally would refuse a
+// compressed modifier that renders perfectly well, and what such a modifier costs is a blur rather
+// than a screen.
+[[nodiscard]] VkImageUsageFlags ExportUsage(VkFormatFeatureFlags features) noexcept
+{
+	const bool samplable = (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+
+	return VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+	       (samplable ? VkImageUsageFlags{ VK_IMAGE_USAGE_SAMPLED_BIT } : VkImageUsageFlags{ 0 });
+}
+
+// Whether the driver will create an *exportable* image with this modifier, usage and extent.
+//
+// **A separate question from the tiling's feature bits, and not implied by them.** The modifier list
+// says what a tiling can do once an image exists; this says whether one can be created at all at this
+// size and whether a descriptor can be got out of it afterwards. A driver that renders into a
+// modifier and refuses to export it would otherwise be found at `vkGetMemoryFdKHR`, after the
+// allocation, with a half-built target to unwind.
+[[nodiscard]] bool CanExport(
+	VkPhysicalDevice physical,
+	VkFormat vulkan,
+	PixelSize<DeviceSpace> size,
+	VkImageUsageFlags usage,
+	std::uint64_t modifier
+) noexcept
+{
+	const VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifierInfo{
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT,
+		.pNext = nullptr,
+		.drmFormatModifier = modifier,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		.queueFamilyIndexCount = 0,
+		.pQueueFamilyIndices = nullptr
+	};
+	const VkPhysicalDeviceExternalImageFormatInfo externalInfo{
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
+		.pNext = &modifierInfo,
+		.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
+	};
+	const VkPhysicalDeviceImageFormatInfo2 info{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+		                                         .pNext = &externalInfo,
+		                                         .format = vulkan,
+		                                         .type = VK_IMAGE_TYPE_2D,
+		                                         .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+		                                         .usage = usage,
+		                                         .flags = 0 };
+
+	VkExternalImageFormatProperties external{ .sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
+		                                      .pNext = nullptr,
+		                                      .externalMemoryProperties = {} };
+	VkImageFormatProperties2 properties{ .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+		                                 .pNext = &external,
+		                                 .imageFormatProperties = {} };
+
+	if (vkGetPhysicalDeviceImageFormatProperties2(physical, &info, &properties) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	if ((external.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) == 0)
+	{
+		return false;
+	}
+
+	return static_cast<std::uint32_t>(size.Width) <= properties.imageFormatProperties.maxExtent.width &&
+	       static_cast<std::uint32_t>(size.Height) <= properties.imageFormatProperties.maxExtent.height;
+}
+
+// The memory plane aspects, in order. A modifier's planes are named by these rather than by
+// `COLOR_BIT`, which is what `vkGetImageSubresourceLayout` requires of a modifier-tiled image and the
+// one thing about reading a layout back that is easy to get wrong — `COLOR_BIT` is accepted by some
+// drivers and answers about the *format's* planes rather than the *memory's*.
+constexpr std::array<VkImageAspectFlags, MaxImagePlanes> MemoryPlanes{
+	VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT,
+	VK_IMAGE_ASPECT_MEMORY_PLANE_1_BIT_EXT,
+	VK_IMAGE_ASPECT_MEMORY_PLANE_2_BIT_EXT,
+	VK_IMAGE_ASPECT_MEMORY_PLANE_3_BIT_EXT,
+};
+
+// The modifier that survived every veto, and the two things about it the allocation then needs.
+struct Candidate
+{
+	std::uint64_t Modifier = ModifierInvalid;
+	std::uint32_t PlaneCount = 0;
+	VkImageUsageFlags Usage = 0;
+};
+} // namespace
+
+void ExportedImage::Reset() noexcept
+{
+	if (m_Device != VK_NULL_HANDLE)
+	{
+		if (m_Image != VK_NULL_HANDLE)
+		{
+			vkDestroyImage(m_Device, m_Image, nullptr);
+		}
+
+		if (m_Memory != VK_NULL_HANDLE)
+		{
+			vkFreeMemory(m_Device, m_Memory, nullptr);
+		}
+	}
+
+	m_Device = VK_NULL_HANDLE;
+	m_Image = VK_NULL_HANDLE;
+	m_Memory = VK_NULL_HANDLE;
+
+	// Closed last and closed here, which is what makes this the owner the header says it is. The
+	// buffer itself is not destroyed by any of this: a dmabuf is reference-counted by the kernel, so a
+	// consumer that duplicated the descriptor still holds the pages after the `VkDeviceMemory` is
+	// gone. What ends is gyro's own ability to draw into it.
+	m_Descriptor.Reset();
+	m_Target = RenderTarget{};
+}
+
+void ExportedTimeline::Reset() noexcept
+{
+	if (m_Device != VK_NULL_HANDLE && m_Semaphore != VK_NULL_HANDLE)
+	{
+		vkDestroySemaphore(m_Device, m_Semaphore, nullptr);
+	}
+
+	m_Device = VK_NULL_HANDLE;
+	m_Semaphore = VK_NULL_HANDLE;
+	m_Descriptor.Reset();
+}
+
+Result<std::uint64_t> ExportedTimeline::Counter() const noexcept
+{
+	if (m_Semaphore == VK_NULL_HANDLE)
+	{
+		return Failure(EINVAL, "reading a timeline that was never created");
+	}
+
+	std::uint64_t value = 0;
+
+	if (Result<void> read =
+	        Check(vkGetSemaphoreCounterValue(m_Device, m_Semaphore, &value), "vkGetSemaphoreCounterValue");
+	    !read)
+	{
+		return std::unexpected{ read.error() };
+	}
+
+	return value;
+}
+
+Result<ExportedImage>
+VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t> modifiers) const
+{
+	if (!IsValid())
+	{
+		return Failure(ENODEV, "no Vulkan device to allocate an exported target from");
+	}
+
+	if (size.IsEmpty())
+	{
+		return Failure(EINVAL, "an exported target needs an extent");
+	}
+
+	const VkFormat vulkan = VulkanFormat(code);
+
+	if (vulkan == VK_FORMAT_UNDEFINED)
+	{
+		return Failure(EINVAL, "that fourcc is not one a composite is recorded into");
+	}
+
+	Candidate chosen;
+
+	for (const std::uint64_t modifier : modifiers)
+	{
+		VkDrmFormatModifierPropertiesEXT entry{};
+
+		// `ModifierEntry` is where `ModifierInvalid` is refused, so a list carrying it loses that one
+		// candidate rather than the whole call — which is what a parent compositor advertising a
+		// legacy entry beside real ones deserves.
+		if (!ModifierEntry(m_Physical, PixelFormat{ code, 0, modifier }, entry))
+		{
+			continue;
+		}
+
+		// More planes than a `DmabufImage` has room for is a description gyro cannot hand out, whatever
+		// the driver thinks of it. Zero is not a thing a driver reports and is refused anyway, because
+		// it would otherwise pass every check below and produce a target with no memory in it.
+		if (entry.drmFormatModifierPlaneCount == 0 || entry.drmFormatModifierPlaneCount > MaxImagePlanes)
+		{
+			continue;
+		}
+
+		if ((entry.drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0)
+		{
+			continue;
+		}
+
+		const VkImageUsageFlags usage = ExportUsage(entry.drmFormatModifierTilingFeatures);
+
+		if (!CanExport(m_Physical, vulkan, size, usage, modifier))
+		{
+			continue;
+		}
+
+		chosen = { .Modifier = modifier, .PlaneCount = entry.drmFormatModifierPlaneCount, .Usage = usage };
+
+		break;
+	}
+
+	if (chosen.PlaneCount == 0)
+	{
+		return Failure(EINVAL, "no offered modifier is one this device will allocate an exportable target under");
+	}
+
+	// **A list of one rather than the explicit layout the import path states, and the direction is the
+	// difference.** An import knows the offsets and strides the allocator already committed to and has
+	// to say them; an allocation is the moment those are *decided*, so the driver lays the image out
+	// and the layout is read back below. Handing the whole candidate list to the driver instead would
+	// work and is not what happens here: a nested output has to tell the parent which modifier it got,
+	// and choosing it above keeps the veto and the answer in one place.
+	const VkImageDrmFormatModifierListCreateInfoEXT modifierInfo{
+		.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT,
+		.pNext = nullptr,
+		.drmFormatModifierCount = 1,
+		.pDrmFormatModifiers = &chosen.Modifier
+	};
+	const VkExternalMemoryImageCreateInfo externalInfo{ .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+		                                                .pNext = &modifierInfo,
+		                                                .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
+	const VkImageCreateInfo imageInfo{
+		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		.pNext = &externalInfo,
+		.flags = 0,
+		.imageType = VK_IMAGE_TYPE_2D,
+		.format = vulkan,
+		.extent = { static_cast<std::uint32_t>(size.Width), static_cast<std::uint32_t>(size.Height), 1 },
+		.mipLevels = 1,
+		.arrayLayers = 1,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+		.usage = chosen.Usage,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		.queueFamilyIndexCount = 0,
+		.pQueueFamilyIndices = nullptr,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+	};
+
+	// Built in place for `Open`'s reason: every early return below runs the destructor, so a failure
+	// after the image exists and before the descriptor does frees the image rather than stranding it.
+	ExportedImage exported;
+	exported.m_Device = m_Device;
+
+	if (Result<void> created = Check(vkCreateImage(m_Device, &imageInfo, nullptr, &exported.m_Image), "vkCreateImage");
+	    !created)
+	{
+		return std::unexpected{ created.error() };
+	}
+
+	VkMemoryRequirements requirements{};
+	vkGetImageMemoryRequirements(m_Device, exported.m_Image, &requirements);
+
+	VkPhysicalDeviceMemoryProperties properties{};
+	vkGetPhysicalDeviceMemoryProperties(m_Physical, &properties);
+
+	// Device-local where the image allows it, because a target is scanned out or sampled by hardware
+	// and never read by this process. Falling back to the first allowed type rather than failing is
+	// what keeps the floor tier working: lavapipe's memory is host memory, and a device-local
+	// requirement there would refuse every allocation on the one device that is always present.
+	std::uint32_t type = properties.memoryTypeCount;
+	std::uint32_t fallback = properties.memoryTypeCount;
+
+	for (std::uint32_t index = 0; index < properties.memoryTypeCount; ++index)
+	{
+		if ((requirements.memoryTypeBits & (1U << index)) == 0)
+		{
+			continue;
+		}
+
+		if (fallback == properties.memoryTypeCount)
+		{
+			fallback = index;
+		}
+
+		if ((properties.memoryTypes[index].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0)
+		{
+			type = index;
+
+			break;
+		}
+	}
+
+	if (type == properties.memoryTypeCount)
+	{
+		type = fallback;
+	}
+
+	if (type == properties.memoryTypeCount)
+	{
+		return Failure(ENOMEM, "no memory type satisfies an exported target");
+	}
+
+	const VkExportMemoryAllocateInfo exportInfo{ .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+		                                         .pNext = nullptr,
+		                                         .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
+
+	// Dedicated for the import path's reason read the other way round: the descriptor names the whole
+	// allocation, so an allocation holding two images would hand out a buffer with somebody else's
+	// pixels in it. A driver that was not told so may also simply refuse the export.
+	const VkMemoryDedicatedAllocateInfo dedicatedInfo{ .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+		                                               .pNext = &exportInfo,
+		                                               .image = exported.m_Image,
+		                                               .buffer = VK_NULL_HANDLE };
+	const VkMemoryAllocateInfo allocateInfo{ .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		                                     .pNext = &dedicatedInfo,
+		                                     .allocationSize = requirements.size,
+		                                     .memoryTypeIndex = type };
+
+	if (Result<void> allocated =
+	        Check(vkAllocateMemory(m_Device, &allocateInfo, nullptr, &exported.m_Memory), "vkAllocateMemory");
+	    !allocated)
+	{
+		return std::unexpected{ allocated.error() };
+	}
+
+	if (Result<void> bound =
+	        Check(vkBindImageMemory(m_Device, exported.m_Image, exported.m_Memory, 0), "vkBindImageMemory");
+	    !bound)
+	{
+		return std::unexpected{ bound.error() };
+	}
+
+	// What the driver actually laid it out as. A one-entry list makes this a formality on a driver
+	// that obeys it and a caught defect on one that does not — and the answer is what goes into the
+	// description, so a nested output tells the parent what it has rather than what it asked for.
+	VkImageDrmFormatModifierPropertiesEXT actual{ .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT,
+		                                          .pNext = nullptr,
+		                                          .drmFormatModifier = ModifierInvalid };
+
+	if (Result<void> read = Check(
+			vkGetImageDrmFormatModifierPropertiesEXT(m_Device, exported.m_Image, &actual),
+			"vkGetImageDrmFormatModifierPropertiesEXT"
+		);
+	    !read)
+	{
+		return std::unexpected{ read.error() };
+	}
+
+	if (actual.drmFormatModifier != chosen.Modifier)
+	{
+		return Failure(EIO, "the driver laid the image out under a modifier it was not offered");
+	}
+
+	const VkMemoryGetFdInfoKHR getInfo{ .sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
+		                                .pNext = nullptr,
+		                                .memory = exported.m_Memory,
+		                                .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
+	int descriptor = InvalidFd;
+
+	if (Result<void> got = Check(vkGetMemoryFdKHR(m_Device, &getInfo, &descriptor), "vkGetMemoryFdKHR"); !got)
+	{
+		return std::unexpected{ got.error() };
+	}
+
+	// Owned from here, so every return below frees it. `vkGetMemoryFdKHR` hands ownership to the
+	// caller — the opposite of the import, where `vkAllocateMemory` takes it — which is the asymmetry
+	// most easily got wrong in a pair of paths that otherwise mirror each other.
+	exported.m_Descriptor = Fd{ descriptor };
+
+	DmabufImage image{};
+	image.PlaneCount = chosen.PlaneCount;
+
+	for (std::uint32_t plane = 0; plane < chosen.PlaneCount; ++plane)
+	{
+		const VkImageSubresource subresource{ .aspectMask = MemoryPlanes[plane], .mipLevel = 0, .arrayLayer = 0 };
+		VkSubresourceLayout layout{};
+		vkGetImageSubresourceLayout(m_Device, exported.m_Image, &subresource, &layout);
+
+		if (layout.offset > std::numeric_limits<std::uint32_t>::max() ||
+		    layout.rowPitch > std::numeric_limits<std::uint32_t>::max())
+		{
+			return Failure(EINVAL, "a plane's offset or stride is past what a description can carry");
+		}
+
+		// **Every plane names the same descriptor, and that is correct rather than a shortcut.** The
+		// allocation is one `VkDeviceMemory` and therefore one dmabuf; a modifier's extra planes are
+		// offsets into it, not separate buffers. Only a disjoint image would have several, and this
+		// does not ask for one — a compression plane belongs beside the pixels it describes.
+		image.Planes[plane] = { .Descriptor = exported.m_Descriptor.Borrow(),
+			                    .Offset = static_cast<std::uint32_t>(layout.offset),
+			                    .Stride = static_cast<std::uint32_t>(layout.rowPitch) };
+	}
+
+	exported.m_Target =
+		RenderTarget{ .Size = size, .Format = PixelFormat{ code, 0, chosen.Modifier }, .Memory = image };
+
+	return exported;
+}
+
+Result<ExportedTimeline> VulkanDevice::ExportTimeline() const
+{
+	if (!IsValid())
+	{
+		return Failure(ENODEV, "no Vulkan device to create a timeline on");
+	}
+
+	// Reported rather than attempted. Where the capability query said no, `Open` did not enable
+	// `VK_KHR_external_semaphore_fd` at all, so `vkGetSemaphoreFdKHR` below is an entry point this
+	// device was never asked for — and volk would have it pointing at nothing.
+	if (!m_Description.ExportsTimeline)
+	{
+		return Failure(ENOTSUP, "this device creates no exportable timeline semaphore");
+	}
+
+	ExportedTimeline timeline;
+	timeline.m_Device = m_Device;
+
+	const VkExportSemaphoreCreateInfo exportInfo{ .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
+		                                          .pNext = nullptr,
+		                                          .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT };
+	const VkSemaphoreTypeCreateInfo typeInfo{ .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+		                                      .pNext = &exportInfo,
+		                                      .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+		                                      .initialValue = 0 };
+	const VkSemaphoreCreateInfo semaphoreInfo{ .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+		                                       .pNext = &typeInfo,
+		                                       .flags = 0 };
+
+	if (Result<void> created =
+	        Check(vkCreateSemaphore(m_Device, &semaphoreInfo, nullptr, &timeline.m_Semaphore), "vkCreateSemaphore");
+	    !created)
+	{
+		return std::unexpected{ created.error() };
+	}
+
+	const VkSemaphoreGetFdInfoKHR getInfo{ .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+		                                   .pNext = nullptr,
+		                                   .semaphore = timeline.m_Semaphore,
+		                                   .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT };
+	int descriptor = InvalidFd;
+
+	if (Result<void> exported = Check(vkGetSemaphoreFdKHR(m_Device, &getInfo, &descriptor), "vkGetSemaphoreFdKHR");
+	    !exported)
+	{
+		return std::unexpected{ exported.error() };
+	}
+
+	timeline.m_Descriptor = Fd{ descriptor };
+
+	return timeline;
 }

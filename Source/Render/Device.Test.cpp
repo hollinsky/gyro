@@ -1,5 +1,7 @@
 #include "Render/Device.h"
 
+#include <array>
+#include <cstdint>
 #include <cstring>
 #include <optional>
 #include <print>
@@ -7,6 +9,7 @@
 #include <utility>
 
 #include "Core/Result.h"
+#include "Geometry/Space.h"
 #include "Render/Vulkan.h"
 #include "Seam/RenderTarget.h"
 #include "Testing/Test.h"
@@ -212,4 +215,120 @@ GYRO_TEST(Device, ResultsSpeakTheSeamsVocabulary)
 	GYRO_CHECK_EQ(failed.error().Code(), ENODEV);
 	GYRO_CHECK_EQ(failed.error().Context(), std::string_view{ "vkQueueSubmit" });
 	GYRO_CHECK(Check(VK_SUCCESS, "vkQueueSubmit").has_value());
+}
+
+// **The export's refusals, which are the half of it a machine with no dmabuf support can still
+// answer.** Each of these is a way for a caller to ask for a target that cannot be described, and
+// each of them succeeding quietly would put a half-built buffer into a presenter's target set rather
+// than an error into its log.
+GYRO_TEST(Device, AnExportRefusesWhatItCannotDescribe)
+{
+	std::optional<VulkanDevice> device = Available("AnExportRefusesWhatItCannotDescribe");
+
+	if (!device)
+	{
+		return;
+	}
+
+	constexpr PixelSize<DeviceSpace> Resolution{ 64, 32 };
+	constexpr std::array<std::uint64_t, 1> Linear{ ModifierLinear };
+
+	// No candidates at all, which is a modifier negotiation that found nothing in common. It is the
+	// case most easily written as an assertion by a caller who assumed the list was non-empty.
+	const Result<ExportedImage> nothing = device->Export(Resolution, FormatXrgb8888, {});
+	GYRO_REQUIRE_EQ(nothing.has_value(), false);
+	GYRO_CHECK_EQ(nothing.error().Code(), EINVAL);
+
+	// `ModifierInvalid`, which is *unknown* rather than *none* — the same refusal `Supports` makes
+	// from the import side, for the same reason: an image laid out under a tiling nobody stated works
+	// by luck on the machine it was written on.
+	constexpr std::array<std::uint64_t, 1> Unknown{ ModifierInvalid };
+	const Result<ExportedImage> unknown = device->Export(Resolution, FormatXrgb8888, Unknown);
+	GYRO_REQUIRE_EQ(unknown.has_value(), false);
+	GYRO_CHECK_EQ(unknown.error().Code(), EINVAL);
+
+	// A modifier no driver has ever advertised. This is what a parent compositor sending a vendor's
+	// tiling to a machine with a different vendor's GPU looks like, and it must not be picked.
+	constexpr std::array<std::uint64_t, 1> Foreign{ 0x00ff'0000'0000'0001ULL };
+	const Result<ExportedImage> foreign = device->Export(Resolution, FormatXrgb8888, Foreign);
+	GYRO_REQUIRE_EQ(foreign.has_value(), false);
+	GYRO_CHECK_EQ(foreign.error().Code(), EINVAL);
+
+	// A fourcc Render/Vulkan.h maps to no `VkFormat`. `NV12` is the honest example: a client commits
+	// one and an encoder wants one, and neither is a target a composite is recorded into.
+	const Result<ExportedImage> planar = device->Export(Resolution, FormatNv12, Linear);
+	GYRO_REQUIRE_EQ(planar.has_value(), false);
+	GYRO_CHECK_EQ(planar.error().Code(), EINVAL);
+
+	// No extent. A presenter that had not yet been configured is what produces this, and a zero-sized
+	// image is one `vkCreateImage` would refuse anyway — reported here, where the caller's mistake is.
+	const Result<ExportedImage> empty = device->Export({}, FormatXrgb8888, Linear);
+	GYRO_REQUIRE_EQ(empty.has_value(), false);
+	GYRO_CHECK_EQ(empty.error().Code(), EINVAL);
+}
+
+// **Decision 108 from the allocating side: the implication rather than the answer.** Whether this
+// machine's device can hand out a syncobj descriptor is the machine's business — lavapipe cannot and
+// anv can — so what is asserted is that the capability query and the attempt agree. A device that
+// claimed one and then failed, or refused one it could have made, is the mismatch a nested output
+// would discover as a commit with no acquire point on it.
+//
+// The class is a parameter because both answers are worth having and no single device gives both.
+namespace
+{
+void CheckTheTimelineMatchesTheClaim(std::string_view test, DeviceClass wanted)
+{
+	std::optional<VulkanDevice> device = Available(test, wanted);
+
+	if (!device)
+	{
+		return;
+	}
+
+	std::println("  {}", device->Description());
+
+	const Result<ExportedTimeline> timeline = device->ExportTimeline();
+	GYRO_CHECK_EQ(timeline.has_value(), device->Description().ExportsTimeline);
+
+	if (!timeline)
+	{
+		// Reported rather than asserted, which is the whole of what decision 108 asks of this path.
+		GYRO_CHECK_EQ(timeline.error().Code(), ENOTSUP);
+
+		return;
+	}
+
+	GYRO_REQUIRE(timeline->IsValid());
+	GYRO_CHECK(timeline->Handle() != VK_NULL_HANDLE);
+
+	// The descriptor is what `wp_linux_drm_syncobj_v1` is handed and what a KMS commit programs as
+	// `IN_FENCE_FD`. On anv it is an `anon_inode:syncobj_file`, which is Seam/SyncPoint.h's premise.
+	GYRO_REQUIRE(timeline->Descriptor().IsValid());
+
+	// Nothing has been submitted against it, so it is where it started. A timeline that came back
+	// already signalled would tell a presenter every buffer was free before the first frame.
+	const Result<std::uint64_t> counter = timeline->Counter();
+	GYRO_REQUIRE_EQ(counter.has_value(), true);
+	GYRO_CHECK_EQ(*counter, std::uint64_t{ 0 });
+
+	// Two are two, which is what a nested output needs: an acquire timeline and a release timeline
+	// are separate objects and a shared one would have the parent's progress and gyro's on one counter.
+	const Result<ExportedTimeline> second = device->ExportTimeline();
+	GYRO_REQUIRE_EQ(second.has_value(), true);
+	GYRO_CHECK(second->Handle() != timeline->Handle());
+	GYRO_CHECK(second->Descriptor() != timeline->Descriptor());
+}
+} // namespace
+
+GYRO_TEST(Device, AnExportedTimelineMatchesWhatTheSoftwareDeviceClaims)
+{
+	CheckTheTimelineMatchesTheClaim("AnExportedTimelineMatchesWhatTheSoftwareDeviceClaims", DeviceClass::Software);
+}
+
+// The other answer, on a machine that has one. Skipped where there is no GPU, for the reason every
+// hardware-gated test here gives: lavapipe can never take this branch, so a suite that only ran the
+// floor tier would leave the descriptor-producing path with no coverage anywhere.
+GYRO_TEST(Device, AnExportedTimelineMatchesWhatTheHardwareDeviceClaims)
+{
+	CheckTheTimelineMatchesTheClaim("AnExportedTimelineMatchesWhatTheHardwareDeviceClaims", DeviceClass::Hardware);
 }
