@@ -169,6 +169,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Publication` | portable | **both** | `Core`, `Geometry` |
 | `Seam` | portable | **both** | `Core`, `Geometry`, `World` |
 | `Scene` | portable | dispatch | `Core`, `Geometry`, `World`, `Animation`, `Publication` |
+| `Gym` | portable | dispatch | `Core`, `Geometry`, `World`, `Animation`, `Scene` |
 | `Blit` | **portable** | frame | `Core`, `Geometry`, `Seam` |
 | `Frame` | portable | frame | `Core`, `Geometry`, `World`, `Animation`, `Publication`, `Seam` |
 | `Render` | platform | **both** | `Core`, `Geometry`, `Publication`, `Seam` |
@@ -572,6 +573,36 @@ and the report record. Every one of those is already reachable, and nothing here
 **`Scene` is `DISPATCH` whole rather than a straddler**, which is what makes the frame side's
 inability to reach it a graph property instead of a directory one. Nothing in it runs on the frame
 thread — the walk that consumes what it publishes is `Frame`'s, and the two never meet.
+
+### The gyms are a module, and the invariant is scenes with no protocol behind them
+
+`Gym` holds the scenes gyro authors for itself: a handful of nodes moving under springs, as the
+instrument for looking at what the compositor actually draws. It is the first thing in the tree that
+authors a scene the way a shell would, outside a test.
+
+**It is a module rather than files under `Compositor`, and `PORTABLE` is what earns it.** A gym
+reaches none of the root's vocabulary — no ring, no `SCHED_FIFO`, no backend, no output negotiation —
+so it builds and is tested on a machine with no GPU, no seat, and no compositor, which is the tier the
+whole instrument case rests on. Left in the root it would be portable *by accident*: the root is the
+one module that is not, so the first time something there reached for a platform header nothing would
+say so. The boot splash is the second scene with exactly this shape, and the alternative worth naming
+is a directory inside `Scene`, which is refused because `Scene` is the machinery a gym is a *caller*
+of and a module holding its own call sites stops being the thing under test.
+
+**`DISPATCH` whole, for `Scene`'s reason.** A gym holds a `SceneStore` and opens `SceneCommit`s, so
+the frame side's inability to reach it is a graph property rather than a directory one. It does not
+depend on `Publication`: a gym authors and never publishes, and the loop around it — `Open` once,
+`Advance` on the wake it asked for, publish, sleep — is the composition root's, exactly as the frame
+loop's `while` is.
+
+**Two of its scenes do not draw under the CPU renderer, and the module says so rather than leaving it
+to be found.** [Blit/Blit.cpp](../Source/Blit/Blit.cpp)'s `Classify` refuses a material, an
+elevation, a nonzero corner radius, and a quad that is not axis-aligned — and one refused item fails
+the whole `Record`, so the frame is *lost* rather than degraded. That makes rotation and materials
+instruments for the Vulkan renderer specifically: under `--backend=dump` they write no frames at all
+for as long as they are moving, which is an empty directory somebody would otherwise file against the
+backend. `DrawsOnCpu` is a free function beside the interface rather than a verb on it, so the root
+can say so at startup without a gym having to answer a question about a renderer it never sees.
 
 ## Threads are a second partition
 

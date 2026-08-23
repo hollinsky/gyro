@@ -312,6 +312,40 @@ gyro_add_module(Scene PORTABLE DISPATCH
 		Store.Test.cpp
 )
 
+# The scenes gyro authors for itself, with no protocol behind them: a handful of nodes moving under
+# springs, as the instrument for looking at what the compositor actually draws.
+#
+# A module rather than files under `Compositor`, and the invariant is what earns it. A gym reaches
+# nothing of the root's vocabulary — no ring, no SCHED_FIFO, no backend, no output negotiation — so
+# `PORTABLE` holds it to a scene that is authored the way a shell would author one, and the build says
+# so the first time something here wants a platform header. Left in the root it would be portable by
+# accident, since the root is the one module that is not. The boot splash is the second scene with
+# exactly this shape.
+#
+# `DISPATCH` whole for `Scene`'s reason, and it is the same edge being protected: a gym holds a
+# `SceneStore` and opens `SceneCommit`s, so the frame side's inability to reach it has to be a graph
+# property rather than a directory one.
+#
+# DEPENDS is what the code has. `Scene` for the store and the commit, `Animation` for the named motions
+# a lane is driven under, `World` for the fills a solid carries and the dressings the materials gym
+# adds, `Geometry` for the output rectangle a layout is a fraction of, and `Core` for the result, the
+# clock and the wake. `Publication` is deliberately absent — a gym authors and never publishes, which
+# is the composition root's half of the loop around it.
+gyro_add_module(Gym PORTABLE DISPATCH
+	DEPENDS
+		Core
+		Geometry
+		World
+		Animation
+		Scene
+	SOURCES
+		Gym.cpp
+		Lanes.cpp
+	TESTS
+		Gym.Test.cpp
+		Lanes.Test.cpp
+)
+
 # The control waist: every interface with more than one implementation, and the plain data that
 # crosses them. This is the presentation half — IPresenter and what its two verbs take and report.
 # IRenderer, ISession and IInput join it where they are written.
