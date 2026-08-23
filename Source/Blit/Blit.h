@@ -33,13 +33,23 @@
 // true by construction rather than by habit**, and it is the one sentence in this file worth
 // re-reading before widening what reaches it.
 //
-// **What it draws today is a solid and a texture, and the staging is `Render`'s.** Decision 110
-// authors the boot scene to what this draws rather than growing this to meet a scene it never sees:
-// no material, no elevation, no `Reference`, and axis-aligned quads with subpixel edges — a scaled
-// and placed logo needs coverage on the boundary spans and nothing more. A `DrawGroup` is named
-// there as required and is still `EINVAL` here, which is where Render/Renderer.h stands one tier up
-// after decision 107: what draws, draws, and everything else is refused rather than silently
-// dropped.
+// **What it draws today is a solid, a texture, and a group.** Decision 110 authors the boot scene
+// to what this draws rather than growing this to meet a scene it never sees: no material, no
+// elevation, no `Reference`, and axis-aligned quads with subpixel edges — a scaled and placed logo
+// needs coverage on the boundary spans and nothing more. Everything else is refused rather than
+// silently dropped, which is where Render/Renderer.h stands one tier up after decision 107.
+//
+// **The group is the exception to *author the scene down to the renderer*, and decision 110 says
+// why.** Group opacity is not per-node alpha — decision 60 — and a window fading out together with
+// its open submenu has to cross-fade as one image or the overlap shows through at every value except
+// the two ends. That needs an offscreen, and an offscreen is the one thing a flat list cannot be
+// widened into later: doing it afterwards would touch the frame loop, both renderers, and the damage
+// path at once. So it is built here even though the splash and the console nest nothing.
+//
+// **The band is what makes it nearly free.** A group's members carry their own device-space corners
+// and its quad is where they already are, so the offscreen is the same pixels of the same output —
+// which means a band-sized level of scratch is a whole offscreen, and flattening a subtree is one
+// `Over` per row rather than a render target and a resample. See `MaxDepth` for what nesting costs.
 //
 // **The texture is required rather than optional, and the reason is the first second of a boot.**
 // The firmware's BGRT logo is an image, and Docs/Architecture.md#from-firmware-to-gyro makes
@@ -104,6 +114,23 @@ public:
 	// guessed at the same number. A longer list is `EINVAL` rather than a truncated picture: nothing
 	// produces one, and reporting it beats overrunning the classification below.
 	static constexpr std::size_t MaxItems = 4096;
+
+	// How deeply a group may nest. Every level is a whole band of scratch, reserved at `BindTargets`
+	// because `Record` may not allocate and cannot know in advance how deep a frame goes — so this is
+	// the one multiplier on the footprint Blit/Band.h's entire argument is about keeping small. Five
+	// levels is a little over a megabyte the frame thread has locked down, against 66 MB for a single
+	// full-size 4K scratch.
+	//
+	// **Four, and the number is the vocabulary rather than the boot scene.** What this renderer
+	// actually composites nests nothing: the splash is a logo and the console is one image, so zero
+	// would draw every frame gyro has today. Decision 110's other refusals are safe because they are
+	// gyro's own scene and are caught by a test, but a *depth* is the one refusal that could arrive
+	// from a scene which is otherwise entirely drawable, and below this renderer there is nothing to
+	// fall to — a refusal here is a dark machine that cannot say why. So it is set where decision 60's
+	// transitions stop composing instead: a greeter cross-fade holding an overview dismissal holding a
+	// workspace holding a window that is itself fading is four, and stacking a fifth is not a
+	// transition anybody has described.
+	static constexpr std::size_t MaxDepth = 4;
 
 	// The clock is for `Submission::RecordCost` and nothing else. Seam/Renderer.h puts the measurement
 	// on the party that knows where the work started and stopped, and on this renderer that figure is
@@ -251,11 +278,27 @@ private:
 		Light Colour{};
 		Sampled Source{};
 		float Opacity = 1.0F;
+
+		// The items behind this one that compose into it, for a group. It is the length of the run
+		// rather than a child count — Seam/Renderer.h — so a nested group and everything under it are
+		// inside this number, and the walk skips the whole of it whether or not the group draws.
+		std::uint32_t Members = 0;
+
 		bool Draws = false;
 		bool Textured = false;
+		bool Grouped = false;
 	};
 
 	[[nodiscard]] Result<Painted> Classify(const DrawItem& item) const noexcept;
+
+	// The run structure, checked once for the whole list and before the first pixel, which is
+	// `Record`'s rule and the reason it is a pass of its own rather than a test inside `Classify` —
+	// one item cannot see where another one's run ends.
+	//
+	// `EINVAL` for a run that reaches past the list, for one that reaches past the run it is nested
+	// inside — the same test against the enclosing end, and what makes a nested group *contained* in
+	// its parent rather than merely following it — and for a group deeper than `MaxDepth`.
+	[[nodiscard]] Result<void> Nesting(std::span<const DrawItem> items) const noexcept;
 
 	// What an id names, or nothing. A linear scan over at most `MaxImages`, once per item rather than
 	// once per pixel — a map would be a container in a module whose whole argument is that its
@@ -285,6 +328,43 @@ private:
 
 	// The composite for one damage rectangle, band by band.
 	void Paint(const Bound& target, PixelRect<DeviceSpace> rect, std::size_t items) noexcept;
+
+	// `[from, to)` of the item list into one level of the scratch, over one band's rows and
+	// `[left, right)` of its columns. A group is the same walk one level up, which is the whole of
+	// what makes this recursive rather than a loop.
+	void Compose(
+		std::size_t level,
+		std::size_t from,
+		std::size_t to,
+		std::int32_t rows,
+		std::int32_t bandTop,
+		std::int32_t left,
+		std::int32_t right
+	) noexcept;
+
+	// One item into one level: the spans, the two partially covered edge columns, and the coverage
+	// that distinguishes them.
+	void Draw(
+		Band& into,
+		const Painted& painted,
+		std::int32_t rows,
+		std::int32_t bandTop,
+		std::int32_t left,
+		std::int32_t right
+	) noexcept;
+
+	// The level above, brought down into `level` at the group's own opacity — decision 60's
+	// *composited once at g*. `[left, right)` is the group's own columns, already clipped, because
+	// that is the rectangle the level above was erased over and reading outside it would read a
+	// previous group's pixels.
+	void Flatten(
+		std::size_t level,
+		const Painted& group,
+		std::int32_t rows,
+		std::int32_t bandTop,
+		std::int32_t left,
+		std::int32_t right
+	) noexcept;
 
 	// One band's rows, encoded into the target. The only place the target is written, and it is
 	// written and never read.
@@ -320,5 +400,8 @@ private:
 	// is going to be, which is a fact this renderer does not have until it is bound.
 	std::array<DecodeTable, 2> m_Decode{};
 
-	Band m_Band{};
+	// The scratch, one level per depth of nesting plus the output's own at zero. All of them are
+	// reserved together at `BindTargets` and all of them are the same rows of the same output, which
+	// is what lets a group be a blend rather than a resample — see `Band::BlendAbove`.
+	std::array<Band, MaxDepth + 1> m_Levels{};
 };

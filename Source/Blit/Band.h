@@ -126,9 +126,22 @@ public:
 	// walking off the end.
 	[[nodiscard]] std::span<const Light> Row(std::int32_t row) const noexcept;
 
-	// Opaque black across `[left, right)` of every row in `[0, rows)`, which is the bottom of every
-	// composite. Clipped to the band; a rectangle outside it writes nothing.
+	// Opaque black across `[left, right)` of every row in `[0, rows)`, which is the bottom of an
+	// output's composite. Clipped to the band; a rectangle outside it writes nothing.
 	void Clear(std::int32_t rows, std::int32_t left, std::int32_t right) noexcept;
+
+	// Nothing at all, over the same rectangle — the bottom of a *group's* composite, where `Clear` is
+	// the bottom of an output's. What lies beneath a group is in the level below it rather than in
+	// this one, so a group's level starts empty and `Over` leaves that level alone wherever the group
+	// put nothing.
+	//
+	// **This is where *the composite's alpha is always exactly full range* stops holding**, which is
+	// the one thing worth carrying out of this file. A group's level holds genuinely translucent
+	// premultiplied light, and the static assertions below stop covering it. What keeps that from
+	// costing anybody a divide is that such a level is never encoded: it is consumed by `BlendAbove`
+	// into the level beneath it, and `Over` and `Attenuate` are both defined on premultiplied values.
+	// The straight value is never needed, so it is never recovered.
+	void Erase(std::int32_t rows, std::int32_t left, std::int32_t right) noexcept;
 
 	// `source` over `[left, right)` of one row. The source is already attenuated by whatever coverage
 	// and opacity apply to the whole run, which is what makes this the tight loop it needs to be: one
@@ -149,12 +162,36 @@ public:
 	// One pixel, for a partially covered edge where the run's constant does not hold.
 	void BlendPixel(std::int32_t row, std::int32_t column, Light source) noexcept;
 
+	// `above` over `[left, right)` of one row of this band, attenuated by `scale` — a group's level
+	// coming down into the level beneath it, which is decision 60's *composited once at g*.
+	//
+	// **A blend rather than a resample, and that is what makes a group cost no sampling at all.** The
+	// two bands hold the same rows of the same output at the same width, because a group's members
+	// carry their own device-space corners and the group's quad is where they already are. So a
+	// column is a column, and the whole of flattening a subtree is one pass of `Over` per row.
+	//
+	// `scale` is the group's own opacity, applied here rather than at each member. That placement is
+	// the entire content of decision 60: the members composite against each other at full strength,
+	// opaque to one another, and the fade happens once, to the result.
+	void BlendAbove(
+		std::int32_t row,
+		std::int32_t left,
+		std::int32_t right,
+		const Band& above,
+		std::uint16_t scale
+	) noexcept;
+
 	[[nodiscard]] Light At(std::int32_t row, std::int32_t column) const noexcept;
 
 private:
 	// Whether `[left, right)` of `row` lies inside the band, narrowed to what does. False where
 	// nothing does.
 	[[nodiscard]] bool Clip(std::int32_t row, std::int32_t& left, std::int32_t& right) const noexcept;
+
+	// One constant over `[left, right)` of every row in `[0, rows)`, written rather than blended.
+	// What `Clear` and `Erase` differ in is only which constant, and saying that once is better than
+	// two copies of the same clip.
+	void Fill(std::int32_t rows, std::int32_t left, std::int32_t right, Light with) noexcept;
 
 	std::vector<Light> m_Pixels;
 	std::int32_t m_Width = 0;
@@ -163,7 +200,9 @@ private:
 
 // The algebra the composite rests on, at compile time. `Over` an opaque backdrop stays exactly
 // opaque however many times it runs, which is what lets the encode skip unpremultiplying and what
-// would otherwise decay a boot screen one least-significant bit per item drawn.
+// would otherwise decay a boot screen one least-significant bit per item drawn. It is a claim about
+// a band whose bottom is `Clear`; the level a group composites into starts at `Erase` and is
+// deliberately outside it.
 static_assert(Multiply(65535, 65535) == 65535 && Multiply(65535, 0) == 0 && Multiply(1234, 65535) == 1234);
 static_assert(Over(Light{ 0, 0, 0, 0 }, Light{ 100, 200, 300, 65535 }) == Light{ 100, 200, 300, 65535 });
 static_assert(Over(Light{ 65535, 0, 0, 65535 }, Light{ 0, 0, 65535, 65535 }) == Light{ 65535, 0, 0, 65535 });

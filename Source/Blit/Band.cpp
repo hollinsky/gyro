@@ -82,12 +82,8 @@ bool Band::Clip(std::int32_t row, std::int32_t& left, std::int32_t& right) const
 	return right > left;
 }
 
-void Band::Clear(std::int32_t rows, std::int32_t left, std::int32_t right) noexcept
+void Band::Fill(std::int32_t rows, std::int32_t left, std::int32_t right, Light with) noexcept
 {
-	// Opaque black, which is the one value that makes `Over` exact forever: every composite above it
-	// keeps an alpha of exactly full range, so nothing has to be unpremultiplied on the way out.
-	constexpr Light Bottom{ 0, 0, 0, 65535 };
-
 	for (std::int32_t row = 0; row < std::min(rows, m_Rows); ++row)
 	{
 		std::int32_t from = left;
@@ -99,8 +95,24 @@ void Band::Clear(std::int32_t rows, std::int32_t left, std::int32_t right) noexc
 		}
 
 		Light* const at = m_Pixels.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(m_Width);
-		std::fill(at + from, at + to, Bottom);
+		std::fill(at + from, at + to, with);
 	}
+}
+
+void Band::Clear(std::int32_t rows, std::int32_t left, std::int32_t right) noexcept
+{
+	// Opaque black, which is the one value that makes `Over` exact forever: every composite above it
+	// keeps an alpha of exactly full range, so nothing has to be unpremultiplied on the way out.
+	Fill(rows, left, right, Light{ 0, 0, 0, 65535 });
+}
+
+void Band::Erase(std::int32_t rows, std::int32_t left, std::int32_t right) noexcept
+{
+	// Nothing, which is the only bottom a group's level can have: the light beneath a group is one
+	// level down and has to survive the blend that brings this one to it. `Over` an empty pixel is
+	// exactly the pixel beneath — Band.h asserts it — so a group covering less than its own bound
+	// leaves what it did not cover untouched rather than nearly so.
+	Fill(rows, left, right, Light{});
 }
 
 void Band::BlendRun(std::int32_t row, std::int32_t left, std::int32_t right, Light source) noexcept
@@ -164,6 +176,56 @@ void Band::BlendRun(std::int32_t row, std::int32_t left, std::int32_t right, std
 void Band::BlendPixel(std::int32_t row, std::int32_t column, Light source) noexcept
 {
 	BlendRun(row, column, column + 1, source);
+}
+
+void Band::BlendAbove(
+	std::int32_t row,
+	std::int32_t left,
+	std::int32_t right,
+	const Band& above,
+	std::uint16_t scale
+) noexcept
+{
+	// A group faded all the way out. Worth the branch rather than the loop for the reason the
+	// constant `BlendRun` skips an empty source: every fade begins or ends here, and a whole level
+	// multiplied by zero is a whole level of stores that change nothing.
+	if (scale == 0)
+	{
+		return;
+	}
+
+	// The two bands are the same rows of the same output at the same width, so a column is a column.
+	// A caller that got that wrong writes nothing rather than reading somebody else's pixels.
+	if (above.m_Width != m_Width || row < 0 || row >= above.m_Rows)
+	{
+		return;
+	}
+
+	if (!Clip(row, left, right))
+	{
+		return;
+	}
+
+	const Light* const from = above.m_Pixels.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(m_Width);
+	Light* const at = m_Pixels.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(m_Width);
+
+	// A group at full opacity, which is the frame before a fade starts and the frame after it ends —
+	// and every frame of a group that exists for a reason other than fading. Hoisted out of the loop
+	// because `Attenuate` by full range is exact but is still four multiplies a pixel.
+	if (scale == 65535)
+	{
+		for (std::int32_t column = left; column < right; ++column)
+		{
+			at[column] = Over(from[column], at[column]);
+		}
+
+		return;
+	}
+
+	for (std::int32_t column = left; column < right; ++column)
+	{
+		at[column] = Over(Attenuate(from[column], scale), at[column]);
+	}
 }
 
 Light Band::At(std::int32_t row, std::int32_t column) const noexcept

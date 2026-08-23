@@ -215,6 +215,15 @@ struct DrawTexture
 //
 // The item's `Quad` is the offscreen's placement and is axis-aligned, because the members' own
 // projections are already baked into their device-space corners.
+//
+// **It is an extent rather than a shape, so a renderer rounds it outward to whole pixels and does not
+// antialias it.** The offscreen is a grid of pixels and the bound of a set of quads is generally
+// fractional, so the surface has to round out to hold the antialiased edges the members already
+// carry. Covering the group's own boundary fractionally on top of that would attenuate those edges a
+// second time, and what that looks like is a faint dark seam around every subtree that fades. The
+// rounding is free: the pixels it adds are pixels no member wrote, and compositing nothing over
+// something leaves the something exactly as it was. Written here rather than in either renderer
+// because both have to reach the same picture.
 struct DrawGroup
 {
 	// Items following this one that compose into it. Zero is a group with nothing in it, which is a

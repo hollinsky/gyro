@@ -89,6 +89,20 @@ private:
 	return item;
 }
 
+// A group and the run behind it. `Count` is the length of that run and not a child count, so a test
+// that nests one of these counts everything under it — Seam/Renderer.h, and the reason a test can get
+// this wrong in a way that still compiles.
+[[nodiscard]] DrawItem Group(Rect<DeviceSpace> at, std::uint32_t count, float opacity = 1.0F)
+{
+	DrawItem item{};
+	item.Content = DrawGroup{ .Count = count };
+	item.Shape = Quad::FromRect(at);
+	item.Extent = { at.Extent.Width, at.Extent.Height };
+	item.Opacity = opacity;
+
+	return item;
+}
+
 // An image and the bytes under it, in one object — the other end of `Surface`, and written through
 // the same codec so that a test says what colour a texel is rather than what word it is.
 class Picture
@@ -385,8 +399,8 @@ GYRO_TEST(Blit, OpacityBlendsInLinearLight)
 
 // Everything decision 110 authors the boot scene away from, refused by name — and the target left
 // exactly as it was, because the refusal happens before the first pixel. A `DrawTexture` was on this
-// list until it was built and is not any more; what a *stale* one does is below, and it is silence
-// rather than a refusal.
+// list until it was built and a `DrawGroup` was until decision 60's offscreen was; what a *stale*
+// texture id does is below, and it is silence rather than a refusal.
 GYRO_TEST(Blit, WhatItCannotExpressIsRefusedBeforeAnythingIsDrawn)
 {
 	const MonotonicClock clock;
@@ -415,11 +429,6 @@ GYRO_TEST(Blit, WhatItCannotExpressIsRefusedBeforeAnythingIsDrawn)
 	DrawItem rounded = Solid(square, 1.0F, 1.0F, 1.0F);
 	rounded.Radius = 4.0F;
 	GYRO_CHECK_EQ(refused(rounded), false);
-
-	DrawItem grouped{};
-	grouped.Content = DrawGroup{ .Count = 0 };
-	grouped.Shape = Quad::FromRect(square);
-	GYRO_CHECK_EQ(refused(grouped), false);
 
 	// A rotated quad. The producer culls back faces and composes the chain, so what arrives here is a
 	// plane in space; this renderer rasterizes the axis-aligned ones and says so about the rest.
@@ -922,4 +931,246 @@ GYRO_TEST(Blit, EveryCodeSurvivesTheRoundTripThroughLinearLight)
 			GYRO_REQUIRE_EQ(surface.At(x, y), Rgb8(code, static_cast<std::uint8_t>(255 - code), code));
 		}
 	}
+}
+
+// **Decision 60's arithmetic, in a picture.** A green backdrop outside the group, then a group at half
+// opacity holding two overlapping opaque solids — blue underneath, red over it. Flattened, the overlap
+// is half red and half backdrop and there is no blue in it at all. Per node it would be half red, a
+// quarter blue and a quarter backdrop, and that quarter of blue is what an occluded window showing
+// through the one in front of it looks like on a real screen.
+//
+// The blue channel is asserted exactly rather than within a code, because the claim is that nothing
+// contributed to it and not that little did.
+GYRO_TEST(Blit, AGroupFadesAsOneImageRatherThanPerNode)
+{
+	const MonotonicClock clock;
+	Blit blit{ clock };
+
+	Surface surface{ 16, 8 };
+	GYRO_REQUIRE(blit.BindTargets(surface.One(), ColorState::Srgb()).has_value());
+
+	const std::array<DrawItem, 4> items{
+		Solid({ {}, { 16.0F, 8.0F } }, 0.0F, 1.0F, 0.0F),
+		Group({ { 2.0F, 2.0F }, { 8.0F, 4.0F } }, 2, 0.5F),
+		Solid({ { 2.0F, 2.0F }, { 8.0F, 4.0F } }, 0.0F, 0.0F, 1.0F),
+		Solid({ { 4.0F, 2.0F }, { 4.0F, 4.0F } }, 1.0F, 0.0F, 0.0F),
+	};
+
+	GYRO_REQUIRE(blit.Record(Frame(items, PixelRect<DeviceSpace>{ {}, { 16, 8 } })).has_value());
+
+	const std::uint16_t half = FromEightBit(static_cast<std::uint8_t>(LinearToSrgb(0.5F) * 255.0F + 0.5F));
+	const std::uint16_t tolerance = FromEightBit(1);
+
+	// The overlap: half red over half backdrop, and the occluded blue is gone rather than faint.
+	GYRO_CHECK_EQ(surface.At(5, 3).Blue, 0);
+	GYRO_CHECK(surface.At(5, 3).Red >= half - tolerance && surface.At(5, 3).Red <= half + tolerance);
+	GYRO_CHECK(surface.At(5, 3).Green >= half - tolerance && surface.At(5, 3).Green <= half + tolerance);
+
+	// Where only the occluded member is, it is half of itself over the backdrop — the group fades what
+	// is visible in it, which is not the same as fading nothing.
+	GYRO_CHECK_EQ(surface.At(2, 3).Red, 0);
+	GYRO_CHECK(surface.At(2, 3).Blue >= half - tolerance && surface.At(2, 3).Blue <= half + tolerance);
+
+	// And outside the group the backdrop is untouched, at full range rather than nearly.
+	GYRO_CHECK_EQ(surface.At(12, 3), Rgb8(0, 255, 0));
+}
+
+// The members are the run behind the item, so a nested group and everything under it belong to the
+// parent — the reading that differs from a child count the moment anything nests. Asserted through a
+// fade rather than through a count: an inner group at zero takes its member with it, and a walk that
+// mistook the parent's run for two children would draw that member loose at the top level in full.
+GYRO_TEST(Blit, ANestedGroupAndEverythingUnderItIsInsideItsParentsRun)
+{
+	const MonotonicClock clock;
+	Blit blit{ clock };
+
+	Surface surface{ 8, 8 };
+	GYRO_REQUIRE(blit.BindTargets(surface.One(), ColorState::Srgb()).has_value());
+
+	const Rect<DeviceSpace> square{ { 2.0F, 2.0F }, { 4.0F, 4.0F } };
+	const PixelRect<DeviceSpace> whole{ {}, { 8, 8 } };
+
+	std::array<DrawItem, 3> items{ Group(square, 2, 1.0F), Group(square, 1, 0.0F), Solid(square, 1.0F, 0.0F, 0.0F) };
+
+	GYRO_REQUIRE(blit.Record(Frame(items, whole)).has_value());
+	GYRO_CHECK_EQ(surface.At(3, 3), Black);
+
+	// The other way round, which is the same claim from the outside: a parent at zero takes the whole
+	// run with it, nested group included.
+	items[0].Opacity = 0.0F;
+	items[1].Opacity = 1.0F;
+
+	GYRO_REQUIRE(blit.Record(Frame(items, whole)).has_value());
+	GYRO_CHECK_EQ(surface.At(3, 3), Black);
+
+	// And with both open it is the solid, undimmed — two levels of scratch and no loss on the way
+	// down, because attenuating by full range is exact.
+	items[0].Opacity = 1.0F;
+
+	GYRO_REQUIRE(blit.Record(Frame(items, whole)).has_value());
+	GYRO_CHECK_EQ(surface.At(3, 3), Red);
+}
+
+// A group's bound is an extent and not an edge to cover, so its placement rounds outward to whole
+// pixels and the members' own antialiasing survives untouched. Covering it fractionally instead would
+// attenuate that edge a second time, which on screen is a dark seam around every subtree that fades —
+// so the same solid is drawn loose and inside a group whose bound is exactly it, and the subpixel
+// column has to come out identical.
+GYRO_TEST(Blit, AGroupsBoundIsAnExtentRatherThanAnEdgeToCover)
+{
+	const MonotonicClock clock;
+	Blit blit{ clock };
+
+	const Rect<DeviceSpace> half{ { 2.5F, 0.0F }, { 3.5F, 8.0F } };
+	const PixelRect<DeviceSpace> whole{ {}, { 16, 8 } };
+
+	Surface loose{ 16, 8 };
+	GYRO_REQUIRE(blit.BindTargets(loose.One(), ColorState::Srgb()).has_value());
+
+	const std::array<DrawItem, 1> alone{ Solid(half, 1.0F, 1.0F, 1.0F) };
+	GYRO_REQUIRE(blit.Record(Frame(alone, whole)).has_value());
+
+	Surface grouped{ 16, 8 };
+	GYRO_REQUIRE(blit.BindTargets(grouped.One(), ColorState::Srgb()).has_value());
+
+	const std::array<DrawItem, 2> wrapped{ Group(half, 1, 1.0F), Solid(half, 1.0F, 1.0F, 1.0F) };
+	GYRO_REQUIRE(blit.Record(Frame(wrapped, whole)).has_value());
+
+	// The half-covered column, and the whole one beside it. Both identical, and the first is a real
+	// coverage value rather than nothing — a group that dropped the column entirely would also pass an
+	// equality check against a picture that had lost it too.
+	GYRO_CHECK_EQ(grouped.At(2, 4), loose.At(2, 4));
+	GYRO_CHECK_EQ(grouped.At(3, 4), loose.At(3, 4));
+	GYRO_CHECK(grouped.At(2, 4).Red > 0);
+	GYRO_CHECK(grouped.At(2, 4).Red < grouped.At(3, 4).Red);
+}
+
+// The offscreen's extent is what clips its members, exactly as a render target of that size would. A
+// member that spilled past the group's bound is cut off rather than drawn onto the output beside it.
+GYRO_TEST(Blit, AMemberIsClippedToTheGroupsOwnBound)
+{
+	const MonotonicClock clock;
+	Blit blit{ clock };
+
+	Surface surface{ 8, 8 };
+	GYRO_REQUIRE(blit.BindTargets(surface.One(), ColorState::Srgb()).has_value());
+
+	const std::array<DrawItem, 2> items{ Group({ {}, { 4.0F, 8.0F } }, 1, 1.0F),
+		                                 Solid({ {}, { 8.0F, 8.0F } }, 1.0F, 0.0F, 0.0F) };
+
+	GYRO_REQUIRE(blit.Record(Frame(items, PixelRect<DeviceSpace>{ {}, { 8, 8 } })).has_value());
+
+	GYRO_CHECK_EQ(surface.At(3, 4), Red);
+	GYRO_CHECK_EQ(surface.At(4, 4), Black);
+}
+
+// A group taller than one band is still one picture. The offscreen is a band rather than a surface, so
+// it is built again for every band the group crosses — and the arithmetic has to come out the same in
+// the band where the group starts, one in the middle, and the one where it ends.
+GYRO_TEST(Blit, AGroupTallerThanOneBandIsStillOnePicture)
+{
+	const MonotonicClock clock;
+	Blit blit{ clock };
+
+	Surface surface{ 8, 200 };
+	GYRO_REQUIRE(blit.BindTargets(surface.One(), ColorState::Srgb()).has_value());
+
+	const std::array<DrawItem, 4> items{
+		Solid({ {}, { 8.0F, 200.0F } }, 0.0F, 1.0F, 0.0F),
+		Group({ {}, { 8.0F, 200.0F } }, 2, 0.5F),
+		Solid({ {}, { 8.0F, 200.0F } }, 0.0F, 0.0F, 1.0F),
+		Solid({ {}, { 8.0F, 200.0F } }, 1.0F, 0.0F, 0.0F),
+	};
+
+	GYRO_REQUIRE(blit.Record(Frame(items, PixelRect<DeviceSpace>{ {}, { 8, 200 } })).has_value());
+
+	GYRO_CHECK_EQ(surface.At(4, 3), surface.At(4, 100));
+	GYRO_CHECK_EQ(surface.At(4, 3), surface.At(4, 199));
+	GYRO_CHECK_EQ(surface.At(4, 100).Blue, 0);
+}
+
+// A group with nothing in it is a caller's bug and draws nothing rather than being refused, which is
+// the answer a stale texture id gets and for the same reason: a frame is not where a bug in the scene
+// is reported, because the frame after it would report the same one again. A group that collapsed to
+// no extent is the same answer, and it takes its members with it — half a faded subtree drawn loose is
+// worse than none of it.
+GYRO_TEST(Blit, AnEmptyOrCollapsedGroupDrawsNothingAndTakesItsRunWithIt)
+{
+	const MonotonicClock clock;
+	Blit blit{ clock };
+
+	Surface surface{ 8, 8 };
+	GYRO_REQUIRE(blit.BindTargets(surface.One(), ColorState::Srgb()).has_value());
+
+	const Rect<DeviceSpace> square{ { 2.0F, 2.0F }, { 4.0F, 4.0F } };
+	const PixelRect<DeviceSpace> whole{ {}, { 8, 8 } };
+
+	const std::array<DrawItem, 1> nothing{ Group(square, 0) };
+	GYRO_REQUIRE(blit.Record(Frame(nothing, whole)).has_value());
+	GYRO_CHECK_EQ(surface.At(3, 3), Black);
+
+	const std::array<DrawItem, 2> collapsed{ Group({ { 2.0F, 2.0F }, {} }, 1), Solid(square, 1.0F, 0.0F, 0.0F) };
+	GYRO_REQUIRE(blit.Record(Frame(collapsed, whole)).has_value());
+	GYRO_CHECK_EQ(surface.At(3, 3), Black);
+}
+
+// The run structure is checked before the first pixel, like everything else `Record` refuses: a run
+// that reaches past the list, or past the run it is nested inside, has no reading that draws the right
+// picture — the members past the boundary would belong to two groups at once.
+GYRO_TEST(Blit, AGroupWhoseRunDoesNotNestIsRefusedBeforeAnythingIsDrawn)
+{
+	const MonotonicClock clock;
+	Blit blit{ clock };
+
+	Surface surface{ 8, 8 };
+	GYRO_REQUIRE(blit.BindTargets(surface.One(), ColorState::Srgb()).has_value());
+
+	const Rect<DeviceSpace> square{ {}, { 4.0F, 4.0F } };
+	const PixelRect<DeviceSpace> whole{ {}, { 8, 8 } };
+
+	const std::array<DrawItem, 2> past{ Group(square, 5), Solid(square, 1.0F, 0.0F, 0.0F) };
+	GYRO_CHECK_EQ(blit.Record(Frame(past, whole)).has_value(), false);
+
+	// The nested form: the outer run ends after the inner group, and the inner one claims the solid
+	// that is outside it.
+	const std::array<DrawItem, 3> crossed{ Group(square, 1), Group(square, 1), Solid(square, 1.0F, 0.0F, 0.0F) };
+	GYRO_CHECK_EQ(blit.Record(Frame(crossed, whole)).has_value(), false);
+
+	GYRO_CHECK(Surface::IsUntouched(surface.At(0, 0)));
+}
+
+// Every level of nesting is a whole band of scratch reserved at `BindTargets`, because `Record` may
+// not allocate — so the depth is a stated bound and past it is `EINVAL` rather than a picture missing
+// its innermost subtree. Exercised at the boundary from both sides, since a bound that is off by one
+// is a bound nobody notices until the frame it refuses.
+GYRO_TEST(Blit, AGroupNestedDeeperThanTheScratchIsRefusedRatherThanDropped)
+{
+	const MonotonicClock clock;
+	Blit blit{ clock };
+
+	Surface surface{ 8, 8 };
+	GYRO_REQUIRE(blit.BindTargets(surface.One(), ColorState::Srgb()).has_value());
+
+	const Rect<DeviceSpace> square{ {}, { 4.0F, 4.0F } };
+	const PixelRect<DeviceSpace> whole{ {}, { 8, 8 } };
+
+	// `depth` groups nested one inside the next, with one solid at the bottom of them all. Each one's
+	// run is everything after it, which is what makes them nest rather than follow.
+	const auto stack = [&](std::size_t depth) {
+		std::vector<DrawItem> items;
+
+		for (std::size_t level = 0; level < depth; ++level)
+		{
+			items.push_back(Group(square, static_cast<std::uint32_t>(depth - level)));
+		}
+
+		items.push_back(Solid(square, 1.0F, 0.0F, 0.0F));
+
+		return blit.Record(Frame(items, whole)).has_value();
+	};
+
+	GYRO_CHECK_EQ(stack(Blit::MaxDepth), true);
+	GYRO_CHECK_EQ(surface.At(1, 1), Red);
+
+	GYRO_CHECK_EQ(stack(Blit::MaxDepth + 1), false);
 }

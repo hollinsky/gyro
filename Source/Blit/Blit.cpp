@@ -122,17 +122,13 @@ Result<Blit::Painted> Blit::Classify(const DrawItem& item) const noexcept
 		return Failure(EINVAL, "no CPU composite rounds a corner yet");
 	}
 
-	if (std::holds_alternative<DrawGroup>(item.Content))
-	{
-		return Failure(EINVAL, "no CPU composite flattens a group yet");
-	}
-
 	const DrawSolid* const solid = std::get_if<DrawSolid>(&item.Content);
 	const DrawTexture* const texture = std::get_if<DrawTexture>(&item.Content);
+	const DrawGroup* const group = std::get_if<DrawGroup>(&item.Content);
 
 	// A dressing with no material and no elevation has nothing of its own to draw, which is what the
-	// two refusals above have already established. It is legal and it is empty.
-	if (solid == nullptr && texture == nullptr)
+	// three refusals above have already established. It is legal and it is empty.
+	if (solid == nullptr && texture == nullptr && group == nullptr)
 	{
 		return Painted{};
 	}
@@ -142,12 +138,26 @@ Result<Blit::Painted> Blit::Classify(const DrawItem& item) const noexcept
 	// numbers meant the same thing. Blit/Transfer.h is what this leaves standing — the transfer
 	// function, which is a conversion within one state rather than between two. For a texture it is
 	// also what makes the decode table below the *output's*, which is the only one this renderer has.
-	if (!(item.Color == m_Output))
+	//
+	// **A group is exempt, because the field describes content it does not have.** What a group
+	// composites is its members, each of which arrives as an item carrying its own colour state and is
+	// checked here in its turn; the flattened result is in the band's units, which are the output's by
+	// construction. Refusing a frame over a field nothing reads is a dark machine for no reason at all.
+	if (group == nullptr && !(item.Color == m_Output))
 	{
 		return Failure(EINVAL, "an item's colour state is not the output's, and nothing here converts");
 	}
 
 	Painted painted{ .Opacity = std::clamp(item.Opacity, 0.0F, 1.0F), .Draws = true };
+
+	if (group != nullptr)
+	{
+		// Recorded before any answer below, because the walk skips this group's run by this count
+		// whether or not the group itself draws — the members belong to it either way, and a group that
+		// collapsed to nothing takes its subtree with it rather than spilling it onto the output.
+		painted.Grouped = true;
+		painted.Members = group->Count;
+	}
 
 	if (!AxisAligned(item.Shape, painted.Shape))
 	{
@@ -161,6 +171,28 @@ Result<Blit::Painted> Blit::Classify(const DrawItem& item) const noexcept
 
 	if (!painted.Draws)
 	{
+		return painted;
+	}
+
+	if (group != nullptr)
+	{
+		// A group with nothing in it draws nothing rather than being refused, which is Seam/Renderer.h's
+		// answer: it is a caller's bug, and a frame is not where one gets reported.
+		painted.Draws = group->Count > 0;
+
+		// **The placement is whole device pixels, so the quad is rounded outward rather than covered
+		// fractionally.** A group's offscreen is a grid of pixels and its bound is the union of its
+		// members' — generally fractional — so the surface has to round out to contain the antialiased
+		// edges the members already carry. Applying coverage to the group's own boundary on top of that
+		// would attenuate those edges a second time, which on screen is a faint dark seam around every
+		// subtree that fades: exactly the artefact decision 47's linear-light blend exists to remove,
+		// arriving one group at a time. Rounding outward instead costs nothing, because the pixels it
+		// adds are pixels no member wrote and `Over` of nothing is exactly what was beneath.
+		painted.Shape = Rect<DeviceSpace>::FromEdges(
+			{ std::floor(painted.Shape.Left()), std::floor(painted.Shape.Top()) },
+			{ std::ceil(painted.Shape.Right()), std::ceil(painted.Shape.Bottom()) }
+		);
+
 		return painted;
 	}
 
@@ -233,6 +265,54 @@ Result<Blit::Painted> Blit::Classify(const DrawItem& item) const noexcept
 	painted.Textured = true;
 
 	return painted;
+}
+
+// The run structure, before the first pixel and once for the whole list. `Classify` cannot do this
+// because one item cannot see where another one's run ends, and the band loop must not: it walks the
+// list once per band, and a list that is malformed is malformed the first time.
+Result<void> Blit::Nesting(std::span<const DrawItem> items) const noexcept
+{
+	// Where each open group's run ends, innermost last. Bounded by `MaxDepth` because a group that
+	// would push past it is exactly the refusal this walk exists to produce.
+	std::array<std::size_t, MaxDepth> ends{};
+	std::size_t open = 0;
+
+	for (std::size_t index = 0; index < items.size(); ++index)
+	{
+		// Runs that ended before this item. A loop rather than an `if` because several can end at once
+		// — a group whose last member is itself a group closes both.
+		while (open > 0 && ends[open - 1] == index)
+		{
+			--open;
+		}
+
+		const DrawGroup* const group = std::get_if<DrawGroup>(&items[index].Content);
+
+		if (group == nullptr)
+		{
+			continue;
+		}
+
+		// The end of the run this group is inside, which is the list itself at the top level. A run
+		// that reaches past its enclosing one is a list whose structure does not nest, and there is no
+		// reading of it that draws the right picture — the members past the boundary belong to two
+		// groups at once.
+		const std::size_t enclosing = open > 0 ? ends[open - 1] : items.size();
+
+		if (index + 1 + static_cast<std::size_t>(group->Count) > enclosing)
+		{
+			return Failure(EINVAL, "a group's run reaches past the list it is inside");
+		}
+
+		if (open == MaxDepth)
+		{
+			return Failure(EINVAL, "a group nested deeper than this renderer reserves scratch for");
+		}
+
+		ends[open++] = index + 1 + static_cast<std::size_t>(group->Count);
+	}
+
+	return {};
 }
 
 const Blit::Image* Blit::Find(TextureId id) const noexcept
@@ -415,15 +495,23 @@ Result<void> Blit::BindTargets(std::span<const RenderTarget> targets, ColorState
 		widest = std::max(widest, target.Size.Width);
 	}
 
-	// One band for the whole set, sized to the widest of them. It holds nothing between frames — see
-	// Blit/Band.h — so there is no reason for it to be per target, and every reason for it not to be.
+	// One set of bands for the whole target set, sized to the widest of them. They hold nothing
+	// between frames — see Blit/Band.h — so there is no reason for them to be per target, and every
+	// reason for them not to be.
+	//
+	// **Every nesting level is reserved here whether or not a frame nests**, because `Record` may not
+	// allocate and cannot know how deep a scene goes until it is walking it. `MaxDepth` is where the
+	// cost of that is argued.
 	if (widest > 0)
 	{
-		if (const Result<void> reserved = m_Band.Reserve(widest); !reserved)
+		for (Band& level : m_Levels)
 		{
-			ReleaseTargets();
+			if (const Result<void> reserved = level.Reserve(widest); !reserved)
+			{
+				ReleaseTargets();
 
-			return std::unexpected{ reserved.error() };
+				return std::unexpected{ reserved.error() };
+			}
 		}
 
 		// One row of sampled pixels, as wide as the widest run a damage rectangle can produce. Sized
@@ -440,7 +528,11 @@ void Blit::ReleaseTargets() noexcept
 {
 	m_Targets.fill(Bound{});
 	m_Count = 0;
-	m_Band.Release();
+
+	for (Band& level : m_Levels)
+	{
+		level.Release();
+	}
 
 	m_Samples.clear();
 	m_Samples.shrink_to_fit();
@@ -462,6 +554,13 @@ Result<Submission> Blit::Record(const RecordRequest& request)
 	if (request.Items.size() > MaxItems)
 	{
 		return Failure(EINVAL, "a draw list longer than any evaluator produces");
+	}
+
+	// The structure before the items, because `Classify` is written against a single item and the
+	// walk below trusts what it says about a group's run.
+	if (const Result<void> nesting = Nesting(request.Items); !nesting)
+	{
+		return std::unexpected{ nesting.error() };
 	}
 
 	// The whole list before the first pixel, and the answers kept. A refusal halfway through would
@@ -641,110 +740,194 @@ void Blit::Paint(const Bound& target, PixelRect<DeviceSpace> rect, std::size_t i
 	const std::int32_t top = std::max(rect.Top(), 0);
 	const std::int32_t bottom = std::min(rect.Bottom(), target.Size.Height);
 
-	if (right <= left || bottom <= top || m_Band.Rows() == 0)
+	if (right <= left || bottom <= top || m_Levels[0].Rows() == 0)
 	{
 		return;
 	}
 
-	for (std::int32_t bandTop = top; bandTop < bottom; bandTop += m_Band.Rows())
+	for (std::int32_t bandTop = top; bandTop < bottom; bandTop += m_Levels[0].Rows())
 	{
-		const std::int32_t rows = std::min(m_Band.Rows(), bottom - bandTop);
+		const std::int32_t rows = std::min(m_Levels[0].Rows(), bottom - bandTop);
 
-		m_Band.Clear(rows, left, right);
+		m_Levels[0].Clear(rows, left, right);
 
-		// Painted in list order, which is decision 55's z: preorder is the painter's order, so there is
-		// nothing to sort and no depth to compare.
-		for (std::size_t index = 0; index < items; ++index)
+		Compose(0, 0, items, rows, bandTop, left, right);
+
+		Emit(target, bandTop, rows, left, right);
+	}
+}
+
+void Blit::Compose(
+	std::size_t level,
+	std::size_t from,
+	std::size_t to,
+	std::int32_t rows,
+	std::int32_t bandTop,
+	std::int32_t left,
+	std::int32_t right
+) noexcept
+{
+	// Painted in list order, which is decision 55's z: preorder is the painter's order, so there is
+	// nothing to sort and no depth to compare. A group is the one place that order has structure, and
+	// even there the members stay in list order — they are just composited somewhere else first.
+	for (std::size_t index = from; index < to; ++index)
+	{
+		const Painted& painted = m_Painted[index];
+
+		if (!painted.Grouped)
 		{
-			const Painted& painted = m_Painted[index];
-
-			if (!painted.Draws)
+			if (painted.Draws)
 			{
-				continue;
+				Draw(m_Levels[level], painted, rows, bandTop, left, right);
 			}
 
-			// The columns this item's edges fall in, and the run between them where every pixel is
-			// fully covered. A rectangle whose edges land on whole pixels has no partial columns at
-			// all, which is decision 67's settled geometry taking the path with no arithmetic in it.
-			const std::int32_t runFrom = static_cast<std::int32_t>(std::ceil(painted.Shape.Left()));
-			const std::int32_t runTo = std::max(static_cast<std::int32_t>(std::floor(painted.Shape.Right())), runFrom);
-			const std::int32_t edgeLeft = static_cast<std::int32_t>(std::floor(painted.Shape.Left()));
-			const std::int32_t edgeRight = static_cast<std::int32_t>(std::ceil(painted.Shape.Right())) - 1;
+			continue;
+		}
 
-			for (std::int32_t row = 0; row < rows; ++row)
+		const std::size_t end = index + 1 + static_cast<std::size_t>(painted.Members);
+
+		// The group's own columns, and the rows of this band it reaches. Both edges are whole numbers
+		// — `Classify` rounded the placement out to pixels — so the cast is exact and there is no
+		// partially covered column to carry.
+		const std::int32_t spanFrom = std::max(static_cast<std::int32_t>(painted.Shape.Left()), left);
+		const std::int32_t spanTo = std::min(static_cast<std::int32_t>(painted.Shape.Right()), right);
+
+		const bool lands = painted.Draws && spanTo > spanFrom && painted.Shape.Bottom() > static_cast<float>(bandTop) &&
+		                   painted.Shape.Top() < static_cast<float>(bandTop + rows);
+
+		// Skipped where the group misses this band, which is most bands for most groups: a fading
+		// window is a few hundred rows of a panel, and an offscreen is only worth building where it
+		// lands. Skipping is *also* what a group that collapsed to nothing does, and it takes its whole
+		// subtree with it — a faded-out group is not the same picture as its members drawn loose.
+		if (lands)
+		{
+			// **The level a group composites into is erased rather than cleared**, because what is
+			// beneath the group lives one level down and has to survive the blend that brings this one
+			// to it. Erased over the group's own columns and read back over the same ones, so the level
+			// is written wherever it will be read; the members are handed those columns too, which is
+			// the offscreen's extent doing the clipping a real render target would do by being that
+			// size.
+			m_Levels[level + 1].Erase(rows, spanFrom, spanTo);
+
+			Compose(level + 1, index + 1, end, rows, bandTop, spanFrom, spanTo);
+
+			Flatten(level, painted, rows, bandTop, spanFrom, spanTo);
+		}
+
+		// The members belong to the group whether or not it drew them.
+		index = end - 1;
+	}
+}
+
+void Blit::Flatten(
+	std::size_t level,
+	const Painted& group,
+	std::int32_t rows,
+	std::int32_t bandTop,
+	std::int32_t left,
+	std::int32_t right
+) noexcept
+{
+	// Whole rows and no vertical coverage, for the reason `Classify` rounds the placement out: a group
+	// is an extent rather than a shape, and antialiasing its boundary would darken edges its members
+	// have already antialiased once.
+	const std::int32_t first = std::max(static_cast<std::int32_t>(group.Shape.Top()) - bandTop, 0);
+	const std::int32_t last = std::min(static_cast<std::int32_t>(group.Shape.Bottom()) - bandTop, rows);
+
+	// One number for the whole surface, which is decision 60 in a line: the members composited against
+	// each other at full strength, and the fade applied once to the result.
+	const std::uint16_t opacity = Quantize(group.Opacity);
+
+	for (std::int32_t row = first; row < last; ++row)
+	{
+		m_Levels[level].BlendAbove(row, left, right, m_Levels[level + 1], opacity);
+	}
+}
+
+void Blit::Draw(
+	Band& into,
+	const Painted& painted,
+	std::int32_t rows,
+	std::int32_t bandTop,
+	std::int32_t left,
+	std::int32_t right
+) noexcept
+{
+	// The columns this item's edges fall in, and the run between them where every pixel is fully
+	// covered. A rectangle whose edges land on whole pixels has no partial columns at all, which is
+	// decision 67's settled geometry taking the path with no arithmetic in it.
+	const std::int32_t runFrom = static_cast<std::int32_t>(std::ceil(painted.Shape.Left()));
+	const std::int32_t runTo = std::max(static_cast<std::int32_t>(std::floor(painted.Shape.Right())), runFrom);
+	const std::int32_t edgeLeft = static_cast<std::int32_t>(std::floor(painted.Shape.Left()));
+	const std::int32_t edgeRight = static_cast<std::int32_t>(std::ceil(painted.Shape.Right())) - 1;
+
+	for (std::int32_t row = 0; row < rows; ++row)
+	{
+		const float vertical = Overlap(painted.Shape.Top(), painted.Shape.Bottom(), bandTop + row);
+
+		if (vertical <= 0.0F)
+		{
+			continue;
+		}
+
+		// The vertical coverage and the item's own opacity are one number by the time a span sees
+		// them, because attenuating a premultiplied colour is the same operation for both.
+		const float weight = vertical * painted.Opacity;
+
+		// The texel row this device row's centre lands on. One value for the whole run, because the
+		// quad is axis-aligned — which is most of why the refusal in `Classify` is worth having rather
+		// than a general rasterizer.
+		const float down = painted.Source.Down(bandTop + row);
+
+		// The interior, where a solid is one constant blended across a span. This is what decision 110
+		// replaced the sketch's fill-per-item-per-damage-rectangle with, and the reason is overdraw: a
+		// CPU composite at a panel's resolution cannot afford to touch a pixel once per item in the
+		// list. A texture resamples the same span into the scratch first and blends it the same way.
+		const std::int32_t spanFrom = std::max(runFrom, left);
+		const std::int32_t spanTo = std::min(runTo, right);
+
+		if (spanTo > spanFrom)
+		{
+			if (painted.Textured)
 			{
-				const float vertical = Overlap(painted.Shape.Top(), painted.Shape.Bottom(), bandTop + row);
-
-				if (vertical <= 0.0F)
-				{
-					continue;
-				}
-
-				// The vertical coverage and the item's own opacity are one number by the time a span
-				// sees them, because attenuating a premultiplied colour is the same operation for both.
-				const float weight = vertical * painted.Opacity;
-
-				// The texel row this device row's centre lands on. One value for the whole run,
-				// because the quad is axis-aligned — which is most of why the refusal above is worth
-				// having rather than a general rasterizer.
-				const float down = painted.Source.Down(bandTop + row);
-
-				// The interior, where a solid is one constant blended across a span. This is what
-				// decision 110 replaced the sketch's fill-per-item-per-damage-rectangle with, and the
-				// reason is overdraw: a CPU composite at a panel's resolution cannot afford to touch a
-				// pixel once per item in the list. A texture resamples the same span into the scratch
-				// first and blends it the same way.
-				const std::int32_t spanFrom = std::max(runFrom, left);
-				const std::int32_t spanTo = std::min(runTo, right);
-
-				if (spanTo > spanFrom)
-				{
-					if (painted.Textured)
-					{
-						m_Band.BlendRun(
-							row, spanFrom, spanTo, SampleRow(painted.Source, down, spanFrom, spanTo, Quantize(weight))
-						);
-					}
-					else
-					{
-						m_Band.BlendRun(row, spanFrom, spanTo, Attenuate(painted.Colour, Quantize(weight)));
-					}
-				}
-
-				// The one or two partial columns, which carry the subpixel placement. A logo scaled to
-				// a panel lands between pixels, and this is the whole of what keeps its edge from
-				// stepping as the scale animates.
-				if (edgeLeft < runFrom && edgeLeft >= left && edgeLeft < right)
-				{
-					const float horizontal = Overlap(painted.Shape.Left(), painted.Shape.Right(), edgeLeft);
-					const std::uint16_t coverage = Quantize(horizontal * weight);
-
-					m_Band.BlendPixel(
-						row,
-						edgeLeft,
-						painted.Textured ?
-							Attenuate(Sample(painted.Source, painted.Source.Across(edgeLeft), down), coverage) :
-							Attenuate(painted.Colour, coverage)
-					);
-				}
-
-				if (edgeRight >= runTo && edgeRight >= left && edgeRight < right)
-				{
-					const float horizontal = Overlap(painted.Shape.Left(), painted.Shape.Right(), edgeRight);
-					const std::uint16_t coverage = Quantize(horizontal * weight);
-
-					m_Band.BlendPixel(
-						row,
-						edgeRight,
-						painted.Textured ?
-							Attenuate(Sample(painted.Source, painted.Source.Across(edgeRight), down), coverage) :
-							Attenuate(painted.Colour, coverage)
-					);
-				}
+				into.BlendRun(
+					row, spanFrom, spanTo, SampleRow(painted.Source, down, spanFrom, spanTo, Quantize(weight))
+				);
+			}
+			else
+			{
+				into.BlendRun(row, spanFrom, spanTo, Attenuate(painted.Colour, Quantize(weight)));
 			}
 		}
 
-		Emit(target, bandTop, rows, left, right);
+		// The one or two partial columns, which carry the subpixel placement. A logo scaled to a panel
+		// lands between pixels, and this is the whole of what keeps its edge from stepping as the scale
+		// animates.
+		if (edgeLeft < runFrom && edgeLeft >= left && edgeLeft < right)
+		{
+			const float horizontal = Overlap(painted.Shape.Left(), painted.Shape.Right(), edgeLeft);
+			const std::uint16_t coverage = Quantize(horizontal * weight);
+
+			into.BlendPixel(
+				row,
+				edgeLeft,
+				painted.Textured ? Attenuate(Sample(painted.Source, painted.Source.Across(edgeLeft), down), coverage) :
+								   Attenuate(painted.Colour, coverage)
+			);
+		}
+
+		if (edgeRight >= runTo && edgeRight >= left && edgeRight < right)
+		{
+			const float horizontal = Overlap(painted.Shape.Left(), painted.Shape.Right(), edgeRight);
+			const std::uint16_t coverage = Quantize(horizontal * weight);
+
+			into.BlendPixel(
+				row,
+				edgeRight,
+				painted.Textured ? Attenuate(Sample(painted.Source, painted.Source.Across(edgeRight), down), coverage) :
+								   Attenuate(painted.Colour, coverage)
+			);
+		}
 	}
 }
 
@@ -758,7 +941,7 @@ void Blit::Emit(
 {
 	for (std::int32_t row = 0; row < rows; ++row)
 	{
-		const std::span<const Light> source = m_Band.Row(row);
+		const std::span<const Light> source = m_Levels[0].Row(row);
 
 		if (source.empty())
 		{
@@ -774,9 +957,15 @@ void Blit::Emit(
 
 			// No unpremultiply. The band's bottom is an opaque clear and `Over` keeps an opaque
 			// backdrop exactly opaque — Blit/Band.h asserts both — so a composited alpha is always full
-			// range and the premultiplied value is the straight one. A group's offscreen is the first
-			// surface where that stops holding, and the divide belongs to that surface rather than to
-			// this loop.
+			// range and the premultiplied value is the straight one.
+			//
+			// **A group's level is the one surface where that stops holding, and it costs nothing**,
+			// which is not what this comment used to predict. It anticipated a divide belonging to that
+			// surface; there is none, because that surface is never encoded. A group's level is erased
+			// rather than cleared, so it does hold genuinely translucent light — and then it is consumed
+			// by `Band::BlendAbove` into the level beneath it, where `Attenuate` and `Over` both want
+			// the premultiplied value and the straight one is never asked for. Only level zero reaches
+			// this loop, and level zero has an opaque bottom.
 			const Rgba16 encoded{
 				m_Transfer.Encode(light.Red), m_Transfer.Encode(light.Green), m_Transfer.Encode(light.Blue), light.Alpha
 			};
