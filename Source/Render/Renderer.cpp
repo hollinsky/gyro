@@ -471,7 +471,7 @@ VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device, Vulkan
 			                                   .pNext = nullptr,
 			                                   .flags = 0,
 			                                   .queryType = VK_QUERY_TYPE_TIMESTAMP,
-			                                   .queryCount = 2 * MaxRenderTargets,
+			                                   .queryCount = MaxStamps * MaxRenderTargets,
 			                                   .pipelineStatistics = 0 };
 
 		if (Result<void> created =
@@ -480,6 +480,29 @@ VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device, Vulkan
 		{
 			spdlog::warn("no GPU cost measurement on this device: {}", created.error().Context());
 			m_Queries = VK_NULL_HANDLE;
+		}
+	}
+
+	// The overdraw counter, and it is reserved beside the timestamps rather than on demand for the
+	// ordinary reason a frame path allocates nothing: a person asks for a trace when the stutter has
+	// already happened, and a pool created at that moment is a `vkCreateQueryPool` on the `SCHED_FIFO`
+	// thread. One query per target, holding one counter.
+	if (device.Description().CountsPipelineStatistics)
+	{
+		const VkQueryPoolCreateInfo statisticsInfo{ .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+			                                        .pNext = nullptr,
+			                                        .flags = 0,
+			                                        .queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS,
+			                                        .queryCount = MaxRenderTargets,
+			                                        .pipelineStatistics =
+			                                            VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT };
+
+		if (Result<void> created =
+		        Check(vkCreateQueryPool(device.Handle(), &statisticsInfo, nullptr, &m_Statistics), "vkCreateQueryPool");
+		    !created)
+		{
+			spdlog::warn("no fragment count on this device: {}", created.error().Context());
+			m_Statistics = VK_NULL_HANDLE;
 		}
 	}
 
@@ -1102,10 +1125,37 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 	// for; `vkCmdResetQueryPool` is core and costs nothing here, because the pair being reset belongs
 	// to this target and the `LastSubmit` poll above has already established that its previous
 	// submission has landed.
+	// **How many of the target's stamps this frame resets is how many it may write.** A trace ring
+	// armed on this thread buys the whole run of them; otherwise the pair is all there is, which is
+	// exactly what Frame/Budget.h has always been fed. Resetting only what will be written keeps the
+	// untraced frame's cost identical to what it was.
+	m_Stamping = Stamping{ .Target = request.Target, .Count = 0, .Active = m_Queries != VK_NULL_HANDLE && IsTracing() };
+
+	// Cleared whole, so that a record that fails after this point cannot leave a pending cost naming
+	// a run of stamps this command buffer never wrote.
+	PendingCost& pending = m_Pending[request.Target];
+	pending = PendingCost{};
+
 	if (m_Queries != VK_NULL_HANDLE)
 	{
-		vkCmdResetQueryPool(command, m_Queries, 2 * request.Target, 2);
-		vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_Queries, 2 * request.Target);
+		const std::uint32_t reserved = m_Stamping.Active ? MaxStamps : 2;
+		vkCmdResetQueryPool(command, m_Queries, MaxStamps * request.Target, reserved);
+		vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_Queries, MaxStamps * request.Target);
+
+		// The first span, opened at the moment the GPU reaches this batch and named for what it
+		// covers: the ownership transfers, the clear, and every item drawn into the target before the
+		// first glass panel interrupts the pass.
+		pending.Names[0] = "composite";
+		m_Stamping.Count = 1;
+	}
+
+	// The whole command buffer, begun outside every render pass instance because it spans several of
+	// them. Only while tracing: this counter is nobody's input, and the frame loop must not pay for an
+	// instrument it does not read.
+	if (m_Statistics != VK_NULL_HANDLE && m_Stamping.Active)
+	{
+		vkCmdResetQueryPool(command, m_Statistics, request.Target, 1);
+		vkCmdBeginQuery(command, m_Statistics, request.Target, 0);
 	}
 
 	const std::uint32_t family = m_Device->QueueFamily();
@@ -1352,9 +1402,22 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 	// After the release barrier rather than before it, so that the span covers everything this
 	// submission asks the GPU to do — the handback to `VK_QUEUE_FAMILY_FOREIGN_EXT` included, since a
 	// presenter cannot read the target until it has happened.
+	if (m_Statistics != VK_NULL_HANDLE && m_Stamping.Active)
+	{
+		vkCmdEndQuery(command, m_Statistics, request.Target);
+	}
+
+	// **The closing stamp goes at the end of the run rather than at index one, and it always goes.**
+	// It is what turns the last open span into a span and what `GpuCost` is the difference across, so
+	// a submission that spent its whole stamp budget on glass panels still reports what the frame
+	// cost — the closer displaces the last mark rather than being dropped behind it.
 	if (m_Queries != VK_NULL_HANDLE)
 	{
-		vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_Queries, 2 * request.Target + 1);
+		const std::uint32_t closing = m_Stamping.Count < MaxStamps ? m_Stamping.Count : MaxStamps - 1;
+		vkCmdWriteTimestamp(
+			command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_Queries, MaxStamps * request.Target + closing
+		);
+		pending.Stamps = closing + 1;
 	}
 
 	if (Result<void> ended = Check(vkEndCommandBuffer(command), "vkEndCommandBuffer"); !ended)
@@ -1403,10 +1466,15 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 
 	// Only after the submit succeeded. A refused submission wrote no timestamps, and claiming one is
 	// pending would leave a pair the next record resets while `CollectCosts` is still expecting it.
+	// The names and the stamp count were filled in as the buffer was recorded, so this fills in the
+	// rest rather than replacing the record — a fresh `PendingCost` here would throw away the run this
+	// submission just wrote.
 	if (m_Queries != VK_NULL_HANDLE)
 	{
-		m_Pending[request.Target] =
-			PendingCost{ .Submit = value, .Generation = request.CostGeneration, .Mode = request.Mode };
+		pending.Submit = value;
+		pending.Generation = request.CostGeneration;
+		pending.Mode = request.Mode;
+		pending.Trace = request.Trace;
 	}
 
 	// **Decision 108 in five lines.** A device that cannot export a timeline has no descriptor to put
@@ -1708,6 +1776,31 @@ void VulkanRenderer::Pass(
 	vkCmdEndRendering(command);
 }
 
+void VulkanRenderer::Mark(VkCommandBuffer command, const char* name) noexcept
+{
+	// One short of the ceiling, because the closing stamp needs the last slot. Running out stops the
+	// cutting and loses nothing else: the spans already opened still close, and the last one simply
+	// runs to the end of the frame.
+	if (!m_Stamping.Active || m_Stamping.Count + 1 >= MaxStamps)
+	{
+		return;
+	}
+
+	// **`BOTTOM_OF_PIPE` on every mark, which is what makes the spans tile.** A top-of-pipe stamp is
+	// written when the GPU *reaches* the command, which on a pipelined part is long before the work in
+	// front of it has finished — so consecutive top-of-pipe spans overlap and their sum is larger than
+	// the frame. Bottom-of-pipe is written when everything recorded before it has completed, so span
+	// *n* ends exactly where span *n + 1* begins and the run adds up to the pair the budget reads.
+	// This costs nothing here only because every call site sits on a barrier the composite already
+	// had; see `MaxStamps`.
+	vkCmdWriteTimestamp(
+		command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_Queries, MaxStamps * m_Stamping.Target + m_Stamping.Count
+	);
+
+	m_Pending[m_Stamping.Target].Names[m_Stamping.Count] = name;
+	++m_Stamping.Count;
+}
+
 void VulkanRenderer::BeginTarget(VkCommandBuffer command, const Slot& slot, const RecordRequest& request) const noexcept
 {
 	// `LOAD` rather than `CLEAR`, and it is the whole of what damage means. The target holds the
@@ -1882,6 +1975,11 @@ Result<void> VulkanRenderer::Dress(
 
 	vkCmdEndRendering(command);
 
+	// The composite so far is over here, and everything from here to the resumed pass is this panel's
+	// glass. Three marks cut it into the extract that reads the screen, the separable chain that blurs
+	// it, and the dressing itself — each of them at a barrier the chain already needed.
+	Mark(command, "extract");
+
 	// The target's writes have to land before the extract reads them, and the layout does not change
 	// — `GENERAL` is already legible to a shader. An execution and memory dependency, nothing more.
 	Depend(
@@ -1905,6 +2003,8 @@ Result<void> VulkanRenderer::Dress(
 	constants.Step[1] = static_cast<float>(plan.Divisor);
 
 	Pass(command, m_Backdrop.Extract(plan.Divisor), slot.Backdrop, 0, used, pane, constants);
+
+	Mark(command, "blur");
 
 	// Then the separable passes, alternating direction and ping-ponging between the two images. The
 	// count is twice the tier's, because a box is separable and each of its passes is two.
@@ -1962,6 +2062,8 @@ Result<void> VulkanRenderer::Dress(
 		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
 	);
+
+	Mark(command, "composite");
 
 	BeginTarget(command, slot, request);
 
@@ -2214,7 +2316,8 @@ std::size_t VulkanRenderer::CollectCosts(std::span<GpuCost> into)
 	for (std::size_t index = 0; index < ready && written < into.size(); ++index)
 	{
 		const std::uint32_t target = order[index];
-		std::array<std::uint64_t, 2> stamps{};
+		const PendingCost& pending = m_Pending[target];
+		std::array<std::uint64_t, MaxStamps> stamps{};
 
 		// No `VK_QUERY_RESULT_WAIT_BIT`. The timeline above says the work is done, so this is expected
 		// to be available every time; `VK_NOT_READY` is nonetheless a legal answer, and the response to
@@ -2222,9 +2325,9 @@ std::size_t VulkanRenderer::CollectCosts(std::span<GpuCost> into)
 		const VkResult result = vkGetQueryPoolResults(
 			m_Device->Handle(),
 			m_Queries,
-			2 * target,
-			2,
-			stamps.size() * sizeof(std::uint64_t),
+			MaxStamps * target,
+			pending.Stamps,
+			pending.Stamps * sizeof(std::uint64_t),
 			stamps.data(),
 			sizeof(std::uint64_t),
 			VK_QUERY_RESULT_64_BIT
@@ -2235,16 +2338,98 @@ std::size_t VulkanRenderer::CollectCosts(std::span<GpuCost> into)
 			continue;
 		}
 
-		const PendingCost& pending = m_Pending[target];
-		into[written] = GpuCost{ .Cost = m_Device->Description().TimestampSpan(stamps[0], stamps[1]),
+		// The frame's own figure is the first stamp against the last, whatever the marks in between
+		// did. Frame/Budget.h's input is unchanged by any of this, which is the property that lets the
+		// instrument be switched on mid-session without moving the tier a panel is drawing at.
+		const DeviceDescription& description = m_Device->Description();
+		into[written] = GpuCost{ .Cost = description.TimestampSpan(stamps[0], stamps[pending.Stamps - 1]),
 			                     .Generation = pending.Generation,
 			                     .Mode = pending.Mode };
 		++written;
+
+		Report(pending, std::span{ stamps.data(), pending.Stamps }, target);
 
 		m_Pending[target] = PendingCost{};
 	}
 
 	return written;
+}
+
+void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uint64_t> stamps, std::uint32_t target)
+{
+	if (!IsTracing() || pending.Stamps < 2)
+	{
+		return;
+	}
+
+	// **Refreshed here rather than held from construction, and the frame that is being placed is the
+	// one that just finished.** The device counter and `CLOCK_MONOTONIC` are separate oscillators, so
+	// an anchor taken at startup would be tens of milliseconds out by the time a person asks for a
+	// trace an hour into a session — a GPU track drawn a whole refresh away from the frame that
+	// submitted it, which is worse than no track. Taken now, the stamps being converted are a couple
+	// of frames old and the drift across them is nanoseconds. It costs about ten microseconds on the
+	// hardware this was written against, once per iteration, and only while a ring is armed.
+	if (Result<GpuCalibration> anchor = m_Device->Calibrate(); anchor)
+	{
+		m_Calibration = *anchor;
+	}
+
+	if (!m_Calibration.IsValid())
+	{
+		return;
+	}
+
+	const DeviceDescription& description = m_Device->Description();
+
+	// The flow id is the timeline value, which is what Frame/Loop.h's `record` slice already knows
+	// this submission by — so a reader clicking the composite arrives at the iteration that asked for
+	// it rather than at the one that read it back.
+	for (std::uint32_t index = 0; index + 1 < pending.Stamps; ++index)
+	{
+		if (pending.Names[index] == nullptr)
+		{
+			continue;
+		}
+
+		TraceSpanAt(
+			pending.Names[index],
+			TimestampAt(description, m_Calibration, stamps[index]),
+			TimestampAt(description, m_Calibration, stamps[index + 1]),
+			pending.Trace,
+			pending.Submit
+		);
+	}
+
+	if (m_Statistics == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	std::uint64_t fragments = 0;
+
+	if (vkGetQueryPoolResults(
+			m_Device->Handle(),
+			m_Statistics,
+			target,
+			1,
+			sizeof fragments,
+			&fragments,
+			sizeof fragments,
+			VK_QUERY_RESULT_64_BIT
+		) != VK_SUCCESS)
+	{
+		return;
+	}
+
+	// Stamped at the end of the batch rather than at the start, because a counter in Perfetto steps at
+	// the sample and holds until the next one — and what this figure describes is a submission that
+	// has finished, not one that is about to.
+	TraceCountAt(
+		"fragments",
+		TimestampAt(description, m_Calibration, stamps[pending.Stamps - 1]),
+		static_cast<std::int64_t>(fragments),
+		pending.Trace
+	);
 }
 
 void VulkanRenderer::Destroy() noexcept
@@ -2260,6 +2445,12 @@ void VulkanRenderer::Destroy() noexcept
 	{
 		vkDestroyQueryPool(m_Device->Handle(), m_Queries, nullptr);
 		m_Queries = VK_NULL_HANDLE;
+	}
+
+	if (m_Statistics != VK_NULL_HANDLE)
+	{
+		vkDestroyQueryPool(m_Device->Handle(), m_Statistics, nullptr);
+		m_Statistics = VK_NULL_HANDLE;
 	}
 
 	m_Pending = {};

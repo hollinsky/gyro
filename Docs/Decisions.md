@@ -10483,7 +10483,71 @@ iteration the snapshot interrupted. Ends with no beginning are dropped; beginnin
 closed at the newest record, which draws the interrupted iteration reaching the right edge, which is
 what it was.
 
-What this does not do yet: a GPU timestamp pair still measures a duration with no position, so a
-composite's execution cannot be drawn against the CPU slice that submitted it.
-`VK_EXT_calibrated_timestamps` is what closes that, and until it lands the GPU row carries the cost
+*(Closed 2026-08-23 by [decision 140](#140-a-composite-is-cut-at-its-barriers-and-counted-by-its-fragments).)*
+What this did not do yet: a GPU timestamp pair still measured a duration with no position, so a
+composite's execution could not be drawn against the CPU slice that submitted it.
+`VK_EXT_calibrated_timestamps` is what closes that, and until it landed the GPU row carried the cost
 as a counter rather than as a span.
+
+### 140. A composite is cut at its barriers and counted by its fragments
+
+**A GPU track needs a position, a decomposition, and a denominator, and none of the three come from
+the timestamp pair decision 29 already had.** The pair says a composite took 2.8 milliseconds. It
+does not say when — the device counter shares no origin with `CLOCK_MONOTONIC`, so the span cannot be
+drawn beside the frame-thread slice that submitted it. It does not say of what — a floored frame is
+one render pass and one number. And it does not say against what — 2.8 milliseconds is either a lot
+of pixels or a slow part, and from outside the two are the same reading.
+
+**Position is `VK_EXT_calibrated_timestamps`, read once per collection and only while a ring is
+armed.** The driver samples the device clock and `CLOCK_MONOTONIC` inside one window and reports the
+window's width; on the Tiger Lake this was written against that width is about ten microseconds, and
+so is the call. Taken in the same iteration that reads the stamps back, the frames being placed are
+two old and the drift across them is nanoseconds, so the GPU row lands within a driver's own sampling
+window of the truth. An anchor taken once at startup would be tens of milliseconds out an hour into a
+session — a composite drawn a whole refresh away from the frame that asked for it, which is worse
+than no row at all. Not two anchors and a slope: that is a clock model in a file whose subject is a
+device, and the fix if ten microseconds is ever too coarse is to sample more often.
+
+**Decomposition is a run of timestamps rather than a pair, and every mark sits on a barrier the
+composite already had.** A submission writes its opener at top of pipe, a mark at each point the
+pipeline was going to drain anyway — where the composite ends so a material can extract the screen,
+where the extract ends and the blur chain begins, where the chain ends and the pass resumes — and its
+closer at bottom of pipe. Every mark is bottom of pipe, which is what makes the spans tile: a top of
+pipe stamp is written when the GPU *reaches* the command rather than when the work in front of it is
+done, so consecutive top of pipe spans overlap and sum to more than the frame.
+
+**What there are no marks inside is one render pass, and refusing to put them there is the whole
+design rather than a limitation of it.** Everything a floored frame draws is inside a single pass with
+no barrier in it, so a mark between two items would *order* two things the hardware was overlapping —
+the instrument reporting a cost it had just created. So a composite's interior is not cut, and the
+question it would have answered is asked a different way.
+
+**The denominator is `pipelineStatisticsQuery`, one counter, wrapping the whole command buffer:
+fragment shader invocations.** It perturbs nothing, and it turns the one span into two answers.
+Divided by the panel's pixels it is how many times gyro drew over the same pixel — every lifted node
+draws a shadow quad larger than itself, every glass panel is drawn twice, and damage that resolves to
+the whole screen redraws everything under everything. Divided by the span it is the rate the part is
+actually achieving, which is the figure to hold against what the part is supposed to do. On this
+machine those came out at 1.6 times over for a plain scene and 2.9 for one with two glass panels in
+it, at 2.3 billion fragments a second — which is what retired the belief that the effect was too
+expensive for the hardware, and pointed at [Open.md](Open.md)'s two entries instead.
+
+**The frame loop's input is untouched by all of it, and that is the property that lets the instrument
+be switched on mid-session.** `GpuCost` is still the first stamp against the last, whatever the marks
+between them did; an untraced frame resets and writes the same two queries it always did, and the
+statistics query is not even recorded. Nothing a person turns on can move the tier a panel is drawing
+at, which is the one way a profiler lies about the thing it was opened to explain.
+
+**Late records go in the frame thread's own ring and the writer sorts.** A GPU span is learned about
+two frames after it happened, so it lands in the ring behind records newer than it and the ring is no
+longer in time order. A ring of its own for late records sounds tidier and gives the wrong picture:
+two rings lap independently, so the window a GPU slice covers drifts out of the window the frame-thread
+slice that submitted it covers, and *which of the two was the frame waiting on* is the only question a
+GPU row is opened to ask. One ring is one window. The sort is stable and happens on the writer thread,
+which is the thread that is allowed to allocate and take milliseconds — and stable is load-bearing
+rather than a default, because an end and the beginning that abuts it share a stamp and a sort free to
+swap them draws a slice that opens before its predecessor closed.
+
+Not a per-item query pool, which is what decision 29's deferral had in mind and is the wrong structure
+twice over: it is sized by a number no frame knows in advance, and every query in it would be a mark
+inside a render pass.

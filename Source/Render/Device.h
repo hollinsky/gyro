@@ -112,6 +112,28 @@ struct DeviceDescription
 	float TimestampPeriod = 0.0F;
 	std::uint32_t TimestampValidBits = 0;
 
+	// Whether the device will read its own clock and `CLOCK_MONOTONIC` in the same breath, which is
+	// the difference between knowing how *long* a composite took and knowing *when* it happened.
+	//
+	// A timestamp pair is a subtraction and needs none of this — Frame/Budget.h has never asked where
+	// on the wall the interval sat. What needs it is a trace: a GPU slice drawn against the frame
+	// thread's own slices has to be in their domain, and the two clocks share no origin. `DEVICE`
+	// beside `CLOCK_MONOTONIC` is what Core/Time.h stamps everything else in, so the conversion is a
+	// subtraction in ticks and an addition in nanoseconds rather than a fit.
+	bool CalibratesTimestamps = false;
+
+	// Whether this device counts what the pipeline did, of which gyro reads exactly one figure:
+	// fragment shader invocations.
+	//
+	// **It is the denominator the timestamp pair has no way to supply.** A composite that takes 2.8
+	// milliseconds is either a lot of pixels or a slow device, and the two are indistinguishable from
+	// the outside — a shadow is drawn over a quad larger than the node it belongs to, every dressed
+	// panel is drawn twice, and a damage region that resolves to the whole screen redraws everything
+	// under everything. Invocations divided by the panel's pixel count is that overdraw as a number,
+	// and invocations divided by the elapsed span is the rate the hardware is actually achieving,
+	// which is the figure a person compares against what the part is supposed to do.
+	bool CountsPipelineStatistics = false;
+
 	// Whether a timestamp taken on this device's queue means anything.
 	[[nodiscard]] constexpr bool MeasuresGpuTime() const noexcept
 	{
@@ -138,6 +160,42 @@ struct DeviceDescription
 		return Duration{ static_cast<std::int64_t>(static_cast<double>(ticks) * static_cast<double>(TimestampPeriod)) };
 	}
 
+	// The signed distance between two raw timestamp results, for a caller placing one *relative to*
+	// another rather than measuring an interval it already knows the direction of.
+	//
+	// **`TimestampSpan` cannot answer this and quietly gives the wrong number if asked.** It reads the
+	// modular difference as a forward one, which is right for a pair the same batch wrote in order and
+	// wrong for a batch that finished before the clocks were last read together — where the honest
+	// answer is negative and the modular one is the counter's whole period minus a millisecond. So the
+	// difference is taken in the shorter direction: more than half the counter's range apart is read
+	// as the other way round, which is unambiguous for any offset shorter than half of fifty-nine
+	// minutes and is the only case a frame can produce.
+	[[nodiscard]] constexpr Duration TimestampOffset(std::uint64_t from, std::uint64_t to) const noexcept
+	{
+		if (!MeasuresGpuTime())
+		{
+			return Duration::zero();
+		}
+
+		const std::uint64_t width =
+			TimestampValidBits >= 64 ? ~std::uint64_t{ 0 } : ((std::uint64_t{ 1 } << TimestampValidBits) - 1);
+		const std::uint64_t ticks = (to - from) & width;
+		const double signedTicks =
+			ticks > width / 2 ? -static_cast<double>((width - ticks) + 1) : static_cast<double>(ticks);
+
+		return Duration{ static_cast<std::int64_t>(signedTicks * static_cast<double>(TimestampPeriod)) };
+	}
+
+	// Where on Core/Time.h's timeline a raw device timestamp sat, read through an anchor.
+	//
+	// Declared after `GpuCalibration` would be circular and it is not worth the indirection, so the
+	// anchor is taken by its two members' types — which is also what makes it usable from a constant
+	// expression the tests below are written as.
+	[[nodiscard]] constexpr Instant TimestampAt(Instant host, std::uint64_t device, std::uint64_t ticks) const noexcept
+	{
+		return Advanced(host, TimestampOffset(device, ticks));
+	}
+
 	[[nodiscard]] std::string_view DeviceName() const noexcept { return { Name.data() }; }
 
 	[[nodiscard]] std::string_view DriverName() const noexcept { return { Driver.data() }; }
@@ -145,6 +203,31 @@ struct DeviceDescription
 	// Whether this is decision 40's permanently-occupied floor tier.
 	[[nodiscard]] constexpr bool IsSoftware() const noexcept { return Type == VK_PHYSICAL_DEVICE_TYPE_CPU; }
 };
+
+// The two clocks read together: the device's counter and Core/Time.h's timebase, sampled by the
+// driver in one window.
+//
+// **A reading and not a fit**, which is the honest shape for what it is used for. `maxDeviation` on
+// the Tiger Lake this was measured against is about ten microseconds — the width of the window the
+// driver sampled both clocks in — and the call itself costs the same ten. A GPU span converted through
+// an anchor taken in the same iteration that read the span back is therefore placed on the timeline to
+// within ten microseconds, against slices hundreds of microseconds long. Two anchors and a slope would
+// beat that and would also be a clock discipline in a file whose subject is a device; the fix if it is
+// ever needed is to sample more often, not to model.
+struct GpuCalibration
+{
+	Instant Host{};
+	std::uint64_t Device = 0;
+
+	[[nodiscard]] constexpr bool IsValid() const noexcept { return Host != Instant{}; }
+};
+
+// The same conversion with the anchor as one argument, which is how every caller has it.
+[[nodiscard]] constexpr Instant
+TimestampAt(const DeviceDescription& description, const GpuCalibration& anchor, std::uint64_t ticks) noexcept
+{
+	return description.TimestampAt(anchor.Host, anchor.Device, ticks);
+}
 
 // No memory type carries what was asked for. Distinct from every valid index because
 // `VK_MAX_MEMORY_TYPES` is 32 and an index is one of those — so this is the first value that cannot
@@ -446,6 +529,17 @@ public:
 	[[nodiscard]] Result<ExportedImage>
 	Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t> modifiers) const;
 
+	// Both clocks read at once, for a caller that has device timestamps and wants them on the wall.
+	//
+	// **On the frame thread and therefore rate-limited by its caller rather than by this.** Ten
+	// microseconds is nothing against a refresh and everything against nothing, so the renderer asks
+	// only while a trace ring is armed — which is decision 139's shape throughout: the instrument is
+	// continuous, and the parts of it that cost something are the parts a person switched on.
+	//
+	// `ENOTSUP` where `Description().CalibratesTimestamps` is false, which is the same answer asked in
+	// advance and the reason a caller that checks it will never see this.
+	[[nodiscard]] Result<GpuCalibration> Calibrate() const;
+
 	// A timeline semaphore this device signals, exported as a DRM syncobj descriptor.
 	//
 	// **What it is for is the half of explicit sync the renderer does not already cover.** The acquire
@@ -536,6 +630,8 @@ static_assert(std::is_nothrow_move_constructible_v<ExportedTimeline>);
 static_assert(!DeviceDescription{}.IsSoftware(), "Unknown is not software");
 static_assert(!DeviceDescription{}.ExportsTimeline);
 static_assert(!DeviceDescription{}.CopiesFromHost);
+static_assert(!DeviceDescription{}.CalibratesTimestamps);
+static_assert(!DeviceDescription{}.CountsPipelineStatistics);
 static_assert(!DeviceDescription{}.MeasuresGpuTime(), "A device nobody has described measures nothing");
 static_assert(DeviceDescription{}.TimestampSpan(0, 1000) == Duration::zero());
 
@@ -570,4 +666,13 @@ static_assert(
 static_assert(
 	DeviceDescription{ .TimestampPeriod = 1.0F, .TimestampValidBits = 64 }.TimestampSpan(5, 105) ==
 	std::chrono::nanoseconds{ 100 }
+);
+
+// The offset a calibration is read through, in both directions. A batch that finished before the
+// clocks were last read together is behind the anchor, and reading that as the counter's whole period
+// less a millisecond would draw the composite fifty-nine minutes into the future.
+static_assert(Detail::TigerLake.TimestampOffset(1000, 1000 + 19200) > std::chrono::microseconds{ 999 });
+static_assert(Detail::TigerLake.TimestampOffset(1000 + 19200, 1000) < -std::chrono::microseconds{ 999 });
+static_assert(
+	Detail::TigerLake.TimestampOffset(9, (std::uint64_t{ 1 } << 36) - 10) == -std::chrono::nanoseconds{ 989 }
 );

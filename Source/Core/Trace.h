@@ -168,10 +168,30 @@ public:
 			return;
 		}
 
+		EmitAt(m_Clock->Now(), kind, name, payload, scope);
+	}
+
+	// The same record with its time supplied rather than read, for the one thing that happens and is
+	// only learned about later: a span of GPU work, whose two ends were stamped by the device's own
+	// clock and are read back some frames after the batch finished.
+	//
+	// **A ring written through this is no longer in timestamp order, and that is handled downstream
+	// rather than here.** The alternative — a ring of its own for records that arrive late — sounds
+	// tidier and gives the wrong picture: two rings lap independently, so the window a GPU slice
+	// covers would drift out of the window the frame-thread slice that submitted it covers, and the
+	// one question a GPU track is opened to answer is which of the two the frame was waiting on. One
+	// ring means one window. Trace/Recorder.h sorts what it copied, on a thread that can afford to.
+	void EmitAt(Instant stamp, TraceKind kind, const char* name, std::uint64_t payload, std::uint16_t scope) noexcept
+	{
+		if (m_Records.empty())
+		{
+			return;
+		}
+
 		const std::uint64_t slot = m_Written.load(std::memory_order_relaxed);
 		TraceRecord& record = m_Records[static_cast<std::size_t>(slot) & (m_Records.size() - 1)];
 
-		record.Stamp.store(m_Clock->Now(), std::memory_order_relaxed);
+		record.Stamp.store(stamp, std::memory_order_relaxed);
 		record.Name.store(name, std::memory_order_relaxed);
 		record.Payload.store(payload, std::memory_order_relaxed);
 		record.Detail.store(Detail::PackTrace(kind, scope), std::memory_order_relaxed);
@@ -308,6 +328,38 @@ inline void TraceElapsed(const char* name, Duration value, std::uint16_t scope =
 	if (TraceBuffer* const buffer = Detail::Tracing)
 	{
 		buffer->Emit(TraceKind::Elapsed, name, static_cast<std::uint64_t>(value.count()), scope);
+	}
+}
+
+// A span of work that is over, both of whose ends are known now.
+//
+// **The one shape `TraceSpan` cannot express, and it is not a convenience.** A scope guard stamps its
+// two records when control passes them, which is exactly right for work this thread is doing and
+// exactly wrong for work it merely submitted: the GPU's composite for frame N is read back during
+// frame N+2, and drawn where the scope guard ran it would sit two frames to the right of the pixels
+// it produced. So the caller supplies both instants, having converted them out of whatever domain
+// stamped them, and the record lands where the work was.
+//
+// A zero-length or inverted span is emitted as given rather than repaired. A GPU pass really can
+// measure zero — the counter's tick is 52 ns on the hardware this was written against — and a
+// conversion that came out backwards is a calibration defect the picture should show.
+inline void
+TraceSpanAt(const char* name, Instant began, Instant ended, std::uint16_t scope, std::uint64_t flow = 0) noexcept
+{
+	if (TraceBuffer* const buffer = Detail::Tracing)
+	{
+		buffer->EmitAt(began, TraceKind::Begin, name, flow, scope);
+		buffer->EmitAt(ended, TraceKind::End, nullptr, 0, scope);
+	}
+}
+
+// A counter sample belonging to a moment that has passed, for the same reason as the span above: a
+// figure a submission produced belongs beside that submission rather than beside its readback.
+inline void TraceCountAt(const char* name, Instant stamp, std::int64_t value, std::uint16_t scope) noexcept
+{
+	if (TraceBuffer* const buffer = Detail::Tracing)
+	{
+		buffer->EmitAt(stamp, TraceKind::Count, name, static_cast<std::uint64_t>(value), scope);
 	}
 }
 

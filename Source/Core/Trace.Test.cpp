@@ -231,3 +231,57 @@ GYRO_TEST(Trace, TheSnapshotRunsAgainstALiveProducer)
 
 	GYRO_CHECK(seen != 0);
 }
+
+// The whole point of `EmitAt`: a span whose two ends are older than the records around it, which is
+// what a GPU composite read back two frames later is.
+GYRO_TEST(Trace, ASuppliedStampIsWhatComesBack)
+{
+	const MonotonicClock clock;
+	Ring ring{ 8, clock };
+
+	EnrollTracing(&ring.Buffer);
+
+	TraceMark("now");
+	TraceSpanAt("composite", Monotonic::FromNanoseconds(1'000), Monotonic::FromNanoseconds(3'000), TraceGpu(0), 7);
+
+	EnrollTracing(nullptr);
+
+	std::array<TraceEvent, 8> into{};
+	const std::size_t count = ring.Buffer.Copy(into);
+
+	GYRO_REQUIRE_EQ(count, std::size_t{ 3 });
+
+	// Out of order in the ring, and deliberately so — the writer is what puts them back in time order,
+	// because it is the thread that can afford to.
+	GYRO_CHECK(into[0].Stamp > into[1].Stamp);
+
+	GYRO_CHECK(into[1].Kind == TraceKind::Begin);
+	GYRO_CHECK_EQ(std::string_view{ into[1].Name }, std::string_view{ "composite" });
+	GYRO_CHECK_EQ(into[1].Payload, std::uint64_t{ 7 });
+	GYRO_CHECK_EQ(into[1].Scope, TraceGpu(0));
+	GYRO_CHECK(into[1].Stamp == Monotonic::FromNanoseconds(1'000));
+
+	GYRO_CHECK(into[2].Kind == TraceKind::End);
+	GYRO_CHECK_EQ(into[2].Scope, TraceGpu(0));
+	GYRO_CHECK(into[2].Stamp == Monotonic::FromNanoseconds(3'000));
+}
+
+// A late counter goes where its sample belongs rather than where it was learned about, for the span's
+// reason one test up.
+GYRO_TEST(Trace, ALateCounterKeepsItsMoment)
+{
+	const MonotonicClock clock;
+	Ring ring{ 4, clock };
+
+	EnrollTracing(&ring.Buffer);
+	TraceCountAt("fragments", Monotonic::FromNanoseconds(500), 1'234'567, TraceGpu(1));
+	EnrollTracing(nullptr);
+
+	std::array<TraceEvent, 4> into{};
+
+	GYRO_REQUIRE_EQ(ring.Buffer.Copy(into), std::size_t{ 1 });
+	GYRO_CHECK(into[0].Kind == TraceKind::Count);
+	GYRO_CHECK_EQ(into[0].Payload, std::uint64_t{ 1'234'567 });
+	GYRO_CHECK_EQ(into[0].Scope, TraceGpu(1));
+	GYRO_CHECK(into[0].Stamp == Monotonic::FromNanoseconds(500));
+}

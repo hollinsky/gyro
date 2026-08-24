@@ -9,6 +9,7 @@
 #include "Core/Clock.h"
 #include "Core/Fd.h"
 #include "Core/Result.h"
+#include "Core/Trace.h"
 #include "Geometry/Space.h"
 #include "Render/Backdrop.h"
 #include "Render/Device.h"
@@ -66,6 +67,24 @@
 // the moment the ceiling moved. Fixed because `BindTargets` must not allocate per target set on a path
 // that runs at every mode set.
 inline constexpr std::uint32_t MaxRenderTargets = 2 * MaxTargets;
+
+// SPEC: how many timestamps one submission may write, which is the same thing as how many named spans
+// its GPU track can be cut into.
+//
+// **A mark costs nothing where it sits on a barrier that was already there, and that is the rule this
+// number is sized against rather than a budget.** Every mark this renderer writes goes at a point the
+// command buffer already synchronises at — the boundary between the extract and the blur chain, the
+// boundary between the chain and the resumed composite — so the pipeline was going to drain there
+// anyway and the timestamp is a register write. A mark placed between two draws inside one render pass
+// would not be free: it would order two things the hardware was overlapping, and the instrument would
+// be reporting the cost it had just created. So there are none, and the inside of a composite is
+// decomposed by counting fragments instead.
+//
+// Thirty-two is eight glass panels' worth — a triple of extract, blur and resumed composite each, plus
+// the opening and closing pair. A submission with more dressed items than that stops marking and keeps
+// measuring: the closing timestamp is always written, so what overflow costs is detail rather than the
+// frame's total.
+inline constexpr std::uint32_t MaxStamps = 32;
 
 // Which of decision 62's two executions this renderer draws.
 //
@@ -230,6 +249,33 @@ private:
 
 		std::uint32_t Generation = 0;
 		RenderMode Mode = RenderMode::Planned;
+
+		// Which GPU track this submission's spans belong on, copied off the request for the same
+		// reason as the two fields above: by the time the timestamps resolve, this renderer has drawn
+		// for whichever outputs it serves and cannot be asked which one this was.
+		std::uint16_t Trace = TraceThread;
+
+		// How many timestamps the submission actually wrote, and what each of them opens. `Stamps`
+		// is zero on a frame that was not being traced, one more than the number of spans otherwise —
+		// the last stamp closes the one before it and names nothing.
+		std::uint32_t Stamps = 0;
+
+		std::array<const char*, MaxStamps> Names{};
+	};
+
+	// Where the marks a recording has written so far are counted.
+	//
+	// **A member rather than a parameter threaded through `Dress`, because the marks are not on one
+	// call path.** `Record` opens and closes the pair, `Dress` cuts the chain out of the middle of it,
+	// and a counter passed by reference through five signatures would be five signatures documenting
+	// an instrument. `Record` is not reentrant — one command buffer per target, and a target with a
+	// submission outstanding is refused before anything is recorded — so this is as single-owner as a
+	// local would be.
+	struct Stamping
+	{
+		std::uint32_t Target = 0;
+		std::uint32_t Count = 0;
+		bool Active = false;
 	};
 
 	[[nodiscard]] Result<void> Import(const RenderTarget& target, ColorState output, Slot& slot);
@@ -305,6 +351,11 @@ private:
 	// start of a recording, and `Dress` resuming after a split.
 	void BeginTarget(VkCommandBuffer command, const Slot& slot, const RecordRequest& request) const noexcept;
 
+	// Close whatever span is open and open one called `name`, at a point where the pipeline has
+	// already drained. A no-op when the frame is not being traced or the stamp budget is spent, which
+	// is what lets the call sites read as ordinary statements rather than as guarded ones.
+	void Mark(VkCommandBuffer command, const char* name) noexcept;
+
 	// One item drawn as decision 62's separate passes: the fill into an intermediate, then one pass
 	// per element of the chain, then the result composited `over` the target.
 	//
@@ -362,6 +413,15 @@ private:
 
 	void TransferSampled(VkCommandBuffer command, std::uint32_t count, bool acquiring) const noexcept;
 
+	// One collected submission's stamps, turned into named spans and a fragment count on decision
+	// 139's GPU track.
+	//
+	// **Separate from `CollectCosts` because they answer to different consumers.** The cost is the
+	// frame loop's input and is produced whether or not anybody is looking; this is the picture, and
+	// it is produced only when a ring is armed. Keeping the split visible is what makes it obvious
+	// that switching tracing on cannot change what the scheduler is fed.
+	void Report(const PendingCost& pending, std::span<const std::uint64_t> stamps, std::uint32_t target);
+
 	void Destroy() noexcept;
 
 	const IClock* m_Clock = nullptr;
@@ -374,6 +434,28 @@ private:
 	// `2n` and `2n + 1`. Null on a device that cannot timestamp, which is what makes `CollectCosts`
 	// answer nothing there rather than branching on a capability at every use.
 	VkQueryPool m_Queries = VK_NULL_HANDLE;
+
+	// One pipeline-statistics query per target, wrapping the whole command buffer, of which one
+	// counter is read: fragment shader invocations.
+	//
+	// **It is the only thing that decomposes a composite, and the timestamps cannot.** Everything a
+	// floored frame draws — every shadow, every fill, every window — is inside one render pass with no
+	// barrier in it, so there is no point to put a mark at that does not also serialise the pass. What
+	// there is instead is a count of how many times a fragment shader ran, which turns the one span
+	// into two answers: divided by the panel's pixels it is how many times gyro drew over the same
+	// pixel, and divided by the span it is the rate the part is achieving, which is the number to hold
+	// against what the part is supposed to do.
+	//
+	// Null where the device does not count, and only ever recorded while a trace ring is armed:
+	// Frame/Budget.h has no use for it, so a machine that is not being looked at does not pay for it.
+	VkQueryPool m_Statistics = VK_NULL_HANDLE;
+
+	Stamping m_Stamping{};
+
+	// The two clocks read together, refreshed once per collection that has something to report. Held
+	// rather than passed because the conversion happens well after the frame that produced the stamps.
+	GpuCalibration m_Calibration{};
+
 	std::array<PendingCost, MaxRenderTargets> m_Pending{};
 
 	// Built at construction and populated per format at `BindTargets`, so that nothing inside a

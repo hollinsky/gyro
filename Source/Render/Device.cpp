@@ -166,6 +166,61 @@ constexpr std::array<const char*, 4> RequiredExtensions{
 	return host.hostImageCopy == VK_TRUE;
 }
 
+// Whether this device will read its own clock and `CLOCK_MONOTONIC` together, which is two questions
+// rather than one: the extension has to be there, and `CLOCK_MONOTONIC` has to be among the domains it
+// offers. A driver that calibrates only against `CLOCK_MONOTONIC_RAW` is one gyro cannot use, because
+// Core/Time.h's timebase is the adjusted one and the two diverge under NTP.
+[[nodiscard]] bool QueryCalibration(VkPhysicalDevice device) noexcept
+{
+	std::uint32_t count = 0;
+
+	if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	std::vector<VkExtensionProperties> available(count);
+
+	if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, available.data()) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	const bool listed = std::ranges::any_of(available, [](const VkExtensionProperties& entry) noexcept {
+		return std::string_view{ entry.extensionName } == VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
+	});
+
+	if (!listed)
+	{
+		return false;
+	}
+
+	std::uint32_t domains = 0;
+
+	if (vkGetPhysicalDeviceCalibrateableTimeDomainsEXT(device, &domains, nullptr) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	std::vector<VkTimeDomainEXT> offered(domains);
+
+	if (vkGetPhysicalDeviceCalibrateableTimeDomainsEXT(device, &domains, offered.data()) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	return std::ranges::find(offered, VK_TIME_DOMAIN_DEVICE_EXT) != offered.end() &&
+	       std::ranges::find(offered, VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT) != offered.end();
+}
+
+[[nodiscard]] bool QueryPipelineStatistics(VkPhysicalDevice device) noexcept
+{
+	VkPhysicalDeviceFeatures features{};
+	vkGetPhysicalDeviceFeatures(device, &features);
+
+	return features.pipelineStatisticsQuery == VK_TRUE;
+}
+
 // Whether a timeline semaphore on this device can be exported as a descriptor. Decision 108's
 // whole question, asked of the driver rather than inferred from its extension list.
 [[nodiscard]] bool QueryTimelineExport(VkPhysicalDevice device) noexcept
@@ -228,6 +283,8 @@ void Describe(VkPhysicalDevice device, std::uint32_t family, DeviceDescription& 
 	into.CopiesFromHost = QueryHostImageCopy(device);
 	into.TimestampPeriod = properties.properties.limits.timestampPeriod;
 	into.TimestampValidBits = QueryTimestampBits(device, family);
+	into.CalibratesTimestamps = QueryCalibration(device);
+	into.CountsPipelineStatistics = QueryPipelineStatistics(device);
 }
 } // namespace
 
@@ -369,7 +426,7 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 	// The optional one. Asked for only where the capability query said the answer is yes, so that a
 	// driver which advertises the extension and refuses the semaphore does not fail device creation
 	// — decision 108's whole subject, and lavapipe's actual behaviour.
-	std::array<const char*, RequiredExtensions.size() + 2> extensions{};
+	std::array<const char*, RequiredExtensions.size() + 3> extensions{};
 	std::ranges::copy(RequiredExtensions, extensions.begin());
 	std::uint32_t extensionCount = RequiredExtensions.size();
 
@@ -397,6 +454,22 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 		features12.pNext = &hostCopy;
 	}
 
+	// The third optional one, and the only one enabled for an instrument rather than for a picture.
+	// Decision 139's tracing is what wants it and nothing else does, so a driver without it loses the
+	// GPU track and keeps every frame.
+	if (device.m_Description.CalibratesTimestamps)
+	{
+		extensions[extensionCount] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
+		++extensionCount;
+	}
+
+	// Not an extension at all — a core feature, off by default, and the counter that says whether a
+	// composite was expensive because of the device or because of how many times gyro drew over the
+	// same pixel. Asked for only where the query said yes, for `RequiredExtensions`' reason: a device
+	// creation that fails over an instrument is a machine with no renderer.
+	VkPhysicalDeviceFeatures baseFeatures{};
+	baseFeatures.pipelineStatisticsQuery = device.m_Description.CountsPipelineStatistics ? VK_TRUE : VK_FALSE;
+
 	const VkDeviceCreateInfo deviceInfo{ .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 		                                 .pNext = &features12,
 		                                 .flags = 0,
@@ -406,7 +479,7 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 		                                 .ppEnabledLayerNames = nullptr,
 		                                 .enabledExtensionCount = extensionCount,
 		                                 .ppEnabledExtensionNames = extensions.data(),
-		                                 .pEnabledFeatures = nullptr };
+		                                 .pEnabledFeatures = &baseFeatures };
 
 	if (Result<void> created = Check(vkCreateDevice(chosen, &deviceInfo, nullptr, &device.m_Device), "vkCreateDevice");
 	    !created)
@@ -1064,6 +1137,42 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 		RenderTarget{ .Size = size, .Format = PixelFormat{ code, 0, chosen.Modifier }, .Memory = image };
 
 	return exported;
+}
+
+Result<GpuCalibration> VulkanDevice::Calibrate() const
+{
+	if (!IsValid() || !m_Description.CalibratesTimestamps)
+	{
+		return Failure(ENOTSUP, "this device will not read its clock and the host's together");
+	}
+
+	// Device first, so that the pair comes back in the order the reader converts them in. The driver
+	// samples both inside one window and reports its width as `maxDeviation`; nothing here reads that,
+	// because the only thing to do with a deviation larger than expected is take the reading anyway —
+	// a GPU track placed to within a driver's own sampling window is the best there is.
+	const std::array<VkCalibratedTimestampInfoEXT, 2> wanted{
+		VkCalibratedTimestampInfoEXT{ .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT,
+		                              .pNext = nullptr,
+		                              .timeDomain = VK_TIME_DOMAIN_DEVICE_EXT },
+		VkCalibratedTimestampInfoEXT{ .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT,
+		                              .pNext = nullptr,
+		                              .timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT }
+	};
+
+	std::array<std::uint64_t, 2> stamps{};
+	std::uint64_t deviation = 0;
+
+	if (Result<void> read = Check(
+			vkGetCalibratedTimestampsEXT(m_Device, 2, wanted.data(), stamps.data(), &deviation),
+			"vkGetCalibratedTimestampsEXT"
+		);
+	    !read)
+	{
+		return std::unexpected{ read.error() };
+	}
+
+	return GpuCalibration{ .Host = Monotonic::FromNanoseconds(static_cast<std::int64_t>(stamps[1])),
+		                   .Device = stamps[0] };
 }
 
 Result<ExportedTimeline> VulkanDevice::ExportTimeline() const

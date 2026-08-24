@@ -937,23 +937,14 @@ nothing only proves the grep.
   first when it is allowed to. What that costs has not been measured, because the ring cannot currently
   be allocated under it long enough to time one; what is measured is the step below it, Y-tiled against
   linear, which was 2.6x. Lossless framebuffer compression is worth roughly its bandwidth share, so the
-  question is whether a composite at this resolution is bandwidth-bound at all — and the sweep in
-  decision 138's neighbourhood says it is at about a tenth of this machine's memory bandwidth, so
-  probably not, and this may be worth much less than its 2.6x predecessor. Cheap to find out and
-  expensive to assume.
-- **Where a GPU span actually sits on the timeline.** A timestamp pair measures how long a composite
-  took and says nothing about *when* it ran, so
-  [decision 139](Decisions.md#139-the-trace-ring-is-always-armed-and-the-format-is-somebody-elses)'s
-  GPU row carries the cost as a counter rather than as a span beside the CPU slice that submitted it —
-  which is the one arrangement that would show queue wait, the term
-  [Seam/Renderer.h](../Source/Seam/Renderer.h) already says the pair cannot separate.
-  `VK_EXT_calibrated_timestamps` is what closes it: one device-and-host pair sampled off the frame
-  path per second, against the tick period and wrap arithmetic
-  [Render/Device.h](../Source/Render/Device.h) already has. The reading is what settles whether the
-  extension is present on both drivers gyro targets and whether the correlation is stable enough to
-  place a span to within less than a frame. Until then the same picture is reachable from below —
-  `gpu_scheduler` and `dma_fence` tracepoints in a concatenated system trace — which is why this is a
-  refinement rather than a hole.
+  question is whether a composite at this resolution is bandwidth-bound at all. *(Revised 2026-08-23.)*
+  It was written here that it is not, on a figure of about a tenth of this machine's memory bandwidth;
+  that figure counted each screen pixel once. [Decision 140](Decisions.md#140-a-composite-is-cut-at-its-barriers-and-counted-by-its-fragments)'s
+  fragment counter says a plain scene shades 1.6 screens' worth per frame and every one of those
+  fragments blends, which is a read and a write — about 18 GB/s at 1920x1048 on a part whose LPDDR4x
+  delivers something in the twenties. So it is much closer to the ceiling than the old number claimed,
+  and compression is correspondingly more likely to be worth its plane. Cheap to find out and expensive
+  to assume.
 - **What the trace ring costs when nothing is reading it.** Decision 139 spends sixteen mebibytes a
   thread and a handful of stores per slice on the grounds that both are far below anything the frame
   loop notices, and neither figure has been measured on a real panel. The instrument for the second
@@ -961,3 +952,31 @@ nothing only proves the grep.
   CPU mark read off the report line. What would change the design is not a large number but a
   *variable* one — a store into a ring the frame thread has not touched for a frame is a cache miss,
   and a miss on the frame path is jitter rather than cost.
+- **The GPU runs gyro's composites at a quarter of its clock, and gyro is why.** `gt_act_freq_mhz`
+  reads 350 MHz on a part whose range is 100 to 1250 while the materials gym is drawing, and the
+  fragment rate that follows from it — 2.3 billion a second, about six and a half fragments per clock —
+  is roughly what Tiger Lake's back end should do *at 350 MHz* with blending into an uncompressed
+  target. The part is not slow; it is asleep. i915 has exactly one lever that ramps it promptly,
+  `intel_rps_boost`, and enumerating its call sites in `drivers/gpu/drm/i915/` — `i915_request.c`,
+  `gem/i915_gem_wait.c`, and `gt/intel_rps.c`'s own `boost_if_not_started` — says it fires when a
+  client *waits* on a request that has not started, or on the atomic modeset interactive path, and
+  nowhere else. gyro never waits — `IRenderer::IsComplete` is a poll and `CollectCosts` is a poll, both of them
+  deliberately, because blocking would put the GPU's schedule on the `SCHED_FIFO` thread — so it never
+  triggers the boost, and the autotuner sees a batch that occupies a third of a refresh and parks at
+  the bottom. What is open is what to do about it: a frequency floor is a policy gyro would be setting
+  on the whole machine's behalf, a deliberate wait is the inversion the frame thread exists to avoid,
+  and doing nothing means every cost figure gyro measures is taken at a clock no benchmark would report.
+  Nothing here is decided, and the three are not equally bad.
+- **Splitting the composite around every dressed panel costs more than the blur does.** At 1920x1048
+  with two glass panels, [decision 140](Decisions.md#140-a-composite-is-cut-at-its-barriers-and-counted-by-its-fragments)'s
+  spans put the frame at 3.0 ms in three composite segments, 1.6 ms in two extracts and 0.8 ms in
+  twelve chain passes. The same scene with no material is 1.4 ms in one segment. So the effect adds
+  about 2.6 million fragments, which at the rate the plain scene achieves is a little over a
+  millisecond — and it adds four extra render pass boundaries, which is the other three. An extract is
+  one draw and costs more than the six-pass chain that follows it, because the barrier in front of it
+  flushes a full-screen render target the composite has just written; the chain passes are small and
+  their cost barely moves with resolution, which is a fixed per-pass overhead rather than pixels. What
+  would change it is drawing every material's extract in one pass instead of interleaving them into the
+  painter's order — which is decision 60's group flattening arriving from the cost side rather than the
+  correctness side, and is not obviously compatible with a material reading the target as of before its
+  own item began.

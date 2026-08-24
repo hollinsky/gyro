@@ -2027,6 +2027,18 @@ a trace with a shifted timeline — it is one a reader drops every packet of. `C
 allowed to read a clock at all, returning raw counts rather than an `Instant` so that nothing can
 mistake the second domain for a now the schedule may decide against.
 
+**A GPU row is a real row, because the composite is placed rather than merely measured.**
+`VK_EXT_calibrated_timestamps` reads the device counter and `CLOCK_MONOTONIC` in one window, so a
+submission's timestamps convert into instants on the same timeline as everything else and the composite
+is drawn under the iteration that submitted it, with a flow arrow between them. The span is cut where
+the command buffer already synchronises — composite, extract, blur, resumed composite — and never
+inside a render pass, because a mark between two draws would order two things the hardware was
+overlapping and the instrument would be reporting the cost it had just created. What decomposes a pass
+instead is a fragment count: one pipeline-statistics query wrapping the batch, which divided by the
+panel's pixels is how much of the screen gyro drew twice and divided by the span is the rate the part
+is achieving. None of it touches what the frame loop is fed — the cost is still the first stamp
+against the last — so tracing can be switched on without moving the tier a panel draws at.
+
 **Three things a trace is asked, and what answers each.** *Was the frame late or was it stale* — the
 flow arrow from the dispatch thread's publish to the frame thread's acquire, keyed on the snapshot
 sequence. *Which part of the iteration was slow* — the nested spans, since the whole point of drawing
@@ -2034,7 +2046,8 @@ sequence. *Which part of the iteration was slow* — the nested spans, since the
 machine about to start dropping frames* — the slack counter, which trends toward zero over a hundred
 frames and is invisible in any one of them.
 
-See [decision 139](Decisions.md#139-the-trace-ring-is-always-armed-and-the-format-is-somebody-elses).
+See [decision 139](Decisions.md#139-the-trace-ring-is-always-armed-and-the-format-is-somebody-elses)
+and [decision 140](Decisions.md#140-a-composite-is-cut-at-its-barriers-and-counted-by-its-fragments).
 
 ## Sessions and users
 

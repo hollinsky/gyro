@@ -382,6 +382,11 @@ private:
 	// this object's — the same reason `m_Device` is passed in and this is not.
 	std::uint16_t m_Trace = TraceThread;
 
+	// The second row: the GPU work this output's composites cost, which is not on any thread and so
+	// cannot be a slice on one. Travels out on the record request because the timestamps that fill it
+	// resolve frames later, by which point the renderer has drawn for other outputs.
+	std::uint16_t m_TraceGpu = TraceThread;
+
 	OutputConfiguration m_Configuration{};
 	FrameClock m_Clock{};
 	Budget m_Cost{};
@@ -456,6 +461,7 @@ public:
 		for (std::size_t index = 0; index < m_Outputs.size(); ++index)
 		{
 			m_Outputs[index].m_Trace = TraceOutput(index);
+			m_Outputs[index].m_TraceGpu = TraceGpu(index);
 		}
 	}
 
@@ -760,6 +766,7 @@ private:
 
 		const RecordRequest request{ .Target = target,
 			                         .Mode = decision.Mode(),
+			                         .Trace = output.m_TraceGpu,
 			                         .CostGeneration = output.m_Cost.Generation(),
 			                         .Damage = stale,
 			                         .Items = list.Items };

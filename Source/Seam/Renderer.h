@@ -13,6 +13,7 @@
 #include "Core/Result.h"
 #include "Core/Texture.h"
 #include "Core/Time.h"
+#include "Core/Trace.h"
 #include "Geometry/AxisTransform.h"
 #include "Geometry/Region.h"
 #include "Geometry/Space.h"
@@ -376,6 +377,19 @@ struct RecordRequest
 	// whatever *chooses* a tier, which is a startup probe nobody has written. Until then this is
 	// `High` from one end of a session to the other.
 	Tier Quality = Tier::High;
+
+	// Which of decision 139's GPU tracks this frame's spans belong on — `Core/Trace.h`'s
+	// `TraceGpu(output)`, since a renderer serves one output and does not know which.
+	//
+	// **On the request rather than at construction, for `Generation`'s reason one line down.** GPU
+	// timestamps are read back frames after the submission that wrote them, so everything the reader
+	// needs to *label* the sample has to travel with it. A renderer that had been told its track once
+	// would still be right; a renderer told per frame is right for the same reason the mode is, and
+	// costs a `std::uint16_t`.
+	//
+	// Ignored by a renderer that does not measure GPU time — `Blit` finishes inside `Record`, so its
+	// work is already a slice on the frame thread's own track.
+	std::uint16_t Trace = TraceThread;
 
 	// `Budget::Generation()`, stamped onto whatever timestamp query this frame writes so that a sample
 	// resolving after a mode set can be dropped rather than filed against an output it does not

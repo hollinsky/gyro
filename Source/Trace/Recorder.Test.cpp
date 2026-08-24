@@ -195,3 +195,35 @@ GYRO_TEST(Recorder, ARequestIsAnsweredByTheWriterThread)
 	GYRO_CHECK(std::filesystem::exists(NumberedTrace(scratch.Path(), 1)));
 	GYRO_CHECK(recorder.Outcome().has_value());
 }
+
+// A GPU span arrives in the ring long after the frame-thread records around it, so what the writer
+// copies is not in time order. `Covered` is the cheapest place that shows: it is the front of the
+// snapshot against the back, which is only the window if the sort happened.
+GYRO_TEST(Recorder, ALateRecordIsSortedBackIntoItsPlace)
+{
+	const MonotonicClock clock;
+	Scratch scratch{ "gyro-recorder-late.pftrace" };
+
+	Recorder recorder{ TracePolicy{ .Bytes = 64 * 1024, .Path = scratch.Path() } };
+
+	TraceBuffer* const frame = recorder.Arm("frame", clock);
+
+	GYRO_REQUIRE(frame != nullptr);
+
+	recorder.Join(*frame, 0);
+
+	// Emitted second and stamped first, which is the shape `Core/Trace.h`'s `EmitAt` exists for.
+	TraceMark("now");
+	TraceSpanAt("composite", Monotonic::FromNanoseconds(1), Monotonic::FromNanoseconds(2), TraceGpu(0));
+
+	const Result<TraceSummary> written = recorder.Snapshot(scratch.Path());
+
+	EnrollTracing(nullptr);
+
+	GYRO_REQUIRE(written.has_value());
+	GYRO_CHECK_EQ(written->Events, std::size_t{ 3 });
+
+	// Unsorted this is the distance from *now* back to the epoch, which is negative. Sorted it is the
+	// distance from the epoch to now, which is the whole age of the machine and is at least positive.
+	GYRO_CHECK(written->Covered > Duration::zero());
+}

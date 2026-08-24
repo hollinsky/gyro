@@ -1,5 +1,6 @@
 #include "Trace/Recorder.h"
 
+#include <algorithm>
 #include <bit>
 #include <cerrno>
 #include <fstream>
@@ -160,6 +161,20 @@ Result<TraceSummary> Recorder::Snapshot(const std::filesystem::path& path)
 		const std::size_t count = source.Buffer.Copy(events);
 
 		events.resize(count);
+
+		// **The copy is in emission order, which is not the same as time order, and Perfetto wants
+		// time.** Core/Trace.h's `EmitAt` is why: a GPU span is stamped with the device clock and
+		// emitted two frames after it happened, so it lands in the ring behind records that are newer
+		// than it. A stable sort is what reconciles the two, and it belongs here rather than in the
+		// ring because this is the thread that is allowed to allocate and take milliseconds — the
+		// whole reason the ring hands out a copy at all.
+		//
+		// **Stable, and that is load-bearing rather than a default.** Two records with the same stamp
+		// are the ordinary case at the boundary between one span and the next, and their order is the
+		// order they were emitted in — an `End` before the `Begin` that abuts it. A sort free to swap
+		// them would draw a slice that opens before its predecessor closed, on a track where nesting
+		// is what a slice means.
+		std::ranges::stable_sort(events, {}, &TraceEvent::Stamp);
 
 		if (count != 0)
 		{
