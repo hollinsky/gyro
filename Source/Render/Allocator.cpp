@@ -20,13 +20,12 @@ private:
 };
 } // namespace
 
-Result<DmabufBuffer> VulkanAllocator::Allocate(PixelSize<DeviceSpace> size, PixelFormat format)
+Result<DmabufBuffer>
+VulkanAllocator::Allocate(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t> modifiers)
 {
-	// A list of one, because the ranking is the caller's. Seam/Allocator.h has the argument: the host
-	// ordered the candidates and this device votes on them one at a time.
-	const std::uint64_t modifier = format.Modifier;
-
-	Result<ExportedImage> image = m_Device->Export(size, format.Code, { &modifier, 1 });
+	// Straight through. Seam/Allocator.h has the argument: the caller says which pairs its consumer
+	// can import, and the device is the end that knows which of them it draws into quickly.
+	Result<ExportedImage> image = m_Device->Export(size, code, modifiers);
 
 	if (!image)
 	{

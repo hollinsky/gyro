@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstring>
 #include <limits>
+#include <ranges>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -501,10 +502,15 @@ ModifierEntry(VkPhysicalDevice physical, PixelFormat format, VkDrmFormatModifier
 // tiling of an RGB format is an auxiliary compression plane, and reading one back on the CPU is not
 // something a target this module hands out supports yet.
 //
-// The export path below accepts more, because what constrains it is what a description can *say*
-// rather than what this renderer will import — a nested output negotiates modifiers with a parent
-// compositor, and refusing the description before the negotiation gets there would be answering a
-// question that has not been asked.
+// **The export path below holds to the same limit, which it did not always.** It used to accept
+// anything a description could *say*, on the argument that refusing a modifier before the parent
+// compositor had been asked about it was answering an unasked question. That was safe only while the
+// caller chose — it walked the host's order and linear is one plane, so the wider door was never gone
+// through. Decision 138 moved the choice to the driver, which naturally picks the best layout it has,
+// and on Tiger Lake that is a Y-tiled CCS pair. The result was an output that allocated a ring
+// nothing could draw into and reported *the targets were never bound* twenty seconds later. A target
+// this device exports is a target this device is about to render into, so the two paths take the same
+// answer from the same function.
 [[nodiscard]] bool Renderable(VkPhysicalDevice physical, PixelFormat format, VkFormatFeatureFlags wanted) noexcept
 {
 	VkDrmFormatModifierPropertiesEXT entry{};
@@ -801,10 +807,28 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 		return Failure(EINVAL, "that fourcc is not one a composite is recorded into");
 	}
 
-	Candidate chosen;
+	// **Every candidate the device will take, not the first one.** Decision 138: the caller's order is
+	// the parent compositor's import ranking and says nothing about what this GPU renders into
+	// quickly, so keeping the whole survivor set is what lets the driver answer that question below.
+	std::array<std::uint64_t, MaxModifiers> accepted{};
+	std::uint32_t count = 0;
+
+	// **The usage the whole set has to satisfy, and it is the maximum rather than the intersection.**
+	// One image is created, so one usage is asked for, and a modifier that cannot carry it has to be
+	// dropped rather than quietly lowering what the others are created with — a target that lost
+	// `SAMPLED` because some entry further down the host's table could not sample is a backdrop that
+	// stops being readable on a machine where every modifier gyro would actually pick was fine.
+	constexpr VkFormatFeatureFlags Wanted =
+		VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+	const VkImageUsageFlags usage = ExportUsage(Wanted);
 
 	for (const std::uint64_t modifier : modifiers)
 	{
+		if (count == MaxModifiers)
+		{
+			break;
+		}
+
 		VkDrmFormatModifierPropertiesEXT entry{};
 
 		// `ModifierEntry` is where `ModifierInvalid` is refused, so a list carrying it loses that one
@@ -815,47 +839,37 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 			continue;
 		}
 
-		// More planes than a `DmabufImage` has room for is a description gyro cannot hand out, whatever
-		// the driver thinks of it. Zero is not a thing a driver reports and is refused anyway, because
-		// it would otherwise pass every check below and produce a target with no memory in it.
-		if (entry.drmFormatModifierPlaneCount == 0 || entry.drmFormatModifierPlaneCount > MaxImagePlanes)
+		// `Renderable` is the whole filter for the tiling itself: one plane, and every feature the usage
+		// asks for. See its header for why the export path is held to the importer's limit rather than
+		// to the wider one a description could carry.
+		if (!Renderable(m_Physical, PixelFormat{ code, 0, modifier }, Wanted))
 		{
 			continue;
 		}
-
-		if ((entry.drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0)
-		{
-			continue;
-		}
-
-		const VkImageUsageFlags usage = ExportUsage(entry.drmFormatModifierTilingFeatures);
 
 		if (!CanExport(m_Physical, vulkan, size, usage, modifier))
 		{
 			continue;
 		}
 
-		chosen = { .Modifier = modifier, .PlaneCount = entry.drmFormatModifierPlaneCount, .Usage = usage };
-
-		break;
+		accepted[count] = modifier;
+		++count;
 	}
 
-	if (chosen.PlaneCount == 0)
+	if (count == 0)
 	{
 		return Failure(EINVAL, "no offered modifier is one this device will allocate an exportable target under");
 	}
 
-	// **A list of one rather than the explicit layout the import path states, and the direction is the
-	// difference.** An import knows the offsets and strides the allocator already committed to and has
-	// to say them; an allocation is the moment those are *decided*, so the driver lays the image out
-	// and the layout is read back below. Handing the whole candidate list to the driver instead would
-	// work and is not what happens here: a nested output has to tell the parent which modifier it got,
-	// and choosing it above keeps the veto and the answer in one place.
+	// **The whole survivor set rather than the explicit layout the import path states, and the
+	// direction is the difference.** An import knows the offsets and strides the allocator already
+	// committed to and has to say them; an allocation is the moment those are *decided*, so the driver
+	// picks among these and lays the image out, and both answers are read back below.
 	const VkImageDrmFormatModifierListCreateInfoEXT modifierInfo{
 		.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT,
 		.pNext = nullptr,
-		.drmFormatModifierCount = 1,
-		.pDrmFormatModifiers = &chosen.Modifier
+		.drmFormatModifierCount = count,
+		.pDrmFormatModifiers = accepted.data()
 	};
 	const VkExternalMemoryImageCreateInfo externalInfo{ .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
 		                                                .pNext = &modifierInfo,
@@ -871,7 +885,7 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 		.arrayLayers = 1,
 		.samples = VK_SAMPLE_COUNT_1_BIT,
 		.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
-		.usage = chosen.Usage,
+		.usage = usage,
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 		.queueFamilyIndexCount = 0,
 		.pQueueFamilyIndices = nullptr,
@@ -962,9 +976,10 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 		return std::unexpected{ bound.error() };
 	}
 
-	// What the driver actually laid it out as. A one-entry list makes this a formality on a driver
-	// that obeys it and a caught defect on one that does not — and the answer is what goes into the
-	// description, so a nested output tells the parent what it has rather than what it asked for.
+	// **Which of them the driver chose, and this is now the answer rather than a formality.** It is
+	// what goes into the description, so a nested output tells the parent what it has rather than what
+	// it asked for — and it is the only thing that makes handing over a set safe, because the set is
+	// exactly what a parent must not be left guessing among.
 	VkImageDrmFormatModifierPropertiesEXT actual{ .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT,
 		                                          .pNext = nullptr,
 		                                          .drmFormatModifier = ModifierInvalid };
@@ -978,9 +993,31 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 		return std::unexpected{ read.error() };
 	}
 
-	if (actual.drmFormatModifier != chosen.Modifier)
+	// Still checked, and against the set rather than against one entry. A driver that answered with a
+	// modifier nobody offered has laid the image out a way the parent will not import, and the failure
+	// that produces is a window of stripes three seconds later rather than an error here.
+	if (std::ranges::find(accepted.begin(), accepted.begin() + count, actual.drmFormatModifier) ==
+	    accepted.begin() + count)
 	{
 		return Failure(EIO, "the driver laid the image out under a modifier it was not offered");
+	}
+
+	Candidate chosen{ .Modifier = actual.drmFormatModifier, .PlaneCount = 0, .Usage = usage };
+	VkDrmFormatModifierPropertiesEXT described{};
+
+	// The plane count belongs to the modifier the driver settled on, so it is looked up here rather
+	// than carried down from the candidate loop — where, now that the loop keeps several, there is no
+	// single one to carry.
+	if (!ModifierEntry(m_Physical, PixelFormat{ code, 0, chosen.Modifier }, described))
+	{
+		return Failure(EIO, "the driver laid the image out under a modifier it does not describe");
+	}
+
+	chosen.PlaneCount = described.drmFormatModifierPlaneCount;
+
+	if (chosen.PlaneCount == 0 || chosen.PlaneCount > MaxImagePlanes)
+	{
+		return Failure(EIO, "the chosen modifier has a plane count a description cannot carry");
 	}
 
 	const VkMemoryGetFdInfoKHR getInfo{ .sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,

@@ -34,7 +34,8 @@
 class HeapAllocator final : public IDmabufAllocator
 {
 public:
-	[[nodiscard]] Result<DmabufBuffer> Allocate(PixelSize<DeviceSpace> size, PixelFormat format) override;
+	[[nodiscard]] Result<DmabufBuffer>
+	Allocate(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t> modifiers) override;
 
 	// The same set `UdmabufAllocator` accepts, reached through the same `BytesPerPixel` — so that the
 	// instrument and the real provider cannot disagree about what a stride is, which is the way a

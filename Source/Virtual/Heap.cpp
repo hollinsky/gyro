@@ -10,14 +10,17 @@
 #include "Core/Fd.h"
 #include "Virtual/Udmabuf.h"
 
-Result<DmabufBuffer> HeapAllocator::Allocate(PixelSize<DeviceSpace> size, PixelFormat format)
+Result<DmabufBuffer>
+HeapAllocator::Allocate(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t> modifiers)
 {
 	if (Refuse != 0)
 	{
 		return Failure(Refuse, "scripted refusal");
 	}
 
-	if (size.IsEmpty() || !size.IsValid() || !Supports(format))
+	const PixelFormat format = FirstSupported(*this, code, modifiers);
+
+	if (size.IsEmpty() || !size.IsValid() || !format.IsValid())
 	{
 		return Failure(EINVAL, "the heap allocator refuses this size or format");
 	}

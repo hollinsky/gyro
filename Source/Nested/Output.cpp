@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstddef>
+#include <ranges>
 #include <utility>
 #include <vector>
 
@@ -666,35 +667,47 @@ Result<void> NestedOutput::BuildTargets()
 		return Failure(ENOTSUP, "the wayland host offers no modifier for the format this output is configured as");
 	}
 
-	// **The host ranks and the device vetoes.** Walked in the host's own order, and the first pair both
-	// ends accept is what the whole ring is allocated under — a set with two modifiers in it would be
-	// two `wl_buffer`s the host imports differently, which is a picture that changes when the ring
-	// wraps.
-	PixelFormat chosen{};
+	// **The host says which pairs it can import and the device picks among them.** Decision 138
+	// reversed the halves of this: it used to walk the host's order and take the first pair that
+	// allocated, which sounds like deferring to the compositor that has to import the result and is
+	// really deferring to a table whose first entry is almost always linear. The device is the end
+	// that knows which layout it renders into quickly, so it is handed the whole set and reports back.
+	//
+	// A set going in, but exactly one coming out: the whole ring is allocated under what the first
+	// target came back as, because a ring with two modifiers in it would be two `wl_buffer`s the host
+	// imports differently, which is a picture that changes when the ring wraps.
+	std::vector<std::uint64_t> offered;
+	offered.reserve(candidates.size());
 
 	for (const PixelFormat& candidate : candidates)
 	{
-		Result<DmabufBuffer> first = m_Allocator->Allocate(size, candidate);
-
-		if (!first)
-		{
-			continue;
-		}
-
-		chosen = first->Format();
-		m_Targets[0].Buffer = std::move(*first);
-
-		break;
+		offered.push_back(candidate.Modifier);
 	}
 
-	if (!chosen.IsValid())
+	Result<DmabufBuffer> first = m_Allocator->Allocate(size, code, offered);
+
+	if (!first)
 	{
 		return Failure(ENOTSUP, "no format the host offered is one this device will export a target under");
 	}
 
+	const PixelFormat chosen = first->Format();
+
+	// The allocator is contractually bound to answer with one of the modifiers it was given, and this
+	// is where that contract is worth restating: everything below hands `chosen` to the host as the
+	// modifier of every `wl_buffer` in the ring, so a substitution outside the set would be a layout
+	// the parent imports wrong rather than an error.
+	if (std::ranges::find(candidates, chosen) == candidates.end())
+	{
+		return Failure(EIO, "the allocator chose a format the host did not offer");
+	}
+
+	m_Targets[0].Buffer = std::move(*first);
+
 	for (std::uint32_t index = 1; index < m_Policy.Targets; ++index)
 	{
-		Result<DmabufBuffer> buffer = m_Allocator->Allocate(size, chosen);
+		const std::uint64_t modifier = chosen.Modifier;
+		Result<DmabufBuffer> buffer = m_Allocator->Allocate(size, chosen.Code, { &modifier, 1 });
 
 		if (!buffer)
 		{

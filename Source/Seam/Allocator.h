@@ -1,5 +1,6 @@
 #pragma once
 
+#include <span>
 #include <string_view>
 
 #include "Core/Result.h"
@@ -32,12 +33,28 @@
 // feedback rather than the one thing gyro knows how to allocate. GBM on a render node is deferred
 // with the dependency it costs; see decision 102.
 //
-// **A caller that has candidates offers them one at a time, in its own preference order.** There is
-// no list-taking verb here and there does not need to be: `zwp_linux_dmabuf_v1` hands a nested output
-// a tranche of format-and-modifier pairs already ranked by the host against its own hardware, and the
-// output walks that order calling `Allocate` until one is accepted. The device contributes the veto
-// and the host contributes the ranking, which is where each of them belongs — and a verb that took
-// the whole list would have to define what the two providers with one modifier each do with it.
+// **A caller offers every candidate at once and is told which one it got.** This used to be the
+// opposite — one modifier per call, walked in the caller's order, the host ranking and the device
+// vetoing — and the reading that reversed it is that *the host's order is not a ranking of anything
+// the device cares about*. `zwp_linux_dmabuf_v1` ranks a tranche by what the parent compositor can
+// import and scan out; it says nothing about what the GPU underneath likes to render into, and the
+// two disagree in the worst possible direction. A host that lists `DRM_FORMAT_MOD_LINEAR` first — and
+// they do, because it is the entry every importer accepts — had gyro compositing every frame into an
+// untiled, uncompressed image. Measured on Tiger Lake at 1920x1048 that is 7.4ms of GPU time against
+// 2.8ms for the same composite Y-tiled, which is most of a 60Hz frame spent on the layout rather than
+// the picture; Frame/Timing.h then correctly dropped the blur to decision 35's floor tier on all but
+// five frames in fifteen hundred, so the visible symptom was *the material disappeared* and the cause
+// was three layers away.
+//
+// **What the objection to a list was, and why it does not hold.** The argument against a list-taking
+// verb was that the two providers with one modifier each would have to define what they do with one.
+// They do: take the first entry they support and answer `EINVAL` if there is none — which is a
+// sentence, not a design, and it is what walking the list from outside already did to them. What the
+// list buys is that the provider with a *real* preference gets to express it: `VK_EXT_image_drm_
+// format_modifier` exists to be handed the whole set so the driver can lay the image out its own
+// best way, and `vkGetImageDrmFormatModifierPropertiesEXT` is how it reports back which way that was.
+// So the ranking moves to the device, the veto stays there too, and the host keeps the only thing it
+// was ever authoritative about — which pairs are importable at all.
 //
 // **Allocation is unbounded and allocating by contract**, which is not a hedge: it opens a
 // descriptor, maps pages, and may talk to a driver. It runs where `IRenderer::BindTargets` runs — at
@@ -57,16 +74,19 @@ public:
 	IDmabufAllocator(IDmabufAllocator&&) = delete;
 	IDmabufAllocator& operator=(IDmabufAllocator&&) = delete;
 
-	// One image, under exactly the format and modifier named. `EINVAL` for a size or format this
-	// provider cannot express, `ENOMEM` where the allocation failed, and whatever the device reported
-	// otherwise — the same vocabulary `IRenderer::BindTargets` answers with, because a caller that
-	// cannot allocate a target set and a renderer that cannot bind one are in the same position.
+	// One image, under `code` and *one of* `modifiers` — whichever this provider prefers. `EINVAL` for
+	// a size or format this provider cannot express or an empty candidate list, `ENOMEM` where the
+	// allocation failed, and whatever the device reported otherwise — the same vocabulary
+	// `IRenderer::BindTargets` answers with, because a caller that cannot allocate a target set and a
+	// renderer that cannot bind one are in the same position.
 	//
-	// **`EINVAL` is an ordinary answer to a candidate rather than the end of a negotiation**, and a
-	// caller walking a list of them treats it that way. What must not vary is the modifier: a provider
-	// that quietly substituted one would hand a parent compositor a buffer laid out differently from
-	// the one it agreed to import.
-	[[nodiscard]] virtual Result<DmabufBuffer> Allocate(PixelSize<DeviceSpace> size, PixelFormat format) = 0;
+	// **Which modifier was chosen is the answer rather than the question**, read back off the returned
+	// buffer's own `Format()`. That is the property a parent compositor depends on: it is going to be
+	// told a modifier when the buffer is offered to it, and a provider that reported one it had not
+	// laid the image out under would hand over pixels the host reads wrong. So substituting freely
+	// within the offered set is the whole point, and substituting outside it is still forbidden.
+	[[nodiscard]] virtual Result<DmabufBuffer>
+	Allocate(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t> modifiers) = 0;
 
 	// Whether `Allocate` would accept this format, without allocating to find out. A presenter asks
 	// before it tears down a working target set for a reconfiguration it cannot honour.
@@ -76,3 +96,20 @@ public:
 	// the developer's machine and one that does not exist in CI is the failure this makes legible.
 	[[nodiscard]] virtual std::string_view Name() const noexcept = 0;
 };
+
+// The list-taking verb's answer for a provider that produces exactly one modifier: the first entry it
+// supports, which is what walking the candidates from outside used to do to it. This is the sentence
+// the paragraph above promises, written once rather than in each of the two providers that need it.
+[[nodiscard]] inline PixelFormat
+FirstSupported(const IDmabufAllocator& allocator, std::uint32_t code, std::span<const std::uint64_t> modifiers) noexcept
+{
+	for (const std::uint64_t modifier : modifiers)
+	{
+		if (const PixelFormat candidate{ code, 0, modifier }; allocator.Supports(candidate))
+		{
+			return candidate;
+		}
+	}
+
+	return {};
+}

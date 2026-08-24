@@ -368,9 +368,14 @@ Two features to build deliberately rather than let emerge:
   [decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread).
 
 What a session comes up on, in the order it is decided. The host's `zwp_linux_dmabuf_v1` feedback
-ranks format-and-modifier pairs against its own hardware; the Vulkan device vetoes; and the first pair
-both accept is what the whole target ring is allocated under — see
-[decision 120](Decisions.md#120-a-nested-outputs-targets-are-exported-from-the-vulkan-device-and-the-allocator-moves-to-seam).
+says which format-and-modifier pairs it can import; the whole set goes to the Vulkan device at once,
+which lays an image out its own best way and reports which pair that was; and that is what the whole
+target ring is allocated under — see
+[decision 120](Decisions.md#120-a-nested-outputs-targets-are-exported-from-the-vulkan-device-and-the-allocator-moves-to-seam)
+and [decision 138](Decisions.md#138-the-parent-compositor-says-what-it-can-import-the-device-says-what-it-wants-to-draw-into),
+which reversed the halves: the host's order is its own import ranking and not a statement about what
+the GPU draws into quickly, and honouring it put every composite into a linear image at more than
+twice the GPU cost.
 The acquire point goes out with the commit where the host speaks `wp_linux_drm_syncobj_v1` and there
 is a DRM node to mint a release timeline on; where either is missing the commit is *held* until the
 composite has landed, which costs a frame of latency and contaminates the timestamps the clock then

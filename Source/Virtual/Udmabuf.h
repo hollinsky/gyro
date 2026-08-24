@@ -63,7 +63,8 @@ public:
 	// every buffer it made and the device is what makes another one.
 	explicit UdmabufAllocator(Fd device) noexcept : m_Device{ std::move(device) } {}
 
-	[[nodiscard]] Result<DmabufBuffer> Allocate(PixelSize<DeviceSpace> size, PixelFormat format) override;
+	[[nodiscard]] Result<DmabufBuffer>
+	Allocate(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t> modifiers) override;
 
 	// Linear or unspecified, and nothing else. A tiled modifier is not something this can produce and
 	// saying so here is what keeps a presenter from tearing down a working target set to find out.

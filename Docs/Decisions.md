@@ -10302,3 +10302,60 @@ nowhere to fold it but the shader. Sixty variants a binding rather than twenty, 
 seventy-five milliseconds of pipeline creation at every mode set. Rejected: binding a 1×1 white image
 behind every solid so that sampling is unconditional, which is twenty fewer pipelines and one
 dependent texture read on the most common draw the compositor makes.
+
+### 138. The parent compositor says what it can import; the device says what it wants to draw into
+
+`zwp_linux_dmabuf_v1` hands a nested output a tranche of format-and-modifier pairs, and the protocol
+says they are ranked. What it does not say — and what gyro read into it — is *ranked for whom*. The
+ranking is the parent compositor's: which pairs it can import, and which it can put on a plane
+without a copy. It carries no information about which layout the GPU underneath draws into quickly,
+and on the machine this was found on the two orderings are opposite.
+
+`Nested/Output.cpp` walked the host's order and allocated under the first pair the device accepted.
+Mutter lists `DRM_FORMAT_MOD_LINEAR` first, because linear is the entry every importer takes; the
+device accepts it, because a device can render into linear. So every frame gyro drew was composited
+into an untiled, uncompressed image, on hardware whose whole memory subsystem assumes otherwise.
+
+Measured on Tiger Lake at 1920x1048, one output, the materials gym: **7.43ms of GPU time for a floor
+composite linear against 2.81ms for the same composite Y-tiled**, and 14.2ms against 5.5ms with the
+blur chain. The visible consequence was not slowness. Decision 35's record-time check did exactly
+what it is built to do — a planned composite no longer fit in the frame, so it dropped to the floor
+tier, which is decision 34's third rung and draws the tint instead of the blur. **Five frames in
+fifteen hundred kept the material.** What a person saw was the glass and the smoke silently becoming
+flat panels, three layers away from a modifier nobody had looked at, and every counter in the
+compositor reporting success: no missed frame, no discard, no refusal.
+
+So `IDmabufAllocator::Allocate` takes the whole candidate set and answers with the one it chose.
+`VK_EXT_image_drm_format_modifier` is built for exactly this — `VkImageDrmFormatModifierListCreateInfoEXT`
+takes a list precisely so the driver can lay the image out its own best way, and
+`vkGetImageDrmFormatModifierPropertiesEXT` reports which way that was. The host keeps the only
+question it is authoritative about, which pairs are importable at all; the device answers the one it
+is authoritative about, which of those it draws into fastest; and the answer comes back in time to be
+the modifier the `wl_buffer` is created with, which is the property that makes handing over a set safe
+at all.
+
+The objection this reverses is Seam/Allocator.h's own: a list-taking verb would have to define what
+the providers with one modifier each do with a list. They take the first entry they support, which is
+what walking the list from outside already did to them, and it is one shared function rather than a
+design.
+
+**A target this device exports is a target this device is about to render into, and that stopped being
+free the moment the driver started choosing.** `Render/Device.cpp` deliberately let the export path
+accept modifiers the import path would refuse — multi-plane ones — on the argument that refusing a
+description before the parent had been asked about it was answering an unasked question. That was
+sound while the caller chose, because the caller chose linear and linear is one plane. Handed the set,
+the driver picks the best layout it has, which on this hardware is a Y-tiled CCS pair, and
+`VulkanRenderer::BindTargets` refuses two planes. The first run of this change allocated a ring
+nothing could draw into and reported *the targets were never bound* twenty seconds later. Both paths
+now take the same answer from `Renderable`.
+
+That is a real cost and it is written down rather than hidden: the fastest modifier the device offers
+is the compressed one, and gyro currently declines it. Teaching the import path a compression plane is
+the next lever on `C` and Open.md carries it.
+
+Rejected: a preference table in gyro ranking known modifiers, which is the thing modifier negotiation
+exists to abolish and would be wrong on the first GPU nobody tested. Rejected: keeping the host's
+order and filtering linear out of it, which fixes this host on this driver and says nothing about the
+next pair. Rejected: asking the device to rank the host's list without allocating — Vulkan exposes
+supported and unsupported and has no verb for *preferred*, which is why the list-taking create info
+exists in the first place.

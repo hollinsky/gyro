@@ -198,14 +198,17 @@ bool UdmabufAllocator::Supports(PixelFormat format) const noexcept
 	return format.Modifier == ModifierLinear || format.Modifier == ModifierInvalid;
 }
 
-Result<DmabufBuffer> UdmabufAllocator::Allocate(PixelSize<DeviceSpace> size, PixelFormat format)
+Result<DmabufBuffer>
+UdmabufAllocator::Allocate(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t> modifiers)
 {
 	if (!m_Device.IsValid())
 	{
 		return Failure(ENODEV, "allocating from a udmabuf allocator with no device");
 	}
 
-	if (!Supports(format))
+	const PixelFormat format = FirstSupported(*this, code, modifiers);
+
+	if (!format.IsValid())
 	{
 		return Failure(EINVAL, "allocating a virtual output target in a format udmabuf cannot produce");
 	}

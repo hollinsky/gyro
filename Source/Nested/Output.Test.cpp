@@ -53,20 +53,24 @@ using namespace Wayland;
 // instrument is rebuilt here in twenty lines. What matters is that the descriptor is real, because it
 // crosses `SCM_RIGHTS` to the peer and a test reads back what arrived.
 //
-// **It accepts linear and refuses everything else**, which is what makes *the host ranked and the
-// device vetoed* an assertion rather than a description: the peer offers a tiled modifier first, and
-// the ring has to end up linear.
+// **It accepts linear and refuses everything else**, which is what keeps decision 138 an assertion
+// rather than a description: the peer offers a tiled modifier first, the whole candidate set is
+// handed over at once, and the ring still has to end up linear — because a provider's answer is
+// bounded by what it can produce however the set is ordered.
 class MemfdAllocator final : public IDmabufAllocator
 {
 public:
-	[[nodiscard]] Result<DmabufBuffer> Allocate(PixelSize<DeviceSpace> size, PixelFormat format) override
+	[[nodiscard]] Result<DmabufBuffer>
+	Allocate(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t> modifiers) override
 	{
 		if (Refuse != 0)
 		{
 			return Failure(Refuse, "this allocator was told to refuse");
 		}
 
-		if (!Supports(format))
+		const PixelFormat format = FirstSupported(*this, code, modifiers);
+
+		if (!format.IsValid())
 		{
 			return Failure(EINVAL, "this allocator does not tile");
 		}

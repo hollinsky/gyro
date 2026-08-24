@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
@@ -58,6 +59,9 @@ namespace
 }
 
 constexpr PixelFormat Linear{ FormatXrgb8888, 0, ModifierLinear };
+
+// The one-entry candidate list every test here offers, since these two providers produce nothing else.
+constexpr std::array<std::uint64_t, 1> LinearOnly{ ModifierLinear };
 } // namespace
 
 GYRO_TEST(Udmabuf, BytesPerPixelKnowsTheFormatsItAllocates)
@@ -114,7 +118,7 @@ GYRO_TEST(Udmabuf, AllocatingWithNoDeviceIsEnodevRatherThanACrash)
 
 	GYRO_CHECK(!allocator.IsValid());
 
-	const Result<DmabufBuffer> buffer = allocator.Allocate(PixelSize<DeviceSpace>{ 64, 32 }, Linear);
+	const Result<DmabufBuffer> buffer = allocator.Allocate(PixelSize<DeviceSpace>{ 64, 32 }, Linear.Code, LinearOnly);
 
 	GYRO_REQUIRE(!buffer.has_value());
 	GYRO_CHECK_EQ(buffer.error().Code(), ENODEV);
@@ -129,7 +133,7 @@ GYRO_TEST(Udmabuf, AllocatesARealDmabuf)
 		return;
 	}
 
-	Result<DmabufBuffer> buffer = allocator->Allocate(PixelSize<DeviceSpace>{ 64, 32 }, Linear);
+	Result<DmabufBuffer> buffer = allocator->Allocate(PixelSize<DeviceSpace>{ 64, 32 }, Linear.Code, LinearOnly);
 	GYRO_REQUIRE(buffer.has_value());
 
 	GYRO_CHECK(buffer->IsValid());
@@ -154,7 +158,7 @@ GYRO_TEST(Udmabuf, TheMappingIsTheBufferAndSurvivesTheMemfd)
 		return;
 	}
 
-	Result<DmabufBuffer> buffer = allocator->Allocate(PixelSize<DeviceSpace>{ 16, 4 }, Linear);
+	Result<DmabufBuffer> buffer = allocator->Allocate(PixelSize<DeviceSpace>{ 16, 4 }, Linear.Code, LinearOnly);
 	GYRO_REQUIRE(buffer.has_value());
 
 	// The allocator closes the memfd as soon as the dmabuf exists, because the driver pins the pages.
@@ -185,12 +189,11 @@ GYRO_TEST(Udmabuf, RefusesWhatItCannotProduce)
 		return;
 	}
 
-	const Result<DmabufBuffer> empty = allocator->Allocate(PixelSize<DeviceSpace>{ 0, 32 }, Linear);
+	const Result<DmabufBuffer> empty = allocator->Allocate(PixelSize<DeviceSpace>{ 0, 32 }, Linear.Code, LinearOnly);
 	GYRO_REQUIRE(!empty.has_value());
 	GYRO_CHECK_EQ(empty.error().Code(), EINVAL);
 
-	const Result<DmabufBuffer> planar =
-		allocator->Allocate(PixelSize<DeviceSpace>{ 64, 32 }, PixelFormat{ FormatNv12, 0, ModifierLinear });
+	const Result<DmabufBuffer> planar = allocator->Allocate(PixelSize<DeviceSpace>{ 64, 32 }, FormatNv12, LinearOnly);
 	GYRO_REQUIRE(!planar.has_value());
 	GYRO_CHECK_EQ(planar.error().Code(), EINVAL);
 }
@@ -204,8 +207,8 @@ GYRO_TEST(Udmabuf, TwoBuffersAreTwoImages)
 		return;
 	}
 
-	Result<DmabufBuffer> first = allocator->Allocate(PixelSize<DeviceSpace>{ 16, 4 }, Linear);
-	Result<DmabufBuffer> second = allocator->Allocate(PixelSize<DeviceSpace>{ 16, 4 }, Linear);
+	Result<DmabufBuffer> first = allocator->Allocate(PixelSize<DeviceSpace>{ 16, 4 }, Linear.Code, LinearOnly);
+	Result<DmabufBuffer> second = allocator->Allocate(PixelSize<DeviceSpace>{ 16, 4 }, Linear.Code, LinearOnly);
 	GYRO_REQUIRE(first.has_value() && second.has_value());
 	GYRO_REQUIRE(first->IsMapped() && second->IsMapped());
 

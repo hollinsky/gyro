@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <string_view>
 
 #include "Core/Result.h"
@@ -46,7 +47,8 @@ public:
 	// presenter could get it wrong.
 	explicit VulkanAllocator(const VulkanDevice& device) noexcept : m_Device{ &device } {}
 
-	[[nodiscard]] Result<DmabufBuffer> Allocate(PixelSize<DeviceSpace> size, PixelFormat format) override;
+	[[nodiscard]] Result<DmabufBuffer>
+	Allocate(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t> modifiers) override;
 
 	[[nodiscard]] bool Supports(PixelFormat format) const noexcept override { return m_Device->Supports(format); }
 

@@ -391,7 +391,9 @@ private:
 
 		for (std::uint32_t index = 0; index < m_Policy.Targets; ++index)
 		{
-			Result<DmabufBuffer> buffer = m_Allocator->Allocate(configuration.Resolution, format);
+			const std::uint64_t modifier = format.Modifier;
+			Result<DmabufBuffer> buffer =
+				m_Allocator->Allocate(configuration.Resolution, format.Code, { &modifier, 1 });
 
 			if (!buffer)
 			{

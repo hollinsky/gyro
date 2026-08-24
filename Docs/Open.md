@@ -927,3 +927,16 @@ nothing only proves the grep.
   descriptor set layout — so it is a second set layout and a second lattice arm rather than a runtime
   branch, which is what makes it a decision rather than a gap. Nothing asks for it until there is a
   video client, and the refusal is loud meanwhile.
+- **Whether the renderer should import a compression plane.**
+  [decision 138](Decisions.md#138-the-parent-compositor-says-what-it-can-import-the-device-says-what-it-wants-to-draw-into)
+  hands the driver the host's whole modifier set and takes what it picks, and then bounds that set by
+  `Renderable` — one plane — because [Render/Device.cpp](../Source/Render/Device.cpp)'s import path has
+  no second view to put an auxiliary plane in. On Tiger Lake the modifier that filter excludes is the
+  Y-tiled CCS pair, which is the *fastest* thing the device offers and the one the driver reaches for
+  first when it is allowed to. What that costs has not been measured, because the ring cannot currently
+  be allocated under it long enough to time one; what is measured is the step below it, Y-tiled against
+  linear, which was 2.6x. Lossless framebuffer compression is worth roughly its bandwidth share, so the
+  question is whether a composite at this resolution is bandwidth-bound at all — and the sweep in
+  decision 138's neighbourhood says it is at about a tenth of this machine's memory bandwidth, so
+  probably not, and this may be worth much less than its 2.6x predecessor. Cheap to find out and
+  expensive to assume.
