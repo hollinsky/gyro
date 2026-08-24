@@ -31,10 +31,14 @@
 // the next frame's arrive, because the frame thread may still be recording from a snapshot that names
 // them.
 //
-// **What is still absent is the node.** A surface with content has an id and an extent and nothing
-// showing it, because a window is shown when it is *placed* and there is no shell to place it — that
-// is the step after this one. What is complete is the state machine, the pixels, and the texture
-// space's side of the handoff.
+// **What is still absent is the node, and the reason is the role rather than the shell.** A surface
+// with content has an id and an extent and nothing showing it, because a `wl_surface` on its own is
+// not a window — `xdg_toplevel` is what says it is one, and only then is the entity parented into the
+// session's floor and shown when something *places* it. The absence of a shell is not what stops that:
+// the rule that gyro owns every container a window can occupy and places one itself when no shell is
+// there to (141) has a Floorplanner centre it on the pointer's output the moment it arrives. There is
+// simply no role, no floor and no planner yet. What is complete is the state machine, the pixels, and
+// the texture space's side of the handoff.
 //
 // **Damage is accumulated in both spaces and reconciled later, rather than converted on arrival.**
 // `wl_surface.damage` is surface-local and `damage_buffer` is in buffer coordinates, and the adapter

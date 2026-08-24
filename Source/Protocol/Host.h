@@ -39,9 +39,10 @@
 // **Two globals are advertised, and together they are everything a client needs to have pixels
 // accepted.** `wl_compositor` is where a `wl_surface` and a `wl_region` come from and `wl_shm` is where
 // its pixels do, so a client can now draw a frame, commit it, and have gyro take a copy and hand the
-// buffer straight back. What it still cannot do is make anything appear: a window is shown when it is
-// *placed*, and a shell is the step after this one. A toolkit will get as far as its first committed
-// frame and then wait, which is exactly as far as this layer honestly goes.
+// buffer straight back. What it still cannot do is make anything appear: a `wl_surface` is not a
+// window until something gives it a role, and `xdg_wm_base` is the step after this one. A toolkit will
+// get as far as its first committed frame and then wait, which is exactly as far as this layer
+// honestly goes.
 //
 // The global is a member rather than something the root passes in, because its lifetime is the
 // server's: `wl_compositor` exists for as long as there is a socket to reach it through, and unlike a

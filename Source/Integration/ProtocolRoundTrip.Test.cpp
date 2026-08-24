@@ -478,7 +478,7 @@ GYRO_TEST(ProtocolRoundTrip, AnOffsetOnAttachEndsAModernClient)
 namespace
 {
 // A surface with one committed frame behind it, which is as far as a client can get before there is a
-// shell to place its window with.
+// role to say the surface is a window at all.
 struct DrawnSurface
 {
 	Wayland::WlSurfaceIgnoring Events;

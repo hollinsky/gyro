@@ -1309,10 +1309,12 @@ private:
 
 			spdlog::info("hosting clients on {}", m_Clients->SocketName());
 
-			// One global, and a client that binds it can build a surface and has nowhere to show it.
-			// Said out loud because the alternative is somebody concluding the socket is broken when a
-			// toolkit starts up, finds no shell, and exits without drawing anything.
-			spdlog::info("wl_compositor and wl_shm are the globals; a client can draw a frame and find no shell to show it on");
+			// Two globals, and a client that binds them can draw a frame and has no way to say it is a
+			// window. Said out loud because the alternative is somebody concluding the socket is broken
+			// when a toolkit starts up, finds no `xdg_wm_base`, and exits without drawing anything.
+			spdlog::info(
+				"wl_compositor and wl_shm are the globals; a client can draw a frame and has no role to show it under"
+			);
 
 			author = std::move(*made);
 		}
