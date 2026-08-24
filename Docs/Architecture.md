@@ -2039,9 +2039,26 @@ panel's pixels is how much of the screen gyro drew twice and divided by the span
 is achieving. None of it touches what the frame loop is fed — the cost is still the first stamp
 against the last — so tracing can be switched on without moving the tier a panel draws at.
 
-**Four things a trace is asked, and what answers each.** *Was the frame late or was it stale* — the
+**Five things a trace is asked, and what answers each.** *Was the frame late or was it stale* — the
 flow arrow from the dispatch thread's publish to the frame thread's acquire, keyed on the snapshot
-sequence. *Which recorded frame was actually on the glass at a given vblank* — the `presented` mark
+sequence. The arrow is drawn once per link and not once per iteration: `acquired` is marked where the
+held snapshot *changed*, and `presented` carries the sequence only on the first flip that showed it,
+because Perfetto chains every event sharing a flow id and a mark re-emitted on an iteration that
+acquired nothing links a publication to itself. What the frame thread is holding *between* those
+events is the `held` counter, sampled every iteration precisely because it is a state and not an
+event. A flow id also carries the domain that minted it in its top bits — the snapshot sequence and
+the renderer's submission value are independent counters that both start near one, and untagged they
+splice a Vulkan composite into a scene it had nothing to do with. *Did the frame fit its budget* —
+the `frame` span on the output's deadline row, which runs from the instant the iteration read the
+clock to the deadline the frame was admitted against, so a frame that overran is work on the row
+above reaching past the end of the span below. It is a row of its own rather than a slice the work
+nests inside because the case worth seeing is a child outliving its parent, which nesting cannot
+draw. Its flow is the renderer's submission value rather than the snapshot, for the reason above read
+the other way: many frames are drawn from one publication, so a budget keyed on the scene would fan an
+arrow per redraw, where the submission is one per frame and lands on the composite the budget was
+spent on. It exists at all because the other rows are drawn in units of loop iteration, which is not
+a frame — a ten-second capture held eighteen hundred iterations and five hundred and eighty-seven
+frames, the rest being the loop waking, finding the commit queue full and going back to sleep. *Which recorded frame was actually on the glass at a given vblank* — the `presented` mark
 on the output's own row, stamped at the host's presentation instant rather than the one the feedback
 was drained at, with the flow extended to it, and the `shown` counter that steps beside it to the
 published sequence the frame was drawn from: the counter reads as what the panel is showing between

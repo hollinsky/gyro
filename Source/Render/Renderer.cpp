@@ -2400,9 +2400,10 @@ void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uin
 
 	const DeviceDescription& description = m_Device->Description();
 
-	// The flow id is the timeline value, which is what Frame/Loop.h's `record` slice already knows
-	// this submission by — so a reader clicking the composite arrives at the iteration that asked for
-	// it rather than at the one that read it back.
+	// The flow id is the timeline value, tagged with its domain because the snapshot sequence counts
+	// publications from one and would otherwise splice a composite into a scene it had nothing to do
+	// with. It is the number Frame/Loop.h's `frame` budget span carries — so a reader clicking the
+	// composite arrives at the frame that asked for it rather than at the one that read it back.
 	for (std::uint32_t index = 0; index + 1 < pending.Stamps; ++index)
 	{
 		if (pending.Names[index] == nullptr)
@@ -2415,7 +2416,7 @@ void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uin
 			TimestampAt(description, m_Calibration, stamps[index]),
 			TimestampAt(description, m_Calibration, stamps[index + 1]),
 			pending.Trace,
-			pending.Submit
+			TraceFlowId(TraceFlow::Submission, pending.Submit)
 		);
 	}
 

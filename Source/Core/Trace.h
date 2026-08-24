@@ -56,8 +56,8 @@ enum class TraceKind : std::uint8_t
 };
 
 // How many outputs a trace can name a track for. Frame/Admission.h's `MaxOutputs` is the number this
-// may not be smaller than, and the Trace module static_asserts that rather than this header reaching
-// up a tier for it.
+// may not be smaller than, and Frame/Loop.h static_asserts that rather than this header reaching up a
+// tier for it — the Trace module cannot, since it depends on `Core` alone and may not say `MaxOutputs`.
 inline constexpr std::size_t TracedOutputs = 16;
 
 // Which track a record lands on, relative to the thread that emitted it.
@@ -78,7 +78,41 @@ inline constexpr std::uint16_t TraceThread = 0;
 	return static_cast<std::uint16_t>(1 + TracedOutputs + (output < TracedOutputs ? output : 0));
 }
 
-inline constexpr std::uint16_t TraceScopes = static_cast<std::uint16_t>(1 + 2 * TracedOutputs);
+// The third row, and it holds what the output was *aiming at* rather than what it did. A budget is a
+// span whose end is a deadline, so a frame that overran is a span on the row above that reaches past
+// the end of the one here — which is the whole reason this is a row of its own and not a slice the
+// work nests inside. Nesting cannot express a child outliving its parent, and the overrun is the one
+// case the picture exists for.
+[[nodiscard]] constexpr std::uint16_t TraceDeadline(std::size_t output) noexcept
+{
+	return static_cast<std::uint16_t>(1 + 2 * TracedOutputs + (output < TracedOutputs ? output : 0));
+}
+
+inline constexpr std::uint16_t TraceScopes = static_cast<std::uint16_t>(1 + 3 * TracedOutputs);
+
+// Which chain a flow id belongs to.
+//
+// **A flow id is a name in one global space, and two unrelated chains that pick the same number are
+// spliced into one.** That is not a theoretical hazard: the snapshot sequence counts publications and
+// the submission value counts queue submits, both start near one, and a trace of ten seconds had
+// forty-two chains in which a Vulkan composite was linked to a scene it had nothing to do with. So
+// every id carries the domain that minted it in its top bits, and the domains are enumerated here
+// rather than agreed on by convention at four call sites.
+enum class TraceFlow : std::uint64_t
+{
+	Snapshot = 1,
+	Submission = 2,
+};
+
+// **Zero is not tagged, because zero is how a call site says *no flow at all*.** Trace/Perfetto.cpp
+// suppresses the field on a zero payload, and a vblank that showed a frame this compositor did not
+// draw relies on that: tagging it would turn *nothing to link to* into a chain of its own.
+[[nodiscard]] constexpr std::uint64_t TraceFlowId(TraceFlow domain, std::uint64_t value) noexcept
+{
+	constexpr std::uint64_t Mask = (std::uint64_t{ 1 } << 60) - 1;
+
+	return value == 0 ? 0 : (static_cast<std::uint64_t>(domain) << 60) | (value & Mask);
+}
 
 // A record as the ring holds it: every field separately atomic, because the reader is another thread
 // and the writer must not synchronize with it.

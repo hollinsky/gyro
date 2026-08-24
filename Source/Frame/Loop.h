@@ -132,6 +132,7 @@ inline constexpr std::uint32_t MaxCommitsInFlight = MaxTargets;
 // place both are visible, so it is where the agreement is checked; being wrong about it would be a run
 // of outputs whose flips are never reported, which reads as clients that stop drawing.
 static_assert(MaxOutputs <= OutputsPerReport, "Every output the loop schedules must fit in one report");
+static_assert(MaxOutputs <= TracedOutputs, "Every output the loop schedules must have rows of its own");
 
 // One output's frame-thread state: the two figures `Timing` composes, and the three facts about this
 // output that neither of them can see.
@@ -272,7 +273,14 @@ private:
 		// on the publish, so a reader following it from a vblank lands on the `author` slice that wrote
 		// the scene the panel is showing; a vblank that showed somebody else's frame names nothing, and
 		// a flow of zero is no flow, which is the honest picture of one.
-		TraceMarkAt("presented", info.PresentedAt, m_Trace, frame);
+		// **The flow rides only on the flip that first showed this scene.** A flip that showed the same
+		// snapshot again is a real event and keeps its mark, but it has nothing new to link to: the
+		// publish it would point at is already the far end of an arrow, and re-attaching it turns one
+		// scene's journey into a fan of forty. What *repetition* looks like is the `shown` counter
+		// stepping to the same number, which is the reading the counter is there for.
+		const bool first = frame > m_Shown;
+
+		TraceMarkAt("presented", info.PresentedAt, m_Trace, first ? TraceFlowId(TraceFlow::Snapshot, frame) : 0);
 
 		if (m_InFlight == 0)
 		{
@@ -288,6 +296,8 @@ private:
 		// loop is rendering from, and an output that is showing what it just recorded is the one where
 		// the two agree.
 		TraceCountAt("shown", info.PresentedAt, static_cast<std::int64_t>(frame), m_Trace);
+
+		m_Shown = std::max(m_Shown, frame);
 
 		if (frame >= m_Presented.Sequence)
 		{
@@ -410,6 +420,7 @@ private:
 	// cannot be a slice on one. Travels out on the record request because the timestamps that fill it
 	// resolve frames later, by which point the renderer has drawn for other outputs.
 	std::uint16_t m_TraceGpu = TraceThread;
+	std::uint16_t m_TraceDeadline = TraceThread;
 
 	OutputConfiguration m_Configuration{};
 	FrameClock m_Clock{};
@@ -430,6 +441,12 @@ private:
 	// The most recent flip this output has not yet reported, staged in the drain and cleared by the post
 	// that carries it.
 	PresentedFrame m_Presented{};
+
+	// The highest published sequence a flip has shown, kept for the trace alone and deliberately not
+	// `m_Presented.Sequence`, which is cleared every iteration by the report that drains it. A flip
+	// that already happened stays true across a `Discard` for the same reason it stays true across the
+	// report: it is a thing the panel did, not a thing this loop is still owed.
+	std::uint64_t m_Shown = 0;
 
 	Region<DeviceSpace> m_Damage{};
 
@@ -503,6 +520,7 @@ public:
 		{
 			m_Outputs[index].m_Trace = TraceOutput(index);
 			m_Outputs[index].m_TraceGpu = TraceGpu(index);
+			m_Outputs[index].m_TraceDeadline = TraceDeadline(index);
 		}
 	}
 
@@ -547,11 +565,6 @@ public:
 			Acquire();
 			CollectCosts();
 
-			// **The flow the whole two-thread picture hangs off.** The sequence is the same number
-			// dispatch stamped on the publish that produced this scene, so a reader following the arrow
-			// lands on the `author` slice that wrote what is about to be drawn — which is how *the frame
-			// is stale* and *the frame is late* stop looking alike.
-			TraceMark("acquired", TraceThread, m_Held);
 			TraceCount("held", static_cast<std::int64_t>(m_Held));
 
 			std::array<std::uint8_t, MaxOutputs> order{};
@@ -618,6 +631,20 @@ private:
 
 		m_Held = acquired.Sequence;
 		m_Snapshot = SnapshotReader{ acquired.Bytes };
+
+		// **The flow the whole two-thread picture hangs off.** The sequence is the same number dispatch
+		// stamped on the publish that produced this scene, so a reader following the arrow lands on the
+		// `author` slice that wrote what is about to be drawn — which is how *the frame is stale* and
+		// *the frame is late* stop looking alike.
+		//
+		// **Inside the check rather than above it, and that is the difference between an arrow and a
+		// thicket.** Perfetto chains every event carrying a flow id, so a mark re-emitted on an
+		// iteration that acquired nothing links the same publish to itself again: a ten-second trace
+		// held one snapshot for a hundred and eighteen iterations and drew a hundred and eighteen
+		// arrows, which is a picture with no information in it and one a reader has to disbelieve
+		// before they can read anything else. What the scene *is* between acquisitions is the `held`
+		// counter, sampled every iteration precisely because it is a state and not an event.
+		TraceMark("acquired", TraceThread, TraceFlowId(TraceFlow::Snapshot, m_Held));
 	}
 
 	// Every renderer reports what its finished work actually cost, filed against the generation it was
@@ -895,6 +922,39 @@ private:
 
 		output.m_Backlog[target].Clear();
 		output.m_Damage.Clear();
+
+		// **The frame as a person means the word, which is the one object the trace did not have.** The
+		// rows above are drawn in units of loop iteration, and an iteration is not a frame: a ten-second
+		// trace had eighteen hundred of them and five hundred and eighty-seven frames, the other two
+		// thirds being the loop waking, finding the commit queue full and going back to sleep. So a
+		// reader looking for *this* frame was reading a sea of marks with no boundary in it.
+		//
+		// The span runs from the instant this iteration read the clock to the deadline the frame was
+		// admitted against, so its extent *is* the budget and the work on the row above either fits
+		// inside that extent or reaches past the end of it. That is why the deadline could not be a
+		// slice the work nests in — the case worth seeing is the child outliving the parent, which
+		// nesting cannot draw. Emitted after the present rather than before it because a budget belongs
+		// to a frame that was actually committed; an attempt that fell out above is `commit full` or
+		// `skipped`, and giving it a span here would make declining to draw look like drawing.
+		//
+		// **The flow is the submission and deliberately not the snapshot**, which is the same trap the
+		// `acquired` mark was in one direction along. Many frames are drawn from one publication — a
+		// twenty-second capture drew eleven hundred from seventy-seven — so a budget carrying the
+		// snapshot would fan thirty-nine arrows out of one publish and say nothing by saying it forty
+		// times. The submission value is one per frame and it crosses to a row the work above cannot
+		// reach: it is the number the renderer's own timestamp spans are keyed by, so following it
+		// arrives at the composite this budget was actually spent on. Zero where the renderer finished
+		// on the CPU and has no timeline to name, which is no flow rather than a false one.
+		if (decision.Deadline != FrameClock::Unscheduled)
+		{
+			TraceSpanAt(
+				"frame",
+				now,
+				decision.Deadline,
+				output.m_TraceDeadline,
+				TraceFlowId(TraceFlow::Submission, submission->Point.Value)
+			);
+		}
 	}
 
 	// Whether this output is owed the frame `Assess` says it could make.

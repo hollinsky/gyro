@@ -140,7 +140,12 @@ constexpr std::uint64_t SourceSequenceBase = 2;
 		return std::format("output {}", scope - 1);
 	}
 
-	return std::format("output {} gpu", scope - 1 - TracedOutputs);
+	if (scope <= 2 * TracedOutputs)
+	{
+		return std::format("output {} gpu", scope - 1 - TracedOutputs);
+	}
+
+	return std::format("output {} deadline", scope - 1 - 2 * TracedOutputs);
 }
 
 // A counter is a track of its own, named for the figure and parented to whatever the figure is about.

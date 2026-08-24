@@ -204,7 +204,7 @@ public:
 		// to cross will carry, and it is the flow id the frame thread's `acquired` mark will match.
 		const std::uint64_t sequence = m_Outbox.NextSequence();
 
-		TraceSpan serialize{ "serialize", TraceThread, sequence };
+		TraceSpan serialize{ "serialize", TraceThread, TraceFlowId(TraceFlow::Snapshot, sequence) };
 
 		const bool published = m_Outbox.Publish(m_Serializer.Serialize(m_Store));
 
@@ -214,7 +214,7 @@ public:
 		{
 			++m_Publications;
 
-			TraceMark("published", TraceThread, sequence);
+			TraceMark("published", TraceThread, TraceFlowId(TraceFlow::Snapshot, sequence));
 		}
 		else
 		{
@@ -223,7 +223,7 @@ public:
 			// The frame thread being four publishes behind, which is the one thing on this row that is
 			// about the *other* row. Counted already; marked here because a run of these beside a gap in
 			// the frame thread's iterations is the pair that names which side is late.
-			TraceMark("deferred", TraceThread, sequence);
+			TraceMark("deferred", TraceThread, TraceFlowId(TraceFlow::Snapshot, sequence));
 		}
 
 		TraceCount("watermark", static_cast<std::int64_t>(m_Outbox.Watermark()));
