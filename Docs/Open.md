@@ -256,16 +256,15 @@ nothing only proves the grep.
   spilling past its container. Both are recoverable by the shell clipping in its own surface, which
   is why this is an entry rather than a defect; what decides it is whether the recoverable version
   costs a round trip on something being dragged.
-- **Where a client's entity is parented, before and without a shell.**
-  [Decision 111](Decisions.md#111-an-entity-is-a-nodes-authoring-side-the-store-is-one-tree) has every
-  entity authored by exactly one connection, and a client's surface therefore appears in the store the
-  moment the client commits it — under nothing, because the shell has not been told the window exists
-  and decision 51 lets placement of a new window round trip. So there is a window between the commit
-  and the shell's answer where a window is real and unparented, and there is a longer one during a
-  shell restart where nothing will answer at all. Decision 51's floor policy says gyro keeps showing
-  windows under default policy, which requires a default parent to show them under. Deferred with
-  layout below because it is the same question asked at a different moment, and because getting it
-  wrong is a black screen with a running desktop behind it rather than a subtle artefact.
+- **Where a client's entity is parented, before and without a shell.** *(Answered 2026-08-23 by
+  [decision 141](Decisions.md#141-a-window-is-parented-into-gyros-floor-and-shown-when-placed-the-floorplanner-stands-in-for-an-absent-shell).)*
+  A client's surface appears in the store the moment it commits, parented into its session's **floor** —
+  the default container gyro authors, so it exists before the shell connects and survives the shell
+  crashing — and it is *shown when placed* rather than at parent, so the window between commit and the
+  shell's answer is invisible rather than flashing at the origin. Where no shell answers — development,
+  or the restart gap — gyro's **Floorplanner** places it centered on the pointer's output. What stays
+  open is layout below: the shell still declares and moves containers, and none of that policy is
+  gyro's.
 - **A match key for a surface a client re-created.**
   [Decision 114](Decisions.md#114-retirement-is-the-author-going-away-and-resurrection-is-the-authors-alone)
   found that Animation.md's headline resurrection case is not resurrection: dismissing a menu destroys
@@ -661,8 +660,11 @@ nothing only proves the grep.
   it. What it does not decide is whether those nodes run their exit transitions or simply vanish, and
   the pull is toward vanish: a desktop's whole chrome animating gracefully out is a statement about a
   crash the user should probably not be shown, and it spends a screen's worth of atlas at the moment
-  the machine is least well. Nor does it say where the client windows go, since the container they
-  were parented into was the shell's — which is *where a client's entity is parented* above.
+  the machine is least well. Where the client windows go is
+  [answered](Decisions.md#141-a-window-is-parented-into-gyros-floor-and-shown-when-placed-the-floorplanner-stands-in-for-an-absent-shell):
+  the container they were parented into is gyro's floor, not the shell's, so a shell restart retires the
+  chrome and leaves every window in place. What is still open here is only whether the *chrome* exits or
+  vanishes.
 - **What `SysRq-V` actually restores under `fbcon=off`.** Decision 37 now leans on it as the last
   key that can put a picture on a panel whose owner is wedged, and the DRM core registers it for
   every device — but it forces an *in-kernel client* to restore, so it does nothing unless one is on

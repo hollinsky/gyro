@@ -10551,3 +10551,99 @@ swap them draws a slice that opens before its predecessor closed.
 Not a per-item query pool, which is what decision 29's deferral had in mind and is the wrong structure
 twice over: it is sized by a number no frame knows in advance, and every query in it would be a mark
 inside a render pass.
+
+### 141. A window is parented into gyro's floor and shown when placed; the Floorplanner stands in for an absent shell
+
+*(Decided 2026-08-23, settling [Open.md](Open.md)'s "where a client's entity is parented, before and
+without a shell" and the tail of the respawn entry that asked where client windows go when the shell
+is gone. [Decision 111](#111-an-entity-is-a-nodes-authoring-side-the-store-is-one-tree) put the
+window in the store the moment the client commits; nothing said what it hangs under.)*
+
+**Every container a window can occupy is gyro's. The shell declares containers and moves windows
+between them; it never authors one. A client's entity is parented, at commit, into its session's
+**floor** — the default container gyro authors — and a window is shown when it is *placed*. Placement
+has an author: the shell, or, where there is none, gyro's **Floorplanner**.**
+[Architecture.md](Architecture.md#the-shell) already says the shell "operates on a
+subtree of a scene whose top belongs to gyro"; this is that sentence carried one level down — the top
+is not just the session node but the whole skeleton windows hang from, and the floor is the branch of
+it a client reaches with no shell in the loop.
+
+**Containers are gyro's because the alternative grows a case in
+[decision 114](#114-retirement-is-the-author-going-away-and-resurrection-is-the-authors-alone).** That
+decision retires the subtree a client authored "in place, under whatever container it was parented
+into", and it is clean precisely because the subtree is single-authored: the author goes away, the
+subtree retires, nothing else is touched. Let the shell take custody of a client's windows and the
+shell dying now retires a subtree holding nodes authored by *someone else*, and 114 has to answer what
+becomes of the foreign children of a retiring node — a question it does not have today. When the
+containers are gyro's, that configuration never exists: the shell disconnecting retires the chrome and
+nothing under the floor moves, which is decision 51's floor policy delivered as *nothing moves* rather
+than as *the windows are still on screen somewhere*.
+
+**A window straddling a shell restart is the case that makes it load-bearing.** If a workspace is the
+shell's node, a restart dissolves it and every window in the session lands in one pile — the user's
+recovery from a crash they did not cause is re-sorting forty windows. With the container gyro's, the
+chrome blinks out and back and the arrangement is untouched. gyro carries a little arrangement state
+across the gap to do this, and the guard that keeps it from becoming a layout engine is at the bottom
+of this entry.
+
+**Shown when placed, with two authors, is
+[decision 112](#112-a-commit-is-a-scope-with-an-origin-and-the-wire-says-when-it-closes) already.** 112
+names the dispatch-side authors — the shell over the protocol, and gyro itself handling input it
+routes. Placement is one of gyro's: with a shell, the shell places (decision 51 lets placement of a
+new window round trip, so the entrance transition starts when the placement lands rather than at the
+origin, and there is no flash-at-origin-then-jump); with no shell, gyro's Floorplanner places
+immediately. There is no "is there a shell?" branch on the window and no second visibility state —
+*invisible until placed* stays literally true, and the no-shell gap collapses to nothing because the
+placer runs at once.
+
+**The Floorplanner is not on the login path, which is narrower than it sounds.**
+[Architecture.md](Architecture.md#an-output-waits-for-its-sessions-shell) does not reassign an output
+to a session until that session's shell has presented, so on the normal boot path a client cannot be
+shown before the shell exists and the Floorplanner never runs at login. It runs in exactly two places:
+**development** — `gyro` with a client and no session agent, which is the configuration the first shell
+is written against and the one with no answer today — and **the restart gap**, where the shell was
+present, the output is assigned, and a window *arrives* while the shell is down. It does not serve the
+crash-loop case: [decision 49](#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot)
+escalates that to `gyro --console`, which is gyro drawing its own scene, not gyro placing client
+windows — so the Floorplanner never has to be a usable multi-window manager, which is what lets it stay
+deliberately dumb.
+
+**The rule: centered on the output holding the pointer, natural size, newest on top and focused.** With
+no input devices yet, the pointer is taken to be centered on the first output. No cascade offset and no
+tiling — and that refusal is the anti-policy guard doing real work, because a cascade needs a number
+(how much, which corner) and a tile needs a rule, and either is gyro making the window-management
+decision [decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) calls a category
+error. Center-on-pointer is the one placement that takes no parameter. Two windows overlapping exactly
+is acceptable here and is honest signal that there is no shell; in the only cases the Floorplanner
+fires there are one or two windows anyway.
+
+**A floor placement is the one placement whose origin is arrival, not an input event.** Under a shell
+the entrance is stamped by the placing input's `t₀`; nothing routes a floor placement, so its origin is
+the commit that created the entity and gyro supplies `now`. That is consistent with decision 112 — a
+client commit carries no timestamp — because the Floorplanner is gyro authoring, and there is genuinely
+no earlier moment to point the entrance at.
+
+**The guard against layout creep.** A declared container carries a transform, a visibility flag, and a
+name the shell mints so it can re-adopt the container after a restart — no tiling rule, no gravity, no
+ordering policy — and gyro never decides *what goes in* a container except at birth with no shell
+present, which is the Floorplanner and nothing else. Layout stays [open](Open.md) and phase two under
+[decision 89](#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete),
+which resolves only derived geometry at close; this entry does not move any of it into gyro. The
+escalation path for a session gyro genuinely cannot serve is a smarter console, not a smarter floor.
+
+**Rejected: the shell takes custody, with an orphan fallback when it dies.** It works, but it needs a
+new rule for what a reparent does to composed geometry — a shell that crashes mid-overview leaves a
+choice between windows that teleport and windows stuck at overview scale — and it is the option that
+forces the foreign-child case onto decision 114. The custody it buys is custody gyro has to unwind at
+exactly the moment the machine is least well.
+
+**Rejected: no containers, the shell writes N transforms.**
+[Decision 65](#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)
+makes a workspace swipe a driven progress parameter on a transition, which needs the workspace to be
+one node with one transform to scrub. The container has to exist; the only real question was who
+authors it, and the two arguments above answer gyro.
+
+**Rejected: the floor is decision 111's top-level list directly.** 111 makes the top level a list
+rather than a root so no walk pays for a node no reader needs; the floor is a node several readers
+need — session switching and the restart-survival above both address it — so it is a container gyro
+authors within the list, not the list itself.
