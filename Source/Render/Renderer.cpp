@@ -8,8 +8,10 @@
 #include <array>
 #include <bit>
 #include <cerrno>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <variant>
 
 #include "Core/ColorState.h"
@@ -78,45 +80,103 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 	};
 }
 
-// Whether a quad is an upright rectangle on the device grid, which is what lets a shadow be a centre
-// and a half-extent rather than a homography to extrapolate.
-//
-// **A tolerance rather than an equality, and it is sixty-fourths of a pixel.** An axis-aligned chain
-// puts the two top corners at one `y` exactly — the coefficient that would separate them is zero, not
-// small — so this would hold at equality today. The tolerance is against the composed chain that
-// grows a term later and leaves a millionth of a degree of skew: an exact test would turn that into a
-// refused frame, which is a black screen for a difference no eye and no framebuffer can hold.
-[[nodiscard]] bool Upright(const Quad& quad) noexcept
+// A unit direction on the glass. Two floats rather than Geometry's `Point`, because a direction is
+// not a position and this file is the only place one is needed.
+struct Axis
 {
+	float X = 0.0F;
+	float Y = 0.0F;
+};
+
+// A quad resolved into the frame a shadow is drawn in: where its centre is, how far it reaches, and
+// which way its own two axes point in device space.
+struct ShadowFrame
+{
+	Point<DeviceSpace> Centre{};
+	Size<DeviceSpace> Extent{};
+	Axis Across{ 1.0F, 0.0F };
+	Axis Down{ 0.0F, 1.0F };
+};
+
+// Whether a projected quad is still a rectangle, and its frame where it is.
+//
+// **This is decision 132's split, and the two cases it separates look nothing alike on screen.** A
+// node *spun* in the plane is a photograph lying at an angle on a desk: still a rectangle, just not
+// square to the screen, and its shadow is not in question — the shape turns and the light does not.
+// A node *tilted out* of the plane is a card flipping over, where perspective makes the near edge
+// longer than the far one and the quad stops being a rectangle at all. That one is open: whether the
+// shadow stretches away from the near edge, and whether it is softer at the end that is further from
+// what it falls on, wants a transition in front of it and there is none.
+//
+// **Verified by reconstruction rather than by testing for skew**, because the tolerance is then in the
+// units that matter. A perpendicularity test on two edge vectors is a tolerance on a cross product,
+// which means one number for a taskbar and another for a thumbnail; rebuilding the four corners from
+// the frame and asking how far they moved is a tolerance in device pixels, at every size.
+[[nodiscard]] std::optional<ShadowFrame> Rectangular(const Quad& quad) noexcept
+{
+	// A sixty-fourth of a pixel: far below what a target can hold and far above what single precision
+	// costs a corner at the scale of a panel.
 	constexpr float Tolerance = 1.0F / 64.0F;
 
 	for (const float weight : quad.Weights)
 	{
 		if (std::abs(weight - 1.0F) > Tolerance)
 		{
-			return false;
+			return std::nullopt;
 		}
 	}
 
-	return std::abs(quad.Corners[0].Y - quad.Corners[1].Y) <= Tolerance &&
-	       std::abs(quad.Corners[3].Y - quad.Corners[2].Y) <= Tolerance &&
-	       std::abs(quad.Corners[0].X - quad.Corners[3].X) <= Tolerance &&
-	       std::abs(quad.Corners[1].X - quad.Corners[2].X) <= Tolerance;
+	const Axis across{ quad.Corners[1].X - quad.Corners[0].X, quad.Corners[1].Y - quad.Corners[0].Y };
+	const Axis down{ quad.Corners[3].X - quad.Corners[0].X, quad.Corners[3].Y - quad.Corners[0].Y };
+
+	const float width = std::hypot(across.X, across.Y);
+	const float height = std::hypot(down.X, down.Y);
+
+	if (width <= 0.0F || height <= 0.0F)
+	{
+		return std::nullopt;
+	}
+
+	const ShadowFrame frame{ .Centre = { 0.5F * (quad.Corners[0].X + quad.Corners[2].X),
+		                                 0.5F * (quad.Corners[0].Y + quad.Corners[2].Y) },
+		                     .Extent = { 0.5F * width, 0.5F * height },
+		                     .Across = { across.X / width, across.Y / width },
+		                     .Down = { down.X / height, down.Y / height } };
+
+	// The four corners this frame would produce, against the four that arrived. A parallelogram fails
+	// on the corner opposite the origin, a sheared quad on two of them, and a perspective one on all
+	// four — one test rather than three, and the number it reports is a distance on the glass.
+	for (std::size_t corner = 0; corner < 4; ++corner)
+	{
+		const float horizontal = corner == 1 || corner == 2 ? frame.Extent.Width : -frame.Extent.Width;
+		const float vertical = corner == 2 || corner == 3 ? frame.Extent.Height : -frame.Extent.Height;
+
+		const Point<DeviceSpace> rebuilt{ frame.Centre.X + horizontal * frame.Across.X + vertical * frame.Down.X,
+			                              frame.Centre.Y + horizontal * frame.Across.Y + vertical * frame.Down.Y };
+
+		if (std::abs(rebuilt.X - quad.Corners[corner].X) > Tolerance ||
+		    std::abs(rebuilt.Y - quad.Corners[corner].Y) > Tolerance)
+		{
+			return std::nullopt;
+		}
+	}
+
+	return frame;
 }
 
-// What one shadow draw is told: the item's rect, the light's three numbers, and how far past the rect
-// the quad has to reach.
+// What one shadow draw is told: the item's frame, the light's three numbers, and how far past the
+// rect the quad has to reach.
 //
 // **The radius crosses in device pixels while `DrawItem` states it in the node's own extent**, and the
 // conversion is here because this is where both are known. The smaller of the two axis scales, so an
 // anisotropically scaled node's shadow rounds less than its content rather than more — a shadow whose
 // corner is rounder than the window's shows as a light gap at four corners, and the other direction
 // hides under the node instead.
-[[nodiscard]] ShadowConstants ShadowFor(const DrawItem& item, PixelSize<DeviceSpace> target) noexcept
+[[nodiscard]] ShadowConstants
+ShadowFor(const DrawItem& item, const ShadowFrame& frame, PixelSize<DeviceSpace> target) noexcept
 {
-	const Rect<DeviceSpace> bounds = item.Shape.Bounds();
-	const float width = bounds.Extent.Width;
-	const float height = bounds.Extent.Height;
+	const float width = 2.0F * frame.Extent.Width;
+	const float height = 2.0F * frame.Extent.Height;
 
 	const float horizontal = item.Extent.Width > 0.0F ? width / item.Extent.Width : 1.0F;
 	const float vertical = item.Extent.Height > 0.0F ? height / item.Extent.Height : 1.0F;
@@ -124,10 +184,10 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 
 	ShadowConstants constants{};
 
-	constants.Rect[0] = bounds.Origin.X + 0.5F * width;
-	constants.Rect[1] = bounds.Origin.Y + 0.5F * height;
-	constants.Rect[2] = 0.5F * width;
-	constants.Rect[3] = 0.5F * height;
+	constants.Rect[0] = frame.Centre.X;
+	constants.Rect[1] = frame.Centre.Y;
+	constants.Rect[2] = frame.Extent.Width;
+	constants.Rect[3] = frame.Extent.Height;
 
 	constants.Shape[0] = radius;
 	constants.Shape[1] = item.Lift.Offset;
@@ -141,6 +201,11 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 	constants.Target[0] = static_cast<float>(target.Width);
 	constants.Target[1] = static_cast<float>(target.Height);
 	constants.Target[2] = Expansion(item.Lift);
+
+	constants.Basis[0] = frame.Across.X;
+	constants.Basis[1] = frame.Across.Y;
+	constants.Basis[2] = frame.Down.X;
+	constants.Basis[3] = frame.Down.Y;
 
 	return constants;
 }
@@ -165,17 +230,20 @@ Transfer(VkImage image, std::uint32_t from, std::uint32_t to, VkAccessFlags sour
 		return Failure(EINVAL, "this renderer flattens no groups yet; decision 60's offscreen is not built");
 	}
 
-	// **A turned node's shadow is an open question rather than an unbuilt feature**, which is why this
-	// refuses instead of drawing something. One light and a node out of the plane disagree: the
-	// physical answer shears the shadow across the plane it is cast on, and the cheap one carries it
-	// on the quad, where a card mid-flip lights itself from the side. Docs/Open.md leaves it to the
-	// first transition that turns a node, and there is none — so what would be shipped meanwhile is
-	// whichever answer happened to be easier to write, which is the way a question gets decided by
-	// accident.
-	if (item.Lift.Draws() && !Upright(item.Shape))
+	// **A tilted node's shadow is an open question rather than an unbuilt feature**, which is why this
+	// refuses instead of drawing something. A card flipping over is further from what it falls on at
+	// one edge than the other, so the shadow both stretches and changes softness across itself, and
+	// Docs/Open.md leaves which of those matters to the first transition that turns a node. There is
+	// none — so what would be shipped meanwhile is whichever answer happened to be easier to write,
+	// which is the way a question gets decided by accident.
+	//
+	// **A node spun in the plane is not that case and is not refused** (decision 132). It is a
+	// photograph lying at an angle: the shape turns and the light does not, which is the one answer a
+	// person would accept, and `Rectangular` is what tells the two apart.
+	if (item.Lift.Draws() && !Rectangular(item.Shape))
 	{
 		return Failure(
-			EINVAL, "this renderer casts no shadow from a turned quad; Docs/Open.md has not settled which way it goes"
+			EINVAL, "this renderer casts no shadow from a node tilted out of the plane; Docs/Open.md has not settled it"
 		);
 	}
 
@@ -1521,7 +1589,16 @@ void VulkanRenderer::Shade(
 	// belongs to a different layout, so the next item has to bind again whatever it wanted.
 	bound = VK_NULL_HANDLE;
 
-	const ShadowConstants constants = ShadowFor(item, slot.Size);
+	// Total, because `Expressible` refused every item this could fail for before recording began — the
+	// same contract the pipeline lookup above runs under.
+	const std::optional<ShadowFrame> frame = Rectangular(item.Shape);
+
+	if (!frame)
+	{
+		return;
+	}
+
+	const ShadowConstants constants = ShadowFor(item, *frame, slot.Size);
 
 	vkCmdPushConstants(
 		command,

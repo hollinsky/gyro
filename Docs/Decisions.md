@@ -26,7 +26,10 @@ transition down* — which is the argument for building the motion catalog early
 the type had one caller.
 
 Five entries were settled by going and reading the source an argument rested on — 2, 49, 73, 76,
-and 106 — and each carries that reading in its own text. The rules they taught are in
+and 106 — and a sixth, 131, by going and computing one, which taught the same lesson from the other
+side: a closed form that is exact in the case you are picturing was wrong by a factor of two in the
+case beside it, and the difference between "slight" and "twice" was one afternoon of arithmetic. Each
+carries that reading in its own text. The rules they taught are in
 [AGENTS.md](../AGENTS.md#how-decisions-get-made), because they are instructions to whoever works
 this list next rather than history. In short: an argument that names its source can be retired by an
 afternoon of reading; read even when you expect to be confirmed, since a right answer on a wrong
@@ -9778,6 +9781,10 @@ worst where it reads through most, and nobody would attribute it to elevation.
 
 #### A turned node's shadow is refused rather than guessed
 
+*(Revised 2026-08-23 by [decision 132](#132-a-node-spun-in-the-plane-is-not-a-node-tilted-out-of-it),
+which splits this refusal in two: a node spun in the plane draws, and only one tilted out of it is
+refused. The argument below is unchanged for the tilt and was simply too wide.)*
+
 [Open.md](Open.md) leaves open whether a rotated node's shadow shears across the plane it falls on or
 rides the node's own quad, and says it arrives with the first transition that turns a node. There is
 no such transition. **Drawing either answer meanwhile decides the question by accident**, in favour
@@ -9794,6 +9801,11 @@ which is worse than either thing the open entry is choosing between and would lo
 than like a decision.
 
 #### What the closed form gives up
+
+*(Retired 2026-08-23 by [decision 131](#131-the-shadows-coverage-is-exact-the-rectangle-is-closed-form-and-the-corners-are-quadrature),
+which replaced the arithmetic this section is about. Kept because the measurement is what forced the
+replacement, and because a distance field read through the normal integral is what every other
+implementation of this ships.)*
 
 Coverage is exact for a straight edge and an approximation at a corner, where reading the distance
 field through the normal integral treats the occluder as continuing around. *(Measured 2026-08-23,
@@ -9903,3 +9915,108 @@ staging copy is wanted for `wl_shm`. `Blit` implements the mapping arm and refus
 is enough to draw a client's shm buffer on a machine with no GPU and is what the seam is tested
 through. Nobody mints an id yet either: that is the protocol layer's, and the snapshot atlas is the
 second minter, which is why the id space is not `Protocol`'s to own.
+
+### 131. The shadow's coverage is exact: the rectangle is closed form and the corners are quadrature
+
+*(Decided 2026-08-23, on measuring what
+[decision 130](#130-the-shadow-is-drawn-in-device-space-over-an-upright-quad-and-a-turned-one-is-refused)
+gave up. It is the sixth entry settled by going and computing rather than arguing, and the rule it
+teaches is the one below.)*
+
+**A distance field read through the normal distribution's integral is what every implementation of a
+blurred rounded rect reaches for, and it is wrong by eleven to twenty eight-bit code points at a
+corner.** Measured against dense quadrature of the true convolution. The reason is one line: at a
+square corner the field reads zero where only a quarter of the neighbourhood is occluded, so the
+closed form answers half coverage against a true quarter — **exactly twice the darkness, at any
+softness**, because the factor has nothing to do with how blurred the shadow is. Rounding the corner
+softens it to about 0.14 of coverage and no further. On screen the shadow's corners are darker and
+squarer than the shape casting them.
+
+Decision 130 called this "slightly darker" without measuring it. That is the whole lesson: **a
+closed form that is exact in the case you are picturing can be wrong by a factor of two in the case
+next to it, and the difference between "slight" and "twice" is one afternoon of arithmetic.**
+
+#### The rectangle is exact and the corners are the correction
+
+A Gaussian is separable and a rectangle is the product of two intervals, so a plain rect's blurred
+coverage is closed form with no error in it at all — four `erf` calls, no loop. The rounded rect is
+that rectangle less four corner deficits, each the curvilinear triangle inside the corner and outside
+the arc.
+
+**The deficit is integrated in the arc's own angle, and that is what makes six nodes enough.** A
+circle's half-width has a square-root singularity in its derivative where the arc meets the straight
+edge; Gauss-Legendre converges algebraically against one of those and the rule needs dozens of nodes.
+Substituting `y = sin θ` makes both coordinates analytic and the convergence geometric.
+
+```
+one clipped panel of 6      radius 24, softness 2      12.35 code points
+two panels of 6, split 45°  radius 24, softness 2       0.03 code points
+two panels of 6, split 45°  every ratio measured     ≤ 0.03 code points
+```
+
+The split at forty-five degrees is where the arc stops being mostly vertical and starts being mostly
+horizontal. One panel across the whole quarter is fine while the softness is comparable to the radius
+and falls apart where it is much smaller — a crisp shadow on a generously rounded window — because the
+sharp feature moves from one coordinate to the other.
+
+**Two early exits are most of what this costs.** A fragment out along an edge, or past the far side of
+a corner, carries no blur mass over that deficit at all, so the common case is one corner evaluated
+and three abandoned before an `erf`; a fragment in the middle of an edge evaluates none, and the
+separable term is exact there on its own.
+
+**Rejected: quadrature over the whole shape**, which is the published method and was the first thing
+tried. Integrating the rounded rect's varying half-width over rows needs more than sixteen samples to
+beat the *uncorrected* separable rectangle, because it spends its nodes across the whole blur rather
+than on the small region where the shape is not a rectangle. Correcting a closed form beats
+integrating one.
+
+**Rejected: a lookup table indexed by the ratios.** It would be a descriptor set on a pass that binds
+nothing, and the arithmetic came in under a code point without one.
+
+#### Held to it by a second implementation
+
+Integration/RenderImport.Test.cpp writes the model down again — double precision, `std::erf`, and a
+five-hundred-interval Simpson rule rather than six Gauss-Legendre nodes — and compares it against
+pixels the device actually produced, for a node square to the screen and one spun in the plane. The
+worst disagreement is **0.504 code points**, which is the quantisation step of the eight-bit target
+itself: the shadow is as exact as the buffer it lands in can record, and what is left is rounding.
+
+That test is also where the error function's approximation, single precision, the premultiply and the
+blend all get checked, none of which the arithmetic above says anything about.
+
+### 132. A node spun in the plane is not a node tilted out of it
+
+*(Decided 2026-08-23, splitting
+[decision 130](#130-the-shadow-is-drawn-in-device-space-over-an-upright-quad-and-a-turned-one-is-refused)'s
+refusal after asking what a turned quad is in front of a person rather than in the projection.)*
+
+Decision 130 refused every lifted node whose quad was not square to the screen, on the grounds that
+[Open.md](Open.md) has not settled which way a turned node's shadow goes. **Those are two
+arrangements, not one, and only the second is open.**
+
+**A node spun in the plane is a photograph lying at an angle on a desk.** It is still a rectangle;
+what changed is that its edges are not the screen's. Its shadow is not in question at all: the shape
+turns and the light does not. A tilted photograph whose shadow swung round with it — pointing off to
+the side — is not an unsettled answer, it is a wrong one, and it is exactly what "the shadow rides
+the quad" would produce.
+
+**A node tilted out of the plane is a card mid-flip.** Perspective makes the near edge longer than the
+far one, the quad stops being a rectangle, and the node is further from what it falls on at one end
+than the other — so the shadow both stretches and changes softness across itself. That is the open
+question, and it still wants a transition in front of it.
+
+So the shape turns and the light does not: the displacement is taken in device space, *before* the
+point is resolved into the node's own frame, which is one subtraction in the fragment stage and is the
+entire content of this entry. The cover quad grows along the node's axes rather than the screen's, so
+a spun node's shadow is a turned rectangle rather than the bounding box of one.
+
+**The test is reconstruction rather than a skew tolerance.** A perpendicularity test on two edge
+vectors is a tolerance on a cross product, which means one number for a taskbar and another for a
+thumbnail. Rebuilding the four corners from the frame and asking how far they moved is a tolerance in
+device pixels — a sixty-fourth of one — at every size, and it catches a parallelogram, a shear and a
+perspective quad with the same comparison.
+
+**Rejected: refusing both, which is what 130 shipped.** It is safe in the sense that nothing wrong
+reaches the glass, and it costs a black screen for an arrangement whose answer nobody disputes. A
+refusal is honest about a question that is open; using one to cover a question that is merely
+unasked is how a renderer accumulates cases nobody remembers were arbitrary.

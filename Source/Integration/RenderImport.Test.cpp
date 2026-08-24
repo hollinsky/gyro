@@ -6,8 +6,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <numbers>
 #include <optional>
 #include <print>
 #include <span>
@@ -1190,13 +1192,15 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 	refused[0].Content = DrawTexture{};
 	refused[1].Content = DrawGroup{ .Count = 0 };
 
-	// **A lifted node is no longer refused; a lifted *turned* one is.** The shadow is analytic over a
-	// rect, and whether a node out of the plane sheds a sheared shadow or carries one on its own quad
-	// is a question Docs/Open.md leaves to the first transition that turns a node. Drawing either
-	// answer meanwhile would settle it by accident, so the quad the producer projected is checked for
-	// being upright and the frame is refused where it is not.
+	// **A lifted node is no longer refused; a lifted node *tilted out of the plane* is.** Whether a
+	// flipping card's shadow stretches away from its near edge, and whether it softens across itself,
+	// is a question Docs/Open.md leaves to the first transition that turns a node — so a quad that has
+	// stopped being a rectangle is refused rather than drawn as whichever answer was easier to write.
+	// A perspective weight is what makes this one a tilt rather than a spin, and decision 132 is that
+	// the two are different questions.
 	refused[2].Lift = Cast(Elevation::Resting);
-	refused[2].Shape.Corners[1] = { refused[2].Shape.Corners[1].X, refused[2].Shape.Corners[1].Y + 4.0F };
+	refused[2].Shape.Weights[1] = 0.8F;
+	refused[2].Shape.Weights[2] = 0.8F;
 
 	// **The colour-state refusal is now one transfer function rather than every conversion**, and HLG
 	// is the one because converting it needs a display peak luminance `ColorState` does not carry.
@@ -1223,8 +1227,9 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 
 	GYRO_CHECK_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &dressed, 1 })).has_value(), true);
 
-	// And the elevation from the same side: an upright node at either lifted level draws, because the
-	// shadow it casts is arithmetic over its own rect with nothing read and no pass of its own.
+	// And the elevation from the same side: a node square to the screen draws at either lifted level,
+	// because the shadow it casts is arithmetic over its own rect with nothing read and no pass of its
+	// own.
 	for (const Elevation level : AllElevations)
 	{
 		DrawItem lifted = drawable;
@@ -1232,6 +1237,26 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 
 		GYRO_CHECK_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &lifted, 1 })).has_value(), true);
 	}
+
+	// **A node spun in the plane draws too, and that is decision 132's whole point.** It is a
+	// photograph lying at an angle rather than a card mid-flip: still a rectangle, so the shape turns,
+	// the light does not, and there is nothing open about it. Refusing this alongside the tilt would
+	// black the screen for an arrangement whose answer nobody disputes.
+	DrawItem spun = drawable;
+	spun.Lift = Cast(Elevation::Floating);
+
+	for (std::size_t corner = 0; corner < 4; ++corner)
+	{
+		const float horizontal = corner == 1 || corner == 2 ? 8.0F : -8.0F;
+		const float vertical = corner == 2 || corner == 3 ? 8.0F : -8.0F;
+		const float across = std::cos(0.4F);
+		const float rise = std::sin(0.4F);
+
+		spun.Shape.Corners[corner] = { 16.0F + horizontal * across - vertical * rise,
+			                           16.0F + horizontal * rise + vertical * across };
+	}
+
+	GYRO_CHECK_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &spun, 1 })).has_value(), true);
 
 	// The branch that used to be here, from the other side: an item whose light is not the output's
 	// is drawn rather than refused, because `Prepare` built the variant that converts it.
@@ -1669,4 +1694,246 @@ GYRO_TEST(RenderImport, ALiftedNodeIsNotDarkenedByItsOwnShadow)
 	// And immediately below it, where the shadow is at its darkest, so that the check above is about
 	// the punch-out rather than about a shadow that never drew.
 	GYRO_CHECK(reader.Image().At(32, 22).Red < White.Red);
+}
+
+namespace
+{
+// **The shadow written down a second time, in double precision and by a different rule.**
+//
+// Decision 131 claims the renderer's shadow is exact to a fraction of an eight-bit code point, and a
+// claim like that is only worth what it is checked against. This is the same *decomposition* — an
+// exact separable rectangle less four corner deficits — evaluated with `std::erf` rather than an
+// approximation and with a dense composite Simpson rather than six Gauss-Legendre nodes over two
+// panels. What it therefore catches is everything between the arithmetic and the glass: the rule's
+// own convergence, the error function's approximation, single precision, the premultiply, the blend,
+// and the frame a spun node is resolved into.
+struct ShadowModel
+{
+	double CentreX = 0.0;
+	double CentreY = 0.0;
+	double HalfWidth = 0.0;
+	double HalfHeight = 0.0;
+
+	// The node's own axes on the glass. The identity for a node square to the screen.
+	double AcrossX = 1.0;
+	double AcrossY = 0.0;
+	double DownX = 0.0;
+	double DownY = 1.0;
+
+	double Radius = 0.0;
+	double Offset = 0.0;
+	double Sigma = 1.0;
+	double Alpha = 0.0;
+};
+
+[[nodiscard]] double Normal(double x)
+{
+	return 0.5 * std::erfc(-x / std::sqrt(2.0));
+}
+
+// One corner's deficit: inside the rectangle's corner, outside the arc, blurred. Composite Simpson
+// over the whole quarter arc, which needs no clipping because it is not trying to be cheap.
+[[nodiscard]] double ReferenceDeficit(double qx, double qy, const ShadowModel& model)
+{
+	if (model.Radius <= 0.0)
+	{
+		return 0.0;
+	}
+
+	// Simpson over an integrand that is analytic in the angle, which is the same property decision 131
+	// leans on — sixty-four intervals is machine precision here and the reference is still a different
+	// rule from the six-node Gauss-Legendre it is checking.
+	constexpr int Intervals = 64;
+
+	const double edge = Normal((model.HalfWidth - qx) / model.Sigma);
+	const double step = (std::numbers::pi / 2.0) / Intervals;
+	double total = 0.0;
+
+	for (int index = 0; index <= Intervals; ++index)
+	{
+		const double angle = index * step;
+		const double row = model.HalfHeight - model.Radius + model.Radius * std::sin(angle);
+		const double arc = model.HalfWidth - model.Radius + model.Radius * std::cos(angle);
+		const double mass = std::exp(-(row - qy) * (row - qy) / (2.0 * model.Sigma * model.Sigma)) /
+		                    (model.Sigma * std::sqrt(2.0 * std::numbers::pi));
+
+		const double weight = index == 0 || index == Intervals ? 1.0 : (index % 2 == 1 ? 4.0 : 2.0);
+
+		total += weight * model.Radius * std::cos(angle) * mass * (edge - Normal((arc - qx) / model.Sigma));
+	}
+
+	return total * step / 3.0;
+}
+
+// How much light one device pixel loses to this shadow.
+[[nodiscard]] double ReferenceDarkening(double px, double py, const ShadowModel& model)
+{
+	// **The light is taken in device space and the frame afterwards**, which is decision 132: the shape
+	// turns with the node and the displacement does not turn with it.
+	const double offsetX = px - model.CentreX;
+	const double offsetY = py - model.CentreY - model.Offset;
+
+	const double x = offsetX * model.AcrossX + offsetY * model.AcrossY;
+	const double y = offsetX * model.DownX + offsetY * model.DownY;
+
+	double coverage = (Normal((model.HalfWidth - x) / model.Sigma) - Normal((-model.HalfWidth - x) / model.Sigma)) *
+	                  (Normal((model.HalfHeight - y) / model.Sigma) - Normal((-model.HalfHeight - y) / model.Sigma));
+
+	for (const int horizontal : { 1, -1 })
+	{
+		for (const int vertical : { 1, -1 })
+		{
+			coverage -= ReferenceDeficit(horizontal * x, vertical * y, model);
+		}
+	}
+
+	return model.Alpha * std::clamp(coverage, 0.0, 1.0);
+}
+
+// Whether a device point is far enough outside the node that the punch-out is not part of the answer.
+[[nodiscard]] bool Outside(double px, double py, const ShadowModel& model, double margin)
+{
+	const double offsetX = px - model.CentreX;
+	const double offsetY = py - model.CentreY;
+
+	const double x = std::abs(offsetX * model.AcrossX + offsetY * model.AcrossY);
+	const double y = std::abs(offsetX * model.DownX + offsetY * model.DownY);
+
+	return x > model.HalfWidth + margin || y > model.HalfHeight + margin;
+}
+} // namespace
+
+// **Decision 131's claim, held to a number.** A white field with one lifted node on it, sampled
+// everywhere the shadow reaches and compared against the model above.
+//
+// Two nodes, and the second is the one that would have gone unnoticed: the first is square to the
+// screen, and the second is spun in the plane, which decision 132 draws rather than refuses. Matching
+// one reference in both configurations is what says the shape turned and the light did not — a
+// renderer that swung the light round with the node passes every test that only looks at a node
+// square to the screen.
+GYRO_TEST(RenderImport, TheShadowMatchesItsClosedFormToWithinACodePoint)
+{
+	std::optional<Fixture> fixture = Available("TheShadowMatchesItsClosedFormToWithinACodePoint");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	constexpr PixelSize<DeviceSpace> Wide{ 256, 160 };
+
+	fixture->Renderer().ReleaseTargets();
+	fixture->Output().Reconfigure({ .Resolution = Wide, .Period = PeriodFromHertz(60.0), .Format = Linear });
+	fixture->Output().Advance(fixture->Clock().Now());
+	fixture->Output().Advance(fixture->Clock().Now());
+
+	GYRO_REQUIRE(fixture->Output().Status().has_value());
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
+
+	// A radius that is a real fraction of the node, so the corner deficits are most of what is being
+	// checked rather than a rounding on the end of a rectangle.
+	constexpr float Radius = 16.0F;
+	constexpr float HalfWidth = 44.0F;
+	constexpr float HalfHeight = 30.0F;
+
+	for (const float angle : { 0.0F, 0.5F })
+	{
+		const float across = std::cos(angle);
+		const float rise = std::sin(angle);
+		const Shadow lift = Cast(Elevation::Resting);
+
+		const ShadowModel model{ .CentreX = 128.0,
+			                     .CentreY = 78.0,
+			                     .HalfWidth = HalfWidth,
+			                     .HalfHeight = HalfHeight,
+			                     .AcrossX = across,
+			                     .AcrossY = rise,
+			                     .DownX = -rise,
+			                     .DownY = across,
+			                     .Radius = Radius,
+			                     .Offset = lift.Offset,
+			                     .Sigma = lift.Softness,
+			                     .Alpha = lift.Opacity };
+
+		Region<DeviceSpace> damage;
+		damage.Add(PixelRect<DeviceSpace>{ {}, Wide });
+
+		// The node draws nothing of its own, so every pixel outside it is the shadow and the field and
+		// nothing else. Its quad is built by hand because this is the one test that wants a projection
+		// the evaluator has no way to author yet.
+		std::array<DrawItem, 2> items{
+			Solid({ {}, { 256.0F, 160.0F } }, DrawSolid{ 1.0F, 1.0F, 1.0F, 1.0F }),
+			Solid({ {}, { 2.0F * HalfWidth, 2.0F * HalfHeight } }, DrawSolid{ 0.0F, 0.0F, 0.0F, 0.0F }, 1.0F, Radius)
+		};
+
+		const float horizontal[4]{ -HalfWidth, HalfWidth, HalfWidth, -HalfWidth };
+		const float vertical[4]{ -HalfHeight, -HalfHeight, HalfHeight, HalfHeight };
+
+		for (std::size_t corner = 0; corner < 4; ++corner)
+		{
+			items[1].Shape.Corners[corner] = {
+				static_cast<float>(model.CentreX) + horizontal[corner] * across - vertical[corner] * rise,
+				static_cast<float>(model.CentreY) + horizontal[corner] * rise + vertical[corner] * across
+			};
+		}
+
+		items[1].Lift = lift;
+
+		const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+		GYRO_REQUIRE(acquired.has_value());
+		GYRO_REQUIRE_EQ(fixture->Renderer().Record(Composite(*acquired, damage, items)).has_value(), true);
+
+		const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+		GYRO_REQUIRE(buffer != nullptr);
+
+		const BufferReader reader{ *buffer };
+		GYRO_REQUIRE(reader.IsValid());
+
+		double worst = 0.0;
+		PixelPoint<DeviceSpace> where{};
+		std::size_t sampled = 0;
+
+		for (std::int32_t y = 0; y < Wide.Height; ++y)
+		{
+			for (std::int32_t x = 0; x < Wide.Width; ++x)
+			{
+				// The pixel's own centre, which is what the fragment stage was asked about, and a margin
+				// clear of the node so that the punch-out's one-pixel feather is not in the comparison.
+				const double px = x + 0.5;
+				const double py = y + 0.5;
+
+				if (!Outside(px, py, model, 1.0))
+				{
+					continue;
+				}
+
+				const double expected = ReferenceDarkening(px, py, model);
+				const double actual = 1.0 - reader.Image().At(x, y).Red / 65535.0;
+				const double apart = std::abs(actual - expected) * 255.0;
+
+				++sampled;
+
+				if (apart > worst)
+				{
+					worst = apart;
+					where = { x, y };
+				}
+			}
+		}
+
+		GYRO_REQUIRE(sampled > 1000);
+		std::printf(
+			"  %s: worst %.3f code points at (%d, %d) over %zu pixels\n",
+			angle == 0.0F ? "square to the screen" : "spun in the plane",
+			worst,
+			where.X,
+			where.Y,
+			sampled
+		);
+
+		// One code point, which is a quantised eight-bit target's own step: the shadow is as exact as
+		// the buffer it lands in can record. Decision 131's measurement is the claim and this is where
+		// it stops being one.
+		GYRO_CHECK(worst <= 1.0);
+	}
 }

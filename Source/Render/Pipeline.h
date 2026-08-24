@@ -220,6 +220,11 @@ struct ShadowConstants
 	// The target's extent in pixels in the first two, which the vertex stage divides by, and the
 	// expansion in the third — how far past the rect the drawn quad reaches.
 	float Target[4]{ 1.0F, 1.0F, 0.0F, 0.0F };
+
+	// The node's own axes in device space, unit length: across in the first two, down in the last two.
+	// The identity for a node square to the screen and a rotation for one spun in the plane, which is
+	// decision 132's half of the refusal — a tilted node never reaches this block at all.
+	float Basis[4]{ 1.0F, 0.0F, 0.0F, 1.0F };
 };
 
 // The shader modules, the layout, and one pipeline per format seen.
@@ -329,12 +334,13 @@ static_assert(offsetof(QuadConstants, Fill) == 64);
 static_assert(offsetof(QuadConstants, Shape) == 80);
 static_assert(offsetof(QuadConstants, Target) == 96);
 
-// The same for the shadow block, which both of its stages declare whole. glslang reports it at 48
-// bytes with `Rect` at 0, `Shape` at 16, and `Target` at 32.
+// The same for the shadow block, which both of its stages declare whole. glslang reports it at 64
+// bytes with `Rect` at 0, `Shape` at 16, `Target` at 32, and `Basis` at 48.
 static_assert(std::is_trivially_copyable_v<ShadowConstants> && std::is_standard_layout_v<ShadowConstants>);
-static_assert(sizeof(ShadowConstants) == 48, "The block Shadow.vert and Shadow.frag declare");
+static_assert(sizeof(ShadowConstants) == 64, "The block Shadow.vert and Shadow.frag declare");
 static_assert(offsetof(ShadowConstants, Shape) == 16);
 static_assert(offsetof(ShadowConstants, Target) == 32);
+static_assert(offsetof(ShadowConstants, Basis) == 48);
 
 // Well inside the 128 bytes every Vulkan implementation guarantees, which is what makes a push
 // constant the right carrier rather than a gamble on a limit. Sixteen bytes of headroom is also the
