@@ -85,5 +85,6 @@ void DispatchWait::Stop() noexcept
 	// Unchecked for Interrupt::Raise's reason: this is called once, the counter saturates far above one,
 	// and the only reachable failure is `EAGAIN` on a counter nobody drains — which means the wakeup this
 	// call wanted is already pending.
-	(void)::write(m_Fd.Get(), &one, sizeof(one));
+	// A `(void)` cast does not discard a `warn_unused_result` on GCC; see Uring.cpp.
+	[[maybe_unused]] const ssize_t raised = ::write(m_Fd.Get(), &one, sizeof(one));
 }

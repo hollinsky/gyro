@@ -217,8 +217,16 @@ struct Recorder
 
 	// A byte the far end can read back, so a test can tell which descriptor arrived where rather than
 	// only that one did.
-	(void)::write(ends[1], &mark, 1);
+	const ssize_t written = ::write(ends[1], &mark, 1);
+
 	::close(ends[1]);
+
+	if (written != 1)
+	{
+		::close(ends[0]);
+
+		return Fd{};
+	}
 
 	return Fd{ ends[0] };
 }

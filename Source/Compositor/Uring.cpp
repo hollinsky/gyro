@@ -146,7 +146,9 @@ void Interrupt::Raise() noexcept
 	// Unchecked deliberately, and it is the one place in this file that is. The counter saturates at
 	// 2^64 - 2 and this is called once per shutdown; the only reachable failure is EAGAIN on a counter
 	// nobody has drained, which means a wakeup is already pending and this call had nothing to add.
-	(void)::write(m_Fd.Get(), &one, sizeof(one));
+	// A `(void)` cast does not discard a `warn_unused_result` on GCC, so the value has to land
+	// somewhere for the deliberate part above to be the one the compiler sees.
+	[[maybe_unused]] const ssize_t raised = ::write(m_Fd.Get(), &one, sizeof(one));
 }
 
 FrameRing::~FrameRing()

@@ -194,9 +194,12 @@ GYRO_TEST(Trace, TheSnapshotRunsAgainstALiveProducer)
 	Ring ring{ 1024, clock };
 
 	std::atomic<bool> stop{ false };
+	std::atomic<bool> producing{ false };
 
-	std::thread producer{ [&ring, &stop] {
+	std::thread producer{ [&ring, &stop, &producing] {
 		EnrollTracing(&ring.Buffer);
+
+		producing.store(true, std::memory_order_release);
 
 		while (!stop.load(std::memory_order_relaxed))
 		{
@@ -207,10 +210,20 @@ GYRO_TEST(Trace, TheSnapshotRunsAgainstALiveProducer)
 		}
 	} };
 
+	// The reader must not start before the writer has, or the race this test is about never happens:
+	// two hundred copies of an empty ring take less time than std::thread takes to reach the lambda,
+	// and the run ends having proved nothing.
+	while (!producing.load(std::memory_order_acquire))
+	{
+	}
+
 	std::vector<TraceEvent> into(1024);
 	std::size_t seen = 0;
 
-	for (int round = 0; round < 200; ++round)
+	// Rounds until something has come back rather than a fixed count, because the number of copies it
+	// takes to catch a record is a scheduling outcome. Bounded, so a ring that genuinely never fills
+	// fails the check below instead of hanging.
+	for (int round = 0; round < 200 || (seen == 0 && round < 100000); ++round)
 	{
 		const std::size_t count = ring.Buffer.Copy(into);
 

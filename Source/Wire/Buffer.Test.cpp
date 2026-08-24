@@ -56,13 +56,20 @@ GYRO_TEST(OutputBuffer, WordsAreNativeOrder)
 // lengths, because the interesting ones are "already aligned" and "one past aligned".
 GYRO_TEST(OutputBuffer, PaddingRoundsToAWord)
 {
-	for (const std::size_t length : { std::size_t{ 0 }, std::size_t{ 1 }, std::size_t{ 4 }, std::size_t{ 5 } })
-	{
+	// Each payload is a literal of exactly its own length rather than a prefix of one long one: the
+	// span a caller really passes is sized to its object, and handing GCC a pointer into a longer
+	// literal with a length it cannot narrow makes -Warray-bounds guess the reserve as the bound.
+	const auto SizeAfter = [](const char* text, std::size_t length) {
 		OutputBuffer buffer;
-		buffer.PutPadded(Bytes("abcdefgh", length));
+		buffer.PutPadded(Bytes(text, length));
 
-		GYRO_CHECK_EQ(buffer.Size(), Padded(length));
-	}
+		return buffer.Size();
+	};
+
+	GYRO_CHECK_EQ(SizeAfter("", 0), Padded(0));
+	GYRO_CHECK_EQ(SizeAfter("a", 1), Padded(1));
+	GYRO_CHECK_EQ(SizeAfter("abcd", 4), Padded(4));
+	GYRO_CHECK_EQ(SizeAfter("abcde", 5), Padded(5));
 
 	// A terminated payload pads the terminator with the text rather than after it, so a four-byte
 	// string occupies eight bytes and not four.
