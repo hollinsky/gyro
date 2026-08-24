@@ -37,6 +37,9 @@ enable_testing()
 # The parser and the emitter, in one library because the tests drive both and the executable is a
 # `main()` over them. Split into two targets it would be two archives with one consumer each.
 add_library(BindingsParser STATIC
+	Emit.Client.cpp
+	Emit.Server.cpp
+	Emit.Shared.cpp
 	Emit.cpp
 	Naming.cpp
 	Xml.cpp
