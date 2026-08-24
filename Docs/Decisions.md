@@ -551,6 +551,45 @@ which means keeping the authoring side of a snapshot addressable until that sequ
 is the same retention the watermark already implies, so it is a constraint made explicit rather than a
 new one.
 
+**The presented pair landed, and it is one of the three the rejection above deferred.** *(Annotated
+2026-08-23, building the return leg.)* `FrameOutput::OnPresented` is a producer now, so *S was
+presented at T* crosses as two numbers per output while the measured costs and the servo's
+observations keep waiting — the rejection was about fields nobody writes, not about a batch.
+
+Three things had to be settled to write it, and each is the kind that reads as obvious afterwards and
+is a client bug if it is guessed wrong.
+
+**`S` is the published sequence and not the panel's vblank counter.** The whole reason a report can be
+one record per frame is that dispatch authored the snapshot and can derive the surfaces from its
+number; a vblank counter is a fact about the panel that no derivation is a function of. That also
+decides what did *not* come with it — the observed period, the counter, the honesty flags — which is
+[Structure.md](Structure.md#region-is-in-geometry-and-reachability-is-why)'s *near enough to fuse and
+the table says not to* about this record and `PresentationInfo`. A record carrying both would be that
+type under another name, reaching a module forbidden from naming `Seam`.
+
+**What is presented trails what is read, by however deep an output's commits are.** The watermark says
+what the frame thread has finished *reading*; the pair says what an output has finished *showing*. So
+the frame loop keeps a queue of published sequences per output rather than one number, and a
+completion answers the oldest — an output two commits deep would otherwise report the newer scene as
+having reached a glass it has not, which is a frame callback handed to a client whose pixels are still
+in a queue.
+
+**The merge is a maximum per output, and a run of a different length replaces rather than blends.** The
+maximum is the watermark's own argument, because presented sequences are monotone per output and
+dispatch derives *everything up to and including P has been shown* — what is lost is the exactness of
+one timestamp, and only once dispatch is already sixteen frames behind. The replacement is
+[decision 84](#84-the-snapshots-per-output-run-is-indexed-under-a-set-generation)'s rule arriving on the return
+leg: the run is positional, so two runs from different output sets do not describe the same panels, and
+merging them by index reports one monitor's flip against another's across a hotplug.
+
+**What is still deferred is the derivation rather than the field.** Turning a presented sequence into a
+set of surfaces wants the retained handle runs
+[decision 115](#115-scene-drains-the-return-channel-and-protocol-observes-what-it-derives) names, and
+those belong with the matching and lifetime work `Scene` has no code for yet. Until then the drain
+announces per output rather than per surface, which is enough to exercise the leg end to end before a
+client exists — and the boot path is the reason that matters, since the splash and the recovery console
+present frames with nothing on the far end of them.
+
 ### 4. All three backends are in scope: nested, headless, DRM
 
 Nested is the daily driver and unlocks RenderDoc, validation layers, ASan, and gdb. Headless is what
@@ -1450,6 +1489,23 @@ apart with it: *where* `Material` lives is answered, and *what is in the set* is
 bundling was a consequence of there being no home rather than a real coupling between the two
 questions, and `Material` stays in `Seam` until the vocabulary lands because moving it before then
 would be a move nobody could check.
+
+**The fifth application was `BufferId`, and what is worth recording is why nothing caught it.**
+*(Annotated 2026-08-23, building the return leg.)* The id a `wl_buffer` release names was declared in
+[Publication/Return.h](../Source/Publication/Return.h), with the argument that the waist is where the
+schema both halves bind to belongs. That is right about the schema and wrong about the type, and it is
+the same shape `TextureId` was in when it lived in `Seam`: `Protocol` mints one when it imports a
+client buffer and consumes one when the hold comes back, and
+[Structure.md](Structure.md#the-modules) gives `Protocol` `Core`, `Geometry` and `Scene` and
+deliberately not the publication waist. Declared where it was, the module that mints the id could not
+say its name. The record it rides in did not move, exactly as `TextureSource` stayed in `Seam` when
+`TextureId` left.
+
+**A type with no producer has no call sites to fail a layering check**, which is the general form and
+the reason this sat wrong for as long as it did. `CheckLayering` reads includes; an identity nothing
+mints is included by nobody who would be denied. So the check is sound and its coverage is a function
+of how much of the design is built — and the moment to re-read a placement is when the first party
+that *produces* the type appears, rather than when the type is written.
 
 ### 90. The snapshot's runs are one per channel, and the frame side validates the tree it walks
 

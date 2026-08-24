@@ -113,8 +113,16 @@ public:
 		TargetsInvalidated.Emit();
 	}
 
+	[[nodiscard]] std::uint32_t CommitDepth() const noexcept override { return Depth; }
+
 	int Presents = 0;
 	bool Refuse = false;
+
+	// One by default, which is KMS's rule. A case about pipelining asks for two, which is what a nested
+	// output answers because its completion arrives from the host a whole refresh after the frame it is
+	// about.
+	std::uint32_t Depth = 1;
+
 	Region<DeviceSpace> PresentedDamage{};
 	OutputConfiguration Requested{};
 
@@ -289,6 +297,19 @@ struct Harness
 	}
 
 	FrameOutput& Output() { return Outputs[0]; }
+
+	// What the last iteration told the dispatch side, drained the way `SnapshotOutbox::Collect` drains
+	// it. The loop posts once per iteration whatever happened, so this always answers.
+	FrameReport Reported()
+	{
+		FrameReport report{};
+
+		while (Returns.Take(report))
+		{
+		}
+
+		return report;
+	}
 };
 } // namespace
 
@@ -928,4 +949,114 @@ GYRO_TEST(FrameLoop, ARefusedRecordStillPaidForItsWalk)
 
 	GYRO_CHECK_EQ(harness.Output().Cost().IrreducibleCpu(), 700us);
 	GYRO_CHECK_EQ(harness.Output().Cost().PlannedCpu(), Duration::zero());
+}
+
+GYRO_TEST(FrameLoop, ThePresentedSequenceIsTheSnapshotTheFrameWasDrawnFromAndNotTheWatermark)
+{
+	Harness harness;
+
+	harness.Anchor();
+	harness.Publish(1, {});
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	// The loop has moved on to a newer scene while the first is still in flight, which is the ordinary
+	// state of a pipelined output. The watermark says what the frame thread has finished *reading*; the
+	// presented pair says what an output has finished *showing*, and conflating them announces a frame
+	// nobody has seen.
+	harness.Publish(2, {});
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(At(1012));
+	(void)harness.Loop.Step();
+
+	const FrameReport report = harness.Reported();
+
+	GYRO_CHECK_EQ(report.Watermark, std::uint64_t{ 2 });
+	GYRO_REQUIRE_EQ(report.Presented().size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(report.Presented()[0].Sequence, std::uint64_t{ 1 });
+	GYRO_CHECK(report.Presented()[0].At == At(1010));
+}
+
+GYRO_TEST(FrameLoop, AnOutputTwoCommitsDeepAnswersTheOlderSceneFirst)
+{
+	Harness harness{ 3 };
+	harness.Presenter.Depth = 2;
+
+	harness.Anchor();
+	harness.Publish(1, {});
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	harness.Publish(2, {});
+	harness.Clock.Set(At(1012));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE_EQ(harness.Presenter.Presents, 2);
+	GYRO_CHECK_EQ(harness.Output().InFlight(), std::uint32_t{ 2 });
+
+	// Two commits out, and the first completion answers the first of them. A loop that remembered only
+	// the newest scene would report sequence 5 as having reached a glass that is still showing 4 — which
+	// on the far side is a frame callback handed to a client whose pixels are in the queue.
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(At(1013));
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Reported().Presented()[0].Sequence, std::uint64_t{ 1 });
+
+	harness.Presenter.Flip(At(1020), 9);
+	harness.Clock.Set(At(1023));
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Reported().Presented()[0].Sequence, std::uint64_t{ 2 });
+}
+
+GYRO_TEST(FrameLoop, AnIterationWithNoFlipReportsNoNewsRatherThanRepeatingItself)
+{
+	Harness harness;
+
+	harness.Anchor();
+	harness.Publish(1, {});
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(At(1012));
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE_EQ(harness.Reported().Presented()[0].Sequence, std::uint64_t{ 1 });
+
+	// A settled output flips nothing, and the report still crosses because the watermark has to. Zero is
+	// what says so — repeating the pair would be indistinguishable from a second flip of the same scene,
+	// and its timestamp would drift a frame further from the truth on every quiet iteration.
+	harness.Clock.Set(At(1022));
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Reported().Presented()[0].Sequence, std::uint64_t{ 0 });
+}
+
+GYRO_TEST(FrameLoop, AFrameTheHostAcceptedAndNeverShowedIsNeverReportedPresented)
+{
+	Harness harness;
+
+	harness.Anchor();
+	harness.Publish(1, {});
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE(harness.Output().IsFlipPending());
+
+	// Decision 124's fourth signal. The frame was drawn and accepted and is not on a screen, so there is
+	// nothing to tell a client about it — the surfaces in that scene are still owed a frame, and a
+	// callback here would be gyro reporting a photon that never left.
+	harness.Presenter.Missed.Emit();
+
+	harness.Clock.Set(At(1012));
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Reported().Presented()[0].Sequence, std::uint64_t{ 0 });
 }

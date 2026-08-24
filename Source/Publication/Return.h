@@ -5,10 +5,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
-#include <string_view>
 #include <type_traits>
 
-#include "Core/Handle.h"
+#include "Core/Buffer.h"
+#include "Core/Time.h"
 
 // The return half of the crossing: frame → dispatch, one report per frame.
 //
@@ -40,28 +40,19 @@
 // it is the only writer — and releases that do not fit are simply *not accepted*, so the frame thread
 // keeps holding those buffers for another frame. See Docs/Decisions.md decision 75.
 //
-// **What is deliberately not here yet.** The presented sequence and its timestamp, the per-output
-// measured costs, the VRR servo's observations: all of them are this record's, and none of them has a
-// producer until the frame loop exists. The project's usual line applies — a field nobody writes is a
-// field that is wrong in detail by the time somebody does — and adding one later costs a recompile of
-// two halves that are always built together. The *shape* is what is being fixed now, because the shape
-// is what decides the sizing and the loss policy, and that is the part that cannot be changed later.
-
-struct BufferTag
-{
-	static constexpr std::string_view Name = "Buffer";
-};
-
-// A client buffer, named so that a release cannot free the wrong one.
+// **The presented pair has a producer now, and the rest still does not.** *(2026-08-23.)* The entry
+// above held off the presented sequence, the per-output measured costs and the VRR servo's
+// observations together, on the grounds that none of them had anything writing it. `Frame/Loop.h`'s
+// `OnPresented` is that producer for the first of the three, so it lands and the other two keep
+// waiting — a field nobody writes is still a field that is wrong in detail by the time somebody does.
 //
-// The identity is the dispatch side's — it mints one when it imports a client buffer and consumes one
-// when the hold comes back — and the frame thread only carries it across. Publication names the type
-// anyway for the reason Publication/Snapshot.h names the runs: the waist is where the schema both
-// halves bind to belongs, and neither half may reach the other to find it. Generational rather than a
-// bare index because Docs/Architecture.md admits cross-thread lifetime as the one genuinely new cost
-// of the split: a client may destroy a surface while the frame thread holds its buffer, and a stale
-// release must compare unequal rather than name whatever occupies the slot now.
-using BufferId = Handle<BufferTag>;
+// **What did not come with it is everything else `PresentationInfo` carries**, and that is the rule
+// [Structure.md](../../Docs/Structure.md#region-is-in-geometry-and-reachability-is-why) states about
+// these two types being *near enough to fuse and the table says not to*. The vblank counter, the
+// observed period and the honesty flags are the frame clock's inputs; what crosses back is the
+// published sequence, which is the only number the dispatch side can turn into the surfaces that were
+// in that frame. A record that carried both would be `PresentationInfo` under another name, reaching a
+// module that must not depend on `Seam`.
 
 // How many holds one report can carry.
 //
@@ -78,7 +69,45 @@ inline constexpr std::size_t ReleasesPerReport = 16;
 // fresh one say the same thing about everything except the holds.
 inline constexpr std::size_t ReportQueueDepth = 16;
 
+// How many outputs one report speaks for.
+//
+// **The same number `Frame/Admission.h` calls `MaxOutputs`, restated rather than shared, and the
+// duplication is the honest form.** The publication waist may not depend on `Frame` — the whole point
+// of it is that neither half names the other — and there is no module below both that has a reason to
+// hold a panel count. So the agreement is written twice and checked once: `Frame/Loop.h` includes both
+// headers and static_asserts that the loop's set fits in a report, which is the one place where being
+// wrong about it would be a run of outputs silently reporting nothing.
+inline constexpr std::size_t OutputsPerReport = 16;
+
 static_assert((ReportQueueDepth & (ReportQueueDepth - 1)) == 0, "so the index is a mask");
+
+// One output's most recent frame on the glass.
+//
+// Decision 75's *S was presented at T*, as two numbers. `Sequence` is the **published** sequence the
+// frame was drawn from rather than the panel's vblank counter, and that is the whole content of the
+// type: the dispatch side authored that snapshot, so it is the one number it can turn back into the
+// surfaces the frame contained — a frame callback for each, `wp_presentation_feedback` at `At`, and
+// the client damage those surfaces had cleared by it.
+//
+// **Zero is *no news* rather than *sequence zero*.** Publication/Ring.h begins at one for exactly this
+// reason, and an output that presented nothing since the last report says so by leaving this alone.
+// That matters because a report goes out every frame whether or not any output flipped, so the common
+// case is a run of zeroes and it must not read as a regression.
+struct PresentedFrame
+{
+	std::uint64_t Sequence = 0;
+
+	// When it reached the glass, in the one timebase — Core/Time.h's, converted by whichever backend
+	// produced it and never observed in another domain. This is what a client's
+	// `wp_presentation_feedback.presented` is filled from, which is why it is a `Core` type here and
+	// not a copy of the `Seam` record the frame clock reads.
+	Instant At{};
+
+	friend constexpr bool operator==(PresentedFrame, PresentedFrame) noexcept = default;
+};
+
+static_assert(std::is_trivially_copyable_v<PresentedFrame> && std::is_standard_layout_v<PresentedFrame>);
+static_assert(sizeof(PresentedFrame) == 2 * sizeof(std::uint64_t), "No padding to leave uninitialised");
 
 // What one frame tells the dispatch thread.
 //
@@ -93,18 +122,35 @@ struct FrameReport
 	std::uint64_t Watermark = 0;
 
 	std::uint32_t ReleaseCount = 0;
-	std::uint32_t Reserved = 0;
+
+	// How many outputs the run below speaks for, which is decision 84's rule arriving on the return
+	// leg: a run whose length is not the reader's output set is *no* information rather than partial
+	// information. A hotplug replaces both halves of the loop at once, so a report staged before one
+	// and merged after it would otherwise attribute a timestamp to whichever panel now sits at that
+	// index. The merge below replaces the run instead of blending it, and the reader ignores a run that
+	// is not its own.
+	std::uint32_t OutputCount = 0;
 
 	// The client buffers the frame thread has finished with ahead of the watermark — the individual
 	// hold that Docs/Architecture.md keeps beside the watermark rather than encoding into it, because
 	// withholding the watermark to express one would stall reclamation of every unrelated commit below.
 	BufferId Releases[ReleasesPerReport] = {};
 
+	// What reached the glass, indexed by the output's position in the set both halves agreed on — the
+	// same positional convention the snapshot's per-output wake and placement runs use, and for the
+	// same reason: an identity here would be a second answer to a question the ordering already has.
+	PresentedFrame Presentations[OutputsPerReport] = {};
+
 	[[nodiscard]] std::span<const BufferId> Released() const noexcept { return { Releases, ReleaseCount }; }
+
+	[[nodiscard]] std::span<const PresentedFrame> Presented() const noexcept { return { Presentations, OutputCount }; }
 };
 
 static_assert(std::is_trivially_copyable_v<FrameReport> && std::is_standard_layout_v<FrameReport>);
-static_assert(sizeof(FrameReport) == 16 + ReleasesPerReport * sizeof(BufferId), "No padding to leave uninitialised");
+static_assert(
+	sizeof(FrameReport) == 16 + ReleasesPerReport * sizeof(BufferId) + OutputsPerReport * sizeof(PresentedFrame),
+	"No padding to leave uninitialised"
+);
 
 class ReturnChannel
 {
@@ -123,10 +169,17 @@ public:
 	// state it can be in, and a hold kept one frame longer costs a deferred blit rather than a leak.
 	//
 	// The watermark is always taken, whether or not the report reaches the queue this call, because it
-	// merges by maximum into a report that is still staged.
-	std::size_t Post(std::uint64_t watermark, std::span<const BufferId> releases = {}) noexcept
+	// merges by maximum into a report that is still staged. So does the presented run, and neither can
+	// be refused — only the holds can, because only they are a set rather than a high-water mark.
+	std::size_t Post(
+		std::uint64_t watermark,
+		std::span<const BufferId> releases = {},
+		std::span<const PresentedFrame> presented = {}
+	) noexcept
 	{
 		m_Staged.Watermark = std::max(m_Staged.Watermark, watermark);
+
+		Stage(presented);
 
 		const std::size_t room = ReleasesPerReport - m_Staged.ReleaseCount;
 		const std::size_t accepted = std::min(room, releases.size());
@@ -175,10 +228,51 @@ public:
 	// than infer it from what came out.
 	[[nodiscard]] bool HasStagedReport() const noexcept
 	{
-		return m_Staged.Watermark != 0 || m_Staged.ReleaseCount != 0;
+		return m_Staged.Watermark != 0 || m_Staged.ReleaseCount != 0 || m_Staged.OutputCount != 0;
 	}
 
 private:
+	// Merge this iteration's presented run into the staged one.
+	//
+	// **Per output it is a maximum, for the watermark's reason rather than by analogy to it.** The frame
+	// thread acquires snapshots in order and renders from the newest it holds, so the sequence an output
+	// presents is monotone; the dispatch side derives *everything up to and including P has been shown*,
+	// which makes an intermediate value carry nothing the later one does not. What is genuinely lost is
+	// the exactness of one timestamp — a surface that was last in sequence 5 is reported at sequence 6's
+	// presentation instant, one frame late — and that only happens when dispatch has already fallen
+	// sixteen frames behind, which is the state where the queue is full and this merge runs at all.
+	//
+	// **A run of a different length replaces rather than blends**, which is the `OutputCount` field's
+	// whole reason: the indices are positional, so two runs from different output sets do not describe
+	// the same panels and merging them by index would report one output's flip against another's.
+	void Stage(std::span<const PresentedFrame> presented) noexcept
+	{
+		if (presented.empty())
+		{
+			return;
+		}
+
+		const std::uint32_t count = static_cast<std::uint32_t>(std::min(presented.size(), OutputsPerReport));
+
+		if (count != m_Staged.OutputCount)
+		{
+			for (PresentedFrame& frame : m_Staged.Presentations)
+			{
+				frame = {};
+			}
+
+			m_Staged.OutputCount = count;
+		}
+
+		for (std::uint32_t index = 0; index < count; ++index)
+		{
+			if (presented[index].Sequence > m_Staged.Presentations[index].Sequence)
+			{
+				m_Staged.Presentations[index] = presented[index];
+			}
+		}
+	}
+
 	[[nodiscard]] bool Push(const FrameReport& report) noexcept
 	{
 		const std::uint64_t written = m_Written.load(std::memory_order_relaxed);

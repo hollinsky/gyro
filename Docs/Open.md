@@ -148,8 +148,9 @@ nothing only proves the grep.
   [Decision 83](Decisions.md#83-dispatchs-publication-is-an-event-source) has dispatch write its
   descriptor on every publication, which is correct and which wakes the frame thread ahead of its
   timer whenever both threads are busy. The saving is to write only when the frame thread last
-  reported a `Settled` wake, which the return channel can carry and `FrameReport` has a spare word
-  for. What makes it a question rather than a patch is the lost wakeup it opens — dispatch may read
+  reported a `Settled` wake, which the return channel can carry — though not in a spare word any more
+  *(2026-08-23)*, since the presented run took the one this entry was counting on and a flag would have
+  to be its own field. What makes it a question rather than a patch is the lost wakeup it opens — dispatch may read
   *not idle*, publish, and decline to signal, all inside the window before the frame thread posts its
   report and sleeps — so the conditional form is correct only with the step re-checking the ring after
   posting and before it returns `Never()`. Settle it by measuring the waste on a busy system rather

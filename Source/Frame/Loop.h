@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -115,6 +116,22 @@
 // are that set.
 inline constexpr std::size_t MaxDevices = 4;
 
+// SPEC: how many commits one output may have outstanding, and therefore how many published sequences
+// this loop remembers on its behalf.
+//
+// `IPresenter::CommitDepth` already says it is *bounded in practice by the target ring, since every
+// outstanding commit is holding one*. This is that sentence made a bound rather than an observation,
+// because the loop now keeps a queue per output and a presenter answering a larger number would run
+// off the end of it. An output whose presenter is more generous than the ring simply stops one short,
+// which is where `AcquireTarget` would have stopped it anyway.
+inline constexpr std::uint32_t MaxCommitsInFlight = MaxTargets;
+
+// The report speaks for a fixed number of outputs and the loop schedules a fixed number, and the two
+// constants live in modules that may not name each other — see `OutputsPerReport`. This is the one
+// place both are visible, so it is where the agreement is checked; being wrong about it would be a run
+// of outputs whose flips are never reported, which reads as clients that stop drawing.
+static_assert(MaxOutputs <= OutputsPerReport, "Every output the loop schedules must fit in one report");
+
 // One output's frame-thread state: the two figures `Timing` composes, and the three facts about this
 // output that neither of them can see.
 //
@@ -178,7 +195,7 @@ public:
 
 	[[nodiscard]] bool IsCommitFull() const noexcept
 	{
-		return m_Presenter == nullptr || m_InFlight >= m_Presenter->CommitDepth();
+		return m_Presenter == nullptr || m_InFlight >= std::min(m_Presenter->CommitDepth(), MaxCommitsInFlight);
 	}
 
 	[[nodiscard]] const Region<DeviceSpace>& Damage() const noexcept { return m_Damage; }
@@ -221,14 +238,39 @@ private:
 	// One commit answered, not all of them. Saturating rather than asserting, because a host that
 	// speaks twice about one frame is a host, and an underflow here would leave this output believing
 	// it may never commit again.
+	//
+	// **This is also where the return leg's half of the frame is staged**, and it is why the loop keeps
+	// a queue of published sequences rather than the one number `m_Committed` holds. The oldest
+	// outstanding commit is the one this answers, so what comes off the front is the snapshot *that*
+	// frame was drawn from — an output two commits deep would otherwise report the newer scene as
+	// having reached a glass it has not, which on the far side is a frame callback handed to a client
+	// whose pixels are still in the queue.
+	//
+	// Staged rather than posted, because the report crosses once per iteration and this arrives in the
+	// drain at the top of one. Two flips in one drain keep the later, for `ReturnChannel::Stage`'s
+	// reason: the sequence is monotone, so the newer one's derivation already contains the older's.
 	void OnPresented(const PresentationInfo& info) noexcept
 	{
 		m_Clock.Observe(info);
 
-		if (m_InFlight != 0)
+		if (m_InFlight == 0)
 		{
-			--m_InFlight;
+			return;
 		}
+
+		if (m_InFlightSnapshots[0] >= m_Presented.Sequence)
+		{
+			m_Presented = { .Sequence = m_InFlightSnapshots[0], .At = info.PresentedAt };
+		}
+
+		--m_InFlight;
+
+		for (std::uint32_t index = 0; index < m_InFlight; ++index)
+		{
+			m_InFlightSnapshots[index] = m_InFlightSnapshots[index + 1];
+		}
+
+		m_InFlightSnapshots[m_InFlight] = 0;
 	}
 
 	// The frame was accepted and never shown, which Seam/Presenter.h argues has to be its own signal.
@@ -308,6 +350,12 @@ private:
 		m_InFlight = 0;
 		m_Committed = FrameClock::NoSequence;
 
+		// The sequences those commits were drawn from go with them, because a frame nobody will flip is
+		// one this output never presented. `m_Presented` deliberately stays: it is a flip that already
+		// happened and is still owed to dispatch, and dropping it here would lose a frame callback on
+		// the iteration a mode set landed in.
+		m_InFlightSnapshots = {};
+
 		// An index into a set that no longer exists. `OnTargetsInvalidated` is the case this is here for
 		// — the images are released before the new ones exist, so a held index names memory that is gone
 		// and the next attempt has to ask the new set for one of its own.
@@ -327,6 +375,17 @@ private:
 	// Commits accepted and not yet answered. A count rather than the flag it was, because the rule it
 	// enforces is the presenter's — see `IPresenter::CommitDepth`, and decision 135.
 	std::uint32_t m_InFlight = 0;
+
+	// What each outstanding commit was drawn from, oldest first, as a queue of exactly `m_InFlight`
+	// entries. It is the published sequence rather than the frame clock's, which is the one distinction
+	// this whole field exists to keep: `m_Committed` is what the schedule reasons about and this is what
+	// the dispatch side turns back into surfaces.
+	std::array<std::uint64_t, MaxCommitsInFlight> m_InFlightSnapshots{};
+
+	// The most recent flip this output has not yet reported, staged in the drain and cleared by the post
+	// that carries it.
+	PresentedFrame m_Presented{};
+
 	Region<DeviceSpace> m_Damage{};
 
 	// What each target is stale by *over and above* `m_Damage`, which is what makes the two disjoint
@@ -423,7 +482,14 @@ public:
 			// layer to mint the ids — they are a different lifetime, since a buffer recorded into a
 			// texture is held by GPU work rather than by the snapshot, and posting them here would
 			// release them a frame early.
-			(void)m_Returns->Post(m_Held);
+			//
+			// **The presented run rides beside it and is not the same statement**, which is the whole
+			// reason decision 75 keeps two numbers rather than one. The watermark is what the frame
+			// thread has finished *reading*; a presented sequence is what an output has finished
+			// *showing*, and the second trails the first by however deep that output's commits are. A
+			// dispatch side that derived frame callbacks from the watermark would send them to clients
+			// whose pixels are still in a queue.
+			(void)m_Returns->Post(m_Held, {}, Presentations());
 		}
 
 		return Fold(now, deviceFree);
@@ -434,6 +500,28 @@ public:
 	[[nodiscard]] const SnapshotReader& Snapshot() const noexcept { return m_Snapshot; }
 
 private:
+	// Gather what each output staged in the drain, and clear it as it goes.
+	//
+	// **Clearing here is what makes a report say *no news* rather than repeating itself.** A report goes
+	// out every iteration whether or not anything flipped, so an output that has not presented since the
+	// last one leaves a zero — which `ReturnChannel::Stage` will never let overwrite a real sequence and
+	// which the reader takes as silence. Repeating the last pair instead would be indistinguishable from
+	// a second flip of the same scene, and the timestamp would drift a frame further from the truth on
+	// every iteration that did nothing.
+	//
+	// It is mutable and allocation-free by construction: a fixed array of sixteen pairs on the stack, in
+	// the same shape as the device instants above it, because the frame section forbids anything else.
+	[[nodiscard]] std::span<const PresentedFrame> Presentations() noexcept
+	{
+		for (std::size_t index = 0; index < m_Outputs.size(); ++index)
+		{
+			m_Presentations[index] = m_Outputs[index].m_Presented;
+			m_Outputs[index].m_Presented = {};
+		}
+
+		return { m_Presentations.data(), m_Outputs.size() };
+	}
+
 	void Acquire() noexcept
 	{
 		const AcquiredSnapshot acquired = m_Ring->Acquire(m_Held);
@@ -645,6 +733,12 @@ private:
 		output.m_Acquired.reset();
 
 		output.m_Committed = decision.Sequence;
+
+		// The published sequence this frame was composed from, queued behind whatever is already out.
+		// `m_Held` is the one the evaluator walked above, and it is read here rather than remembered
+		// per attempt because acquisition is once per iteration — every output served in this pass drew
+		// from the same scene.
+		output.m_InFlightSnapshots[output.m_InFlight] = m_Held;
 		++output.m_InFlight;
 
 		// The backlogs fold forward, and this is the whole of the buffer-age bookkeeping. Every *other*
@@ -781,4 +875,8 @@ private:
 
 	std::uint64_t m_Held = 0;
 	SnapshotReader m_Snapshot{};
+
+	// Scratch for the run `Presentations` hands the return channel, a member rather than a local so that
+	// the span it returns outlives the call. Nothing reads it between iterations.
+	std::array<PresentedFrame, MaxOutputs> m_Presentations{};
 };

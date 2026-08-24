@@ -17,6 +17,7 @@
 #include "Publication/Return.h"
 #include "Publication/Ring.h"
 #include "Scene/Output.h"
+#include "Scene/Return.h"
 #include "Scene/Serializer.h"
 #include "Scene/Store.h"
 #include "Seam/Importer.h"
@@ -132,6 +133,11 @@ public:
 
 		m_Store.SetOutputs(outputs);
 
+		// The drain reads a positional run, so it has to be told how long this world's is — the same
+		// number and the same order the store just took, which is what makes index `i` here the frame
+		// loop's output `i` on the way back as well as on the way out.
+		m_Return.SetOutputs(outputs.size());
+
 		if (const Result<void> opened = author->Open(m_Store, m_Textures); !opened)
 		{
 			return opened;
@@ -239,16 +245,30 @@ public:
 	// buffers, and nothing imports one yet.
 	[[nodiscard]] std::uint64_t Reports() const noexcept { return m_Reports; }
 
+	// What the reports meant, as signals. `Protocol` owns the links to these — decision 115's shape, and
+	// the reason the drain is `Scene`'s rather than the protocol layer's is that the boot splash and the
+	// recovery console present frames with nothing on the far end of them.
+	[[nodiscard]] SceneReturn& Return() noexcept { return m_Return; }
+
+	[[nodiscard]] const SceneReturn& Return() const noexcept { return m_Return; }
+
 private:
 	// Drain the return channel to empty, which is what advances the watermark and puts every buffer
 	// below it back in the pool. Taking one report and stopping would leave reclamation a frame behind
 	// forever, since the frame thread posts one per frame whatever else happened.
-	void Collect() noexcept
+	//
+	// **Each report is handed on rather than counted and dropped.** `SnapshotOutbox::Collect` takes the
+	// watermark and performs the reclamation it authorises, which is the half that is a memory-safety
+	// property; `SceneReturn` takes what is left — decision 115's derivation, which is where a presented
+	// sequence becomes a frame callback and a hold becomes a `wl_buffer.release`. Both halves see every
+	// report, and neither can be advanced without the other running.
+	void Collect()
 	{
 		FrameReport report{};
 
 		while (m_Outbox.Collect(report))
 		{
+			m_Return.Drain(report);
 			++m_Reports;
 		}
 	}
@@ -256,6 +276,9 @@ private:
 	SceneStore m_Store;
 	SceneSerializer m_Serializer{};
 	SnapshotOutbox m_Outbox;
+
+	// The return leg's reader, beside the outbox that is its other half. One report feeds both.
+	SceneReturn m_Return{};
 
 	// The texture id space, which is the world's rather than the loop's — it outlives any one snapshot
 	// and is what a device migration re-adopts against. Held here because this is the object that knows

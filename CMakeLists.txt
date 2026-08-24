@@ -284,9 +284,10 @@ gyro_add_module(Publication PORTABLE
 		Publisher/Publisher.Test.cpp
 )
 
-# The world, as the dispatch thread holds it: the entity store, and the serializer that turns it into
-# a snapshot. Decision 111 for the shape — an entity is a node's authoring side and the store is one
-# tree — and decision 86 for what comes out the other end.
+# The world, as the dispatch thread holds it: the entity store, the serializer that turns it into a
+# snapshot, and the drain that reads what came back. Decision 111 for the shape — an entity is a node's
+# authoring side and the store is one tree — decision 86 for what comes out the other end, and decision
+# 115 for why the return leg lands here rather than on the module that sends the protocol events.
 #
 # DISPATCH whole rather than a straddler, which is what makes the frame side's inability to reach it a
 # graph property instead of a directory one. Nothing here runs on the frame thread: the walk that
@@ -295,9 +296,9 @@ gyro_add_module(Publication PORTABLE
 # DEPENDS is the row Docs/Structure.md already carried before there was a line of this module, which is
 # the check that the placements it rests on are right. The store needs SlotAllocator and Handle; the
 # entity holds Animatables; the serializer stages into Publication's builder and writes World's record;
-# and the output model needs Scale and the adapter. Seam is not among them and must not become one —
-# CheckLayering denies what is not declared, and its report would name the missing edge rather than
-# decision 87.
+# the output model needs Scale and the adapter; and the return drain needs Signal and the report record.
+# Seam is not among them and must not become one — CheckLayering denies what is not declared, and its
+# report would name the missing edge rather than decision 87.
 gyro_add_module(Scene PORTABLE DISPATCH
 	DEPENDS
 		Core
@@ -309,6 +310,7 @@ gyro_add_module(Scene PORTABLE DISPATCH
 		Commit.Test.cpp
 		Entity.Test.cpp
 		Output.Test.cpp
+		Return.Test.cpp
 		Serializer.Test.cpp
 		Settle.Test.cpp
 		Store.Test.cpp
@@ -882,6 +884,7 @@ add_executable(IntegrationTests
 	Source/Integration/PublicationRoundTrip.Test.cpp
 	Source/Integration/PublicationSoak.Test.cpp
 	Source/Integration/RenderImport.Test.cpp
+	Source/Integration/ReturnLeg.Test.cpp
 	Source/Integration/SceneCommit.Test.cpp
 	Source/Integration/SceneIdle.Test.cpp
 	Source/Integration/ScenePublication.Test.cpp

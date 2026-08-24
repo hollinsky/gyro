@@ -415,6 +415,12 @@ what the decision above is for. A `TextureId` is an import's identity and a `Col
 client declared — both authored on the dispatch side, so both are in `Core`, by
 [the rule below](#region-is-in-geometry-and-reachability-is-why). `Seam/Renderer.h` includes them the
 same way it includes `Geometry/Space.h`, and the item's shape is unchanged.
+`BufferId` relocates for `TextureId`'s reason exactly, and *(2026-08-23)* it is the one that says
+something about the check rather than about the type: `Protocol` mints it and the identity was
+declared in `Publication`, which `Protocol` may not name. Nothing caught it because a type with no
+producer has no call sites to deny — `CheckLayering` reads includes, and an id nothing mints is
+included by nobody who would fail. The moment to re-read a placement is when the first party that
+*produces* the type appears.
 See [decision 87](Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam).
 
 ### Geometry is not part of Core
@@ -573,7 +579,13 @@ what crosses backwards is the report. `Protocol` sends `wp_presentation_feedback
 record, and `PresentationInfo` stays in `Seam` as what a presenter signals to `FrameClock`. The two
 are near enough to fuse and the table says not to.
 
-**The rule has since been applied three more times, and it does not always answer *move*.**
+**The pair landed and the table held.** *(2026-08-23.)* What crosses back is the published sequence
+and the instant, as `Core` types; the observed period, the vblank counter and the honesty flags stayed
+in `Seam`, because they are the frame clock's inputs and no derivation on the far side is a function
+of them. A record that had taken all six would have been `PresentationInfo` under another name,
+reaching the one module forbidden from naming the waist it lives at.
+
+**The rule has since been applied four more times, and it does not always answer *move*.**
 `TextureId` and `ColorState` relocate to `Core` for damage's reason exactly — `Protocol` mints one
 and `Scene` stores the other, and neither may say `Seam`. `OutputConfiguration` does not: `Scene`
 needs an output model, but almost nothing `OutputConfiguration` carries serves it, because that type
@@ -618,6 +630,10 @@ of the scene with reusable work lists. And the **return channel's reader**, whic
 `Protocol` depends on `Scene` and not the reverse, so what `Protocol` needs of a presented sequence
 arrives as a `Signal<>` it owns the link to — [decision 77](Decisions.md#77-a-signals-observers-are-links-the-observers-own)'s
 shape, legal because both are the dispatch thread and a signal is intra-thread by rule.
+[`Return`](../Source/Scene/Return.h) is that reader *(2026-08-23)*, and it announces per output rather
+than per surface for as long as there are no retained handle runs to turn a sequence into surfaces —
+which is enough to exercise the leg end to end, and the boot path is why that is worth having before
+a client exists.
 
 **Its dependency row does not change, and that is the check that the placements above are right.**
 `Scene` was already declared on `Core`, `Geometry`, `World`, `Animation`, and `Publication`. A commit
