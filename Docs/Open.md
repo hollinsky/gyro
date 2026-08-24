@@ -883,17 +883,6 @@ nothing only proves the grep.
   and it makes the output's period a function of backpressure, which is the one thing
   [FrameClock](../Source/Frame/FrameClock.h) is built to assume is stable. Small, and worth settling
   before a second consumer exists rather than after.
-- **Damage is per output where a target ring is deeper than two.** `FrameOutput` accumulates one
-  damage region and clears it at the present, so the region handed to a layer is *what changed since
-  the last frame* rather than *what changed since this target was last presented*. With a ring of
-  three the image being drawn into is two frames stale, and everything outside the damage region is
-  two frames old — a moving window leaves its old position behind on every third frame. Nothing shows
-  it today because the only producers damage the whole output: the scene ring is empty, and both
-  invalidation paths re-damage everything. What it wants is a per-target accumulator — union the
-  frame's damage into every *other* target and clear the one being presented, which is buffer-age
-  damage and is about fifteen lines in `Frame` — and it wants deciding before a scene author is
-  looking at a real picture rather than after. It is `Frame`'s rather than a backend's, which is why
-  it is here and not in the nested work that surfaced it.
 - **How long a held commit waits when there is no acquire point.**
   [Decision 125](Decisions.md#125-nesteds-release-timelines-come-from-a-drm-node-it-opens-itself)'s
   fallback polls `IRenderer::IsComplete` from the drain and asks to be looked at again in half a

@@ -63,6 +63,26 @@
 // so the region is cleared where the present succeeded and nowhere else — including on a refused
 // record and on a refused present, both of which leave the output owing exactly what it owed before.
 //
+// **That is one of two damage regions and it is the one that answers whether to draw at all.** The
+// other is per target, and a ring deeper than two is why: `AcquireTarget` hands back an image that was
+// on the glass two frames ago, so everything in it outside this frame's damage is two frames old.
+// Scissoring to what changed since the last present leaves the rest of that image as it was — which is
+// a window that moved leaving a crisp copy of itself behind on every third frame. So each target
+// carries a backlog, `Seam/Renderer.h`'s *union of every damage since it was last drawn*, and what the
+// renderer is scissored to is the pending region joined with the backlog of the target being drawn.
+//
+// **Keyed to when a target was last *drawn complete*, not to when it was last shown, and that is what
+// makes the two independent of every way a frame can be lost.** A skip, a refused record, a refused
+// commit: none of them drew anything, so no backlog moves. A frame the host accepted and discarded
+// *did* draw its target completely, so that target's backlog is honest and only the glass is wrong —
+// which `OnMissed` already answers by damaging the whole output. The backlogs fold forward on the one
+// exit that presented, and nowhere else.
+//
+// **What is emphatically not merged is `PresentLayer::Damage`.** The screen holds the last frame that
+// reached it, so what differs from the screen is the pending region alone — the backlog is repair to
+// an image nobody has seen, and reporting it would hand a plane or a host more damage than the
+// picture actually changed by.
+//
 // **A frame that was wanted and never reached the glass is counted and named.** The three ways it can
 // happen — a target the presenter listed but does not hold, a record the renderer would not make, a
 // commit the presenter would not take — are all a return with nothing said, and a run of them is a
@@ -93,6 +113,15 @@
 // `MaxOutputs` is Admission.h's, because the capacity is the admission set's size and these outputs
 // are that set.
 inline constexpr std::size_t MaxDevices = 4;
+
+// SPEC: how deep a target ring this loop can carry a backlog for. Frame-local rather than a seam
+// constant, and the reason is that nothing at the waist needs the number: `IPresenter` publishes a
+// span and `IRenderer` is handed one, so a cap belongs to whoever holds fixed storage per target.
+// Three modules already pick four for their own storage — `Headless`, `Blit`, and `Nested` — and this
+// is a fourth of the same kind rather than a fifth party to an agreement. An index past it is refused
+// the way an index past the published set is, because a presenter deeper than this would silently get
+// the buffer-age bug back and a refusal says so.
+inline constexpr std::size_t MaxFrameTargets = 4;
 
 // One output's frame-thread state: the two figures `Timing` composes, and the three facts about this
 // output that neither of them can see.
@@ -168,7 +197,20 @@ public:
 	// output, a first frame with nothing behind it.
 	void AddDamage(const Region<DeviceSpace>& region) noexcept { m_Damage.Add(region); }
 
-	void DamageWholeOutput() noexcept { m_Damage.Add(PixelRect<DeviceSpace>{ {}, m_Configuration.Resolution }); }
+	// **Every backlog is dropped here, and this is the only place they are dropped.** Damaging the whole
+	// output subsumes them by definition — a backlog is a subset of the output's own extent, so the join
+	// the renderer is scissored to is the whole output whatever any of them held. Clearing here rather
+	// than in `Discard` is what keeps that unconditional: `Discard`'s callers all damage the whole output
+	// today, and a fourth that did not would quietly hand back the ghost this exists to prevent.
+	void DamageWholeOutput() noexcept
+	{
+		m_Damage.Add(PixelRect<DeviceSpace>{ {}, m_Configuration.Resolution });
+
+		for (Region<DeviceSpace>& backlog : m_Backlog)
+		{
+			backlog.Clear();
+		}
+	}
 
 private:
 	friend class FrameLoop;
@@ -273,6 +315,18 @@ private:
 	std::uint64_t m_Committed = FrameClock::NoSequence;
 	bool m_FlipPending = false;
 	Region<DeviceSpace> m_Damage{};
+
+	// What each target is stale by *over and above* `m_Damage`, which is what makes the two disjoint
+	// questions rather than two spellings of one: `m_Damage` is owed to the glass and decides whether a
+	// frame is wanted, and this is repair owed to an image and decides only how much of it to redraw. A
+	// `Wants` that consulted these would find the two targets it is not presenting permanently dirty
+	// with each other's history and never let the output idle.
+	//
+	// So an output that settles and then wakes on one small change redraws more than moved for the first
+	// few frames, as each target in turn cashes in what it accumulated before the scene went quiet. That
+	// is bounded by the ring depth and it is the bill for the frames that were skipped, not a leak.
+	std::array<Region<DeviceSpace>, MaxFrameTargets> m_Backlog{};
+
 	FrameDecision m_Last{};
 
 	std::uint64_t m_Refused = 0;
@@ -497,6 +551,19 @@ private:
 			return;
 		}
 
+		if (target >= MaxFrameTargets)
+		{
+			// A ring deeper than this loop carries a backlog for. Refused rather than drawn without one,
+			// because drawing it is the buffer-age bug arriving silently — a stale band on one target in
+			// the rotation, which reads as a renderer fault and is a capacity fault. Dropped for the same
+			// reason as above: the index is one this loop will never accept, so holding it retries it
+			// forever where releasing it lets the presenter offer one inside the set.
+			output.Refuse(Error{ ERANGE, "the presenter's target ring is deeper than the frame loop tracks" });
+			output.m_Acquired.reset();
+
+			return;
+		}
+
 		const DrawList list = m_Evaluator->Evaluate(
 			{ .Snapshot = m_Snapshot,
 		      .Output = index,
@@ -509,10 +576,17 @@ private:
 		(void)output.m_Cost.ObserveIrreducibleCpu(list.EvaluateCost);
 		output.m_Damage.Add(list.Damage);
 
+		// The buffer-age join, and it is built after the evaluator has contributed so that this frame's
+		// own damage is in it. A copy rather than a reference because `RecordRequest` takes the region by
+		// value and the loop must not hand a target's backlog somewhere it could be cleared from — and it
+		// is a fixed-size array of rectangles on the stack, which is what decision 36 asks of it.
+		Region<DeviceSpace> stale = output.m_Damage;
+		stale.Add(output.m_Backlog[target]);
+
 		const RecordRequest request{ .Target = target,
 			                         .Mode = decision.Mode(),
 			                         .CostGeneration = output.m_Cost.Generation(),
-			                         .Damage = output.m_Damage,
+			                         .Damage = stale,
 			                         .Items = list.Items };
 
 		const Result<Submission> submission = output.m_Renderer->Record(request);
@@ -556,6 +630,20 @@ private:
 
 		output.m_Committed = decision.Sequence;
 		output.m_FlipPending = true;
+
+		// The backlogs fold forward, and this is the whole of the buffer-age bookkeeping. Every *other*
+		// target now owes this frame's change on top of what it already owed, and the one just drawn owes
+		// nothing — its content is complete as of now, which is true whether or not the glass ever shows
+		// it. Before the clear below, because the region being folded is the one being cleared.
+		for (std::size_t other = 0; other < MaxFrameTargets; ++other)
+		{
+			if (other != target)
+			{
+				output.m_Backlog[other].Add(output.m_Damage);
+			}
+		}
+
+		output.m_Backlog[target].Clear();
 		output.m_Damage.Clear();
 	}
 

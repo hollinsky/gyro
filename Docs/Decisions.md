@@ -10020,3 +10020,64 @@ perspective quad with the same comparison.
 reaches the glass, and it costs a black screen for an arrangement whose answer nobody disputes. A
 refusal is honest about a question that is open; using one to cover a question that is merely
 unasked is how a renderer accumulates cases nobody remembers were arbitrary.
+
+### 133. Damage is per target as well as per output, and the two answer different questions
+
+`AcquireTarget` hands back an image that was on the glass two frames ago. Everything in it outside this
+frame's damage is two frames old, so a composite scissored to *what changed since the last present*
+leaves the rest of that image exactly as it was — and what a person sees is a window that moved leaving
+a crisp copy of itself behind, once per trip round the ring. Not a blur and not a tear: a second window,
+appearing and vanishing on a regular beat, which reads as a broken machine rather than a dropped frame.
+
+[Seam/Renderer.h](../Source/Seam/Renderer.h) has said the right thing since `RecordRequest` existed —
+damage is *per target and not per output*, the union of every damage since **it** was last drawn, and
+accumulating it "belongs to the caller". The caller accumulated per output. So this entry is a loop
+brought up to a contract rather than a contract being decided.
+
+**Two regions, and keeping them apart is the whole of the design.** `m_Damage` is what the glass has not
+seen: it decides whether a frame is wanted at all, it survives a skip, and it is what
+`PresentLayer::Damage` reports. `m_Backlog[i]` is what image *i* has forgotten while it sat in the
+queue: it decides only how much of that image to redraw. The renderer is scissored to the join; the
+presenter is told the pending region alone, because the backlog is repair to an image nobody has seen
+and reporting it would hand a plane or a host more damage than the picture actually changed by.
+
+**A backlog is keyed to when a target was last *drawn complete*, not to when it was last shown**, and
+that one word is what makes the bookkeeping independent of every way a frame can be lost. A skip, a
+refused record, a refused commit: nothing was drawn, so nothing folds. A frame the host accepted and
+then discarded *did* draw its target completely — that backlog is honest, and only the glass is wrong,
+which decision 124's signal already answers by damaging the whole output. There is no interaction to
+get right because there is no interaction.
+
+**The backlogs retire where the whole output is damaged, and nowhere else.** Repainting everything
+subsumes every backlog by definition, so clearing there is unconditional; clearing in `Discard` instead
+would have been correct only because its three callers happen to damage the whole output too, and a
+fourth that did not would quietly hand back the ghost.
+
+**Rejected: the buffer-age query, which is what every other Wayland compositor does.** Ask the presenter
+how old the image is and keep a ring of the last few frames' damage, unioning that many entries. Less
+state, and correct only where images are handed out in strict rotation — which
+[Headless/Output.h](../Source/Headless/Output.h) already is not, since it scans from a cursor for a
+*free* target, and which a host holding a buffer breaks as well. When the assumption fails the union is
+off by one and the ghost comes back intermittently and unreproducibly, which is a worse bug than the one
+being fixed. It would also add a verb to `IPresenter` that every backend has to answer correctly for as
+long as there are backends.
+
+**Rejected: copying the last frame into the new image and painting the change on top.** Correct with no
+bookkeeping at all, and a full-screen copy every frame costs about what repainting everything costs — it
+spends the entire saving to avoid a page of state.
+
+**Rejected: pushing it to the backends.** Three implementations, three chances to get it subtly wrong,
+and the party that knows what changed is not the party being asked.
+
+**`MaxFrameTargets` is Frame's own four rather than a seam constant.** Nothing at the waist needs the
+number — `IPresenter` publishes a span and `IRenderer` is handed one — so the cap belongs to whoever
+holds fixed storage per target, which `Headless`, `Blit` and `Nested` each already do at four of their
+own. An index past it is refused the way an index past the published set is, because a deeper ring would
+otherwise get this bug back in silence.
+
+**What to expect and not mistake for a leak.** An output that settles and then wakes on one small change
+redraws more than moved for the first few frames, as each target in turn cashes in what it accumulated
+while the scene was quiet. Bounded by the ring depth, and it is the bill for the frames that were
+skipped. The other one is [Geometry/Region.h](../Source/Geometry/Region.h)'s sixteen rectangles: a join
+reaches the collapse-to-bounds threshold sooner than one frame's damage does, so once per-node damage is
+real that number will want raising. It is a bandwidth dial and the header says so.

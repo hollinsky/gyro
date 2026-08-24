@@ -269,7 +269,11 @@ struct Harness
 
 	FrameLoop Loop{ Clock, Ring, Returns, Evaluator };
 
-	Harness()
+	// Two targets by default, because that is the shallowest ring a nonblocking flip can be built on and
+	// most cases here are about one image going round. A case that is about *age* asks for three, since
+	// two is the depth at which the image being drawn into is the one presented last and the buffer-age
+	// question has no room to be wrong.
+	explicit Harness(std::uint32_t targets = 2) : Presenter{ targets }
 	{
 		Outputs[0].Bind(Presenter, Renderer, 0, Panel());
 		Loop.Bind(Outputs);
@@ -505,6 +509,123 @@ GYRO_TEST(FrameLoop, ARefusedRecordKeepsItsTargetRatherThanBurningOne)
 	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
 	GYRO_CHECK(harness.Output().Damage().IsEmpty());
 	GYRO_CHECK_EQ(harness.Output().Refused(), static_cast<std::uint64_t>(attempts));
+}
+
+// The buffer-age case, and it needs three targets to exist at all: the image acquired for the third
+// frame here has never been drawn into, and the one acquired for the fourth was last on the glass three
+// frames ago. Scissoring to what changed since the last *present* would leave the first window position
+// standing in it — a crisp copy of the window, appearing on every third frame.
+//
+// What the renderer is scissored to is therefore the join of the pending region with that target's own
+// backlog, while what the *presenter* is told is the pending region alone: the glass holds the last
+// frame that reached it, and repair to an image nobody has seen is not a change to the picture.
+GYRO_TEST(FrameLoop, ATargetIsRedrawnForEveryDamageSinceItWasLastDrawn)
+{
+	Harness harness{ 3 };
+
+	constexpr PixelRect<DeviceSpace> first{ { 0, 0 }, { 100, 100 } };
+	constexpr PixelRect<DeviceSpace> second{ { 200, 0 }, { 100, 100 } };
+	constexpr PixelRect<DeviceSpace> third{ { 400, 0 }, { 100, 100 } };
+
+	harness.Anchor();
+
+	harness.Clock.Set(At(1002));
+	harness.Output().AddDamage(Region<DeviceSpace>{ first });
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE_EQ(harness.Presenter.Presents, 1);
+	GYRO_REQUIRE_EQ(harness.Renderer.RecordedTarget, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(harness.Renderer.RecordedDamage.Bounds(), first);
+
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(At(1012));
+	harness.Output().AddDamage(Region<DeviceSpace>{ second });
+	(void)harness.Loop.Step();
+
+	// Target one last held a frame from before any of this, so it owes the first window position as well
+	// as the second — and the presenter is told about the second only.
+	GYRO_REQUIRE_EQ(harness.Presenter.Presents, 2);
+	GYRO_REQUIRE_EQ(harness.Renderer.RecordedTarget, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(harness.Renderer.RecordedDamage.Bounds(), (PixelRect<DeviceSpace>{ { 0, 0 }, { 300, 100 } }));
+	GYRO_CHECK_EQ(harness.Presenter.PresentedDamage.Bounds(), second);
+
+	harness.Presenter.Flip(At(1020), 9);
+	harness.Clock.Set(At(1022));
+	harness.Output().AddDamage(Region<DeviceSpace>{ third });
+	(void)harness.Loop.Step();
+
+	// And target two owes all three, because nothing has ever been drawn into it.
+	GYRO_REQUIRE_EQ(harness.Presenter.Presents, 3);
+	GYRO_REQUIRE_EQ(harness.Renderer.RecordedTarget, std::uint32_t{ 2 });
+	GYRO_CHECK_EQ(harness.Renderer.RecordedDamage.Bounds(), (PixelRect<DeviceSpace>{ { 0, 0 }, { 500, 100 } }));
+	GYRO_CHECK_EQ(harness.Presenter.PresentedDamage.Bounds(), third);
+
+	// Round the ring: target zero was complete as of the first frame, so it owes the second and the third
+	// and *not* the first, which is the half that says a backlog is cleared and not merely added to.
+	harness.Presenter.Flip(At(1030), 10);
+	harness.Clock.Set(At(1032));
+	harness.Output().AddDamage(Region<DeviceSpace>{ first });
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE_EQ(harness.Renderer.RecordedTarget, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(harness.Renderer.RecordedDamage.Bounds(), (PixelRect<DeviceSpace>{ { 0, 0 }, { 500, 100 } }));
+	GYRO_CHECK_EQ(harness.Renderer.RecordedDamage.Rects().size(), std::size_t{ 3 });
+}
+
+// The failure mode the two regions exist to keep apart. A backlog is repair owed to an image, not pixels
+// owed to the glass, so an output whose scene has settled must idle with two of its three targets still
+// dirty with each other's history. An implementation that folded the two together would find something
+// to redraw on every vblank for as long as the machine was on, on a screen where nothing is moving.
+GYRO_TEST(FrameLoop, ASettledOutputIdlesWithItsOtherTargetsStillOwedRepair)
+{
+	Harness harness{ 3 };
+
+	constexpr std::array<Wake, 1> settled{ Wake::Never() };
+	harness.Publish(1, settled);
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE_EQ(harness.Renderer.Records, 1);
+	GYRO_REQUIRE(harness.Output().Damage().IsEmpty());
+
+	harness.Presenter.Flip(At(1010), 8);
+
+	for (int frame = 0; frame < 8; ++frame)
+	{
+		harness.Clock.Set(At(1012 + 10 * frame));
+		(void)harness.Loop.Step();
+	}
+
+	GYRO_CHECK_EQ(harness.Renderer.Records, 1);
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
+}
+
+// Damaging the whole output subsumes every backlog, so they are dropped there — which is also what keeps
+// a rectangle in the *old* extent from outliving a mode set. Asserted through the join, because a
+// backlog is not otherwise observable and should not be: the region handed to the renderer is the whole
+// of what it is for.
+GYRO_TEST(FrameLoop, WholeOutputDamageRetiresEveryBacklog)
+{
+	Harness harness{ 3 };
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().AddDamage(Region<DeviceSpace>{ PixelRect<DeviceSpace>{ { 0, 0 }, { 100, 100 } } });
+	(void)harness.Loop.Step();
+
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(At(1012));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	// One rectangle rather than two: the whole output already covers what target one was owed, so the
+	// join has nothing to add and the renderer scissors once.
+	GYRO_REQUIRE_EQ(harness.Renderer.RecordedTarget, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(harness.Renderer.RecordedDamage.Rects().size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(harness.Renderer.RecordedDamage.Bounds(), (PixelRect<DeviceSpace>{ {}, { 2560, 1440 } }));
 }
 
 // A refused present has not been accepted, so the presenter did not take the image either — the loop is

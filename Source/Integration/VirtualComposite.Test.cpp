@@ -436,21 +436,20 @@ GYRO_TEST(VirtualComposite, AStalledConsumerCostsFramesAndNeverDamage)
 	GYRO_CHECK(machine.Bound().Damage().IsEmpty());
 }
 
-// A characterisation rather than a promise, and the gap it pins is a real one.
-//
+// *(Inverted from a characterisation to a promise 2026-08-23.)* This test used to assert the gap:
 // Seam/Renderer.h says `RecordRequest::Damage` is *per target and not per output* — a target reached
 // by `AcquireTarget` may be two or three frames old, so what is stale in it is the union of every
-// damage since **it** was last drawn, and accumulating that "belongs to the caller". The caller is
-// Frame/Loop.h, and what it accumulates is per *output*, cleared on every successful present. With a
-// ring three deep, an image is handed back having missed two frames' worth of damage that nobody
-// will repaint.
+// damage since **it** was last drawn, and accumulating that "belongs to the caller" — and the caller
+// accumulated per *output* instead, cleared on every successful present. An image handed back after a
+// trip round the ring had missed every frame in between and nobody repainted them.
 //
-// It is invisible today because decision 101 reports the whole output while anything is moving, so
-// every damage region in practice covers everything. It stops being invisible the moment there is a
-// partial-composite path to feed, which is what that decision defers. This test states what happens
-// now so that closing the gap is a deliberate change with a failing test in front of it rather than
-// something that quietly starts working.
-GYRO_TEST(VirtualComposite, PartialDamageIsNotYetAccumulatedAcrossTheRing)
+// It was invisible because decision 101 reports the whole output while anything is moving, so every
+// damage region in practice covered everything. Held here rather than deleted because the picture is
+// the point: a partial composite arriving in an image that missed the frames before it is the whole
+// failure, and it is only observable end to end, where a real renderer paints real pixels into a real
+// buffer that a consumer reads back. Frame/Loop.h now carries a backlog per target and joins it with
+// the pending region, so a frame that damaged half a panel arrives whole.
+GYRO_TEST(VirtualComposite, PartialDamageIsAccumulatedAcrossTheRing)
 {
 	const std::array<SolidContent, 1> solids{ Colour(1.0F, 0.0F, 0.0F) };
 
@@ -487,15 +486,13 @@ GYRO_TEST(VirtualComposite, PartialDamageIsNotYetAccumulatedAcrossTheRing)
 
 	DumpOnFailure(second.Image, second.Frame.Sequence);
 
-	// The damaged half is painted.
+	// The damaged half is painted, and so is the half this frame never asked for — because the image it
+	// landed in had never been drawn into, and the loop knew that. The two halves agreeing is the whole
+	// of it: a consumer is handed a whole panel rather than the left edge of one.
 	GYRO_CHECK(second.Image.IsUniform(PixelRect<DeviceSpace>{ {}, { 32, 32 } }, Red));
-
-	// The rest of it is not, and that is the whole finding: the consumer was handed a frame that is
-	// half a panel, because the loop asked for the damage *this* frame produced rather than the
-	// damage this *image* had missed. A buffer-age accumulation would have made the two halves agree.
-	GYRO_CHECK(!second.Image.IsUniform(PixelRect<DeviceSpace>{ { 32, 0 }, { 32, 32 } }, Red));
+	GYRO_CHECK(second.Image.IsUniform(PixelRect<DeviceSpace>{ { 32, 0 }, { 32, 32 } }, Red));
 
 	const std::optional<PixelRect<DeviceSpace>> painted = second.Image.BoundsOfDiffering(Background);
 	GYRO_REQUIRE_EQ(painted.has_value(), true);
-	GYRO_CHECK_EQ(*painted, (PixelRect<DeviceSpace>{ {}, { 32, 32 } }));
+	GYRO_CHECK_EQ(*painted, (PixelRect<DeviceSpace>{ {}, Resolution }));
 }

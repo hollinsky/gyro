@@ -1891,6 +1891,12 @@ late too. **This is why damage must accumulate per output since its last success
 per frame** — a skipped frame would otherwise lose damage and corrupt the next one. See
 [decision 35](Decisions.md#35-a-miss-costs-one-frame-bounded-by-the-floor-composite).
 
+That region is what the glass has not seen, and it is not what the renderer is scissored to. The image
+`AcquireTarget` returns has been round a ring, so it is stale by every frame since it was last drawn as
+well — which is a second region per target, joined with this one at record time and retired where the
+whole output is damaged. See
+[decision 133](Decisions.md#133-damage-is-per-target-as-well-as-per-output-and-the-two-answer-different-questions).
+
 **Read it as a fixpoint and not as one pass.** *(Added 2026-08-22.)* The third line names a new
 deadline, and the check runs again against that one, so frames are dropped until the target is a
 frame the work fits before — which is decision 35's `⌈overrun / P⌉` and not an extra rung beside it.
