@@ -37,7 +37,10 @@
 // value *be* a retarget under the commit's shared origin, so a staged value is the shape that decision
 // killed — and what a channel below offers is `AnimateTo`, which is that retarget and nothing else.
 // What has not arrived with it is decision 89's phase two, the half whose inputs are the rest of the
-// commit: the differ, the match set, the atlas reservation, and the retiring flag of decision 114.
+// commit: the differ, the match set, and the atlas reservation. Decision 114's retiring flag has
+// arrived ahead of them — it is below, it is set eagerly at the write like every phase-one write, and
+// what stayed behind in phase two is only the cancellation, which is a retire and a re-create in one
+// transaction annihilating before either spends anything.
 //
 // **And there is no client damage**, which is a different kind of absence: decision 113 puts a
 // `Region<BufferSpace>` on the image entity and a run of its own on the wire, and both land when
@@ -137,6 +140,23 @@ struct Entity
 	NodeKind Kind = NodeKind::Container;
 	Material Dress = Material::None;
 	Elevation Lift = Elevation::None;
+
+	// Decision 114's retiring set, which is this flag and not a container. The author that created this
+	// entity has gone away, so nothing will ever write to it again — but it is still drawn, still
+	// published, and still at the position it had, because an exit animation is a motion on a node and a
+	// node that had been moved somewhere else to die would have to be spliced back into the preorder run
+	// to be serialised at all.
+	//
+	// **What it means is a predicate three dispatch-side readers apply**: layout skips it, focus will not
+	// land on it, and hit-testing passes through it. All three are on this side of the waist, which is
+	// why it is not a `Node::` flag — the frame thread draws a retiring node exactly as it draws any
+	// other, and a bit on the published record would be a bit nothing over there ever reads.
+	//
+	// **It is also what schedules the entity's destruction**, in `Scene/Serializer.h`: the free happens
+	// when every channel in the retiring subtree has settled, which before there is an exit catalog is
+	// the very next serialisation and afterwards is the frame the exit finishes on. One rule, stated
+	// once, correct on both sides of that catalog landing.
+	bool Retiring = false;
 
 	// Where this entity's payload is, in whichever of the store's per-kind arrays `Kind` selects, or
 	// `NoContent` for a container or a reference. It is *not* the position the node record will carry:

@@ -236,6 +236,31 @@ public:
 		return true;
 	}
 
+	// Decision 114's retirement: this entity's author has gone away, so it and its subtree stop being
+	// authorable and begin dying. A client destroying a `wl_surface`, a shell disconnecting and taking
+	// the arrangement it built with it.
+	//
+	// **It retires rather than removes, and the whole point is that the window stays on screen.** The
+	// subtree keeps its links and its position, so it goes on being published and drawn for as long as
+	// anything on it is still moving — which is what makes an exit animation possible at all — and
+	// `Scene/Serializer.h` frees it on the pass its last channel settles. Before there is an exit catalog
+	// that is the very next pass, so a closed window disappears; the rule does not change when the
+	// catalog lands, only the number of passes does.
+	//
+	// **It is a write and therefore inside the transaction**, which is not ceremony: decision 89 puts
+	// lifetime at close so that a retire and a re-create in one commit annihilate before either spends an
+	// atlas rectangle or launches an exit — a declarative shell rebuilding its arrangement is
+	// remove-then-add on every node, every commit. That cancellation is phase two and is not here; what
+	// is here sets the flag eagerly, the way every other write in this file resolves eagerly.
+	//
+	// **No motion argument and no origin.** What retirement starts is an exit the *catalog* names, not one
+	// a caller passes, and it works in a commit with no origin because a client destroying a surface is
+	// exactly the shape that has none.
+	//
+	// False for a scope that is not the open one and for an id that names nothing live — the second being
+	// a double retire arriving through a handle that has already gone stale.
+	bool Retire(EntityId id) noexcept { return m_Open && m_Scene->Retire(id); }
+
 	// A node's own quad, which has no coefficient slot and never had one. It is here because it is what
 	// a client commit mostly writes: a client resizing itself changes this, and decision 68 has a
 	// subsurface's position snap for the same reason — a spring between a video player's controls and

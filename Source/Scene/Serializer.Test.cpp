@@ -418,3 +418,170 @@ GYRO_TEST(SceneSerializer, AnOutputlessSceneStillSettlesAndStagesNoSchedule)
 	GYRO_CHECK_EQ(serializer.ActiveOpacities(), std::size_t{ 0 });
 	GYRO_CHECK(serializer.SceneWake() == Wake::Never());
 }
+
+// Docs/Decisions.md decision 114's two steps, seen from the side that performs the second one.
+
+GYRO_TEST(SceneSerializer, ARetiringSubtreeIsPublishedUntilItHasFinishedAndThenIsGone)
+{
+	ManualClock clock;
+	SceneStore store{ clock };
+
+	const EntityId behind = store.CreateContainer({}, {}).value();
+	const EntityId closing = store.CreateContainer({}, {}).value();
+	const EntityId child = store.CreateImage(closing, Panel(100.0F, 40.0F), ImageContent{}).value();
+	const SceneOutput outputs[] = { Primary() };
+
+	store.SetOutputs(outputs);
+
+	// The exit: something on the subtree is still moving when the author goes away, which is the case the
+	// whole two-step shape exists for.
+	{
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+
+		GYRO_REQUIRE(commit.Fade(child, 0.0F, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Retire(closing));
+	}
+
+	GYRO_REQUIRE(store.Find(closing)->Retiring);
+	GYRO_REQUIRE(store.Find(child)->Retiring);
+
+	SceneSerializer serializer;
+
+	// Still on screen, still drawn, still at the position it had — decision 114's retiring entity is in
+	// the tree and not in a container somewhere else.
+	serializer.Serialize(store);
+
+	GYRO_REQUIRE_EQ(serializer.Nodes().size(), std::size_t{ 3 });
+	GYRO_CHECK_EQ(serializer.ActiveOpacities(), std::size_t{ 1 });
+
+	const Wake owed = serializer.Republish();
+
+	GYRO_REQUIRE(owed.Which == Wake::Kind::Timed);
+	clock.Set(owed.When);
+
+	// The pass the exit finishes on is the pass that publishes the scene without it. Swept before the
+	// walk rather than after it, which is the difference between a closing window's last frame being the
+	// end of its animation and being a still that stays up until something unrelated republishes.
+	serializer.Serialize(store);
+
+	GYRO_CHECK_EQ(serializer.Nodes().size(), std::size_t{ 1 });
+	GYRO_CHECK(!store.IsLive(closing));
+	GYRO_CHECK(!store.IsLive(child));
+
+	// And the window behind it is still there, which is what the unlink is for: a chain whose links no
+	// longer name live entities reads as a chain that ended.
+	GYRO_CHECK(store.IsLive(behind));
+	GYRO_CHECK(store.FirstRoot() == behind);
+	GYRO_CHECK(store.Find(behind)->NextSibling.IsNull());
+	GYRO_CHECK(serializer.SceneWake() == Wake::Never());
+}
+
+GYRO_TEST(SceneSerializer, ARetiringSubtreeWithNothingMovingLeavesOnTheNextPass)
+{
+	ManualClock clock;
+	SceneStore store{ clock };
+
+	const EntityId window = store.CreateContainer({}, {}).value();
+	const SceneOutput outputs[] = { Primary() };
+
+	store.SetOutputs(outputs);
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Client };
+
+		GYRO_REQUIRE(commit.Retire(window));
+	}
+
+	SceneSerializer serializer;
+
+	// No exit catalog yet, so nothing is moving and the subtree has finished the instant it retired. The
+	// rule is the same one the animating case obeys — free when every channel has settled — and it needs
+	// no special case to mean *disappear now* before there is an animation to wait for.
+	serializer.Serialize(store);
+
+	GYRO_CHECK_EQ(serializer.Nodes().size(), std::size_t{ 0 });
+	GYRO_CHECK(!store.IsLive(window));
+	GYRO_CHECK_EQ(store.Count(), std::uint32_t{ 0 });
+}
+
+GYRO_TEST(SceneSerializer, OneChannelStillMovingKeepsTheWholeRetiringSubtreeAlive)
+{
+	ManualClock clock;
+	SceneStore store{ clock };
+
+	const EntityId window = store.CreateContainer({}, {}).value();
+	const EntityId sliding = store.CreateImage(window, Panel(100.0F, 40.0F), ImageContent{}).value();
+	const SceneOutput outputs[] = { Primary() };
+
+	store.SetOutputs(outputs);
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+
+		GYRO_REQUIRE(commit.Move(sliding, { 900.0, 0.0, 0.0 }, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Retire(window));
+	}
+
+	SceneSerializer serializer;
+
+	// The parent's own channels are at rest and it does not leave without the child: a window whose
+	// opacity has finished must not vanish out from under a subsurface still sliding away.
+	serializer.Serialize(store);
+
+	GYRO_REQUIRE_EQ(serializer.Nodes().size(), std::size_t{ 2 });
+	GYRO_CHECK(store.IsLive(window));
+
+	clock.Set(serializer.Republish().When);
+	serializer.Serialize(store);
+
+	GYRO_CHECK_EQ(serializer.Nodes().size(), std::size_t{ 0 });
+	GYRO_CHECK(!store.IsLive(window));
+	GYRO_CHECK(!store.IsLive(sliding));
+}
+
+GYRO_TEST(SceneSerializer, AFreedPayloadIsReclaimedAndTheEntityThatMovedStillDrawsItsOwn)
+{
+	ManualClock clock;
+	SceneStore store{ clock };
+
+	const SceneOutput outputs[] = { Primary() };
+
+	store.SetOutputs(outputs);
+
+	// Three images, so that freeing the first moves the last into its hole rather than simply popping.
+	const auto pixels = [](std::uint32_t texture) {
+		ImageContent content{};
+		content.Texture = TextureId{ texture };
+
+		return content;
+	};
+
+	const EntityId first = store.CreateImage({}, Panel(10.0F, 10.0F), pixels(1)).value();
+	const EntityId second = store.CreateImage({}, Panel(20.0F, 20.0F), pixels(2)).value();
+	const EntityId third = store.CreateImage({}, Panel(30.0F, 30.0F), pixels(3)).value();
+
+	GYRO_REQUIRE_EQ(store.Images().size(), std::size_t{ 3 });
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Client };
+
+		GYRO_REQUIRE(commit.Retire(first));
+	}
+
+	SceneSerializer serializer;
+
+	serializer.Serialize(store);
+
+	// The run shrank rather than keeping a hole — a session is windows opening and closing all day, and
+	// a per-kind array that only grows is a leak with a slow clock on it.
+	GYRO_CHECK(!store.IsLive(first));
+	GYRO_CHECK_EQ(store.Images().size(), std::size_t{ 2 });
+
+	// And the entity whose payload was moved to fill the hole still names its own pixels, which is the
+	// one index the swap has to repair.
+	GYRO_REQUIRE_EQ(serializer.Nodes().size(), std::size_t{ 2 });
+	GYRO_CHECK(store.Images()[store.Find(second)->Content].Texture == TextureId{ 2 });
+	GYRO_CHECK(store.Images()[store.Find(third)->Content].Texture == TextureId{ 3 });
+
+	GYRO_CHECK(serializer.Nodes()[0].Content != serializer.Nodes()[1].Content);
+}

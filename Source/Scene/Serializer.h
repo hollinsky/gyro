@@ -120,6 +120,7 @@ public:
 	const SnapshotPublisher& Serialize(SceneStore& store)
 	{
 		Reset(store);
+		Sweep(store);
 		Walk(store);
 		Stage(store);
 
@@ -198,6 +199,95 @@ private:
 		m_Published.assign(store.SlotCount(), NoContent);
 	}
 
+	// Decision 114's second step: destroy the retiring subtrees that have finished dying.
+	//
+	// **It is here and not in the store because settling is this file's question.** The store can say
+	// which subtrees are retiring; whether one has *come to rest* is `Animatable::NextWake` against the
+	// thresholds `Reset` just resolved from the output set, and those exist for the length of a
+	// serialisation. It is the same argument that already put channel retirement in this file — the walk
+	// that decides whether a coefficient crosses is the walk that holds the thresholds — applied to the
+	// entity instead of to the channel.
+	//
+	// **Before the walk rather than after it, and that is a frame on the screen.** Swept first, the pass
+	// on which an exit finishes is the pass that publishes the scene without it, so the last frame a
+	// person sees is the one where the animation ended. Swept afterwards, the finished entity would be in
+	// the run this pass is about to build and would need a further publication to leave — and nothing
+	// would arm one, because a channel that settles contributes no wake, so the closing window would stop
+	// at its last frame and stay on screen until something unrelated republished.
+	//
+	// The predicate is *settled*, not *at rest*, and the difference is one pass. A spring inside both
+	// thresholds is finished as far as the schedule is concerned and does not become `IsAtRest` until
+	// something calls `Settle` on it — which for a subtree about to be destroyed is never, since the walk
+	// that would have done it is the walk this sweep is keeping the entity out of.
+	void Sweep(SceneStore& store)
+	{
+		m_Dead.clear();
+
+		for (const EntityId root : store.RetiringRoots())
+		{
+			if (HasFinished(store, root))
+			{
+				m_Dead.push_back(root);
+			}
+		}
+
+		// Collected first and destroyed second, because destroying is what edits the list being iterated.
+		for (const EntityId root : m_Dead)
+		{
+			[[maybe_unused]] const bool destroyed = store.Destroy(root);
+		}
+	}
+
+	// Whether every channel of every entity in this subtree has settled. One still moving keeps the whole
+	// subtree alive, which is what decision 114 means by a retiring entity still being evaluated: a window
+	// whose own opacity has finished does not vanish out from under a subsurface still sliding away.
+	[[nodiscard]] bool HasFinished(const SceneStore& store, EntityId root)
+	{
+		m_Pending.clear();
+		m_Pending.push_back(root);
+
+		while (!m_Pending.empty())
+		{
+			const EntityId at = m_Pending.back();
+			m_Pending.pop_back();
+
+			const Entity* const entity = store.Find(at);
+
+			if (entity == nullptr)
+			{
+				continue;
+			}
+
+			const bool settled = Settled(entity->Translation, m_Thresholds.Translation()) &&
+			                     Settled(entity->Scale, m_Thresholds.Scaling()) &&
+			                     Settled(entity->Turn, m_Thresholds.Rotation()) &&
+			                     Settled(entity->Opacity, m_Thresholds.Opacity());
+
+			if (!settled)
+			{
+				return false;
+			}
+
+			for (EntityId child = entity->FirstChild; !child.IsNull();)
+			{
+				const Entity* const next = store.Find(child);
+
+				m_Pending.push_back(child);
+				child = next != nullptr ? next->NextSibling : EntityId{};
+			}
+		}
+
+		return true;
+	}
+
+	// One channel, asked the same question `Coefficient` asks and answered without the write. At rest is
+	// settled trivially; anything else is settled exactly when its wake says so.
+	template<typename Channel>
+	[[nodiscard]] bool Settled(const Channel& channel, SettleThresholds<typename Channel::Scalar> thresholds) const
+	{
+		return channel.IsAtRest() || channel.NextWake(m_At, thresholds).Which == Wake::Kind::Settled;
+	}
+
 	// Preorder over the tree, iteratively. Iteratively rather than recursively because the depth is the
 	// author's — a shell that nests a thousand containers would be a stack overflow in the one process
 	// on the machine that must not have one, where here it is a vector that grows.
@@ -209,9 +299,13 @@ private:
 		{
 			Entity* entity = cursor.IsNull() ? nullptr : store.Mutable(cursor);
 
-			// A sibling chain ends at a null link, and a stale one ends it too. The second cannot happen
-			// while nothing is destroyed, and it is written as an ending rather than a skip because a
-			// chain whose links no longer name live entities has no next to go to.
+			// A sibling chain ends at a null link, and a stale one ends it too. The second is not supposed
+			// to be reachable — `SceneStore::Destroy` unlinks before it frees, precisely so that a window
+			// closing cannot truncate the chain of the windows behind it — and it is written as an ending
+			// rather than a skip because a chain whose links no longer name live entities has no next to
+			// go to. Ending early loses the siblings after the break; skipping would follow a link into a
+			// reused slot and publish whatever now lives there, which is a closed window's neighbours
+			// replaced by something else rather than missing.
 			if (entity == nullptr)
 			{
 				if (m_Open.empty())
@@ -411,6 +505,12 @@ private:
 	std::vector<SolidContent> m_Solids;
 	std::vector<OutputAdapter> m_Views;
 	std::vector<Wake> m_Wakes;
+
+	// The sweep's two scratch lists: what finished dying this pass, and the subtree stack that decides it.
+	// Members rather than locals for the same reason every run above is, which is that a serialisation
+	// after the first few frames of a session allocates nothing.
+	std::vector<EntityId> m_Dead;
+	std::vector<EntityId> m_Pending;
 
 	// What this serialisation is judged at, and what against. Both are resolved once in `Reset` rather
 	// than per node: the instant is the store's clock, which decision 57 makes one read, and the

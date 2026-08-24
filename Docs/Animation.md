@@ -619,7 +619,7 @@ the same `(x, v)`. Order does not matter and the last target wins.
 **Phase two is everything whose inputs are the rest of the commit.** Enter and exit come from entity
 creation and destruction, and neither can be resolved where it is written: a key-`K` exit becomes a
 [move](#matched-geometry) rather than an exit if a key-`K` enter arrives later in the same commit, a
-removal is a [resurrection](#lifetime) if the entity was retiring, an exit
+a retire and a re-create in one commit [annihilate](#lifetime) before either spends anything, an exit
 [reserves atlas space](#when-the-blit-happens) that a move would not have wanted, and a
 [derived](#bundles-are-the-real-unit) quantity like an anchor coordinate depends on an extent that
 may still change. So phase one retargets channels and resolves nothing derived; layout, matching,
@@ -730,9 +730,9 @@ What falls out is the whole of the behaviour above:
   wrong for one being made — a gesture that does not track is not reduced, it is broken. So reduced
   motion substitutes the bundle's channels and leaves the parameterization alone, which is only
   statable because they are separate things.
-- **A driven entity is never a retiring one.** Swipe-to-dismiss does not remove anything from model
-  state until the gesture resolves, so no exit is generated and no [snapshot](#where-snapshots-live)
-  is reserved while a finger is down. That is what keeps the atlas admitting bounded-lifetime
+- **A driven entity is never a retiring one.** Swipe-to-dismiss destroys nothing until the gesture
+  resolves, so no exit is generated and no [snapshot](#where-snapshots-live) is reserved while a
+  finger is down. That is what keeps the atlas admitting bounded-lifetime
   occupants only; an exit whose duration is under the user's control would be exactly the immortal
   occupant that rule refuses.
 
@@ -849,24 +849,55 @@ silently inheriting a dead one's animation state.
 
 ## Lifetime
 
-- Model state removes the entity; the differ generates an exit transition.
-- The entity moves to a **retiring** set — still evaluated and rendered, but invisible to layout,
-  focus, and hit-testing.
+*(Corrected against [decision 114](Decisions.md#114-retirement-is-the-author-going-away-and-resurrection-is-the-authors-alone)
+and the implementation, 2026-08-24. Three things below said something else: what puts an entity into
+the retiring set, what that set is, and the menu, which was the headline example of a mechanism that
+cannot reach it.)*
+
+- **An entity's author going away** retires it; the differ generates an exit transition. The author
+  is the connection that created it — a client for its surfaces, the shell for the arrangement it
+  builds, gyro for what gyro invents.
+- The entity is marked **retiring** — still evaluated and rendered, but invisible to layout, focus,
+  and hit-testing.
 - On settle it is destroyed and the slot's generation bumps.
 
-**Re-adding while retiring resurrects, it does not re-create.** Dismiss a menu and immediately
-reopen it, or hide and re-show a workspace: if that produced a new entity, the exit and enter
-animations would fight and produce a visible hitch. Resurrection keeps the id live so the spring
-retargets from its current `(x, v)` and smoothly reverses. Fast repeated actions feeling right
-rather than janky is entirely this behaviour, and it requires retiring entities to stay in the
-identity map rather than being freed on removal.
+**Retiring is a flag on the entity, not a place it is kept.** A retiring entity is still drawn, so it
+is still published, so it is still in the tree at the position it had — a separate container would
+have to be spliced back into the preorder run to be serialised at all, and where it spliced would be
+a second answer to a question the tree already answers. What "moves to a retiring set" describes is a
+predicate three readers apply, all three of them on the dispatch side, which is why nothing on the
+frame thread can tell a retiring node from any other. `Scene/Entity.h` carries the flag and
+`Scene/Serializer.h` performs the destruction, on the pass that has the settle thresholds in hand.
 
-Snapshot pressure is the one thing that can take resurrection away. An entity evicted under pressure
-([exit pixels](#exit-pixels)) is settled and destroyed, so reopening it enters fresh instead of
-reversing — the cost is a hitch on exactly the fast repeated action this behaviour exists to serve.
-It is bounded to the pressure case, and the converse works in our favour: resurrection returns a
-rectangle to the atlas, so repeated open-close relieves the pressure it creates rather than
-compounding it.
+**Retirement is not removal from the tree, and the distinction is what keeps a workspace switch
+cheap.** A window moved between workspaces, hidden, or reparented is a link change or a flag and the
+entity is untouched. Without it, the overview that
+[decision 95](Decisions.md#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind)
+builds — the real windows under a hidden container, the thumbnails below referencing them — would
+retire nine workspaces' worth of windows every time the arrangement changed.
+
+**Re-adding while retiring resurrects, it does not re-create**, and the entity's own author is the
+only party that can do it. Resurrection keeps the id live so the spring retargets from its current
+`(x, v)` and smoothly reverses, which is what stops an exit and an enter fighting into a visible
+hitch. It covers what the shell and gyro invent and destroy while still connected — a switcher tile,
+a drag placeholder, an arrangement rebuilt declaratively — because only an author can name an entity
+in order to re-create it.
+
+**It does not cover the menu, which is what this section used to lead with.** Dismissing a menu
+destroys an `xdg_popup` and normally its `wl_surface` with it, so reopening produces a *new* surface
+and a *new* entity, and there is nothing to resurrect. More generally, an entity that retired
+*because its author disappeared* has no author left to resurrect it, which is most of the population
+this mechanism looked like it served. Fast repeated open-close is served by
+[matched geometry](#matched-geometry) instead — a different mechanism at a different price:
+resurrection keeps one entity's springs, while matching hands geometry from one entity to another and
+needs a match key that nobody currently mints. That key is [open](Open.md).
+
+Snapshot pressure is the one thing that can take resurrection away where it does apply. An entity
+evicted under pressure ([exit pixels](#exit-pixels)) is settled and destroyed, so its author
+re-creating it enters fresh instead of reversing — a hitch on exactly the repeated action
+resurrection exists to smooth. It is bounded to the pressure case, and the converse works in our
+favour: resurrection returns a rectangle to the atlas, so a repeated destroy and re-create relieves
+the pressure it creates rather than compounding it.
 
 ## Exit pixels
 

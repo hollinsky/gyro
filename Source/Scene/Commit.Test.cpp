@@ -376,3 +376,74 @@ GYRO_TEST(SceneCommit, AttachReplacesThePixelsAndRefusesAnythingThatIsNotALiveIm
 	GYRO_CHECK(!nested.Attach(image, first));
 	GYRO_CHECK_EQ(store.Images()[entity->Content].Texture, next);
 }
+
+GYRO_TEST(SceneCommit, RetirementFlagsTheSubtreeAndLeavesItExactlyWhereItWas)
+{
+	ManualClock clock;
+	SceneStore store{ clock };
+
+	const EntityId keep = store.CreateContainer({}, {}).value();
+	const EntityId window = store.CreateContainer({}, {}).value();
+	const EntityId surface = store.CreateContainer(window, {}).value();
+	const EntityId popup = store.CreateContainer(surface, {}).value();
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Client };
+
+		GYRO_REQUIRE(commit.Retire(window));
+	}
+
+	// Everything the author authored, to the bottom — a client destroying a `wl_surface` takes the
+	// subsurfaces under it and does not stop at the first level.
+	GYRO_CHECK(store.Find(window)->Retiring);
+	GYRO_CHECK(store.Find(surface)->Retiring);
+	GYRO_CHECK(store.Find(popup)->Retiring);
+
+	// And nothing else, which is decision 114's distinction: only the author's disappearance retires, so
+	// the window beside it is untouched.
+	GYRO_CHECK(!store.Find(keep)->Retiring);
+
+	// **Retirement is not removal**, and this is the assertion that says so. The subtree keeps its links
+	// and its place in the top-level order, because an entity moved somewhere else to die would have to
+	// be spliced back into the preorder run to be drawn at all — and it has to be drawn, or there is no
+	// exit animation.
+	GYRO_CHECK(store.IsLive(window));
+	GYRO_CHECK(store.FirstRoot() == keep);
+	GYRO_CHECK(store.Find(keep)->NextSibling == window);
+	GYRO_CHECK(store.Find(window)->FirstChild == surface);
+	GYRO_CHECK_EQ(store.Count(), std::uint32_t{ 4 });
+}
+
+GYRO_TEST(SceneCommit, RetiringTwiceIsTheSameRetirementAndAStaleIdIsARefusal)
+{
+	ManualClock clock;
+	SceneStore store{ clock };
+
+	const EntityId window = store.CreateContainer({}, {}).value();
+	const EntityId child = store.CreateContainer(window, {}).value();
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Client };
+
+		GYRO_CHECK(commit.Retire(window));
+
+		// Idempotent, and the guard is the flag rather than a search: a client tearing a window down
+		// surface by surface pays one subtree walk rather than one per surface.
+		GYRO_CHECK(commit.Retire(window));
+		GYRO_CHECK(commit.Retire(child));
+
+		// An id that names nothing live is the double retire that arrives through a handle already gone
+		// stale, and it is a refusal rather than a crash.
+		GYRO_CHECK(!commit.Retire(EntityId{}));
+	}
+
+	// And a scope that is not the open one retires nothing, the same as every other write here.
+	const EntityId other = store.CreateContainer({}, {}).value();
+
+	SceneCommit outer{ store, CommitAuthor::Client };
+	SceneCommit nested{ store, CommitAuthor::Client };
+
+	GYRO_REQUIRE(!nested.IsOpen());
+	GYRO_CHECK(!nested.Retire(other));
+	GYRO_CHECK(!store.Find(other)->Retiring);
+}
