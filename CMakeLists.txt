@@ -705,6 +705,7 @@ gyro_add_module(Render
 		Allocator.cpp
 		Backdrop.cpp
 		Device.cpp
+		GpuClock.cpp
 		Pipeline.cpp
 		Renderer.cpp
 		Textures.cpp
@@ -712,6 +713,7 @@ gyro_add_module(Render
 	TESTS
 		Backdrop.Test.cpp
 		Device.Test.cpp
+		GpuClock.Test.cpp
 		Pipeline.Test.cpp
 		Textures.Test.cpp
 		Unfused.Test.cpp

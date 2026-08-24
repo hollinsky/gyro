@@ -11,6 +11,7 @@
 #include "Core/Result.h"
 #include "Core/Time.h"
 #include "Geometry/Space.h"
+#include "Render/GpuClock.h"
 #include "Render/Vulkan.h"
 #include "Seam/RenderTarget.h"
 
@@ -133,6 +134,15 @@ struct DeviceDescription
 	// and invocations divided by the elapsed span is the rate the hardware is actually achieving,
 	// which is the figure a person compares against what the part is supposed to do.
 	bool CountsPipelineStatistics = false;
+
+	// The primary DRM node's minor number, or -1 where `VK_EXT_physical_device_drm` did not answer.
+	//
+	// **Not a Vulkan concept — it is the bridge from the device Vulkan chose to the sysfs entry the
+	// kernel driver hangs its frequency nodes off**, which is what decision 142's clock reader needs and
+	// the reason it is a device property rather than a guess. On a machine with more than one GPU it is
+	// what makes the clock the *right* one's; -1 leaves Render/GpuClock.h invalid and every `GpuCost`
+	// reporting a zero clock, which is honest rather than wrong.
+	std::int64_t PrimaryMinor = -1;
 
 	// Whether a timestamp taken on this device's queue means anything.
 	[[nodiscard]] constexpr bool MeasuresGpuTime() const noexcept
@@ -414,7 +424,8 @@ public:
 		  m_Physical{ std::exchange(other.m_Physical, VK_NULL_HANDLE) },
 		  m_Device{ std::exchange(other.m_Device, VK_NULL_HANDLE) },
 		  m_Queue{ std::exchange(other.m_Queue, VK_NULL_HANDLE) },
-		  m_QueueFamily{ std::exchange(other.m_QueueFamily, 0) }, m_Description{ other.m_Description }
+		  m_QueueFamily{ std::exchange(other.m_QueueFamily, 0) }, m_Description{ other.m_Description },
+		  m_GpuClock{ std::move(other.m_GpuClock) }
 	{}
 
 	VulkanDevice& operator=(VulkanDevice&& other) noexcept
@@ -428,6 +439,7 @@ public:
 			m_Queue = std::exchange(other.m_Queue, VK_NULL_HANDLE);
 			m_QueueFamily = std::exchange(other.m_QueueFamily, 0);
 			m_Description = other.m_Description;
+			m_GpuClock = std::move(other.m_GpuClock);
 		}
 
 		return *this;
@@ -540,6 +552,17 @@ public:
 	// advance and the reason a caller that checks it will never see this.
 	[[nodiscard]] Result<GpuCalibration> Calibrate() const;
 
+	// The GPU's core clock while the caller's most recent submission ran, in MHz, or zero where it
+	// could not be read — decision 142's operating point, the number a `GpuCost` span in seconds is
+	// meaningless without.
+	//
+	// **Rate-limited inside Render/GpuClock.h, so `Record` calls it every frame and it enters the
+	// kernel at most once every few milliseconds** — the clock it reports moves no faster than that, so
+	// per-frame precision would buy nothing the frame thread should pay a syscall for. Not `const`
+	// because the cached reading is state; unlike `Calibrate`, this does not gate on a description bit,
+	// because an unreadable clock is a zero rather than an error a caller acts on.
+	[[nodiscard]] std::uint32_t SampleClockMhz(Instant now) noexcept { return m_GpuClock.Sample(now); }
+
 	// A timeline semaphore this device signals, exported as a DRM syncobj descriptor.
 	//
 	// **What it is for is the half of explicit sync the renderer does not already cover.** The acquire
@@ -579,6 +602,11 @@ private:
 
 	std::uint32_t m_QueueFamily = 0;
 	DeviceDescription m_Description{};
+
+	// The per-driver frequency reader, resolved from `m_Description.PrimaryMinor` at `Open`. Invalid on
+	// a device gyro cannot read a clock off — `Blit`'s never gets one, since `Blit` is not a
+	// `VulkanDevice` — and then `SampleClockMhz` answers zero.
+	GpuClock m_GpuClock;
 };
 
 // Prints as llvmpipe [llvmpipe] api 1.4.354 software no-export, which is the whole of what a startup

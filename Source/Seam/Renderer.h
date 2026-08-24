@@ -444,6 +444,16 @@ struct GpuCost
 	std::uint32_t Generation = 0;
 	RenderMode Mode = RenderMode::Planned;
 
+	// The GPU's core clock while this composite ran, in MHz, or zero where gyro could not read it.
+	//
+	// **A span in seconds is meaningless without the operating point it was taken at**, which is
+	// decision 142: the part this was measured on sits parked at a quarter of its clock because the
+	// kernel's frequency governor cannot see a frame deadline, so a `Budget` window that mixes samples
+	// taken at different clocks is comparing populations rather than costs. The reader is per driver and
+	// lives beside the device; zero is the same honest nothing `Blit` and a device with no timestamp
+	// support already report for `Cost` itself.
+	std::uint32_t ClockMhz = 0;
+
 	friend constexpr bool operator==(GpuCost, GpuCost) noexcept = default;
 };
 

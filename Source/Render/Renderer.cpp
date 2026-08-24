@@ -1475,6 +1475,11 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		pending.Generation = request.CostGeneration;
 		pending.Mode = request.Mode;
 		pending.Trace = request.Trace;
+
+		// Sampled here, near the work, rather than at collection frames later where the clock has moved.
+		// `started` is this record's `Now()`, a few hundred microseconds stale against a reading that is
+		// rate-limited to milliseconds — so the operating point filed with the span is the one it ran at.
+		pending.ClockMhz = m_Device->SampleClockMhz(started);
 	}
 
 	// **Decision 108 in five lines.** A device that cannot export a timeline has no descriptor to put
@@ -2344,7 +2349,8 @@ std::size_t VulkanRenderer::CollectCosts(std::span<GpuCost> into)
 		const DeviceDescription& description = m_Device->Description();
 		into[written] = GpuCost{ .Cost = description.TimestampSpan(stamps[0], stamps[pending.Stamps - 1]),
 			                     .Generation = pending.Generation,
-			                     .Mode = pending.Mode };
+			                     .Mode = pending.Mode,
+			                     .ClockMhz = pending.ClockMhz };
 		++written;
 
 		Report(pending, std::span{ stamps.data(), pending.Stamps }, target);
@@ -2399,6 +2405,17 @@ void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uin
 			pending.Submit
 		);
 	}
+
+	// The operating point beside the spans, so a reader sees the clock the composite was measured at
+	// without leaving the trace — decision 142's number, and the one that turns the fragment rate below
+	// from a slow part into a parked one. Emitted whether or not the device counts fragments, because it
+	// answers a question the timestamps alone cannot: whether a long span was work or a low clock.
+	TraceCountAt(
+		"clock (MHz)",
+		TimestampAt(description, m_Calibration, stamps[pending.Stamps - 1]),
+		static_cast<std::int64_t>(pending.ClockMhz),
+		pending.Trace
+	);
 
 	if (m_Statistics == VK_NULL_HANDLE)
 	{

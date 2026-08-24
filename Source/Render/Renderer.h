@@ -250,6 +250,12 @@ private:
 		std::uint32_t Generation = 0;
 		RenderMode Mode = RenderMode::Planned;
 
+		// The GPU's core clock when this submission was recorded, in MHz, sampled at submit rather than
+		// at collection for the same reason the mode and generation are copied here: by the time the
+		// timestamps resolve the clock has moved, so the operating point the span was measured at is only
+		// knowable near the work that produced it. Zero where the device has no clock reader.
+		std::uint32_t ClockMhz = 0;
+
 		// Which GPU track this submission's spans belong on, copied off the request for the same
 		// reason as the two fields above: by the time the timestamps resolve, this renderer has drawn
 		// for whichever outputs it serves and cannot be asked which one this was.

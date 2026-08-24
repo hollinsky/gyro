@@ -263,6 +263,49 @@ constexpr std::array<const char*, 4> RequiredExtensions{
 	return families[family].timestampValidBits;
 }
 
+// The primary DRM node's minor for this physical device, or -1 where the driver does not carry it.
+//
+// **`VK_EXT_physical_device_drm` is a physical-device property query, not a device feature**, so it is
+// read here without enabling anything at device creation — gyro uses none of its commands, only the
+// minor it reports. Guarded on the extension being listed because the property struct is only
+// populated where the implementation supports it; a driver without it — or one that has no primary
+// node — leaves decision 142's clock reader with nothing to open, which it reports rather than guesses.
+[[nodiscard]] std::int64_t QueryDrmPrimaryMinor(VkPhysicalDevice device) noexcept
+{
+	std::uint32_t count = 0;
+
+	if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) != VK_SUCCESS)
+	{
+		return -1;
+	}
+
+	std::vector<VkExtensionProperties> available(count);
+
+	if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, available.data()) != VK_SUCCESS)
+	{
+		return -1;
+	}
+
+	const bool listed = std::ranges::any_of(available, [](const VkExtensionProperties& entry) noexcept {
+		return std::string_view{ entry.extensionName } == VK_EXT_PHYSICAL_DEVICE_DRM_EXTENSION_NAME;
+	});
+
+	if (!listed)
+	{
+		return -1;
+	}
+
+	VkPhysicalDeviceDrmPropertiesEXT drm{};
+	drm.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT;
+
+	VkPhysicalDeviceProperties2 properties{};
+	properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+	properties.pNext = &drm;
+	vkGetPhysicalDeviceProperties2(device, &properties);
+
+	return drm.hasPrimary == VK_TRUE ? static_cast<std::int64_t>(drm.primaryMinor) : -1;
+}
+
 void Describe(VkPhysicalDevice device, std::uint32_t family, DeviceDescription& into) noexcept
 {
 	VkPhysicalDeviceDriverProperties driver{};
@@ -285,6 +328,7 @@ void Describe(VkPhysicalDevice device, std::uint32_t family, DeviceDescription& 
 	into.TimestampValidBits = QueryTimestampBits(device, family);
 	into.CalibratesTimestamps = QueryCalibration(device);
 	into.CountsPipelineStatistics = QueryPipelineStatistics(device);
+	into.PrimaryMinor = QueryDrmPrimaryMinor(device);
 }
 } // namespace
 
@@ -494,6 +538,12 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 	volkLoadDevice(device.m_Device);
 
 	vkGetDeviceQueue(device.m_Device, device.m_QueueFamily, 0, &device.m_Queue);
+
+	// Decision 142's clock reader, resolved from the DRM node the device reported. It warns and comes up
+	// invalid on a driver it does not cover rather than failing device creation — a machine whose GPU
+	// clock gyro cannot read is one that draws every frame and files a zero operating point, not one
+	// that comes up with no renderer.
+	device.m_GpuClock = GpuClock::Open(device.m_Description.PrimaryMinor);
 
 	return device;
 }
