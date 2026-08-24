@@ -691,17 +691,6 @@ public:
 			}
 		}
 
-		spdlog::warn(
-			"PROBE steps={} planned={} floor={} full={} waited={} unwanted={} notarget={}",
-			Probe::Steps,
-			Probe::PlannedFrames,
-			Probe::FloorFrames,
-			Probe::Full,
-			Probe::Waited,
-			Probe::Unwanted,
-			Probe::NoTarget
-		);
-
 		if (const std::optional<Wire::ProtocolFault>& fault = m_Host.Fault(); fault.has_value())
 		{
 			spdlog::error("the host ended the connection: {} on {}", fault->Message, fault->Object);
