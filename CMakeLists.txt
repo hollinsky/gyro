@@ -812,6 +812,7 @@ gyro_add_module(Protocol DISPATCH
 		Scene
 	SOURCES
 		Compositor.cpp
+		Data.cpp
 		Floor.cpp
 		Host.cpp
 		Region.cpp

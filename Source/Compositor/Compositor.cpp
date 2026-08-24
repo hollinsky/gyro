@@ -1309,12 +1309,15 @@ private:
 
 			spdlog::info("hosting clients on {}", m_Clients->SocketName());
 
-			// Three globals, which is a window and nothing a person can do to it. Said out loud because
+			// Four globals, which is a window and nothing a person can do to it. Said out loud because
 			// the alternative is somebody filing the silence as a bug: an application will open, appear
-			// centred, and then ignore every click and keystroke and never repaint.
+			// centred, and then ignore every click and keystroke and never repaint. The clipboard is
+			// named the same way, because a global that is advertised and does nothing is the other kind
+			// of silence somebody would spend an afternoon on.
 			spdlog::info(
-				"wl_compositor, wl_shm and xdg_wm_base are the globals; a window will open and be placed, and there is "
-				"no seat to route input and no frame callback to answer, so it will not respond or redraw"
+				"wl_compositor, wl_shm, xdg_wm_base and wl_data_device_manager are the globals; a window will open and "
+				"be placed, and there is no seat to route input, no frame callback to answer and nothing behind the "
+				"clipboard, so it will not respond or redraw and cannot copy or paste"
 			);
 
 			author = std::move(*made);

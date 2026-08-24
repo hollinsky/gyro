@@ -306,7 +306,7 @@ struct BoundCompositor
 }
 } // namespace
 
-GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheThreeGlobalsAWindowIsBuiltFrom)
+GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
@@ -341,9 +341,79 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheThreeGlobalsAWindowIsBuiltFrom
 	// do nothing.
 	GYRO_CHECK_EQ(shell->Version, std::uint32_t{ 1 });
 
-	// Exactly three, which is the smallest set a window can be built out of. When `wl_seat` lands this
-	// number goes up in the same commit as the thing it counts.
-	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 3 });
+	const Registry::Global* const data = bound.Listener.Find(Wayland::WlDataDeviceManager::WireName);
+	GYRO_REQUIRE(data != nullptr);
+
+	// The one global here that is not part of building a window: GTK will not open a display without
+	// it and gives up before it looks for the other three. Version 3 is where every toolkit stops
+	// asking, and no version of it promises more than another while there is no seat to reach a
+	// selection or a drag through. See Protocol/Data.h.
+	GYRO_CHECK_EQ(data->Version, std::uint32_t{ 3 });
+
+	// Exactly four: three a window is built out of, and one a toolkit demands before it will look for
+	// them. When `wl_seat` lands this number goes up in the same commit as the thing it counts.
+	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 4 });
+}
+
+// What a GTK client actually does with the clipboard global before it has a seat, which is bind it,
+// find it answers, and — for a client that owns something copyable — make a source nobody will ever
+// ask for. Both have to work for an application to start; neither transfers anything.
+//
+// The seat is the reason `get_data_device` is not exercised here: it takes one as an argument, gyro
+// advertises none, and a client cannot name an object it was never offered. That request has no
+// caller until there is input, and this test says so rather than reaching around the protocol to
+// pretend otherwise.
+GYRO_TEST(ProtocolRoundTrip, ADataSourceIsCreatedAndOffersMimeTypesNobodyWillAskFor)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-data" };
+	GYRO_REQUIRE(session.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	const Registry::Global* const data = bound.Listener.Find(Wayland::WlDataDeviceManager::WireName);
+	GYRO_REQUIRE(data != nullptr);
+
+	const Wayland::WlDataDeviceManager manager =
+		bound.Listener.Object().Bind<Wayland::WlDataDeviceManager>(data->Name, data->Version);
+	GYRO_REQUIRE(manager.IsValid());
+
+	// A source is never selected, so none of these ever arrive. Counted anyway, because "nothing came
+	// back" is the claim being made.
+	class SourceEvents final : public Wayland::WlDataSourceIgnoring
+	{
+	public:
+		void OnTarget(std::string_view) override { ++Events; }
+
+		void OnSend(std::string_view, Fd) override { ++Events; }
+
+		void OnCancelled() override { ++Events; }
+
+		std::size_t Events = 0;
+	};
+
+	SourceEvents events;
+
+	Wayland::WlDataSource source = manager.CreateDataSource(events);
+	GYRO_REQUIRE(source.IsValid());
+
+	source.Offer("text/plain;charset=utf-8");
+	source.SetActions(Wayland::WlDataDeviceManagerDndAction::Copy);
+
+	session.Turn();
+
+	// Still connected is the whole of it: a client that offered a MIME type and was ended for it is
+	// one that never gets as far as drawing.
+	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK_EQ(events.Events, std::size_t{ 0 });
+
+	source.Destroy();
+
+	session.Turn();
+
+	GYRO_CHECK(!session.Client.Fault().has_value());
 }
 
 GYRO_TEST(ProtocolRoundTrip, BindingWlShmAnnouncesTheFormatsBeforeAnythingIsAsked)

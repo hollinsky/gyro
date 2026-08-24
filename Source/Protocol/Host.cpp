@@ -57,6 +57,16 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		return Failure(ENOMEM, "advertising xdg_wm_base");
 	}
 
+	m_DataGlobal = Wayland::Server::WlDataDeviceManager::Advertise(*display, DataDeviceManagerVersion, m_Data);
+
+	if (m_DataGlobal == nullptr)
+	{
+		// Fatal, and it is the one global here that transfers nothing: GTK refuses to open a display
+		// without it, so a compositor that came up missing this would start, log nothing, and be a
+		// socket every GTK application walks away from. [Data.h](Data.h) carries the rest.
+		return Failure(ENOMEM, "advertising wl_data_device_manager");
+	}
+
 	return {};
 }
 

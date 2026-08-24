@@ -8,6 +8,7 @@
 #include "Core/Wake.h"
 #include "Protocol/Compositor.h"
 #include "Protocol/Context.h"
+#include "Protocol/Data.h"
 #include "Protocol/Floor.h"
 #include "Protocol/Server.h"
 #include "Protocol/Shell.h"
@@ -38,11 +39,14 @@
 // acting on the callback it never received. `Flush` is therefore public and the root calls it
 // immediately before the wait, which is the one place that knows the thread is about to sleep.
 //
-// **Three globals are advertised, and together they are a window on screen.** `wl_compositor` is where
-// a `wl_surface` and a `wl_region` come from, `wl_shm` is where its pixels do, and `xdg_wm_base` is
-// what says the surface is a window — so a toolkit can now start, negotiate a size, draw a frame and
-// be placed. The floor it is placed on is authored here, once, because with no session agent there is
-// one session and this object is the whole of it.
+// **Three globals are a window on screen, and the fourth is what a toolkit demands before it will
+// look for them.** `wl_compositor` is where a `wl_surface` and a `wl_region` come from, `wl_shm` is
+// where its pixels do, and `xdg_wm_base` is what says the surface is a window — so a toolkit can now
+// start, negotiate a size, draw a frame and be placed. `wl_data_device_manager` is beside them
+// because GTK gives up on a display that does not advertise one, and it transfers nothing:
+// [Data.h](Data.h) says why an inert clipboard is the honest shape of it while there is no seat. The
+// floor a window is placed on is authored here, once, because with no session agent there is one
+// session and this object is the whole of it.
 //
 // What a person cannot do yet is *use* the window: there is no seat, so nothing routes a click or a
 // keystroke, and no frame callback answers, so an application draws its first frame and then waits for
@@ -112,6 +116,9 @@ private:
 
 	ShellGlobal m_Shell{ m_Context };
 	wl_global* m_ShellGlobal = nullptr;
+
+	DataDeviceManagerGlobal m_Data;
+	wl_global* m_DataGlobal = nullptr;
 
 	// gyro's own node, authored before any client can reach the socket and outliving all of them.
 	SessionFloor m_Floor;
