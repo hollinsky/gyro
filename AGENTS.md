@@ -22,6 +22,10 @@ put the message in the reply — subject on one line, blank line, then the body.
 - **Build and test before saying a change is done**: `cmake -S . -B build -G Ninja && ninja -C build
   && ctest --test-dir build`. The disciplines below are `ALL` targets, so an ordinary build runs them.
 - **Format C++ with the project's `.clang-format`** before finalizing.
+- **A commit subject says what the commit did**, imperatively — `Render: Modulate the GPU frequency
+  floor`, `Bindings: Split the emitter into a shared floor and two arms`. The declarative form
+  belongs to `Docs:` commits, where the subject *is* the claim being recorded. It has leaked into a
+  few code commits, so reading only the last handful of subjects gives the wrong pattern.
 - No `Co-Authored-By:` or other attribution footers in commit messages.
 
 ### Explaining your work
