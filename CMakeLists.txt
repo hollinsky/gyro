@@ -788,6 +788,25 @@ target_link_libraries(Nested
 		spdlog::spdlog
 )
 
+# gyro's Wayland server, and the dispatch-side half of decision 2's split. It owns the display its
+# clients' objects live in, the loop they are demarshalled on, and the socket they reach it through —
+# the codec underneath is libwayland's. DISPATCH because a connection is pumped by one thread and that
+# thread is the author's, per decisions 45 and 81, and not PORTABLE because the display, the loop and
+# the socket are libwayland's own and libwayland is Linux's.
+gyro_add_module(Protocol DISPATCH
+	DEPENDS
+		Core
+	SOURCES
+		Server.cpp
+	TESTS
+		Server.Test.cpp
+)
+
+# libwayland-server for the display, the event loop, and the socket, which are the core library's own
+# rather than anything generated. The typed globals over it are WaylandServerProtocols, and they
+# arrive the day Protocol advertises its first global; the lifecycle here needs no binding.
+target_link_libraries(Protocol PUBLIC PkgConfig::WAYLAND_SERVER)
+
 # The composition root, and the only module that knows both sides of either waist. Docs/Structure.md
 # #orchestration is its whole brief: it constructs the clock, the backend, the rendering device, the
 # publication channel, and the threads, and hands each subsystem what it needs.
