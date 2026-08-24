@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iterator>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -18,7 +19,13 @@
 
 // The generator's entry point: XML paths in, a generated tree out.
 //
-//   GyroBindings --output <directory> <protocol.xml>...
+//   GyroBindings [--server] --output <directory> <protocol.xml>...
+//
+// **The direction is a flag rather than a second program**, and the two runs share nothing but the
+// parser: `--server` emits resources and handlers over libwayland into `Wayland/Server/`, and the
+// default emits proxies and listeners over gyro's own codec into `Wayland/`. They are separate
+// invocations with separate protocol lists, because what gyro speaks to its host and what it speaks
+// to its clients are different sets of protocols that happen to be described by the same files.
 //
 // **Every protocol is one invocation**, because Tools/Bindings/Emit.h needs the whole set to resolve
 // a reference that leaves its own document — and because one invocation is one build rule, so a
@@ -33,8 +40,12 @@
 // **A file this run did not write is deleted.** Dropping a protocol from the CMake list otherwise
 // leaves its header sitting in the generated tree, on the include path, describing an interface
 // nothing generates a definition for any more — so the build keeps working until somebody includes it
-// and gets a link error naming a symbol they never asked for. Scoped to the one directory the
-// generator owns, which is a directory the build created and nothing else writes to.
+// and gets a link error naming a symbol they never asked for.
+//
+// Scoped to the directories this run wrote into, which is what makes the two directions coexist: the
+// client run owns `Wayland/` and the server run owns `Wayland/Server/`, and neither prunes the
+// other's tree. A sweep of `Wayland/` that recursed would have the client run delete every server
+// header on every build.
 
 namespace
 {
@@ -80,44 +91,59 @@ bool WriteIfChanged(const std::filesystem::path& path, std::string_view text)
 
 	return true;
 }
-// Everything in the generated directory that this run did not produce. A protocol removed from the
-// build's list leaves a header behind otherwise, and a header on the include path that nothing
-// generates a `.cpp` for is worse than a missing one: it compiles.
-bool Prune(const std::filesystem::path& directory, const std::vector<std::filesystem::path>& written)
+// Everything in the directories this run wrote into that this run did not produce. A protocol removed
+// from the build's list leaves a header behind otherwise, and a header on the include path that
+// nothing generates a `.cpp` for is worse than a missing one: it compiles.
+//
+// **The directories come from what was written rather than from a fixed name**, and that is what
+// keeps the two directions out of each other's way. `Wayland/` and `Wayland/Server/` are written by
+// separate runs of this program; a sweep that recursed from the first would delete the second's
+// output every build, and one that named a single directory would leave a dropped server protocol's
+// header behind forever. Each run sweeps exactly the directories it filled, one level deep.
+bool Prune(const std::vector<std::filesystem::path>& written)
 {
-	std::error_code failure;
+	std::set<std::filesystem::path> directories;
 
-	// A first run has nothing to prune, which is not an error.
-	if (!std::filesystem::is_directory(directory, failure))
+	for (const std::filesystem::path& path : written)
 	{
-		return true;
+		directories.insert(path.parent_path());
 	}
 
-	for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator{ directory, failure })
+	for (const std::filesystem::path& directory : directories)
 	{
-		if (!entry.is_regular_file())
+		std::error_code failure;
+
+		for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator{ directory, failure })
 		{
-			continue;
+			if (!entry.is_regular_file())
+			{
+				continue;
+			}
+
+			const std::filesystem::path path = entry.path().lexically_normal();
+
+			if (std::ranges::find(written, path) != written.end())
+			{
+				continue;
+			}
+
+			std::filesystem::remove(path, failure);
+
+			if (failure)
+			{
+				std::fprintf(stderr, "gyro-bindings: %s: could not be removed\n", path.string().c_str());
+
+				return false;
+			}
 		}
-
-		const std::filesystem::path path = entry.path().lexically_normal();
-
-		if (std::ranges::find(written, path) != written.end())
-		{
-			continue;
-		}
-
-		std::filesystem::remove(path, failure);
 
 		if (failure)
 		{
-			std::fprintf(stderr, "gyro-bindings: %s: could not be removed\n", path.string().c_str());
-
 			return false;
 		}
 	}
 
-	return !failure;
+	return true;
 }
 } // namespace
 
@@ -127,6 +153,7 @@ int main(int argc, char** argv)
 
 	std::filesystem::path output;
 	std::vector<std::filesystem::path> inputs;
+	Direction direction = Direction::Client;
 
 	for (std::size_t index = 1; index < arguments.size(); ++index)
 	{
@@ -146,6 +173,13 @@ int main(int argc, char** argv)
 			continue;
 		}
 
+		if (argument == "--server")
+		{
+			direction = Direction::Server;
+
+			continue;
+		}
+
 		if (argument.starts_with("--"))
 		{
 			std::fprintf(
@@ -160,7 +194,7 @@ int main(int argc, char** argv)
 
 	if (output.empty() || inputs.empty())
 	{
-		std::fprintf(stderr, "usage: gyro-bindings --output <directory> <protocol.xml>...\n");
+		std::fprintf(stderr, "usage: gyro-bindings [--server] --output <directory> <protocol.xml>...\n");
 
 		return EXIT_FAILURE;
 	}
@@ -198,7 +232,7 @@ int main(int argc, char** argv)
 	}
 
 	EmitDiagnostic diagnostic;
-	const Result<std::vector<EmittedFile>> files = Emit(protocols, &diagnostic);
+	const Result<std::vector<EmittedFile>> files = Emit(protocols, direction, &diagnostic);
 
 	if (!files)
 	{
@@ -221,5 +255,5 @@ int main(int argc, char** argv)
 		written.push_back(path.lexically_normal());
 	}
 
-	return Prune(output / "Wayland", written) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return Prune(written) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

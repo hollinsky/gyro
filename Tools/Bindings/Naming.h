@@ -39,4 +39,11 @@
 // Whether a generated member name would land on one every proxy already declares. A protocol is free
 // to name a request `version`, and the generator has to refuse rather than emit a class with two
 // members of that name and a compiler error naming neither the protocol nor the request.
-[[nodiscard]] bool IsReservedMember(std::string_view identifier) noexcept;
+[[nodiscard]] bool IsReservedProxyMember(std::string_view identifier) noexcept;
+
+// The same question for the server arm, and it is a different set because a resource is a different
+// class. A proxy sends requests and declares `Listen`; a resource sends *events* and declares the
+// creation verbs libwayland's C API needs named — so `Listen` is free on this side and `Create` is
+// not. Two lists rather than one union, because a union would refuse a protocol for colliding with a
+// member of a class it does not appear in.
+[[nodiscard]] bool IsReservedResourceMember(std::string_view identifier) noexcept;

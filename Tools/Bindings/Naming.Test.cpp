@@ -72,11 +72,32 @@ GYRO_TEST(Naming, ReservedMembersAreTheOnesEveryProxyDeclares)
 {
 	// The set exists so that a protocol naming a request `version` fails the build at the generator
 	// rather than at a redefinition error in a file nobody wrote.
-	GYRO_CHECK(IsReservedMember("Version"));
-	GYRO_CHECK(IsReservedMember("Listener"));
-	GYRO_CHECK(IsReservedMember("Dispatch"));
-	GYRO_CHECK(IsReservedMember("Id"));
+	GYRO_CHECK(IsReservedProxyMember("Version"));
+	GYRO_CHECK(IsReservedProxyMember("Listener"));
+	GYRO_CHECK(IsReservedProxyMember("Dispatch"));
+	GYRO_CHECK(IsReservedProxyMember("Id"));
 
-	GYRO_CHECK(!IsReservedMember("Attach"));
-	GYRO_CHECK(!IsReservedMember("Commit"));
+	GYRO_CHECK(!IsReservedProxyMember("Attach"));
+	GYRO_CHECK(!IsReservedProxyMember("Commit"));
+}
+
+GYRO_TEST(Naming, TheTwoDirectionsReserveDifferentNames)
+{
+	// The two lists are not one union, and this is what says so: a resource has no `Listen` and a
+	// proxy has no `Create`, so a protocol with an event named `listen` is emittable on the server
+	// arm and a request named `create` is emittable on the client one. Refusing either against the
+	// other list would be the generator declining a protocol over a class it never puts it in.
+	GYRO_CHECK(IsReservedResourceMember("Create"));
+	GYRO_CHECK(IsReservedResourceMember("PostError"));
+	GYRO_CHECK(IsReservedResourceMember("WireResource"));
+
+	GYRO_CHECK(!IsReservedResourceMember("Listen"));
+	GYRO_CHECK(!IsReservedProxyMember("Create"));
+
+	// The four that are the same question in both classes.
+	for (const std::string_view shared : { "Version", "IsValid", "WireName", "WireVersion" })
+	{
+		GYRO_CHECK(IsReservedProxyMember(shared));
+		GYRO_CHECK(IsReservedResourceMember(shared));
+	}
 }

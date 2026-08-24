@@ -43,11 +43,22 @@ constexpr std::array Keywords{
 // Everything a generated proxy declares for itself. A request landing on one of these is a build
 // failure rather than a rename, because renaming would put a name in the header that no reader can
 // find in the protocol.
-constexpr std::array Reserved{
+constexpr std::array ReservedProxy{
 	std::string_view{ "Child" },    std::string_view{ "Dispatch" },    std::string_view{ "Id" },
 	std::string_view{ "Ignoring" }, std::string_view{ "IsValid" },     std::string_view{ "Listen" },
 	std::string_view{ "Listener" }, std::string_view{ "Object" },      std::string_view{ "Version" },
 	std::string_view{ "WireName" }, std::string_view{ "WireVersion" },
+};
+
+// The same for a generated resource, which is the server arm's class and shares only four of these.
+// An *event* is what lands here, since a request arrives on the handler behind an `On` prefix and can
+// only collide with another request.
+constexpr std::array ReservedResource{
+	std::string_view{ "Advertise" },   std::string_view{ "Create" },       std::string_view{ "Factory" },
+	std::string_view{ "Handler" },     std::string_view{ "Ignoring" },     std::string_view{ "IsValid" },
+	std::string_view{ "PostError" },   std::string_view{ "PostNoMemory" }, std::string_view{ "Version" },
+	std::string_view{ "WireClient" },  std::string_view{ "WireName" },     std::string_view{ "WireResource" },
+	std::string_view{ "WireVersion" },
 };
 
 constexpr bool IsDigit(char character) noexcept
@@ -132,7 +143,12 @@ std::string Parameter(std::string_view wire)
 	return result;
 }
 
-bool IsReservedMember(std::string_view identifier) noexcept
+bool IsReservedProxyMember(std::string_view identifier) noexcept
 {
-	return std::ranges::find(Reserved, identifier) != Reserved.end();
+	return std::ranges::find(ReservedProxy, identifier) != ReservedProxy.end();
+}
+
+bool IsReservedResourceMember(std::string_view identifier) noexcept
+{
+	return std::ranges::find(ReservedResource, identifier) != ReservedResource.end();
 }

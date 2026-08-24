@@ -68,7 +68,7 @@ struct Generated
 	}
 };
 
-Generated Generate(std::span<const std::string_view> paths)
+Generated Generate(std::span<const std::string_view> paths, Direction direction = Direction::Client)
 {
 	Generated generated;
 
@@ -95,7 +95,7 @@ Generated Generate(std::span<const std::string_view> paths)
 	}
 
 	EmitDiagnostic diagnostic;
-	Result<std::vector<EmittedFile>> emitted = Emit(generated.Sources, &diagnostic);
+	Result<std::vector<EmittedFile>> emitted = Emit(generated.Sources, direction, &diagnostic);
 
 	if (!emitted)
 	{
@@ -176,7 +176,7 @@ struct Rejection
 	EmitDiagnostic Detail;
 };
 
-Rejection Reject(std::span<const std::string> documents)
+Rejection Reject(std::span<const std::string> documents, Direction direction = Direction::Client)
 {
 	std::vector<ProtocolSource> sources;
 
@@ -193,7 +193,7 @@ Rejection Reject(std::span<const std::string> documents)
 	}
 
 	Rejection rejection;
-	rejection.Refused = !Emit(sources, &rejection.Detail).has_value();
+	rejection.Refused = !Emit(sources, direction, &rejection.Detail).has_value();
 
 	return rejection;
 }
@@ -522,6 +522,330 @@ GYRO_TEST(Emit, WlDisplayIsEmittedWithoutAListener)
 
 // ---------------------------------------------------------------------------------------------
 // What the emitter refuses.
+
+// --- The server arm ----------------------------------------------------------------------------
+
+GYRO_TEST(Emit, EveryRequestHasASlotInTheDispatchTable)
+{
+	// Decision 2's second claim, counted rather than read. A hole in the table is a null function
+	// pointer libwayland indexes into and aborts on, and an abort here is not one client dying — it is
+	// every client of every user on the machine, at a moment a client chose.
+	const std::string_view paths[] = { WaylandXml, XdgShellXml, LinuxDmabufXml, PresentationTimeXml };
+	const Generated generated = Generate(paths, Direction::Server);
+
+	if (!generated.Note.empty())
+	{
+		GYRO_FAIL(generated.Note);
+		return;
+	}
+
+	std::size_t checked = 0;
+
+	for (const ProtocolSource& source : generated.Sources)
+	{
+		const std::string* const text =
+			generated.Find(std::format("Wayland/Server/{}.cpp", Pascalled(source.Model.Name)));
+		const std::string* const header =
+			generated.Find(std::format("Wayland/Server/{}.h", Pascalled(source.Model.Name)));
+
+		GYRO_REQUIRE(text != nullptr);
+		GYRO_REQUIRE(header != nullptr);
+
+		for (const Interface& interface : source.Model.Interfaces)
+		{
+			// The two libwayland answers itself, which is why they have no table to check.
+			if (interface.Name == "wl_display" || interface.Name == "wl_registry")
+			{
+				continue;
+			}
+
+			const std::string_view table =
+				Region(*text, std::format("constexpr Wire{}Implementation ", Pascalled(interface.Name)), "\n};\n");
+
+			if (table.empty() && !interface.Requests.empty())
+			{
+				GYRO_FAIL(std::format("{} has requests and no table", interface.Name));
+				continue;
+			}
+
+			// One entry per request and nothing else: an entry the protocol does not declare would be
+			// a slot libwayland reads a client's opcode against.
+			GYRO_CHECK_EQ(Occurrences(table, "\n\t&Wire"), interface.Requests.size());
+
+			for (const Message& request : interface.Requests)
+			{
+				// No trailing newline: the last entry's is where the region stops.
+				const std::string slot =
+					std::format("\n\t&Wire{}Request{},", Pascalled(interface.Name), Pascalled(request.Name));
+
+				if (Occurrences(table, slot) != 1)
+				{
+					GYRO_FAIL(std::format("{}.{} has no slot in the table", interface.Name, request.Name));
+				}
+
+				// And the pure virtual it is filled from, so the two lists cannot drift: a request in
+				// the table with no handler method would not compile, and this is the other direction.
+				const std::string handler = std::format("On{}(", Pascalled(request.Name));
+
+				if (Occurrences(*header, std::format("\tvirtual void {}", handler)) +
+				        Occurrences(*header, std::format("Handler* On{}(", Pascalled(request.Name))) ==
+				    0)
+				{
+					GYRO_FAIL(std::format("{}.{} has no pure handler", interface.Name, request.Name));
+				}
+			}
+
+			++checked;
+		}
+	}
+
+	GYRO_CHECK(checked > 20);
+}
+
+GYRO_TEST(Emit, AResourceIsNeverCreatedWithoutItsImplementation)
+{
+	// The first of decision 2's two claims, and the one a wrapper is supposed to make unspellable.
+	// `wl_resource_create` leaves the implementation null; a request arriving in that window aborts
+	// the process. So every call to it in the emitted tree has to sit inside a `Create` that sets one,
+	// and there has to be no other way to reach it.
+	const std::string_view paths[] = { WaylandXml, XdgShellXml, LinuxDmabufXml, PresentationTimeXml };
+	const Generated generated = Generate(paths, Direction::Server);
+
+	if (!generated.Note.empty())
+	{
+		GYRO_FAIL(generated.Note);
+		return;
+	}
+
+	std::size_t created = 0;
+
+	for (const ProtocolSource& source : generated.Sources)
+	{
+		const std::string* const text =
+			generated.Find(std::format("Wayland/Server/{}.cpp", Pascalled(source.Model.Name)));
+		GYRO_REQUIRE(text != nullptr);
+
+		// Every creation is paired, file by file. Counting both across the whole file is what catches
+		// a second creation path being added later without one.
+		GYRO_CHECK_EQ(Occurrences(*text, "wl_resource_create("), Occurrences(*text, "wl_resource_set_implementation("));
+
+		for (const Interface& interface : source.Model.Interfaces)
+		{
+			if (interface.Name == "wl_display" || interface.Name == "wl_registry")
+			{
+				continue;
+			}
+
+			const std::string name = Pascalled(interface.Name);
+			const std::string_view body = Body(*text, std::format("{0} {0}::Create(", name));
+
+			if (body.empty())
+			{
+				GYRO_FAIL(std::format("{} has no typed constructor", interface.Name));
+				continue;
+			}
+
+			GYRO_CHECK_EQ(Occurrences(body, "wl_resource_create("), std::size_t{ 1 });
+			GYRO_CHECK_EQ(Occurrences(body, "wl_resource_set_implementation("), std::size_t{ 1 });
+
+			// Set before the handler is told about the object, and therefore before anything the
+			// handler does could reach back into the connection.
+			GYRO_CHECK(body.find("wl_resource_set_implementation(") < body.find("handler.m_Object ="));
+
+			++created;
+		}
+	}
+
+	GYRO_CHECK(created > 20);
+}
+
+GYRO_TEST(Emit, TheEmittedWireTablesSayWhatTheProtocolSays)
+{
+	// The one part of the output no compiler checks. libwayland demarshals a client's bytes against
+	// these strings, so a wrong one is a request read at the wrong offsets — descriptors landing on
+	// the wrong buffer, and nothing detecting it. Rebuilt here from the model rather than compared
+	// against a fixture, because a fixture only proves the fixture.
+	const std::string_view paths[] = { WaylandXml, XdgShellXml, LinuxDmabufXml };
+	const Generated generated = Generate(paths, Direction::Server);
+
+	if (!generated.Note.empty())
+	{
+		GYRO_FAIL(generated.Note);
+		return;
+	}
+
+	std::size_t checked = 0;
+
+	for (const ProtocolSource& source : generated.Sources)
+	{
+		// The core protocol is in the set so that references out of the other two resolve, and it
+		// emits no tables of its own: libwayland is built with it and exports them, and a second
+		// definition would be a duplicate symbol.
+		if (source.Model.Name == "wayland")
+		{
+			continue;
+		}
+
+		const std::string* const text =
+			generated.Find(std::format("Wayland/Server/{}.cpp", Pascalled(source.Model.Name)));
+		GYRO_REQUIRE(text != nullptr);
+
+		for (const Interface& interface : source.Model.Interfaces)
+		{
+			for (const std::vector<Message>* messages : { &interface.Requests, &interface.Events })
+			{
+				for (const Message& message : *messages)
+				{
+					std::string signature;
+
+					if (message.Since > 1)
+					{
+						signature += std::to_string(message.Since);
+					}
+
+					for (const Argument& argument : message.Arguments)
+					{
+						if (argument.AllowNull)
+						{
+							signature += '?';
+						}
+
+						// Spelled out rather than taken from the first letter of `Name`, which would give
+						// `fixed` and `fd` the same character.
+						switch (argument.Kind)
+						{
+							case ArgumentKind::Int:
+								signature += 'i';
+								break;
+							case ArgumentKind::Uint:
+								signature += 'u';
+								break;
+							case ArgumentKind::Fixed:
+								signature += 'f';
+								break;
+							case ArgumentKind::String:
+								signature += 's';
+								break;
+							case ArgumentKind::Object:
+								signature += 'o';
+								break;
+							case ArgumentKind::NewId:
+								signature += 'n';
+								break;
+							case ArgumentKind::Array:
+								signature += 'a';
+								break;
+							case ArgumentKind::Fd:
+								signature += 'h';
+								break;
+						}
+					}
+
+					if (Occurrences(*text, std::format("{{ \"{}\", \"{}\", ", message.Name, signature)) == 0)
+					{
+						GYRO_FAIL(
+							std::format("{}.{} is not described as \"{}\"", interface.Name, message.Name, signature)
+						);
+					}
+
+					++checked;
+				}
+			}
+		}
+	}
+
+	GYRO_CHECK(checked > 60);
+}
+
+GYRO_TEST(Emit, TheDisplayAndTheRegistryAreLibwaylandsAndStillHaveAName)
+{
+	// Decision 2 leaves both to libwayland, so neither gets a handler or a table. They keep a class,
+	// because `wl_fixes.destroy_registry` takes a `wl_registry` as an ordinary argument and a
+	// generated signature that said `wl_resource*` there would be saying less than the XML did.
+	const std::string_view paths[] = { WaylandXml };
+	const Generated generated = Generate(paths, Direction::Server);
+
+	if (!generated.Note.empty())
+	{
+		GYRO_FAIL(generated.Note);
+		return;
+	}
+
+	const std::string* const header = generated.Find("Wayland/Server/Wayland.h");
+	const std::string* const text = generated.Find("Wayland/Server/Wayland.cpp");
+
+	GYRO_REQUIRE(header != nullptr);
+	GYRO_REQUIRE(text != nullptr);
+
+	GYRO_CHECK(header->find("class WlRegistry\n") != std::string::npos);
+	GYRO_CHECK(header->find("class WlDisplay\n") != std::string::npos);
+
+	// No handler, no binding, no table, and no `Create` — libwayland makes these.
+	GYRO_CHECK(header->find("class WlRegistryHandler\n") == std::string::npos);
+	GYRO_CHECK(header->find("class WlDisplayHandler\n") == std::string::npos);
+	GYRO_CHECK(text->find("WlRegistry WlRegistry::Create(") == std::string::npos);
+	GYRO_CHECK(text->find("WireWlRegistryTable") == std::string::npos);
+
+	// And the argument that made them worth naming.
+	GYRO_CHECK(header->find("OnDestroyRegistry(WlRegistry registry)") != std::string::npos);
+}
+
+GYRO_TEST(Emit, TheUntypedNewIdIsRefusedOnTheArmThatWouldHaveToDispatchIt)
+{
+	// The same protocol, accepted on one arm and refused on the other. A `new_id` with no interface is
+	// three wire values with the type chosen at runtime: the side that *sends* it can name the type as
+	// a template argument, and the side that receives it would have to instantiate a class from a
+	// string. `wl_registry.bind` is the only one in the published protocols, and the server arm never
+	// reaches this because libwayland owns the registry.
+	const std::string documents[] = {
+		Document(
+			"test",
+			"<interface name=\"test_thing\" version=\"1\">\n"
+			"  <request name=\"bind\"><arg name=\"id\" type=\"new_id\"/></request>\n"
+			"</interface>"
+		),
+	};
+
+	GYRO_CHECK(!Reject(documents, Direction::Client).Refused);
+
+	const Rejection refused = Reject(documents, Direction::Server);
+
+	GYRO_CHECK(refused.Refused);
+	GYRO_CHECK_EQ(refused.Detail.Failure, EmitFailure::UntypedEventArgument);
+	GYRO_CHECK(refused.Detail.Message.find("the request test_thing.bind") != std::string::npos);
+}
+
+GYRO_TEST(Emit, AnEventMayNotLandOnAMemberEveryResourceHas)
+{
+	// The mirror of the proxy rule, and the point is that it is a *different* list. An event named
+	// `create` collides with the typed constructor; a request named `create` is fine, because a
+	// request arrives on the handler behind an `On` prefix.
+	const std::string collides[] = {
+		Document(
+			"test",
+			"<interface name=\"test_thing\" version=\"1\">\n"
+			"  <event name=\"create\"/>\n"
+			"</interface>"
+		),
+	};
+
+	const Rejection refused = Reject(collides, Direction::Server);
+
+	GYRO_CHECK(refused.Refused);
+	GYRO_CHECK_EQ(refused.Detail.Failure, EmitFailure::NameCollision);
+	GYRO_CHECK(refused.Detail.Message.find("every generated resource already declares") != std::string::npos);
+
+	const std::string fine[] = {
+		Document(
+			"test",
+			"<interface name=\"test_thing\" version=\"1\">\n"
+			"  <request name=\"create\"/>\n"
+			"</interface>"
+		),
+	};
+
+	GYRO_CHECK(!Reject(fine, Direction::Server).Refused);
+}
 
 GYRO_TEST(Emit, AnInterfaceOutsideTheSetIsNamedRatherThanErased)
 {

@@ -190,6 +190,19 @@ gyro_add_module(Core PORTABLE OBJECT
 		Wake.Test.cpp
 )
 
+# GCC 16 speculatively devirtualizes IClock::Now() at the trace ring's emit site, where this file is
+# the only translation unit with two IClock implementations in scope for it to guess between. It then
+# warns that ManualClock's atomic member overflows the MonotonicClock the test actually built — a body
+# guarded by a vptr check it never reaches. The speculation is what produces the warning, so it is the
+# speculation that is switched off, on the one file rather than in BuildFlags.cmake.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+	set_source_files_properties(
+		"${GYRO_SOURCE_DIR}/Core/Trace.Test.cpp"
+		TARGET_DIRECTORY CoreTests
+		PROPERTIES COMPILE_OPTIONS "-fno-devirtualize-speculatively"
+	)
+endif()
+
 # Header-only, so the tests are the only thing that compiles it. See Docs/Structure.md, both for why
 # Geometry is not part of Core and for what that arrangement makes true.
 gyro_add_module(Geometry PORTABLE
@@ -499,6 +512,30 @@ gyro_add_module(Wire PORTABLE
 # when the panel belongs to somebody else; `viewporter` is scaling without a re-render; and
 # `xdg-decoration` is how gyro says it draws its own, which it does.
 gyro_add_bindings(WaylandProtocols
+	PROTOCOLS
+		wayland
+		stable/xdg-shell/xdg-shell
+		stable/presentation-time/presentation-time
+		stable/linux-dmabuf/linux-dmabuf-v1
+		staging/linux-drm-syncobj/linux-drm-syncobj-v1
+		stable/viewporter/viewporter
+		unstable/xdg-decoration/xdg-decoration-unstable-v1
+)
+
+# The typed server bindings, over libwayland — the other half of decision 2's split, and the wrapper
+# it asks for in exchange for not writing the server codec. A resource cannot be made without its
+# implementation and the dispatch table is generated from the XML, which between them close the only
+# two `wl_abort` sites a client can reach. On a compositor with no VTs, reaching one is the screen
+# going black with nothing to switch to.
+#
+# **A second list rather than the same one**, and today it names the same protocols for a reason worth
+# saying out loud: a nested output is a client of a compositor, so what gyro asks a host for and what
+# gyro's own clients ask gyro for are the same vocabulary seen from opposite ends. The lists are
+# separate because they diverge upward from here and only in one direction — fractional scale, cursor
+# shape, text input and the rest are things gyro will serve and will never ask a host for — and
+# because a protocol added to one has no business regenerating the other.
+gyro_add_bindings(WaylandServerProtocols
+	SERVER
 	PROTOCOLS
 		wayland
 		stable/xdg-shell/xdg-shell
