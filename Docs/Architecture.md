@@ -1895,7 +1895,7 @@ That region is what the glass has not seen, and it is not what the renderer is s
 `AcquireTarget` returns has been round a ring, so it is stale by every frame since it was last drawn as
 well — which is a second region per target, joined with this one at record time and retired where the
 whole output is damaged. See
-[decision 133](Decisions.md#133-damage-is-per-target-as-well-as-per-output-and-the-two-answer-different-questions).
+[decision 134](Decisions.md#134-damage-is-per-target-as-well-as-per-output-and-the-two-answer-different-questions).
 
 **Read it as a fixpoint and not as one pass.** *(Added 2026-08-22.)* The third line names a new
 deadline, and the check runs again against that one, so frames are dropped until the target is a

@@ -100,7 +100,7 @@ struct ShadowFrame
 
 // Whether a projected quad is still a rectangle, and its frame where it is.
 //
-// **This is decision 132's split, and the two cases it separates look nothing alike on screen.** A
+// **This is decision 133's split, and the two cases it separates look nothing alike on screen.** A
 // node *spun* in the plane is a photograph lying at an angle on a desk: still a rectangle, just not
 // square to the screen, and its shadow is not in question — the shape turns and the light does not.
 // A node *tilted out* of the plane is a card flipping over, where perspective makes the near edge
@@ -237,7 +237,7 @@ ShadowFor(const DrawItem& item, const ShadowFrame& frame, PixelSize<DeviceSpace>
 	// none — so what would be shipped meanwhile is whichever answer happened to be easier to write,
 	// which is the way a question gets decided by accident.
 	//
-	// **A node spun in the plane is not that case and is not refused** (decision 132). It is a
+	// **A node spun in the plane is not that case and is not refused** (decision 133). It is a
 	// photograph lying at an angle: the shape turns and the light does not, which is the one answer a
 	// person would accept, and `Rectangular` is what tells the two apart.
 	if (item.Lift.Draws() && !Rectangular(item.Shape))

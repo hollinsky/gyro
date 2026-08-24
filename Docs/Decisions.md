@@ -26,7 +26,7 @@ transition down* — which is the argument for building the motion catalog early
 the type had one caller.
 
 Five entries were settled by going and reading the source an argument rested on — 2, 49, 73, 76,
-and 106 — and a sixth, 131, by going and computing one, which taught the same lesson from the other
+and 106 — and a sixth, 132, by going and computing one, which taught the same lesson from the other
 side: a closed form that is exact in the case you are picturing was wrong by a factor of two in the
 case beside it, and the difference between "slight" and "twice" was one afternoon of arithmetic. Each
 carries that reading in its own text. The rules they taught are in
@@ -9781,7 +9781,7 @@ worst where it reads through most, and nobody would attribute it to elevation.
 
 #### A turned node's shadow is refused rather than guessed
 
-*(Revised 2026-08-23 by [decision 132](#132-a-node-spun-in-the-plane-is-not-a-node-tilted-out-of-it),
+*(Revised 2026-08-23 by [decision 133](#133-a-node-spun-in-the-plane-is-not-a-node-tilted-out-of-it),
 which splits this refusal in two: a node spun in the plane draws, and only one tilted out of it is
 refused. The argument below is unchanged for the tilt and was simply too wide.)*
 
@@ -9802,7 +9802,7 @@ than like a decision.
 
 #### What the closed form gives up
 
-*(Retired 2026-08-23 by [decision 131](#131-the-shadows-coverage-is-exact-the-rectangle-is-closed-form-and-the-corners-are-quadrature),
+*(Retired 2026-08-23 by [decision 132](#132-the-shadows-coverage-is-exact-the-rectangle-is-closed-form-and-the-corners-are-quadrature),
 which replaced the arithmetic this section is about. Kept because the measurement is what forced the
 replacement, and because a distance field read through the normal integral is what every other
 implementation of this ships.)*
@@ -9916,7 +9916,7 @@ is enough to draw a client's shm buffer on a machine with no GPU and is what the
 through. Nobody mints an id yet either: that is the protocol layer's, and the snapshot atlas is the
 second minter, which is why the id space is not `Protocol`'s to own.
 
-### 131. The shadow's coverage is exact: the rectangle is closed form and the corners are quadrature
+### 132. The shadow's coverage is exact: the rectangle is closed form and the corners are quadrature
 
 *(Decided 2026-08-23, on measuring what
 [decision 130](#130-the-shadow-is-drawn-in-device-space-over-an-upright-quad-and-a-turned-one-is-refused)
@@ -9984,7 +9984,7 @@ itself: the shadow is as exact as the buffer it lands in can record, and what is
 That test is also where the error function's approximation, single precision, the premultiply and the
 blend all get checked, none of which the arithmetic above says anything about.
 
-### 132. A node spun in the plane is not a node tilted out of it
+### 133. A node spun in the plane is not a node tilted out of it
 
 *(Decided 2026-08-23, splitting
 [decision 130](#130-the-shadow-is-drawn-in-device-space-over-an-upright-quad-and-a-turned-one-is-refused)'s
@@ -10021,7 +10021,7 @@ reaches the glass, and it costs a black screen for an arrangement whose answer n
 refusal is honest about a question that is open; using one to cover a question that is merely
 unasked is how a renderer accumulates cases nobody remembers were arbitrary.
 
-### 133. Damage is per target as well as per output, and the two answer different questions
+### 134. Damage is per target as well as per output, and the two answer different questions
 
 `AcquireTarget` hands back an image that was on the glass two frames ago. Everything in it outside this
 frame's damage is two frames old, so a composite scissored to *what changed since the last present*

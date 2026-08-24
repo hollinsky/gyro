@@ -223,7 +223,7 @@ struct ShadowConstants
 
 	// The node's own axes in device space, unit length: across in the first two, down in the last two.
 	// The identity for a node square to the screen and a rotation for one spun in the plane, which is
-	// decision 132's half of the refusal — a tilted node never reaches this block at all.
+	// decision 133's half of the refusal — a tilted node never reaches this block at all.
 	float Basis[4]{ 1.0F, 0.0F, 0.0F, 1.0F };
 };
 

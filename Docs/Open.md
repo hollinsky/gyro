@@ -409,7 +409,7 @@ nothing only proves the grep.
   reaches it and it is a transition nobody has written, so this arrives with the first one that turns
   a node rather than before it. **It is the tilt alone**: a node *spun* in the plane is a photograph
   lying at an angle, its shadow falls down the screen like everything else's, and
-  [decision 132](Decisions.md#132-a-node-spun-in-the-plane-is-not-a-node-tilted-out-of-it) draws it.
+  [decision 133](Decisions.md#133-a-node-spun-in-the-plane-is-not-a-node-tilted-out-of-it) draws it.
   What is left open is the card mid-flip, where the node is further from what it falls on at one end
   than the other — and the renderer refuses that rather than drawing one of the two answers, which is
   what keeps this open instead of settled by whichever was easier to write.

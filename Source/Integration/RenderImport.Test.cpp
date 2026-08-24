@@ -1196,7 +1196,7 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 	// flipping card's shadow stretches away from its near edge, and whether it softens across itself,
 	// is a question Docs/Open.md leaves to the first transition that turns a node — so a quad that has
 	// stopped being a rectangle is refused rather than drawn as whichever answer was easier to write.
-	// A perspective weight is what makes this one a tilt rather than a spin, and decision 132 is that
+	// A perspective weight is what makes this one a tilt rather than a spin, and decision 133 is that
 	// the two are different questions.
 	refused[2].Lift = Cast(Elevation::Resting);
 	refused[2].Shape.Weights[1] = 0.8F;
@@ -1238,7 +1238,7 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 		GYRO_CHECK_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &lifted, 1 })).has_value(), true);
 	}
 
-	// **A node spun in the plane draws too, and that is decision 132's whole point.** It is a
+	// **A node spun in the plane draws too, and that is decision 133's whole point.** It is a
 	// photograph lying at an angle rather than a card mid-flip: still a rectangle, so the shape turns,
 	// the light does not, and there is nothing open about it. Refusing this alongside the tilt would
 	// black the screen for an arrangement whose answer nobody disputes.
@@ -1700,7 +1700,7 @@ namespace
 {
 // **The shadow written down a second time, in double precision and by a different rule.**
 //
-// Decision 131 claims the renderer's shadow is exact to a fraction of an eight-bit code point, and a
+// Decision 132 claims the renderer's shadow is exact to a fraction of an eight-bit code point, and a
 // claim like that is only worth what it is checked against. This is the same *decomposition* — an
 // exact separable rectangle less four corner deficits — evaluated with `std::erf` rather than an
 // approximation and with a dense composite Simpson rather than six Gauss-Legendre nodes over two
@@ -1740,7 +1740,7 @@ struct ShadowModel
 		return 0.0;
 	}
 
-	// Simpson over an integrand that is analytic in the angle, which is the same property decision 131
+	// Simpson over an integrand that is analytic in the angle, which is the same property decision 132
 	// leans on — sixty-four intervals is machine precision here and the reference is still a different
 	// rule from the six-node Gauss-Legendre it is checking.
 	constexpr int Intervals = 64;
@@ -1768,7 +1768,7 @@ struct ShadowModel
 // How much light one device pixel loses to this shadow.
 [[nodiscard]] double ReferenceDarkening(double px, double py, const ShadowModel& model)
 {
-	// **The light is taken in device space and the frame afterwards**, which is decision 132: the shape
+	// **The light is taken in device space and the frame afterwards**, which is decision 133: the shape
 	// turns with the node and the displacement does not turn with it.
 	const double offsetX = px - model.CentreX;
 	const double offsetY = py - model.CentreY - model.Offset;
@@ -1803,11 +1803,11 @@ struct ShadowModel
 }
 } // namespace
 
-// **Decision 131's claim, held to a number.** A white field with one lifted node on it, sampled
+// **Decision 132's claim, held to a number.** A white field with one lifted node on it, sampled
 // everywhere the shadow reaches and compared against the model above.
 //
 // Two nodes, and the second is the one that would have gone unnoticed: the first is square to the
-// screen, and the second is spun in the plane, which decision 132 draws rather than refuses. Matching
+// screen, and the second is spun in the plane, which decision 133 draws rather than refuses. Matching
 // one reference in both configurations is what says the shape turned and the light did not — a
 // renderer that swung the light round with the node passes every test that only looks at a node
 // square to the screen.
@@ -1932,7 +1932,7 @@ GYRO_TEST(RenderImport, TheShadowMatchesItsClosedFormToWithinACodePoint)
 		);
 
 		// One code point, which is a quantised eight-bit target's own step: the shadow is as exact as
-		// the buffer it lands in can record. Decision 131's measurement is the claim and this is where
+		// the buffer it lands in can record. Decision 132's measurement is the claim and this is where
 		// it stops being one.
 		GYRO_CHECK(worst <= 1.0);
 	}

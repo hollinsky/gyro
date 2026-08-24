@@ -16,7 +16,7 @@
 // else.
 //
 // **The arithmetic is exact rather than the distance field every compositor reaches for**, and
-// decision 131 carries the measurement that forced it: reading a rounded-rect distance field through
+// decision 132 carries the measurement that forced it: reading a rounded-rect distance field through
 // the normal integral is wrong by eleven to twenty eight-bit code points at a corner, because at a
 // square corner the field reads zero where only a quarter of the neighbourhood is occluded. What is
 // here instead is the separable rectangle, which is exact, minus the four corner deficits, which are
@@ -37,7 +37,7 @@ layout(location = 0) out vec4 Colour;
 // what an eight-bit target can hold.
 const float ShadowSpan = 4.0;
 
-// Six-point Gauss-Legendre on `[-1, 1]`. Six because decision 131 measured it: the integrand is
+// Six-point Gauss-Legendre on `[-1, 1]`. Six because decision 132 measured it: the integrand is
 // analytic in the angle, so the rule converges geometrically, and six nodes over each of two panels
 // is where the error stops being the rule's and starts being the reference's.
 const float ShadowNode[6] =
@@ -63,7 +63,7 @@ float ShadowPhi(float x)
 }
 
 // The signed distance to a rounded rect, negative inside. Used for the mask at the bottom of this
-// file and nowhere in the coverage arithmetic, which is the whole of decision 131.
+// file and nowhere in the coverage arithmetic, which is the whole of decision 132.
 float ShadowField(vec2 point, vec2 extent, float radius)
 {
 	vec2 corner = abs(point) - extent + radius;
@@ -137,7 +137,7 @@ float ShadowDeficit(vec2 point, vec2 extent, float radius, float sigma)
 
 	// Split at forty-five degrees, where the arc stops being mostly vertical and starts being mostly
 	// horizontal. One panel across the whole quarter is enough where the softness is comparable to the
-	// radius and visibly is not where it is much smaller — decision 131 measured twelve code points at
+	// radius and visibly is not where it is much smaller — decision 132 measured twelve code points at
 	// a ratio of twelve, and two panels take that to a thirtieth of one.
 	float middle = clamp(0.78539816, low, high);
 	float edge = ShadowPhi((extent.x - point.x) / sigma);
@@ -174,7 +174,7 @@ void main()
 	vec2 down = shadow.Basis.zw;
 	vec2 offset = gl_FragCoord.xy - shadow.Rect.xy;
 
-	// **The shape turns and the light does not**, which is decision 132 in one subtraction. The
+	// **The shape turns and the light does not**, which is decision 133 in one subtraction. The
 	// displacement is taken in device space, before the point is resolved into the node's own frame —
 	// so a node lying at an angle keeps its shadow falling down the screen, where a displacement
 	// applied inside the frame would swing it round with the node and light a tilted photograph from
