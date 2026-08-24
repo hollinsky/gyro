@@ -24,7 +24,7 @@
 // two* of a motion and never its shape, because
 // [decision 89](../../Docs/Decisions.md#89-a-model-value-is-set-under-a-shared-origin-and-setting-it-is-a-retarget)
 // stamps a retarget with the instant it fell due rather than with now. So the animation renders already
-// in progress by exactly the lateness, which is what `IGym::Advance` is documented to want.
+// in progress by exactly the lateness, which is what `ISceneAuthor::Advance` is documented to want.
 //
 // **Stopping is a sticky flag and a counter nothing drains**, which is deliberate. `Interrupt` in
 // Compositor/Uring.h drains because the ring polls level-triggered every iteration and an eventfd left

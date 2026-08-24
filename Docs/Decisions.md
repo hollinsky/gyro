@@ -9567,7 +9567,7 @@ has no vblank to be late for. What lateness costs here is set by
 [decision 89](#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete):
 a retarget is stamped with the instant it fell due rather than with now, so a wake served late renders
 the motion **already in progress by exactly the lateness** — the first frame or two of an animation,
-never its shape. `IGym::Advance` is documented to want precisely that, because a gym stamping `now`
+never its shape. `ISceneAuthor::Advance` is documented to want precisely that, because a gym stamping `now`
 would hide the lateness it exists to expose.
 
 **`Wake::Kind::Continuous` has no meaning on this side, and the root is where it acquires one.** It

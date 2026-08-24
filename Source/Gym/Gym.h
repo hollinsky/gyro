@@ -9,10 +9,7 @@
 #include <string_view>
 
 #include "Core/Result.h"
-#include "Core/Time.h"
-#include "Core/Wake.h"
-#include "Gym/Textures.h"
-#include "Scene/Store.h"
+#include "Scene/Author.h"
 
 // The scenes gyro authors for itself: a handful of nodes moving under springs, with no protocol
 // behind them.
@@ -209,48 +206,8 @@ static_assert([] {
 	return std::nullopt;
 }
 
-// One scene gyro authors for itself.
-//
-// The two verbs are separate because they run at different rates and answer different questions:
-// `Open` builds a tree and can fail, `Advance` mutates one and cannot. An `Advance` that returned a
-// `Result` would be a failure on the path a loop takes every wake, which is a failure nothing is in a
-// position to do anything about — so the ways a gym can be wrong are all in `Open`, and what
-// `Advance` answers is only when to call it again.
-class IGym
-{
-public:
-	virtual ~IGym() = default;
-
-	IGym(const IGym&) = delete;
-	IGym& operator=(const IGym&) = delete;
-	IGym(IGym&&) = delete;
-	IGym& operator=(IGym&&) = delete;
-
-	[[nodiscard]] virtual std::string_view Name() const noexcept = 0;
-
-	// Author the tree, once, into a store that already carries the output set. Called before the first
-	// `Advance` and never again.
-	//
-	// **The texture space arrives as an argument rather than being held**, on `SceneStore`'s terms and
-	// for the same reason: what a gym owns is a scene, and both of the things it authors that scene
-	// *into* belong to the loop around it. A gym that draws no images ignores it, which is three of the
-	// five and will be most of what a shell authors too.
-	[[nodiscard]] virtual Result<void> Open(SceneStore& scene, ITextures& textures) = 0;
-
-	// Retarget whatever is due at `now`, and answer when the next thing falls due.
-	//
-	// **The origin a retarget is stamped with is the instant it fell due, not `now`.** A wake served
-	// late is decision 89's ordinary case — the motion renders already in progress by exactly the
-	// elapsed amount rather than starting from zero — so lateness costs the first frame or two of an
-	// animation and never its shape, and a gym stamping `now` would hide precisely the lateness it
-	// exists to expose.
-	[[nodiscard]] virtual Wake Advance(SceneStore& scene, ITextures& textures, Instant now) = 0;
-
-protected:
-	IGym() = default;
-};
-
-// The gym a name spells, or an error naming the vocabulary.
-[[nodiscard]] Result<std::unique_ptr<IGym>> MakeGym(std::string_view name);
+// The gym a name spells, or an error naming the vocabulary. A gym is one `ISceneAuthor`
+// ([Scene/Author.h](../Scene/Author.h)); this is the factory for the ones gyro authors for itself.
+[[nodiscard]] Result<std::unique_ptr<ISceneAuthor>> MakeGym(std::string_view name);
 
 [[nodiscard]] std::span<const std::string_view> GymNames();

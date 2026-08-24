@@ -698,7 +698,7 @@ the same reason.
 describes**, and the difference is scope rather than disagreement. That one drains input first,
 demarshals client traffic under a per-connection budget, and imports buffers; none of those have a
 producer yet. What exists is the part underneath all of it that does not change when they arrive, with
-a gym standing where the clients will stand — `IGym`'s two verbs being the shape a shell has anyway.
+a gym standing where the clients will stand — `ISceneAuthor`'s two verbs being the shape a shell has anyway.
 
 **The one number it carries is a poll, and it is there because the return direction has no doorbell.**
 [Decision 83](Decisions.md#83-dispatchs-publication-is-an-event-source) gave the forward channel an

@@ -13,10 +13,10 @@
 #include "Core/Trace.h"
 #include "Core/Wake.h"
 #include "Dispatch/Textures.h"
-#include "Gym/Gym.h"
 #include "Publication/Publisher/Outbox.h"
 #include "Publication/Return.h"
 #include "Publication/Ring.h"
+#include "Scene/Author.h"
 #include "Scene/Output.h"
 #include "Scene/Return.h"
 #include "Scene/Serializer.h"
@@ -37,7 +37,7 @@
 // describes.** That one drains input first, demarshals client traffic under a per-connection budget,
 // and imports buffers. None of those have a producer yet. What is here is the part of that loop which
 // exists below all of it and does not change when they arrive: author, serialise, publish, reclaim.
-// The gym is standing where the clients will stand, and `IGym`'s two verbs are the shape a shell has
+// The gym is standing where the clients will stand, and `ISceneAuthor`'s two verbs are the shape a shell has
 // anyway — author once, retarget what is due, say when to come back.
 //
 // **Nothing here blocks and nothing here waits on the frame thread**, which is
@@ -109,7 +109,7 @@ public:
 	// 87](../../Docs/Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)'s
 	// division. Their *order* is load-bearing: the snapshot's per-output wake and placement runs are
 	// positional, so index `i` here has to be the frame loop's output `i`.
-	[[nodiscard]] Result<void> Open(std::unique_ptr<IGym> author, std::span<const SceneOutput> outputs)
+	[[nodiscard]] Result<void> Open(std::unique_ptr<ISceneAuthor> author, std::span<const SceneOutput> outputs)
 	{
 		if (m_Author)
 		{
@@ -317,7 +317,7 @@ private:
 	// both the watermark and the moment an author has finished giving things up.
 	TextureRegistry m_Textures;
 
-	std::unique_ptr<IGym> m_Author;
+	std::unique_ptr<ISceneAuthor> m_Author;
 
 	std::uint64_t m_Publications = 0;
 	std::uint64_t m_Deferrals = 0;

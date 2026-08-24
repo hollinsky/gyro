@@ -93,7 +93,7 @@ template<typename Write>
 }
 
 // What every gym here has: the instrument, and the authoring of it.
-class LaneGym : public IGym
+class LaneGym : public ISceneAuthor
 {
 protected:
 	[[nodiscard]] Result<void> AuthorScene(SceneStore& scene)
@@ -376,7 +376,7 @@ public:
 // frame is still sampling are three different things to see rather than one crash to bisect — and
 // under a sanitiser the third is not a picture at all, which is the point of doing it here rather than
 // discovering it under a client's window.
-class CardGym final : public IGym
+class CardGym final : public ISceneAuthor
 {
 public:
 	[[nodiscard]] std::string_view Name() const noexcept override { return ::Name(GymKind::Card); }
@@ -561,7 +561,7 @@ private:
 };
 } // namespace
 
-Result<std::unique_ptr<IGym>> MakeGym(std::string_view name)
+Result<std::unique_ptr<ISceneAuthor>> MakeGym(std::string_view name)
 {
 	const std::optional<GymKind> kind = GymNamed(name);
 

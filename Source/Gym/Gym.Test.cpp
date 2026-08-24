@@ -137,7 +137,7 @@ GYRO_TEST(Gym, EveryNameInTheVocabularyConstructs)
 
 	for (const std::string_view name : GymNames())
 	{
-		const Result<std::unique_ptr<IGym>> gym = MakeGym(name);
+		const Result<std::unique_ptr<ISceneAuthor>> gym = MakeGym(name);
 
 		GYRO_REQUIRE(gym);
 		GYRO_REQUIRE(*gym != nullptr);
@@ -150,7 +150,7 @@ GYRO_TEST(Gym, EveryNameInTheVocabularyConstructs)
 
 GYRO_TEST(Gym, AnUnknownNameIsRefusedRatherThanDefaulted)
 {
-	const Result<std::unique_ptr<IGym>> gym = MakeGym("windows");
+	const Result<std::unique_ptr<ISceneAuthor>> gym = MakeGym("windows");
 
 	GYRO_REQUIRE(!gym);
 	GYRO_CHECK_EQ(gym.error().Code(), EINVAL);
@@ -169,7 +169,7 @@ GYRO_TEST(Gym, EveryGymAuthorsAgainstAnOutputAndRefusesWithout)
 		ManualClock clock{ Start };
 		SceneStore bare{ clock };
 
-		const Result<std::unique_ptr<IGym>> gym = MakeGym(name);
+		const Result<std::unique_ptr<ISceneAuthor>> gym = MakeGym(name);
 
 		GYRO_REQUIRE(gym);
 
@@ -191,7 +191,7 @@ GYRO_TEST(Gym, ThePerpetualGymsNeverAnswerSettled)
 	{
 		Fixture fixture;
 
-		const Result<std::unique_ptr<IGym>> gym = MakeGym(Name(kind));
+		const Result<std::unique_ptr<ISceneAuthor>> gym = MakeGym(Name(kind));
 
 		GYRO_REQUIRE(gym);
 		GYRO_REQUIRE((*gym)->Open(fixture.Store, textures));
@@ -237,7 +237,7 @@ GYRO_TEST(Gym, TheSettlingGymAuthorsOnceAndThenAsksForNothing)
 
 	Fixture fixture;
 
-	const Result<std::unique_ptr<IGym>> gym = MakeGym(Name(GymKind::Settle));
+	const Result<std::unique_ptr<ISceneAuthor>> gym = MakeGym(Name(GymKind::Settle));
 
 	GYRO_REQUIRE(gym);
 	GYRO_REQUIRE((*gym)->Open(fixture.Store, textures));
@@ -265,7 +265,7 @@ GYRO_TEST(Gym, TheCardGymSwapsItsBufferAndGivesUpTheOneItReplaced)
 	CountingTextures textures;
 	Fixture fixture;
 
-	const Result<std::unique_ptr<IGym>> gym = MakeGym(Name(GymKind::Card));
+	const Result<std::unique_ptr<ISceneAuthor>> gym = MakeGym(Name(GymKind::Card));
 
 	GYRO_REQUIRE(gym);
 	GYRO_REQUIRE((*gym)->Open(fixture.Store, textures));
@@ -321,7 +321,7 @@ GYRO_TEST(Gym, ARetargetIsStampedWithTheInstantItFellDueRatherThanTheWakeItWasSe
 
 	Fixture fixture;
 
-	const Result<std::unique_ptr<IGym>> gym = MakeGym(Name(GymKind::Lanes));
+	const Result<std::unique_ptr<ISceneAuthor>> gym = MakeGym(Name(GymKind::Lanes));
 
 	GYRO_REQUIRE(gym);
 	GYRO_REQUIRE((*gym)->Open(fixture.Store, textures));

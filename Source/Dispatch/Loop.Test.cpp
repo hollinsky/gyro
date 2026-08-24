@@ -64,7 +64,7 @@ struct Fixture
 
 	[[nodiscard]] Result<void> Open(std::string_view gym)
 	{
-		Result<std::unique_ptr<IGym>> author = MakeGym(gym);
+		Result<std::unique_ptr<ISceneAuthor>> author = MakeGym(gym);
 
 		if (!author)
 		{
@@ -136,7 +136,7 @@ struct ImportingFixture
 
 	[[nodiscard]] Result<void> Open()
 	{
-		Result<std::unique_ptr<IGym>> author = MakeGym("card");
+		Result<std::unique_ptr<ISceneAuthor>> author = MakeGym("card");
 
 		if (!author)
 		{
@@ -202,7 +202,7 @@ GYRO_TEST(DispatchLoop, OpenRefusesAnAuthorlessOrOutputlessScene)
 	// publishes a wake schedule of length zero, which decision 84 makes *no* information rather than
 	// partial information — so the frame thread folds to idle with a scene nobody ever sees.
 	{
-		Result<std::unique_ptr<IGym>> author = MakeGym("lanes");
+		Result<std::unique_ptr<ISceneAuthor>> author = MakeGym("lanes");
 
 		GYRO_REQUIRE(author);
 		GYRO_CHECK_EQ(fixture.Loop.Open(std::move(*author), {}).error().Code(), EINVAL);
@@ -213,7 +213,7 @@ GYRO_TEST(DispatchLoop, OpenRefusesAnAuthorlessOrOutputlessScene)
 	// And a second author is refused rather than replacing the first, because the store it would author
 	// into already holds the first one's tree.
 	{
-		Result<std::unique_ptr<IGym>> second = MakeGym("settle");
+		Result<std::unique_ptr<ISceneAuthor>> second = MakeGym("settle");
 
 		GYRO_REQUIRE(second);
 		GYRO_CHECK_EQ(fixture.Loop.Open(std::move(*second), outputs).error().Code(), EEXIST);

@@ -1264,7 +1264,7 @@ private:
 			spdlog::warn("no CPU composite can draw it, so this run will write no frames at all");
 		}
 
-		Result<std::unique_ptr<IGym>> author = MakeGym(Name(gym));
+		Result<std::unique_ptr<ISceneAuthor>> author = MakeGym(Name(gym));
 
 		if (!author)
 		{
