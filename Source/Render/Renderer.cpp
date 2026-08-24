@@ -460,6 +460,29 @@ VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device, Vulkan
 		return;
 	}
 
+	// **Created only where the device said the family can timestamp, and a failure here is not fatal.**
+	// The renderer's job is to draw; measuring what it cost is what lets the frame loop schedule it
+	// well, and a machine that cannot report one still wants a desktop. So this leaves the pool null
+	// and `CollectCosts` answers nothing, which is the same state a device with no timestamp support
+	// is in — one path rather than two.
+	if (device.Description().MeasuresGpuTime())
+	{
+		const VkQueryPoolCreateInfo queryInfo{ .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+			                                   .pNext = nullptr,
+			                                   .flags = 0,
+			                                   .queryType = VK_QUERY_TYPE_TIMESTAMP,
+			                                   .queryCount = 2 * MaxRenderTargets,
+			                                   .pipelineStatistics = 0 };
+
+		if (Result<void> created =
+		        Check(vkCreateQueryPool(device.Handle(), &queryInfo, nullptr, &m_Queries), "vkCreateQueryPool");
+		    !created)
+		{
+			spdlog::warn("no GPU cost measurement on this device: {}", created.error().Context());
+			m_Queries = VK_NULL_HANDLE;
+		}
+	}
+
 	// Exportable only where the device said it could be. Asking unconditionally is what fails on
 	// lavapipe — `VK_ERROR_INVALID_EXTERNAL_HANDLE` from `vkCreateSemaphore`, not from the export —
 	// and a renderer that aborted there would take the floor tier out entirely. Decision 108.
@@ -1074,6 +1097,17 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		return std::unexpected{ begun.error() };
 	}
 
+	// **The reset is recorded rather than performed from the host, and that is one fewer device
+	// feature to enable.** `vkResetQueryPool` needs `hostQueryReset`, which this device does not ask
+	// for; `vkCmdResetQueryPool` is core and costs nothing here, because the pair being reset belongs
+	// to this target and the `LastSubmit` poll above has already established that its previous
+	// submission has landed.
+	if (m_Queries != VK_NULL_HANDLE)
+	{
+		vkCmdResetQueryPool(command, m_Queries, 2 * request.Target, 2);
+		vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_Queries, 2 * request.Target);
+	}
+
 	const std::uint32_t family = m_Device->QueueFamily();
 	const VkImageMemoryBarrier acquire =
 		Transfer(slot.Image, VK_QUEUE_FAMILY_FOREIGN_EXT, family, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
@@ -1315,6 +1349,14 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		&release
 	);
 
+	// After the release barrier rather than before it, so that the span covers everything this
+	// submission asks the GPU to do — the handback to `VK_QUEUE_FAMILY_FOREIGN_EXT` included, since a
+	// presenter cannot read the target until it has happened.
+	if (m_Queries != VK_NULL_HANDLE)
+	{
+		vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_Queries, 2 * request.Target + 1);
+	}
+
 	if (Result<void> ended = Check(vkEndCommandBuffer(command), "vkEndCommandBuffer"); !ended)
 	{
 		return std::unexpected{ ended.error() };
@@ -1358,6 +1400,14 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 	}
 
 	slot.LastSubmit = value;
+
+	// Only after the submit succeeded. A refused submission wrote no timestamps, and claiming one is
+	// pending would leave a pair the next record resets while `CollectCosts` is still expecting it.
+	if (m_Queries != VK_NULL_HANDLE)
+	{
+		m_Pending[request.Target] =
+			PendingCost{ .Submit = value, .Generation = request.CostGeneration, .Mode = request.Mode };
+	}
 
 	// **Decision 108 in five lines.** A device that cannot export a timeline has no descriptor to put
 	// in a `SyncPoint`, and an invalid one there means *nothing to wait for* — which would be a lie
@@ -2117,9 +2167,84 @@ bool VulkanRenderer::IsComplete(SyncPoint point) const
 	return Reached(point.Value);
 }
 
-std::size_t VulkanRenderer::CollectCosts(std::span<GpuCost>)
+std::size_t VulkanRenderer::CollectCosts(std::span<GpuCost> into)
 {
-	return 0;
+	if (m_Queries == VK_NULL_HANDLE || into.empty())
+	{
+		return 0;
+	}
+
+	// Oldest first, which the seam asks for and the storage does not give: the pending set is indexed
+	// by target, and a target index says nothing about submission order. Insertion sort over at most
+	// eight entries, for `OrderByDeadline`'s reasons — the set is tiny, fixed and nearly ordered, and
+	// nothing inside the frame section may allocate a comparator's scratch.
+	//
+	// The order also decides what a short `into` leaves behind, and what it leaves is the newest —
+	// which stay pending and arrive on the next iteration rather than being lost, because a pair is
+	// only ever reset by a fresh record into the target that owns it.
+	std::array<std::uint8_t, MaxRenderTargets> order{};
+	std::size_t ready = 0;
+
+	for (std::uint32_t target = 0; target < MaxRenderTargets; ++target)
+	{
+		const PendingCost& pending = m_Pending[target];
+
+		// The timeline before the query pool. A submission the queue has not signalled cannot have
+		// written its closing timestamp, so this answers the common case without entering the driver
+		// at all — and it is the same poll `IsComplete` is, for the same reason.
+		if (pending.Submit == 0 || !Reached(pending.Submit))
+		{
+			continue;
+		}
+
+		std::size_t position = ready;
+
+		while (position > 0 && m_Pending[order[position - 1]].Submit > pending.Submit)
+		{
+			order[position] = order[position - 1];
+			--position;
+		}
+
+		order[position] = static_cast<std::uint8_t>(target);
+		++ready;
+	}
+
+	std::size_t written = 0;
+
+	for (std::size_t index = 0; index < ready && written < into.size(); ++index)
+	{
+		const std::uint32_t target = order[index];
+		std::array<std::uint64_t, 2> stamps{};
+
+		// No `VK_QUERY_RESULT_WAIT_BIT`. The timeline above says the work is done, so this is expected
+		// to be available every time; `VK_NOT_READY` is nonetheless a legal answer, and the response to
+		// it is to leave the sample pending rather than to file a value the driver did not write.
+		const VkResult result = vkGetQueryPoolResults(
+			m_Device->Handle(),
+			m_Queries,
+			2 * target,
+			2,
+			stamps.size() * sizeof(std::uint64_t),
+			stamps.data(),
+			sizeof(std::uint64_t),
+			VK_QUERY_RESULT_64_BIT
+		);
+
+		if (result != VK_SUCCESS)
+		{
+			continue;
+		}
+
+		const PendingCost& pending = m_Pending[target];
+		into[written] = GpuCost{ .Cost = m_Device->Description().TimestampSpan(stamps[0], stamps[1]),
+			                     .Generation = pending.Generation,
+			                     .Mode = pending.Mode };
+		++written;
+
+		m_Pending[target] = PendingCost{};
+	}
+
+	return written;
 }
 
 void VulkanRenderer::Destroy() noexcept
@@ -2130,6 +2255,14 @@ void VulkanRenderer::Destroy() noexcept
 	}
 
 	m_Pipeline.Destroy();
+
+	if (m_Queries != VK_NULL_HANDLE)
+	{
+		vkDestroyQueryPool(m_Device->Handle(), m_Queries, nullptr);
+		m_Queries = VK_NULL_HANDLE;
+	}
+
+	m_Pending = {};
 
 	m_TimelineFd = Fd{};
 

@@ -9,6 +9,7 @@
 
 #include "Core/Fd.h"
 #include "Core/Result.h"
+#include "Core/Time.h"
 #include "Geometry/Space.h"
 #include "Render/Vulkan.h"
 #include "Seam/RenderTarget.h"
@@ -92,6 +93,50 @@ struct DeviceDescription
 	// dmabufs and refuses mapped buffers, which Render/Textures.h states as a named refusal rather
 	// than working around. Every current Mesa driver and both proprietary ones have it.
 	bool CopiesFromHost = false;
+
+	// The GPU's own clock, as the two numbers a timestamp query has to be read through: how many
+	// nanoseconds one tick is, and how many of a query's sixty-four bits actually carry a value.
+	//
+	// **Both are needed and neither is a formality.** The period is a `float` and is not an integer
+	// on real hardware — Tiger Lake's is 52.083 ns, a 19.2 MHz counter — so a tick count is not a
+	// nanosecond count and the conversion cannot be elided. The valid bits are the half that is easy
+	// to skip and expensive to skip: the same device reports thirty-six, which is a counter that
+	// **wraps every fifty-nine minutes**. A plain subtraction across that wrap yields an hour-long
+	// frame, and Frame/Budget.h's mark is a maximum over a window, so one such sample holds an output
+	// at decision 35's floor tier for the next two hundred and fifty-six frames. `TimestampSpan`
+	// below is where both are applied, so that no caller has to remember either.
+	//
+	// **Zero valid bits means this device cannot measure GPU time at all**, which is a report rather
+	// than a defect: `IRenderer::CollectCosts` then returns nothing forever, exactly as `Blit` does,
+	// and `Budget` schedules on the CPU half of `C` alone.
+	float TimestampPeriod = 0.0F;
+	std::uint32_t TimestampValidBits = 0;
+
+	// Whether a timestamp taken on this device's queue means anything.
+	[[nodiscard]] constexpr bool MeasuresGpuTime() const noexcept
+	{
+		return TimestampValidBits != 0 && TimestampPeriod > 0.0F;
+	}
+
+	// The elapsed time between two raw timestamp query results, wrap included.
+	//
+	// **The subtraction is modular and that is the whole point.** Masking each value to the valid
+	// bits and subtracting in that width is correct across the counter's wrap for any span shorter
+	// than the counter's own period — which a composite is by five orders of magnitude — so the
+	// hour-long frame described above cannot be produced rather than being filtered out afterwards.
+	[[nodiscard]] constexpr Duration TimestampSpan(std::uint64_t begin, std::uint64_t end) const noexcept
+	{
+		if (!MeasuresGpuTime())
+		{
+			return Duration::zero();
+		}
+
+		const std::uint64_t mask =
+			TimestampValidBits >= 64 ? ~std::uint64_t{ 0 } : ((std::uint64_t{ 1 } << TimestampValidBits) - 1);
+		const std::uint64_t ticks = (end - begin) & mask;
+
+		return Duration{ static_cast<std::int64_t>(static_cast<double>(ticks) * static_cast<double>(TimestampPeriod)) };
+	}
 
 	[[nodiscard]] std::string_view DeviceName() const noexcept { return { Name.data() }; }
 
@@ -455,7 +500,7 @@ struct std::formatter<DeviceDescription>
 	{
 		return std::format_to(
 			context.out(),
-			"{} [{}] api {}.{}.{} {} {} {}",
+			"{} [{}] api {}.{}.{} {} {} {} {}",
 			description.DeviceName(),
 			description.DriverName(),
 			VK_API_VERSION_MAJOR(description.ApiVersion),
@@ -463,7 +508,8 @@ struct std::formatter<DeviceDescription>
 			VK_API_VERSION_PATCH(description.ApiVersion),
 			description.IsSoftware() ? "software" : "hardware",
 			description.ExportsTimeline ? "exports" : "no-export",
-			description.CopiesFromHost ? "host-copy" : "no-host-copy"
+			description.CopiesFromHost ? "host-copy" : "no-host-copy",
+			description.MeasuresGpuTime() ? "gpu-timed" : "no-gpu-time"
 		);
 	}
 };
@@ -490,3 +536,38 @@ static_assert(std::is_nothrow_move_constructible_v<ExportedTimeline>);
 static_assert(!DeviceDescription{}.IsSoftware(), "Unknown is not software");
 static_assert(!DeviceDescription{}.ExportsTimeline);
 static_assert(!DeviceDescription{}.CopiesFromHost);
+static_assert(!DeviceDescription{}.MeasuresGpuTime(), "A device nobody has described measures nothing");
+static_assert(DeviceDescription{}.TimestampSpan(0, 1000) == Duration::zero());
+
+// Tiger Lake's numbers, which is the machine this was measured on: a 19.2 MHz counter reported
+// through thirty-six valid bits.
+namespace Detail
+{
+inline constexpr DeviceDescription TigerLake{ .TimestampPeriod = 52.083332F, .TimestampValidBits = 36 };
+} // namespace Detail
+
+// A tick is not a nanosecond, and the conversion is the whole reason the period is carried: 19200
+// ticks of a 19.2 MHz counter is a millisecond rather than the twenty microseconds a raw count would
+// read as. Bounded rather than equal because the period is a `float` and 52.083332 times 19200 is not
+// exactly a million — which is itself the reason the conversion happens in `double`.
+static_assert(Detail::TigerLake.MeasuresGpuTime());
+static_assert(
+	Detail::TigerLake.TimestampSpan(1000, 1000 + 19200) > std::chrono::microseconds{ 999 } &&
+	Detail::TigerLake.TimestampSpan(1000, 1000 + 19200) <= std::chrono::microseconds{ 1000 }
+);
+
+// **The one a bare subtraction gets wrong.** A composite that straddles the counter's wrap reads as
+// a closing timestamp *below* its opening one, and the unmasked difference is the counter's whole
+// period — an hour-long frame, filed into a mark that is a maximum over the next two hundred and
+// fifty-six frames. Masked, it is the microsecond it actually was.
+static_assert(
+	Detail::TigerLake.TimestampSpan((std::uint64_t{ 1 } << 36) - 10, 9) == std::chrono::nanoseconds{ 989 },
+	"A frame that straddles the timestamp counter's wrap costs what it cost"
+);
+
+// Sixty-four valid bits is the other end of the same arithmetic, and the shift that would be
+// undefined there is why the mask is a branch rather than an expression.
+static_assert(
+	DeviceDescription{ .TimestampPeriod = 1.0F, .TimestampValidBits = 64 }.TimestampSpan(5, 105) ==
+	std::chrono::nanoseconds{ 100 }
+);

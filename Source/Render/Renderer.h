@@ -128,14 +128,24 @@ public:
 
 	[[nodiscard]] bool IsComplete(SyncPoint point) const override;
 
-	// Nothing yet, and this is a gap rather than a floor.
+	// Decision 29's `C`, GPU half: every submission whose timestamps have resolved since the last
+	// call, oldest first.
 	//
-	// `SimulatedRenderer` and `Blit` return zero because their work has no second device to cost;
-	// this one has a real queue whose occupancy is exactly what decision 29's `C` wants, and
-	// measuring it means a timestamp query pool written at submission and resolved some frames
-	// later. Until that lands, `Budget` sees the CPU half of `C` and nothing else — which understates
-	// the composite on an accelerated device and is very nearly right on the floor tier, where the
-	// wait below folds the GPU half into the CPU figure anyway.
+	// **A poll and never a wait, twice over.** The timeline is asked first — a submission the queue
+	// has not signalled cannot have written its second timestamp — and only then is the query pool
+	// read, without `VK_QUERY_RESULT_WAIT_BIT`. Both are the reason `IsComplete` is a poll: a block
+	// here would put the GPU's schedule on the `SCHED_FIFO` frame thread.
+	//
+	// **What the pair measures is elapsed GPU time, not gyro's own occupancy.** The opening timestamp
+	// is written when the GPU *reaches* this command buffer, so time spent queued behind another
+	// client's batch is already outside the bracket; what remains inside it is genuine mid-batch
+	// preemption, which inflates the figure with work that is not gyro's. Vulkan exposes no counter
+	// that separates the two — `VK_KHR_performance_query` is not present on the Intel driver this was
+	// measured against — so elapsed is what there is, and it is also what the deadline cares about:
+	// a frame is not on glass until it is on glass, whoever the GPU spent the interval serving.
+	//
+	// Zero forever on a device whose graphics family cannot timestamp, which is the same honest
+	// report `Blit` makes rather than a stub.
 	[[nodiscard]] std::size_t CollectCosts(std::span<GpuCost> into) override;
 
 	// Render/Textures.h's half, answered on the dispatch thread while this thread composites.
@@ -198,6 +208,28 @@ private:
 		// here would put the GPU's schedule on the `SCHED_FIFO` thread — which is the inversion
 		// Seam/Renderer.h's `IsComplete` is a poll to avoid.
 		std::uint64_t LastSubmit = 0;
+	};
+
+	// One submission's GPU cost, between the frame that wrote the timestamps and the iteration that
+	// reads them back.
+	//
+	// **Held per target rather than in a queue of its own, because the target already bounds it.**
+	// `LastSubmit` above refuses a second record into a target whose first has not landed, so a
+	// target carries at most one outstanding submission and a query pair per target can never be
+	// contended. That is also what lets the pool be indexed by target instead of by a cursor two
+	// structures would have to keep in agreement.
+	//
+	// The mode and the generation are copied out of the request rather than looked up at collection,
+	// because by then this renderer has drawn other frames in other modes against an output that may
+	// have been reconfigured underneath both — which is the whole of what `GpuCost` carries them for.
+	struct PendingCost
+	{
+		// The timeline value this submission signals, and zero where the target has nothing
+		// outstanding. Zero is never a real submission value: `Record` increments before it submits.
+		std::uint64_t Submit = 0;
+
+		std::uint32_t Generation = 0;
+		RenderMode Mode = RenderMode::Planned;
 	};
 
 	[[nodiscard]] Result<void> Import(const RenderTarget& target, ColorState output, Slot& slot);
@@ -337,6 +369,12 @@ private:
 
 	VkCommandPool m_Pool = VK_NULL_HANDLE;
 	std::array<VkCommandBuffer, MaxRenderTargets> m_Commands{};
+
+	// Two queries per target — the frame's opening and closing timestamp — so target `n` owns
+	// `2n` and `2n + 1`. Null on a device that cannot timestamp, which is what makes `CollectCosts`
+	// answer nothing there rather than branching on a capability at every use.
+	VkQueryPool m_Queries = VK_NULL_HANDLE;
+	std::array<PendingCost, MaxRenderTargets> m_Pending{};
 
 	// Built at construction and populated per format at `BindTargets`, so that nothing inside a
 	// recording ever creates one — decision 62's *no frame blocks on compilation*, holding at the one

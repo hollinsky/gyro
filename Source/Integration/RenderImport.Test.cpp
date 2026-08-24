@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -14,6 +15,7 @@
 #include <print>
 #include <span>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -184,12 +186,16 @@ private:
 	std::uint32_t target,
 	const Region<DeviceSpace>& damage = {},
 	std::span<const DrawItem> items = {},
-	RenderMode mode = RenderMode::Planned
+	RenderMode mode = RenderMode::Planned,
+	std::uint32_t generation = 0
 )
 {
-	return RecordRequest{
-		.Target = target, .Mode = mode, .Quality = Tier::High, .CostGeneration = 0, .Damage = damage, .Items = items
-	};
+	return RecordRequest{ .Target = target,
+		                  .Mode = mode,
+		                  .Quality = Tier::High,
+		                  .CostGeneration = generation,
+		                  .Damage = damage,
+		                  .Items = items };
 }
 
 // How many descriptors this process holds. Counted from `/proc` rather than tracked, because what is
@@ -505,6 +511,75 @@ void CheckTheTwoPathsAgree(Fixture& fixture, std::string_view label)
 
 	GYRO_CHECK(difference.Agrees());
 }
+// One frame's worth of decision 29's `C`, GPU half, checked the way the frame loop reads it.
+//
+// **The mode and the generation are the assertions that carry weight.** Neither is knowable at
+// collection time — by then the renderer may have drawn other frames in other modes against an
+// output reconfigured underneath both — so `GpuCost` carries them from the request, and a renderer
+// that filled them in from its current state rather than from the submission would pass every
+// timing assertion here and quietly file a floor frame's cost against the planned mark.
+void CheckTheGpuCostIsReported(Fixture& fixture)
+{
+	GYRO_REQUIRE(fixture.Renderer().BindTargets(fixture.Output().Targets(), ColorState::Srgb()).has_value());
+
+	const std::optional<std::uint32_t> acquired = fixture.Output().AcquireTarget();
+	GYRO_REQUIRE(acquired.has_value());
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	static constexpr std::uint32_t Generation = 7;
+	const Result<Submission> submission =
+		fixture.Renderer().Record(Composite(*acquired, damage, {}, RenderMode::Floor, Generation));
+	GYRO_REQUIRE_EQ(submission.has_value(), true);
+
+	// Polled rather than waited on, which is what the frame loop does with this — and bounded, so a
+	// driver that never resolves a query fails the test instead of hanging the suite.
+	std::array<GpuCost, 4> costs{};
+	std::size_t collected = 0;
+
+	for (int attempt = 0; attempt < 2000 && collected == 0; ++attempt)
+	{
+		collected = fixture.Renderer().CollectCosts(costs);
+
+		if (collected == 0)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds{ 1 });
+		}
+	}
+
+	// A device whose graphics family cannot timestamp reports nothing forever, which is the same
+	// honest answer `Blit` gives rather than a stub — so what is asserted is the implication and not
+	// the answer.
+	if (!fixture.Device().Description().MeasuresGpuTime())
+	{
+		GYRO_CHECK_EQ(collected, std::size_t{ 0 });
+
+		return;
+	}
+
+	GYRO_REQUIRE_EQ(collected, std::size_t{ 1 });
+
+	// Printed because the number is the thing a reader wants and no assertion can state: a composite
+	// this size should read as microseconds, and a figure fifty-two times too small is a tick count
+	// that never met the period.
+	std::println("  gpu cost {}", costs[0].Cost);
+
+	GYRO_CHECK_EQ(costs[0].Generation, Generation);
+	GYRO_CHECK(costs[0].Mode == RenderMode::Floor);
+	GYRO_CHECK(costs[0].Cost > Duration::zero());
+
+	// **The upper bound is the assertion that earns its place.** A composite of this size is
+	// microseconds on any device that has one; what a whole second catches is the failure that has
+	// nothing to do with speed — a raw subtraction across a timestamp counter narrower than sixty-four
+	// bits, which on the Intel part below wraps every fifty-nine minutes and would yield an hour-long
+	// frame, held as the mark for the next window's worth of frames.
+	GYRO_CHECK(costs[0].Cost < std::chrono::seconds{ 1 });
+
+	// Taken once. A sample filed twice is a mark that cannot come back down for a window.
+	GYRO_CHECK_EQ(fixture.Renderer().CollectCosts(costs), std::size_t{ 0 });
+}
+
 } // namespace
 
 // The whole path, in one test: allocate, import, draw the damage, read the bytes back.
@@ -1798,11 +1873,39 @@ GYRO_TEST(RenderImport, SyncPointsMatchWhatTheDeviceCanExport)
 	GYRO_CHECK(fixture->Renderer().IsComplete(submission->Point));
 	GYRO_CHECK(fixture->Renderer().IsComplete(SyncPoint{ RawFd{ 0 }, 99999 }));
 
-	// The GPU half of `C` is not measured yet, and a stub that invented one would be worse than a
-	// gap. Frame/Budget.h reads what it is given.
-	std::array<GpuCost, 4> costs{};
-	GYRO_CHECK_EQ(fixture->Renderer().CollectCosts(costs), std::size_t{ 0 });
 	GYRO_CHECK(submission->RecordCost >= Duration::zero());
+}
+
+GYRO_TEST(RenderImport, AFrameReportsWhatItCostTheGpu)
+{
+	std::optional<Fixture> fixture = Available("AFrameReportsWhatItCostTheGpu");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	CheckTheGpuCostIsReported(*fixture);
+}
+
+// **The same claim on a real driver, and here the numbers are the point rather than the plumbing.**
+// lavapipe reports a one-nanosecond tick through all sixty-four bits, which is the one configuration
+// where reading a timestamp wrong still gives the right answer. A GPU does not: the Intel part this
+// was written against ticks every 52.083 nanoseconds and reports thirty-six valid bits, so a raw
+// count is off by a factor of fifty-two and a raw subtraction is off by an hour once an hour. This is
+// the only test that can tell.
+GYRO_TEST(RenderImport, AFrameReportsWhatItCostTheGpuOnHardware)
+{
+	std::optional<Fixture> fixture = Available("AFrameReportsWhatItCostTheGpuOnHardware", DeviceClass::Hardware);
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	std::println("  {}", fixture->Device().Description());
+
+	CheckTheGpuCostIsReported(*fixture);
 }
 
 // The other side of decision 108, on a machine that has one.

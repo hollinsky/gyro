@@ -188,7 +188,26 @@ constexpr std::array<const char*, 4> RequiredExtensions{
 	return (properties.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT) != 0;
 }
 
-void Describe(VkPhysicalDevice device, DeviceDescription& into) noexcept
+// How many bits of a timestamp query taken on this family carry a value. Zero where the family
+// cannot timestamp at all, which is a real answer rather than a failure: llvmpipe reports sixty-four
+// and a graphics family with none is a device whose GPU costs are simply not measurable.
+[[nodiscard]] std::uint32_t QueryTimestampBits(VkPhysicalDevice device, std::uint32_t family) noexcept
+{
+	std::uint32_t count = 0;
+	vkGetPhysicalDeviceQueueFamilyProperties(device, &count, nullptr);
+
+	if (family >= count)
+	{
+		return 0;
+	}
+
+	std::vector<VkQueueFamilyProperties> families(count);
+	vkGetPhysicalDeviceQueueFamilyProperties(device, &count, families.data());
+
+	return families[family].timestampValidBits;
+}
+
+void Describe(VkPhysicalDevice device, std::uint32_t family, DeviceDescription& into) noexcept
 {
 	VkPhysicalDeviceDriverProperties driver{};
 	driver.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
@@ -206,6 +225,8 @@ void Describe(VkPhysicalDevice device, DeviceDescription& into) noexcept
 	into.ApiVersion = properties.properties.apiVersion;
 	into.ExportsTimeline = QueryTimelineExport(device);
 	into.CopiesFromHost = QueryHostImageCopy(device);
+	into.TimestampPeriod = properties.properties.limits.timestampPeriod;
+	into.TimestampValidBits = QueryTimestampBits(device, family);
 }
 } // namespace
 
@@ -308,12 +329,16 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 	}
 
 	device.m_Physical = chosen;
-	Describe(chosen, device.m_Description);
 
 	if (!FindGraphicsQueue(chosen, device.m_QueueFamily))
 	{
 		return Failure(ENODEV, "the chosen Vulkan device has no graphics queue");
 	}
+
+	// After the family is known, not before: `timestampValidBits` is a property of the queue family
+	// rather than of the device, and it is the half of the timestamp pair that decides whether this
+	// renderer reports a GPU cost at all.
+	Describe(chosen, device.m_QueueFamily, device.m_Description);
 
 	const float priority = 1.0F;
 	const VkDeviceQueueCreateInfo queueInfo{ .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
