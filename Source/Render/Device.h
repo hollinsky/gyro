@@ -144,6 +144,16 @@ struct DeviceDescription
 	// reporting a zero clock, which is honest rather than wrong.
 	std::int64_t PrimaryMinor = -1;
 
+	// The render node's minor, or -1 where the same extension did not answer for it.
+	//
+	// **A second minor rather than the primary one plus a hundred and twenty-eight**, which is the
+	// arithmetic everybody does and which stops being true on a machine with enough devices to run the
+	// minors together. What wants it is decision 142's other half: every `drm_syncobj` ioctl is
+	// `DRM_RENDER_ALLOW`, so Render/Deadline.h states a frame's deadline through a node it opens
+	// without asking for master — which is a thing gyro holds on the primary node and must not risk
+	// taking twice.
+	std::int64_t RenderMinor = -1;
+
 	// Whether a timestamp taken on this device's queue means anything.
 	[[nodiscard]] constexpr bool MeasuresGpuTime() const noexcept
 	{

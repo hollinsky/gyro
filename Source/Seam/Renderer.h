@@ -397,6 +397,26 @@ struct RecordRequest
 	// Frame/Budget.h's `ObserveGpu`.
 	std::uint32_t CostGeneration = 0;
 
+	// When this frame's pixels have to be finished by, for a renderer that can tell the driver.
+	//
+	// **Decision 142: a frequency governor measures occupancy, and a frame-deadline workload is
+	// defined by not being occupancy-bound — so the better gyro is doing, the less clock the kernel
+	// grants it.** What a person sees is blur and shadow quality stepping up and down for no reason on
+	// a machine that could hold the top tier at a third of its capacity. The deadline is the one thing
+	// gyro knows that no occupancy measurement contains, so it travels on the request that will be
+	// submitted, and Render/Deadline.h is what says it.
+	//
+	// **It is the latch instant rather than the vblank, because what has to be finished is the fence
+	// and not the scanout.** `FrameClock::NextDeadline` is already presentation less the latch lead,
+	// which is exactly the figure decision 142 asks for; naming the vblank instead would overstate the
+	// time available by the whole of the present overhead.
+	//
+	// The epoch means *no schedule to state* — an output whose clock has not been observed, or one a
+	// mode set has just invalidated — and a renderer that has one says nothing rather than saying zero.
+	// Ignored by a renderer with no queue to hurry: `Blit` has finished before `Record` returns, and
+	// `Headless` charges a cost against a clock nobody can raise.
+	Instant Deadline{};
+
 	// No colour state here. *(Moved to `BindTargets` 2026-08-22.)* What the composite is encoded to is
 	// the output's, a renderer is per output, and it is what decides which pipelines have to exist —
 	// so it is stated once where a renderer is allowed to act on it rather than once per frame where

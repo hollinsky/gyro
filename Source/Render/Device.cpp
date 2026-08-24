@@ -263,27 +263,39 @@ constexpr std::array<const char*, 4> RequiredExtensions{
 	return families[family].timestampValidBits;
 }
 
-// The primary DRM node's minor for this physical device, or -1 where the driver does not carry it.
+// This physical device's DRM node minors, each -1 where the driver does not carry it.
 //
 // **`VK_EXT_physical_device_drm` is a physical-device property query, not a device feature**, so it is
 // read here without enabling anything at device creation — gyro uses none of its commands, only the
-// minor it reports. Guarded on the extension being listed because the property struct is only
-// populated where the implementation supports it; a driver without it — or one that has no primary
-// node — leaves decision 142's clock reader with nothing to open, which it reports rather than guesses.
-[[nodiscard]] std::int64_t QueryDrmPrimaryMinor(VkPhysicalDevice device) noexcept
+// minors it reports. Guarded on the extension being listed because the property struct is only
+// populated where the implementation supports it; a driver without it — or one that has no node of the
+// kind asked for — leaves decision 142's clock reader with nothing to open and its deadline with no
+// node to state itself on, which both report rather than guess.
+//
+// **Both minors, because they are two different jobs on two different nodes.** The clock reader wants
+// the primary node's sysfs kobject, which is where the driver hangs its frequency attributes; the
+// deadline wants a render node, because a syncobj ioctl is `DRM_RENDER_ALLOW` and opening the primary
+// node a second time is a thing gyro holds DRM master by.
+struct DrmMinors
+{
+	std::int64_t Primary = -1;
+	std::int64_t Render = -1;
+};
+
+[[nodiscard]] DrmMinors QueryDrmMinors(VkPhysicalDevice device) noexcept
 {
 	std::uint32_t count = 0;
 
 	if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) != VK_SUCCESS)
 	{
-		return -1;
+		return {};
 	}
 
 	std::vector<VkExtensionProperties> available(count);
 
 	if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, available.data()) != VK_SUCCESS)
 	{
-		return -1;
+		return {};
 	}
 
 	const bool listed = std::ranges::any_of(available, [](const VkExtensionProperties& entry) noexcept {
@@ -292,7 +304,7 @@ constexpr std::array<const char*, 4> RequiredExtensions{
 
 	if (!listed)
 	{
-		return -1;
+		return {};
 	}
 
 	VkPhysicalDeviceDrmPropertiesEXT drm{};
@@ -303,7 +315,8 @@ constexpr std::array<const char*, 4> RequiredExtensions{
 	properties.pNext = &drm;
 	vkGetPhysicalDeviceProperties2(device, &properties);
 
-	return drm.hasPrimary == VK_TRUE ? static_cast<std::int64_t>(drm.primaryMinor) : -1;
+	return { .Primary = drm.hasPrimary == VK_TRUE ? static_cast<std::int64_t>(drm.primaryMinor) : -1,
+		     .Render = drm.hasRender == VK_TRUE ? static_cast<std::int64_t>(drm.renderMinor) : -1 };
 }
 
 void Describe(VkPhysicalDevice device, std::uint32_t family, DeviceDescription& into) noexcept
@@ -328,7 +341,9 @@ void Describe(VkPhysicalDevice device, std::uint32_t family, DeviceDescription& 
 	into.TimestampValidBits = QueryTimestampBits(device, family);
 	into.CalibratesTimestamps = QueryCalibration(device);
 	into.CountsPipelineStatistics = QueryPipelineStatistics(device);
-	into.PrimaryMinor = QueryDrmPrimaryMinor(device);
+	const DrmMinors minors = QueryDrmMinors(device);
+	into.PrimaryMinor = minors.Primary;
+	into.RenderMinor = minors.Render;
 }
 } // namespace
 

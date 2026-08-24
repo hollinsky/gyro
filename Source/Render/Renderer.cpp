@@ -550,6 +550,12 @@ VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device, Vulkan
 		}
 
 		m_TimelineFd = Fd{ descriptor };
+
+		// Decision 142's hint, opened once here rather than per frame: an import is a node open and an
+		// ioctl, and the timeline it names lives exactly as long as this renderer does. It logs its own
+		// absence and comes up invalid where the node will not adopt the descriptor, because a frame
+		// drawn without a deadline is the frame gyro would have drawn anyway.
+		m_Deadline = FenceDeadline::Open(device.Description().RenderMinor, m_TimelineFd.Borrow());
 	}
 
 	// Last, and it is the step that can fail on a driver that took everything above: a device which
@@ -1463,6 +1469,13 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 	}
 
 	slot.LastSubmit = value;
+
+	// **Decision 142, and this is the earliest instant it can be said.** A timeline point has no fence
+	// behind it until something is submitted against it, so the deadline could not have been stated
+	// with the request; a microsecond after `vkQueueSubmit` it can, and the driver has it before it has
+	// begun running the batch. One ioctl that cannot block — see Render/Deadline.h — so it is inside
+	// the frame section on purpose rather than despite it.
+	m_Deadline.State(value, request.Deadline);
 
 	// Only after the submit succeeded. A refused submission wrote no timestamps, and claiming one is
 	// pending would leave a pair the next record resets while `CollectCosts` is still expecting it.
@@ -2471,6 +2484,10 @@ void VulkanRenderer::Destroy() noexcept
 	}
 
 	m_Pending = {};
+
+	// Before the descriptor it was imported from, so that the node this holds open is gone by the time
+	// the timeline it names is.
+	m_Deadline = FenceDeadline{};
 
 	m_TimelineFd = Fd{};
 

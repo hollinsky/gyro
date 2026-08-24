@@ -12,6 +12,7 @@
 #include "Core/Trace.h"
 #include "Geometry/Space.h"
 #include "Render/Backdrop.h"
+#include "Render/Deadline.h"
 #include "Render/Device.h"
 #include "Render/Pipeline.h"
 #include "Render/Textures.h"
@@ -500,6 +501,11 @@ private:
 	// cannot export one, and decision 108 is what that means for the points handed out.
 	VkSemaphore m_Timeline = VK_NULL_HANDLE;
 	Fd m_TimelineFd;
+
+	// Decision 142's deadline, imported off the descriptor above and therefore constructed after it.
+	// Invalid on a device that exports no timeline, which is the same device that has no queue for a
+	// deadline to hurry.
+	FenceDeadline m_Deadline;
 	std::atomic<std::uint64_t> m_Submitted = 0;
 
 	std::array<Slot, MaxRenderTargets> m_Slots{};

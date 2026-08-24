@@ -768,6 +768,12 @@ private:
 			                         .Mode = decision.Mode(),
 			                         .Trace = output.m_TraceGpu,
 			                         .CostGeneration = output.m_Cost.Generation(),
+			                         // Decision 142's hint, and the translation of one sentinel into
+			                         // another: an unscheduled clock has no instant to name, and the
+			                         // seam says so as the epoch because Seam/Renderer.h may not reach
+			                         // in here for `FrameClock`'s spelling of the same nothing.
+			                         .Deadline =
+			                             decision.Deadline == FrameClock::Unscheduled ? Instant{} : decision.Deadline,
 			                         .Damage = stale,
 			                         .Items = list.Items };
 
