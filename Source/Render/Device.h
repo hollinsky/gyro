@@ -72,6 +72,27 @@ struct DeviceDescription
 	// exactly on both drivers this was measured against.
 	bool ExportsTimeline = false;
 
+	// Whether this device can write host memory straight into an optimally-tiled image, with no
+	// queue, no command buffer and no staging buffer between the two.
+	//
+	// **It is what makes a `wl_shm` import a dispatch-thread operation at all**, which is the whole
+	// reason it is queried. Seam/Importer.h puts `Adopt` on the dispatch thread while the frame
+	// thread is compositing, and the ordinary way to fill a device image — a staging buffer and
+	// `vkCmdCopyBufferToImage` — needs a queue submission, on a queue the `SCHED_FIFO` frame thread
+	// is already submitting to. Sharing it means a lock the frame thread can block on behind a
+	// lower-priority thread, which is a missed frame every time a client posts a software buffer;
+	// a second queue means a second submission order, which is what
+	// Render/Device.cpp's queue selection declines for a reason that still stands. `VK_EXT_host_image_copy`
+	// makes the question go away rather than answering it: the copy is `memcpy` into a tiled image
+	// performed by the driver on the calling thread.
+	//
+	// **A feature and not just an extension.** Promoted to Vulkan 1.4 core, and gyro requires 1.3, so
+	// it is asked for by name — and it is asked for optionally, the way `ExportsTimeline` is, because
+	// a driver without it is not a machine gyro refuses to run on — it is a device that imports
+	// dmabufs and refuses mapped buffers, which Render/Textures.h states as a named refusal rather
+	// than working around. Every current Mesa driver and both proprietary ones have it.
+	bool CopiesFromHost = false;
+
 	[[nodiscard]] std::string_view DeviceName() const noexcept { return { Name.data() }; }
 
 	[[nodiscard]] std::string_view DriverName() const noexcept { return { Driver.data() }; }
@@ -79,6 +100,11 @@ struct DeviceDescription
 	// Whether this is decision 40's permanently-occupied floor tier.
 	[[nodiscard]] constexpr bool IsSoftware() const noexcept { return Type == VK_PHYSICAL_DEVICE_TYPE_CPU; }
 };
+
+// No memory type carries what was asked for. Distinct from every valid index because
+// `VK_MAX_MEMORY_TYPES` is 32 and an index is one of those — so this is the first value that cannot
+// be one, rather than a sentinel picked to be large.
+inline constexpr std::uint32_t MemoryTypeNone = VK_MAX_MEMORY_TYPES;
 
 // Whether Vulkan can be reached at all on this machine.
 //
@@ -325,6 +351,27 @@ public:
 	// sampling costs a look rather than a screen.
 	[[nodiscard]] bool SupportsSampling(PixelFormat format) const noexcept;
 
+	// Whether an *optimally-tiled* image of this format can be sampled and filled by
+	// `vkCopyMemoryToImage`, which together are what a `wl_shm` client's buffer needs of a device.
+	//
+	// **A different question from the two above, and the difference is the word `dmabuf`.** Those ask
+	// what can be done with an image whose memory came from somewhere else, so they range over DRM
+	// modifiers; this asks what can be done with one this device allocated for itself, where the
+	// tiling is the driver's own optimal and there is no modifier in the picture. A `wl_shm` buffer
+	// has no modifier to ask about — it is bytes — so the import that copies it is the one caller
+	// that needs this form.
+	//
+	// False on any device where `CopiesFromHost` is false, since the feature bit cannot be set
+	// without the feature. Render/Textures.h is where a refusal is what that means.
+	[[nodiscard]] bool SupportsHostTexture(PixelFormat format) const noexcept;
+
+	// The first memory type in `allowed` carrying every one of `properties`, or `MemoryTypeNone`.
+	//
+	// Here rather than copied into each of the four callers that walk `VkPhysicalDeviceMemoryProperties`
+	// for a different reason: the walk is the same walk, and the interesting part is always which
+	// property bits the caller asked for.
+	[[nodiscard]] std::uint32_t MemoryType(std::uint32_t allowed, VkMemoryPropertyFlags properties) const noexcept;
+
 	[[nodiscard]] std::uint32_t ImportableMemoryTypes(RawFd descriptor) const noexcept;
 
 	// Allocate an image of this size and format under the first workable modifier, and export it as a
@@ -408,14 +455,15 @@ struct std::formatter<DeviceDescription>
 	{
 		return std::format_to(
 			context.out(),
-			"{} [{}] api {}.{}.{} {} {}",
+			"{} [{}] api {}.{}.{} {} {} {}",
 			description.DeviceName(),
 			description.DriverName(),
 			VK_API_VERSION_MAJOR(description.ApiVersion),
 			VK_API_VERSION_MINOR(description.ApiVersion),
 			VK_API_VERSION_PATCH(description.ApiVersion),
 			description.IsSoftware() ? "software" : "hardware",
-			description.ExportsTimeline ? "exports" : "no-export"
+			description.ExportsTimeline ? "exports" : "no-export",
+			description.CopiesFromHost ? "host-copy" : "no-host-copy"
 		);
 	}
 };
@@ -441,3 +489,4 @@ static_assert(std::is_nothrow_move_constructible_v<ExportedTimeline>);
 // reading as a working software device.
 static_assert(!DeviceDescription{}.IsSoftware(), "Unknown is not software");
 static_assert(!DeviceDescription{}.ExportsTimeline);
+static_assert(!DeviceDescription{}.CopiesFromHost);

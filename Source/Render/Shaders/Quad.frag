@@ -26,6 +26,12 @@ layout(constant_id = 2) const int SourcePrimaries = ChainPrimariesBt709;
 layout(constant_id = 3) const int TargetTransfer = ChainTransferSrgb;
 layout(constant_id = 4) const int TargetPrimaries = ChainPrimariesBt709;
 
+// The image a sampling variant reads. Declared unconditionally because a specialization constant
+// cannot guard a declaration — what the constant folds away is the *use*, and a resource with no
+// static use is one Vulkan does not require a set to be bound for. So the twenty variants that fill
+// declare this and never touch it, and Render/Pipeline.cpp binds nothing for them.
+layout(set = 0, binding = 0) uniform sampler2D Source;
+
 layout(push_constant) uniform Item
 {
 	vec4 Corner[4];
@@ -41,6 +47,30 @@ layout(location = 0) out vec4 Colour;
 void main()
 {
 	vec4 colour = item.Fill;
+
+	if ((Run & ChainRunSample) != 0u)
+	{
+		// `Local` is surface-local in `[0, Extent]`, and `Fill` carries the source rectangle already
+		// normalized against the image — so this is one multiply-add and the texture's own size never
+		// had to cross the seam. Render/Pipeline.h states the packing.
+		//
+		// **The divide is guarded because a zero extent is expressible.** Seam/Renderer.h lets a
+		// caller build an item whose extent is nothing; the quad it produces has no area and rasterizes
+		// no fragments on any conforming device, but a NaN coordinate reaching a sampler is the kind of
+		// thing one driver turns into a black rectangle and another into a hang.
+		const vec2 extent = max(item.Shape.xy, vec2(1.0));
+
+		colour = texture(Source, item.Fill.xy + (Local / extent) * item.Fill.zw);
+
+		// Before everything, and Docs/Architecture.md#premultiplied-alpha-is-the-sharp-edge is the
+		// reason it is here rather than after the conversion: every element below this line assumes
+		// premultiplied components, including `ChainConvert`, whose first act is to divide the alpha
+		// back out.
+		if ((Run & ChainRunPremultiply) != 0u)
+		{
+			colour = vec4(colour.rgb * colour.a, colour.a);
+		}
+	}
 
 	if ((Run & ChainRunConvert) != 0u)
 	{

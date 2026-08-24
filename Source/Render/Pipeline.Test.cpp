@@ -11,6 +11,7 @@
 #include "Core/Result.h"
 #include "Core/Time.h"
 #include "Render/Device.h"
+#include "Render/Textures.h"
 #include "Render/Vulkan.h"
 #include "Testing/Test.h"
 
@@ -116,8 +117,11 @@ GYRO_TEST(Pipeline, PrepareBuildsEveryVariantAnItemCanAskFor)
 		return;
 	}
 
+	VulkanTextures textures{ *device };
+	GYRO_REQUIRE(textures.Status().has_value());
+
 	QuadPipeline pipeline;
-	GYRO_REQUIRE(pipeline.Create(*device).has_value());
+	GYRO_REQUIRE(pipeline.Create(*device, textures.SetLayout()).has_value());
 
 	const ColorState output = ColorState::Srgb();
 	constexpr VkFormat Format = VK_FORMAT_B8G8R8A8_UNORM;
@@ -174,8 +178,11 @@ GYRO_TEST(Pipeline, WhatCannotBeBoundIsRefusedAtTheBinding)
 		return;
 	}
 
+	VulkanTextures textures{ *device };
+	GYRO_REQUIRE(textures.Status().has_value());
+
 	QuadPipeline pipeline;
-	GYRO_REQUIRE(pipeline.Create(*device).has_value());
+	GYRO_REQUIRE(pipeline.Create(*device, textures.SetLayout()).has_value());
 
 	GYRO_CHECK_EQ(pipeline.Prepare(VK_FORMAT_UNDEFINED, ColorState::Srgb()).has_value(), false);
 
@@ -195,8 +202,11 @@ GYRO_TEST(Pipeline, AnUnpreparedFormatHasNoPipeline)
 		return;
 	}
 
+	VulkanTextures textures{ *device };
+	GYRO_REQUIRE(textures.Status().has_value());
+
 	QuadPipeline pipeline;
-	GYRO_REQUIRE(pipeline.Create(*device).has_value());
+	GYRO_REQUIRE(pipeline.Create(*device, textures.SetLayout()).has_value());
 	GYRO_REQUIRE(pipeline.Prepare(VK_FORMAT_B8G8R8A8_UNORM, ColorState::Srgb()).has_value());
 
 	const QuadVariant plain{};

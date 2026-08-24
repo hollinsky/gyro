@@ -53,6 +53,7 @@
 #include "Render/Allocator.h"
 #include "Render/Device.h"
 #include "Render/Renderer.h"
+#include "Render/Textures.h"
 #include "Scene/Output.h"
 #include "Seam/EventSource.h"
 #include "Seam/Importer.h"
@@ -191,9 +192,15 @@ struct BoundOutput
 	// the waist rather than private to `Blit`. So the root is what pairs them, exactly as it pairs a
 	// renderer with a presenter.
 	//
-	// Null is an ordinary answer today: `Render`'s Vulkan arm is unwritten and the simulated renderer
-	// has no pixels to import into. A dispatch loop handed no importers refuses every adopt, which is
-	// what makes `--gym=card` fail to open on those backends instead of drawing four empty rectangles.
+	// **Two outputs may name one importer, which `Render`'s arrival made a real case**
+	// *(2026-08-23)*. `Blit` is its own importer and there is one per output; Render/Textures.h belongs
+	// to the *device* and every Vulkan output on the machine points at the same one, because a table
+	// per renderer would hold a `VkImage` and a descriptor set per monitor for every window. So the
+	// gather below is a set rather than a list.
+	//
+	// Null is still an ordinary answer: the simulated renderer has no pixels to import into. A dispatch
+	// loop handed no importers refuses every adopt, which is what makes `--gym=card` fail to open on
+	// those backends instead of drawing four empty rectangles.
 	ITextureImporter* Importer = nullptr;
 	OutputConfiguration Configuration{};
 	Connection<> OnTargetsInvalidated;
@@ -560,6 +567,25 @@ public:
 		m_Device = std::move(*device);
 		m_Allocator.emplace(m_Device);
 
+		// One table for every output on this device, which is Render/Textures.h's whole argument: the
+		// root is the only party that sees both a device and the renderers over it, and a table per
+		// renderer would hold one copy of every window's pixels per monitor.
+		m_Textures.emplace(m_Device);
+
+		if (const Result<void>& built = m_Textures->Status(); !built)
+		{
+			return built;
+		}
+
+		if (!m_Device.Description().CopiesFromHost)
+		{
+			// Said out loud for `ExportsTimeline`'s reason: it decides which clients this session can
+			// draw at all. A driver without `VK_EXT_host_image_copy` takes dmabuf buffers and refuses
+			// software ones, and a person seeing a blank window from an `wl_shm` toolkit should find
+			// the sentence that explains it in the same log as everything else.
+			spdlog::warn("this device cannot fill an image from host memory, so software client buffers are refused");
+		}
+
 		spdlog::info("rendering on {} ({})", m_Device.Description().DeviceName(), m_Device.Description().DriverName());
 
 		if (!m_Device.Description().ExportsTimeline)
@@ -609,7 +635,7 @@ public:
 			return Failure(ENOSPC, "more outputs than one host connection carries");
 		}
 
-		auto renderer = std::make_unique<VulkanRenderer>(*m_Clock, m_Device);
+		auto renderer = std::make_unique<VulkanRenderer>(*m_Clock, m_Device, *m_Textures);
 
 		auto window = std::make_unique<Nested::NestedOutput>(
 			m_Host,
@@ -627,6 +653,10 @@ public:
 		into.Presenter = window.get();
 		into.Configuration = window->Configuration();
 		into.Renderer = std::move(renderer);
+
+		// The device's table, not this renderer's — Render/Textures.h's whole argument, and the reason
+		// the gather above is a set. Every output on this device hands back the same pointer.
+		into.Importer = &*m_Textures;
 
 		m_Windows[index] = std::move(window);
 		m_Count = index + 1;
@@ -661,6 +691,17 @@ public:
 			}
 		}
 
+		spdlog::warn(
+			"PROBE steps={} planned={} floor={} full={} waited={} unwanted={} notarget={}",
+			Probe::Steps,
+			Probe::PlannedFrames,
+			Probe::FloorFrames,
+			Probe::Full,
+			Probe::Waited,
+			Probe::Unwanted,
+			Probe::NoTarget
+		);
+
 		if (const std::optional<Wire::ProtocolFault>& fault = m_Host.Fault(); fault.has_value())
 		{
 			spdlog::error("the host ended the connection: {} on {}", fault->Message, fault->Object);
@@ -677,6 +718,11 @@ private:
 
 	VulkanDevice m_Device;
 	std::optional<VulkanAllocator> m_Allocator;
+
+	// After the device and before the windows, so it is destroyed after every renderer that
+	// registered with it and before the device that owns its handles. Every renderer detaches in its
+	// own destructor, which is what makes this ordering a statement rather than a hope.
+	std::optional<VulkanTextures> m_Textures;
 
 	// `unique_ptr` because a presenter is neither copyable nor movable and the array has to be built
 	// one at a time, which is `BoundOutput::Renderer`'s reason exactly.
@@ -1150,19 +1196,33 @@ private:
 			return laid;
 		}
 
-		// Every renderer that can sample, gathered for the texture registry. A renderer is per output, so
-		// an image a scene can draw anywhere has to be adopted everywhere it might be drawn — and the
-		// root is the only party holding the whole set.
+		// Every importer that can be drawn through, gathered for the texture registry. An image a scene
+		// can draw anywhere has to be adopted everywhere it might be drawn, and the root is the only
+		// party holding the whole set.
+		//
+		// **Distinct importers, not one per output.** Where the two coincide — `Blit`, which is its own
+		// importer — the loop is the same loop. Where they do not, adopting an id twice into one table
+		// would make the second call a *replacing* adopt of the first, which retires the image the first
+		// one just created and leaves the id naming a copy nobody needed.
 		std::array<ITextureImporter*, MaxOutputs> importers{};
 		std::size_t importing = 0;
 
 		for (std::size_t index = 0; index < m_Count; ++index)
 		{
-			if (m_Bound[index].Importer != nullptr)
+			ITextureImporter* const importer = m_Bound[index].Importer;
+
+			if (importer == nullptr)
 			{
-				importers[importing] = m_Bound[index].Importer;
-				++importing;
+				continue;
 			}
+
+			if (std::ranges::contains(std::span{ importers.data(), importing }, importer))
+			{
+				continue;
+			}
+
+			importers[importing] = importer;
+			++importing;
 		}
 
 		m_Dispatch =

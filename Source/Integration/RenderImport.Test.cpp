@@ -16,16 +16,19 @@
 #include <string_view>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include "Core/Clock.h"
 #include "Core/ColorState.h"
 #include "Core/Fd.h"
 #include "Core/Result.h"
+#include "Core/Texture.h"
 #include "Core/Time.h"
 #include "Geometry/Region.h"
 #include "Geometry/Space.h"
 #include "Render/Device.h"
 #include "Render/Renderer.h"
+#include "Render/Textures.h"
 #include "Seam/OutputConfiguration.h"
 #include "Seam/Presenter.h"
 #include "Seam/RenderTarget.h"
@@ -89,12 +92,14 @@ public:
 			  m_Allocator,
 			  OutputConfiguration{ .Resolution = Resolution, .Period = PeriodFromHertz(60.0), .Format = Linear }
 		  },
-		  m_Renderer{ m_Clock, m_Vulkan }
+		  m_Textures{ m_Vulkan }, m_Renderer{ m_Clock, m_Vulkan, m_Textures }
 	{}
 
 	[[nodiscard]] VirtualOutput& Output() noexcept { return m_Output; }
 
 	[[nodiscard]] VulkanRenderer& Renderer() noexcept { return m_Renderer; }
+
+	[[nodiscard]] VulkanTextures& Textures() noexcept { return m_Textures; }
 
 	[[nodiscard]] VulkanDevice& Device() noexcept { return m_Vulkan; }
 
@@ -123,6 +128,10 @@ private:
 	UdmabufAllocator m_Allocator;
 	VulkanDevice m_Vulkan;
 	VirtualOutput m_Output;
+
+	// Before the renderer, so it is destroyed after it: a renderer detaches from this in its
+	// destructor, and the two orderings differ by whether that call lands on a live object.
+	VulkanTextures m_Textures;
 	VulkanRenderer m_Renderer;
 };
 
@@ -218,6 +227,85 @@ constexpr std::uint32_t Filled = 0xABABABAB;
 		             .Dress = Material::None,
 		             .Lift = {},
 		             .Color = ColorState::Srgb(),
+		             .Sampling = {} };
+}
+
+// An image a caller keeps alive, and the item that samples it.
+//
+// **The pixels are a member and not a temporary, because Seam/Importer.h borrows.** The seam is
+// explicit that the memory stays the caller's until `Forget` returns, and a test that handed over a
+// temporary would be exercising a use-after-free that a driver reports as a corrupt picture rather
+// than as a crash — which is exactly the failure the contract exists to prevent, arriving in the one
+// place it would be blamed on the renderer.
+class Picture
+{
+public:
+	// A quartered card: red, blue, half-alpha green, and transparent. Small enough to assert every
+	// region by hand and asymmetric enough that a flipped axis or a swapped channel is a failure
+	// rather than a coincidence.
+	Picture(std::int32_t side, AlphaMode alpha)
+		: m_Words(static_cast<std::size_t>(side) * static_cast<std::size_t>(side)), m_Side{ side }
+	{
+		for (std::int32_t y = 0; y < side; ++y)
+		{
+			for (std::int32_t x = 0; x < side; ++x)
+			{
+				const bool right = x >= side / 2;
+				const bool bottom = y >= side / 2;
+
+				std::uint32_t word =
+					right ? (bottom ? 0x00000000U : 0xFF0000FFU) : (bottom ? Half(alpha) : 0xFFFF0000U);
+
+				m_Words[static_cast<std::size_t>(y) * static_cast<std::size_t>(side) + static_cast<std::size_t>(x)] =
+					word;
+			}
+		}
+	}
+
+	[[nodiscard]] TextureSource Source() const noexcept
+	{
+		return TextureSource{ .Size = { m_Side, m_Side },
+			                  .Format = PixelFormat{ FormatArgb8888, 0, ModifierLinear },
+			                  .Memory = MappedPixels{ .Pixels = reinterpret_cast<const std::byte*>(m_Words.data()),
+			                                          .Stride = static_cast<std::uint32_t>(m_Side) * 4U,
+			                                          .Reserved = 0,
+			                                          .Length = m_Words.size() * sizeof(std::uint32_t) } };
+	}
+
+private:
+	// Half-alpha green, spelled both ways. The two are the same light and differ only in whether the
+	// alpha has already been applied to the components — which is the whole of what
+	// `QuadRunPremultiply` selects between, and the reason the two spellings have to composite to one
+	// picture. 0x80 rather than 0x7F because premultiplying 1.0 by 128/255 lands back on 128 exactly,
+	// so the comparison is about the fold rather than about a rounding step.
+	[[nodiscard]] static std::uint32_t Half(AlphaMode alpha) noexcept
+	{
+		return alpha == AlphaMode::Straight ? 0x8000FF00U : 0x80008000U;
+	}
+
+	std::vector<std::uint32_t> m_Words;
+	std::int32_t m_Side = 0;
+};
+
+// A textured item over a rectangle, every field named for `Solid`'s reason.
+[[nodiscard]] DrawItem Textured(
+	TextureId id,
+	Rect<DeviceSpace> where,
+	AlphaMode alpha = AlphaMode::Premultiplied,
+	Rect<BufferSpace> source = {}
+)
+{
+	ColorState state = ColorState::Srgb();
+	state.Alpha = alpha;
+
+	return DrawItem{ .Content = DrawTexture{ .Texture = id, .Source = source },
+		             .Shape = Quad::FromRect(where),
+		             .Extent = { where.Extent.Width, where.Extent.Height },
+		             .Opacity = 1.0F,
+		             .Radius = 0.0F,
+		             .Dress = Material::None,
+		             .Lift = {},
+		             .Color = state,
 		             .Sampling = {} };
 }
 
@@ -360,7 +448,7 @@ void CheckThePlacement(const ImageView& image)
 // and nothing else.
 void CheckTheTwoPathsAgree(Fixture& fixture, std::string_view label)
 {
-	VulkanRenderer reference{ fixture.Clock(), fixture.Device(), Fusion::Separate };
+	VulkanRenderer reference{ fixture.Clock(), fixture.Device(), fixture.Textures(), Fusion::Separate };
 	GYRO_REQUIRE(reference.Status().has_value());
 	GYRO_REQUIRE_EQ(reference.Fuses(), Fusion::Separate);
 
@@ -535,6 +623,201 @@ GYRO_TEST(RenderImport, ACompositedFrameReachesTheConsumer)
 
 	fixture->Output().Release(presented->Target);
 	GYRO_CHECK(!fixture->Output().PresentedFrame().has_value());
+}
+
+// **The picture a client posts, arriving on the glass.** Every other test in this file draws
+// something the renderer invented; this is the first that draws something that came from outside it,
+// and what it asserts is the chain end to end — a mapping becomes a `VkImage` on the dispatch thread,
+// a descriptor set reaches a fragment, and the texels land where the item's corners say.
+//
+// **Drawn at one texel per pixel and asserted exactly, which is a claim about the filter.** The
+// sampler is bilinear, and bilinear at unit scale is exact: a fragment centre maps to a texel centre,
+// both weights come out zero, and the result is the texel itself. That is the property decision 56's
+// sharpness path rests on and the reason a still window is not softened by being composited — so it
+// is asserted as an equality rather than a tolerance, and a half-pixel error in the coordinate
+// arithmetic is a failure here rather than a blur somebody notices on a font six months later.
+GYRO_TEST(RenderImport, AnImportedImageLandsTexelForTexel)
+{
+	std::optional<Fixture> fixture = Available("AnImportedImageLandsTexelForTexel");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	if (!fixture->Device().Description().CopiesFromHost)
+	{
+		std::println("  skipped RenderImport.AnImportedImageLandsTexelForTexel: no VK_EXT_host_image_copy");
+
+		return;
+	}
+
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
+	fixture->Prefill();
+
+	constexpr std::int32_t Side = 16;
+	const Picture picture{ Side, AlphaMode::Premultiplied };
+	const TextureId id{ 1, 1 };
+
+	GYRO_REQUIRE(fixture->Textures().Adopt(id, picture.Source()).has_value());
+
+	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+	GYRO_REQUIRE(acquired.has_value());
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	const DrawItem item = Textured(id, { { 8.0F, 8.0F }, { Side, Side } });
+
+	const Result<Submission> submission = fixture->Renderer().Record(Composite(*acquired, damage, { &item, 1 }));
+	GYRO_REQUIRE_EQ(submission.has_value(), true);
+	GYRO_REQUIRE(fixture->Renderer().IsComplete(submission->Point));
+
+	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+	GYRO_REQUIRE(buffer != nullptr);
+
+	const DmabufRead read{ *buffer };
+
+	// The four quarters, at the centre of each. Red top-left, blue top-right, half-alpha green
+	// bottom-left over black, and nothing at all bottom-right.
+	GYRO_CHECK_EQ(PixelAt(*buffer, 12, 12), 0xFFFF0000U);
+	GYRO_CHECK_EQ(PixelAt(*buffer, 20, 12), 0xFF0000FFU);
+	GYRO_CHECK_EQ(PixelAt(*buffer, 12, 20), 0xFF008000U);
+	GYRO_CHECK_EQ(PixelAt(*buffer, 20, 20), Black);
+
+	// **And nothing outside the quad**, which is what says the extent reached the shader rather than
+	// the image being stretched over whatever the rasterizer covered. One pixel out on each side, on
+	// the three edges the transparent quarter does not touch.
+	GYRO_CHECK_EQ(PixelAt(*buffer, 7, 12), Black);
+	GYRO_CHECK_EQ(PixelAt(*buffer, 24, 12), Black);
+	GYRO_CHECK_EQ(PixelAt(*buffer, 12, 7), Black);
+
+	fixture->Textures().Forget(id);
+}
+
+// **The two spellings of one image compositing to one picture**, which
+// Docs/Architecture.md#premultiplied-alpha-is-the-sharp-edge is the reason to be able to put side by
+// side and which `QuadRunPremultiply` is the whole of the renderer's answer to.
+//
+// **This is the check that would have caught the premise that did not survive.** Render/Pipeline.h
+// used to say the alpha mode costs a fragment nothing, and its argument — *a solid is four numbers* —
+// is true of a fill and false of a texture. A renderer that carried that assumption forward would
+// draw a straight-alpha client's translucent regions far too bright, on the one kind of content
+// nobody authors by hand and everybody notices.
+GYRO_TEST(RenderImport, StraightAndPremultipliedSpellingsOfOneImageAgree)
+{
+	std::optional<Fixture> fixture = Available("StraightAndPremultipliedSpellingsOfOneImageAgree");
+
+	if (!fixture || !fixture->Device().Description().CopiesFromHost)
+	{
+		return;
+	}
+
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
+	fixture->Prefill();
+
+	constexpr std::int32_t Side = 16;
+	const Picture folded{ Side, AlphaMode::Premultiplied };
+	const Picture straight{ Side, AlphaMode::Straight };
+
+	GYRO_REQUIRE(fixture->Textures().Adopt(TextureId{ 1, 1 }, folded.Source()).has_value());
+	GYRO_REQUIRE(fixture->Textures().Adopt(TextureId{ 2, 1 }, straight.Source()).has_value());
+
+	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+	GYRO_REQUIRE(acquired.has_value());
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	// Side by side in one frame, over the same ground, so the comparison is between two draws of one
+	// composite rather than between two frames a driver could have handled differently.
+	const std::array<DrawItem, 2> items{
+		Textured(TextureId{ 1, 1 }, { { 4.0F, 8.0F }, { Side, Side } }, AlphaMode::Premultiplied),
+		Textured(TextureId{ 2, 1 }, { { 40.0F, 8.0F }, { Side, Side } }, AlphaMode::Straight)
+	};
+
+	const Result<Submission> submission = fixture->Renderer().Record(Composite(*acquired, damage, items));
+	GYRO_REQUIRE_EQ(submission.has_value(), true);
+	GYRO_REQUIRE(fixture->Renderer().IsComplete(submission->Point));
+
+	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+	GYRO_REQUIRE(buffer != nullptr);
+
+	const DmabufRead read{ *buffer };
+
+	// Every quarter, at the same offset within each copy. The opaque three are a control — they would
+	// agree even if the fold were skipped — and the translucent one is the assertion.
+	for (const std::int32_t x : { 4, 12 })
+	{
+		for (const std::int32_t y : { 12, 20 })
+		{
+			GYRO_CHECK_EQ(PixelAt(*buffer, 4 + x, y), PixelAt(*buffer, 40 + x, y));
+		}
+	}
+
+	// Named outright as well, so a failure says *which* answer is wrong rather than only that the two
+	// differ: half-alpha green over black is half green, in the output's own encoding.
+	GYRO_CHECK_EQ(PixelAt(*buffer, 8, 20), 0xFF008000U);
+	GYRO_CHECK_EQ(PixelAt(*buffer, 44, 20), 0xFF008000U);
+
+	fixture->Textures().Forget(TextureId{ 1, 1 });
+	fixture->Textures().Forget(TextureId{ 2, 1 });
+}
+
+// **A source rectangle naming part of an image samples that part and no other**, which is
+// `wp_viewport`'s `src` reaching a fragment and is also how decision 99's overview draws one window
+// at two sizes from one texture.
+GYRO_TEST(RenderImport, ASourceRectangleSamplesOnlyWhatItNames)
+{
+	std::optional<Fixture> fixture = Available("ASourceRectangleSamplesOnlyWhatItNames");
+
+	if (!fixture || !fixture->Device().Description().CopiesFromHost)
+	{
+		return;
+	}
+
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
+	fixture->Prefill();
+
+	constexpr std::int32_t Side = 16;
+	const Picture picture{ Side, AlphaMode::Premultiplied };
+	const TextureId id{ 3, 1 };
+
+	GYRO_REQUIRE(fixture->Textures().Adopt(id, picture.Source()).has_value());
+
+	const std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+	GYRO_REQUIRE(acquired.has_value());
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	// The top-right quarter alone, drawn at its own size somewhere else on the target. Blue
+	// throughout, and nothing of the other three quarters anywhere in it.
+	const DrawItem item = Textured(
+		id,
+		{ { 8.0F, 8.0F }, { 8.0F, 8.0F } },
+		AlphaMode::Premultiplied,
+		Rect<BufferSpace>{ { 8.0F, 0.0F }, { 8.0F, 8.0F } }
+	);
+
+	const Result<Submission> submission = fixture->Renderer().Record(Composite(*acquired, damage, { &item, 1 }));
+	GYRO_REQUIRE_EQ(submission.has_value(), true);
+	GYRO_REQUIRE(fixture->Renderer().IsComplete(submission->Point));
+
+	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+	GYRO_REQUIRE(buffer != nullptr);
+
+	const DmabufRead read{ *buffer };
+
+	for (std::int32_t y = 8; y < 16; ++y)
+	{
+		for (std::int32_t x = 8; x < 16; ++x)
+		{
+			GYRO_CHECK_EQ(PixelAt(*buffer, x, y), 0xFF0000FFU);
+		}
+	}
+
+	fixture->Textures().Forget(id);
 }
 
 // **Where a fill lands, to the pixel.** The quad is axis-aligned on the device grid, which decision
@@ -1188,9 +1471,8 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 	// The baseline, so that the refusals below are about what changed rather than about the fixture.
 	GYRO_REQUIRE_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &drawable, 1 })).has_value(), true);
 
-	std::array<DrawItem, 4> refused{ drawable, drawable, drawable, drawable };
-	refused[0].Content = DrawTexture{};
-	refused[1].Content = DrawGroup{ .Count = 0 };
+	std::array<DrawItem, 3> refused{ drawable, drawable, drawable };
+	refused[0].Content = DrawGroup{ .Count = 0 };
 
 	// **A lifted node is no longer refused; a lifted node *tilted out of the plane* is.** Whether a
 	// flipping card's shadow stretches away from its near edge, and whether it softens across itself,
@@ -1198,16 +1480,16 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 	// stopped being a rectangle is refused rather than drawn as whichever answer was easier to write.
 	// A perspective weight is what makes this one a tilt rather than a spin, and decision 133 is that
 	// the two are different questions.
-	refused[2].Lift = Cast(Elevation::Resting);
-	refused[2].Shape.Weights[1] = 0.8F;
-	refused[2].Shape.Weights[2] = 0.8F;
+	refused[1].Lift = Cast(Elevation::Resting);
+	refused[1].Shape.Weights[1] = 0.8F;
+	refused[1].Shape.Weights[2] = 0.8F;
 
 	// **The colour-state refusal is now one transfer function rather than every conversion**, and HLG
 	// is the one because converting it needs a display peak luminance `ColorState` does not carry.
 	// Everything else — a solid authored in linear light at wide primaries, drawn onto an sRGB
 	// output — is a specialization constant and a matrix that exist, and the check below is that it
 	// draws rather than that it is refused.
-	refused[3].Color = ColorState{ ColorPrimaries::Bt2020, TransferFunction::Hlg, AlphaMode::Premultiplied, 0, 203.0F };
+	refused[2].Color = ColorState{ ColorPrimaries::Bt2020, TransferFunction::Hlg, AlphaMode::Premultiplied, 0, 203.0F };
 
 	for (const DrawItem& item : refused)
 	{
@@ -1216,7 +1498,19 @@ GYRO_TEST(RenderImport, WhatTheQuadPipelineCannotExpressIsRefused)
 		GYRO_CHECK_EQ(answer.error().Code(), EINVAL);
 	}
 
-	// **A material is no longer among them**, and it is the second branch to leave this list rather
+	// **A texture left this list and did not become a refusal somewhere else** *(2026-08-23)*. It used
+	// to be here because nothing sampled; now that something does, an item naming an id the table does
+	// not hold draws *nothing* and reports success — which is Core/Texture.h's rule and not a
+	// concession. The id in a published snapshot is stale exactly when a client destroyed its buffer
+	// while a frame was in flight, and that is a race the dispatch thread has already resolved by the
+	// time this frame lands; refusing the whole composite would take every other window on the panel
+	// down with it, once per frame, until the next snapshot crossed.
+	DrawItem vanished = drawable;
+	vanished.Content = DrawTexture{};
+
+	GYRO_CHECK_EQ(fixture->Renderer().Record(Composite(*acquired, damage, { &vanished, 1 })).has_value(), true);
+
+	// **A material is no longer among them**, and it is the third branch to leave this list rather
 	// than the first. `Material::Glass` reads the composite back, blurs it, and composites the result
 	// — Render/Backdrop.h — and where the device or the target's modifier will not have that, it draws
 	// decision 34's third rung instead of refusing. So the refusal that used to be here is a picture

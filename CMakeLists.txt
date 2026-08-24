@@ -646,6 +646,7 @@ gyro_add_module(Render
 		Backdrop.Test.cpp
 		Device.Test.cpp
 		Pipeline.Test.cpp
+		Textures.Test.cpp
 		Unfused.Test.cpp
 )
 

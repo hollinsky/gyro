@@ -342,19 +342,31 @@ dispatch thread, and the reason it is an interface of its own rather than two mo
 holding the other would be reading a comment.
 
 [The straddler table](#threads-are-a-second-partition) already predicted this — `Render`'s dispatch
-half is named `Import` there, against nothing that existed — and what writing it found is that the
-prediction is right about `Render` and does not reach `Blit`. A Vulkan import creates images, uploads,
-and negotiates modifiers, which is a directory's worth of code the partition can be declared over. The
-CPU renderer's is a table entry into the same array `Record` samples from: splitting it out would put
-two halves of one array in two places to satisfy a check.
+half is named `Import` there, against nothing that existed. *(Corrected 2026-08-23, against the code
+that arrived.)* **The prediction was wrong, and it was wrong about the interesting part.** It assumed
+the split could be declared because a Vulkan import creates images, uploads and negotiates modifiers,
+which is a directory's worth of code. It is — [Render/Textures.h](../Source/Render/Textures.h) — and
+the partition still cannot be declared over it, because the *table* is read by both threads on
+purpose. `Adopt` and `Forget` are dispatch's; `Find`, which resolves an id to a descriptor set, is
+called from inside `Record`. A directory the frame half may not include is exactly what
+`CheckLayering` means by a dispatch half, and this is a file the frame half must include.
 
-**So `Blit` straddles and the build does not say so, and that is the limit worth stating rather than
-papering over.** Nothing stops the frame thread calling `Adopt` there. What stands in for the check is
-the discipline in [Seam/Importer.h](../Source/Seam/Importer.h), and it is not a convention: `Forget` is
-safe only below `Publication`'s watermark, so a caller on the wrong thread does not have the number the
-verb is defined in terms of.
+That is not an accident of layout, it is the design:
+[decision 131](Decisions.md#131-texture-import-is-a-second-interface-and-a-texture-retires-on-the-watermark)
+rejected refcounting the table precisely so that the frame thread's lookup costs no synchronisation,
+and what makes that safe is the watermark rather than a boundary — dispatch only ever writes a slot no
+published snapshot names, and the frame thread only ever reads slots the snapshot it is composing from
+does name. Two disjoint sets in one array, which is the same shape as `Blit`'s table one tier down and
+the same reason it cannot be split either.
 
-See [decision 131](Decisions.md#131-texture-import-is-a-second-interface-and-a-texture-retires-on-the-watermark).
+**So both renderers straddle and the build says so about neither, and that is the limit worth stating
+rather than papering over.** Nothing stops the frame thread calling `Adopt`. What stands in for the
+check is the discipline in [Seam/Importer.h](../Source/Seam/Importer.h), and it is not a convention:
+`Forget` is defined below `Publication`'s watermark, so a caller on the wrong thread does not have the
+number the verb is stated in terms of.
+
+See [decision 131](Decisions.md#131-texture-import-is-a-second-interface-and-a-texture-retires-on-the-watermark)
+and [decision 137](Decisions.md#137-the-vulkan-texture-table-belongs-to-the-device-and-a-mapped-buffer-needs-host-image-copy).
 
 ### A dressing's numbers are in Seam, and the enums naming it are not
 
@@ -688,7 +700,7 @@ and the two are not the same shape. Four modules straddle the boundary, and each
 | --- | --- | --- |
 | `Animation` | `Solve` — closed form over published coefficients | `Author` — `Animatable`, catalog, retargeting |
 | `Publication` | `Reader` — wait-free, const | `Publisher` — serializes, allocates, reclaims |
-| `Render` | `Record` — passes, submission | `Import` — dmabuf, shm upload, resource creation |
+| `Render` | `Record` — passes, submission | `Import` — dmabuf, shm upload, resource creation. **Not declarable**, and [the section above](#the-importer-is-the-first-waist-interface-the-dispatch-thread-calls) says why: `Textures` is read from both threads by design |
 | `Platform` | presentation | input, session |
 
 That last row is worth noticing rather than arranging: [the seam](Architecture.md#the-seam) keeps

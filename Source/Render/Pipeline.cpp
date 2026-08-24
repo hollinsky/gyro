@@ -176,11 +176,16 @@ constexpr std::array<VkDynamicState, 2> Dynamics{ VK_DYNAMIC_STATE_VIEWPORT, VK_
 }
 } // namespace
 
-Result<void> QuadPipeline::Create(VulkanDevice& device)
+Result<void> QuadPipeline::Create(VulkanDevice& device, VkDescriptorSetLayout textures)
 {
 	if (!device.IsValid())
 	{
 		return Failure(ENODEV, "pipelines built against an unopened device");
+	}
+
+	if (textures == VK_NULL_HANDLE)
+	{
+		return Failure(EINVAL, "no texture set layout; the importer did not come up");
 	}
 
 	m_Device = &device;
@@ -218,13 +223,21 @@ Result<void> QuadPipeline::Create(VulkanDevice& device)
 		                             .offset = 0,
 		                             .size = sizeof(QuadConstants) };
 
-	// No descriptor sets at all, which is what an untextured quad needs and is worth noticing while
-	// it is true: the first `DrawTexture` is what puts a sampled image behind a set here.
+	// One set, and it is Render/Textures.h's — the first `DrawTexture` is what put it here, exactly
+	// as the comment this replaces predicted *(2026-08-23)*.
+	//
+	// **One layout for every variant, including the twenty that sample nothing.** A pipeline layout
+	// that declares a set the shader does not use is legal and costs nothing to create, and what it
+	// buys is that `vkCmdPushConstants` names one layout for every item in the list — a solid drawn
+	// between two textures does not force a layout change, and the call site does not carry a branch
+	// for which of two layouts an item's constants belong to. Two layouts would also make the two
+	// halves *incompatible* for set binding, so a bound texture would be invalidated by the next
+	// solid and rebound for the one after it.
 	const VkPipelineLayoutCreateInfo layoutInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 		                                         .pNext = nullptr,
 		                                         .flags = 0,
-		                                         .setLayoutCount = 0,
-		                                         .pSetLayouts = nullptr,
+		                                         .setLayoutCount = 1,
+		                                         .pSetLayouts = &textures,
 		                                         .pushConstantRangeCount = 1,
 		                                         .pPushConstantRanges = &range };
 
@@ -341,14 +354,26 @@ Result<void> QuadPipeline::Prepare(VkFormat format, ColorState output)
 		return built;
 	}
 
-	// Every source state that can reach this output, plus the pair that converts nothing. Enumerated
-	// rather than built on demand because a frame may not compile — decision 62 — so `For` has to be
-	// total over what an item can ask for, and the closed vocabulary is what makes that finite.
-	for (std::uint32_t rounded = 0; rounded < 2; ++rounded)
+	// Every source state that can reach this output, plus the pair that converts nothing — and the
+	// whole of that again for each way an item can get its colour. Enumerated rather than built on
+	// demand because a frame may not compile: a variant an item wants and does not find is a refused
+	// frame, so `For` can only be total if this has already made everything reachable.
+	//
+	// **Three content arms rather than four**, per `QuadVariantsPerBinding`: filled, sampled
+	// premultiplied, and sampled straight. There is no fourth, because folding a fill's alpha is
+	// three multiplies the renderer does on the CPU before the constants are written.
+	constexpr std::array<std::uint32_t, 3> Content{ 0U, QuadRunSample, QuadRunSample | QuadRunPremultiply };
+
+	for (const std::uint32_t content : Content)
 	{
-		if (Result<void> built = Build(format, QuadVariant{ .Run = rounded != 0 ? QuadRunCorner : 0U }); !built)
+		for (std::uint32_t rounded = 0; rounded < 2; ++rounded)
 		{
-			return built;
+			const QuadVariant variant{ .Run = content | (rounded != 0 ? QuadRunCorner : 0U) };
+
+			if (Result<void> built = Build(format, variant); !built)
+			{
+				return built;
+			}
 		}
 	}
 
@@ -359,21 +384,24 @@ Result<void> QuadPipeline::Prepare(VkFormat format, ColorState output)
 		                                               ColorPrimaries::DciP3,
 		                                               ColorPrimaries::Bt2020 };
 
-	for (const TransferFunction transfer : Transfers)
+	for (const std::uint32_t content : Content)
 	{
-		for (const ColorPrimaries primaries : Primaries)
+		for (const TransferFunction transfer : Transfers)
 		{
-			for (std::uint32_t rounded = 0; rounded < 2; ++rounded)
+			for (const ColorPrimaries primaries : Primaries)
 			{
-				const QuadVariant variant{ .Run = QuadRunConvert | (rounded != 0 ? QuadRunCorner : 0U),
-					                       .SourceTransfer = transfer,
-					                       .SourcePrimaries = primaries,
-					                       .TargetTransfer = output.Transfer,
-					                       .TargetPrimaries = output.Primaries };
-
-				if (Result<void> built = Build(format, variant); !built)
+				for (std::uint32_t rounded = 0; rounded < 2; ++rounded)
 				{
-					return built;
+					const QuadVariant variant{ .Run = content | QuadRunConvert | (rounded != 0 ? QuadRunCorner : 0U),
+						                       .SourceTransfer = transfer,
+						                       .SourcePrimaries = primaries,
+						                       .TargetTransfer = output.Transfer,
+						                       .TargetPrimaries = output.Primaries };
+
+					if (Result<void> built = Build(format, variant); !built)
+					{
+						return built;
+					}
 				}
 			}
 		}

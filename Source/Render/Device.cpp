@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "Core/Result.h"
@@ -120,6 +121,50 @@ constexpr std::array<const char*, 4> RequiredExtensions{
 	return false;
 }
 
+// Whether this device will write host memory into a tiled image with no queue involved.
+//
+// **Both halves are asked, and the extension alone is not one of them.** `VK_EXT_host_image_copy`
+// can be present with `hostImageCopy` false — the extension says the entry points exist, the feature
+// says the driver implements them — and enabling an extension whose feature is false is a device
+// creation that fails, which on this path is a machine that comes up with no renderer at all. So it
+// is asked the way decision 108 taught: the capability query, not the extension list.
+[[nodiscard]] bool QueryHostImageCopy(VkPhysicalDevice device) noexcept
+{
+	std::uint32_t count = 0;
+
+	if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	std::vector<VkExtensionProperties> available(count);
+
+	if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, available.data()) != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	const bool listed = std::ranges::any_of(available, [](const VkExtensionProperties& entry) noexcept {
+		return std::string_view{ entry.extensionName } == VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME;
+	});
+
+	if (!listed)
+	{
+		return false;
+	}
+
+	VkPhysicalDeviceHostImageCopyFeatures host{};
+	host.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES;
+
+	VkPhysicalDeviceFeatures2 features{};
+	features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	features.pNext = &host;
+
+	vkGetPhysicalDeviceFeatures2(device, &features);
+
+	return host.hostImageCopy == VK_TRUE;
+}
+
 // Whether a timeline semaphore on this device can be exported as a descriptor. Decision 108's
 // whole question, asked of the driver rather than inferred from its extension list.
 [[nodiscard]] bool QueryTimelineExport(VkPhysicalDevice device) noexcept
@@ -160,6 +205,7 @@ void Describe(VkPhysicalDevice device, DeviceDescription& into) noexcept
 	into.Type = properties.properties.deviceType;
 	into.ApiVersion = properties.properties.apiVersion;
 	into.ExportsTimeline = QueryTimelineExport(device);
+	into.CopiesFromHost = QueryHostImageCopy(device);
 }
 } // namespace
 
@@ -297,7 +343,7 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 	// The optional one. Asked for only where the capability query said the answer is yes, so that a
 	// driver which advertises the extension and refuses the semaphore does not fail device creation
 	// — decision 108's whole subject, and lavapipe's actual behaviour.
-	std::array<const char*, RequiredExtensions.size() + 1> extensions{};
+	std::array<const char*, RequiredExtensions.size() + 2> extensions{};
 	std::ranges::copy(RequiredExtensions, extensions.begin());
 	std::uint32_t extensionCount = RequiredExtensions.size();
 
@@ -305,6 +351,24 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 	{
 		extensions[extensionCount] = VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME;
 		++extensionCount;
+	}
+
+	// The second optional one, and it is optional for a different reason than the first. Decision
+	// 108's is optional because a driver advertises it and then refuses; this one is optional because
+	// it is genuinely newer than the floor gyro runs on, and Render/Textures.h has a path that does
+	// not need it. Both are enabled only where the query said yes, which is what keeps a device
+	// creation from failing over a capability nothing has to have.
+	VkPhysicalDeviceHostImageCopyFeatures hostCopy{};
+	hostCopy.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES;
+
+	if (device.m_Description.CopiesFromHost)
+	{
+		extensions[extensionCount] = VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME;
+		++extensionCount;
+
+		hostCopy.hostImageCopy = VK_TRUE;
+		hostCopy.pNext = &features13;
+		features12.pNext = &hostCopy;
 	}
 
 	const VkDeviceCreateInfo deviceInfo{ .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -449,6 +513,71 @@ bool VulkanDevice::Supports(PixelFormat format) const noexcept
 	// Drawn into, which is the usage that matters — a target this device can sample but not render to
 	// is one `BindTargets` must refuse rather than discover at the first frame.
 	return Renderable(m_Physical, format, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
+}
+
+bool VulkanDevice::SupportsHostTexture(PixelFormat format) const noexcept
+{
+	if (!IsValid() || !format.IsValid() || !m_Description.CopiesFromHost)
+	{
+		return false;
+	}
+
+	const VkFormat vulkan = VulkanFormat(format.Code);
+
+	if (vulkan == VK_FORMAT_UNDEFINED)
+	{
+		return false;
+	}
+
+	// The `2` form rather than `vkGetPhysicalDeviceFormatProperties`, because the bit this is really
+	// asking about lives past the thirty-two the older structure has room for —
+	// `VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT` is bit 46. The sampling bit is readable either
+	// way; asking both through one call is what keeps the two answers from being taken under
+	// different queries.
+	VkFormatProperties3 extended{ .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3,
+		                          .pNext = nullptr,
+		                          .linearTilingFeatures = 0,
+		                          .optimalTilingFeatures = 0,
+		                          .bufferFeatures = 0 };
+	VkFormatProperties2 properties{ .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+		                            .pNext = &extended,
+		                            .formatProperties = {} };
+
+	vkGetPhysicalDeviceFormatProperties2(m_Physical, vulkan, &properties);
+
+	constexpr VkFormatFeatureFlags2 Wanted =
+		VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT;
+
+	return (extended.optimalTilingFeatures & Wanted) == Wanted;
+}
+
+std::uint32_t VulkanDevice::MemoryType(std::uint32_t allowed, VkMemoryPropertyFlags properties) const noexcept
+{
+	if (!IsValid())
+	{
+		return MemoryTypeNone;
+	}
+
+	VkPhysicalDeviceMemoryProperties memory{};
+	vkGetPhysicalDeviceMemoryProperties(m_Physical, &memory);
+
+	// First match wins, which is the ordinary answer and the one every driver orders usefully: the
+	// spec requires the types to be sorted so that a more specific one never precedes a subset of
+	// itself, so the first hit is the least surprising type carrying what was asked for.
+	for (std::uint32_t index = 0; index < memory.memoryTypeCount; ++index)
+	{
+		if ((allowed & (1U << index)) == 0)
+		{
+			continue;
+		}
+
+		if ((memory.memoryTypes[index].propertyFlags & properties) == properties)
+		{
+			return index;
+		}
+	}
+
+	return MemoryTypeNone;
 }
 
 std::uint32_t VulkanDevice::ImportableMemoryTypes(RawFd descriptor) const noexcept

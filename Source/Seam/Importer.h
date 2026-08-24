@@ -36,13 +36,31 @@
 // invisible. What migration costs instead is a re-adoption of every live texture against the *same*
 // ids, driven by the composition root because it is the only party that sees both renderers.
 //
-// **Retirement is already solved and needs nothing added.** Docs/Open.md asked how a release can be
-// safe while the frame thread may still hold the id in a list it is recording from, and the answer was
-// built for something else: Publication/Return.h's watermark is the sequence the frame thread is
-// rendering from, and everything strictly below it is the dispatch side's to reclaim. A texture last
-// named by a snapshot below the watermark is a texture no frame can still be sampling. So `Forget` is
-// an ordinary dispatch-side reclamation alongside the buffer releases already derived there, rather
-// than a third channel — which decision 45 would have made a design error rather than an addition.
+// **Retirement is two rules, and the entry only wrote one.** *(Corrected 2026-08-23.)* Docs/Open.md
+// asked how a release can be safe while the frame thread may still hold the id in a list it is
+// recording from, and Publication/Return.h's watermark answers exactly that: it is the sequence the
+// frame thread is rendering from, and everything strictly below it is the dispatch side's to reclaim.
+// So `Forget` is an ordinary dispatch-side reclamation alongside the buffer releases already derived
+// there, rather than a third channel — which decision 45 would have made a design error rather than an
+// addition.
+//
+// What the entry got wrong is the word *sampling*. A texture below the watermark is one the frame
+// thread will not **record** again, and for a renderer that finishes on the CPU before `Record`
+// returns those are the same statement — which `Blit` does, which is why one rule looked like enough
+// for as long as there was one implementation. A device's are not the same statement: the frame thread
+// submits a command buffer and moves on, so the watermark passes a snapshot whose composite is still
+// executing on the queue. An image freed there is freed underneath a read in flight, and what it looks
+// like is a window that corrupts or a device lost, on the frame after somebody closed something —
+// which is the hardest moment there is to attribute it to. Frame/Loop.h already says this in the same
+// breath as the post it makes: *a buffer recorded into a texture is held by GPU work rather than by
+// the snapshot*.
+//
+// So the rule splits by who is able to know the answer. **The caller says when the scene has stopped
+// naming an id; the implementation says when its own work has stopped reading one.** Only the
+// watermark can carry the first and only the renderer holds the second, so `Forget` below is a promise
+// to release rather than a release. This is not the refcounted table decision 131 rejected: what
+// defers is the destruction of a device object, checked where the renderer is already asked whether a
+// frame is done, and nothing is added to the path a fragment is sampled on.
 //
 // **A failed import is a surface that never reaches a frame**, which is the third thing that entry
 // left open. `Adopt` reports to the dispatch thread, and the dispatch thread is what decides whether a
@@ -149,31 +167,41 @@ public:
 	// staging copy is ordinary work rather than something to be careful about.
 	//
 	// **The memory stays the caller's and must stay valid until `Forget` returns.** The two
-	// implementations need it for different lengths of time — a device importer duplicates the
-	// descriptor during this call and owes nothing afterwards, while a CPU sampler reads the mapping on
-	// every frame that names the id — so the contract is the stricter of the two, stated once, rather
-	// than a rule that changes with which renderer the machine happens to be running.
+	// implementations need it for different lengths of time — a device importer consumes it during this
+	// call and owes nothing afterwards, whether it duplicated a descriptor or staged a copy, while a
+	// CPU sampler reads the mapping on every frame that names the id — so the contract is the stricter
+	// of the two, stated once, rather than a rule that changes with which renderer the machine happens
+	// to be running. It is unaffected by `Forget` deferring: what a device holds past that call is its
+	// own image, never the caller's memory.
 	//
 	// **Re-adopting a live id replaces what it names**, which is a console re-laying its grid at a new
-	// address across a mode change, and it is subject to the watermark rule `Forget` carries: it stops
-	// the id naming pixels the frame thread may still be sampling, so it is the same hazard under a
-	// different verb. A client's next buffer is a new id rather than a replacement, because that is
-	// what makes the old one still drawable while the new one imports.
+	// address across a mode change, and it carries both halves of the rule `Forget` does: the caller
+	// waits for the watermark because it stops the id naming pixels a frame may still be recording, and
+	// the implementation retires the image it replaced the way it retires a forgotten one. A client's
+	// next buffer is a new id rather than a replacement, because that is what makes the old one still
+	// drawable while the new one imports.
 	//
 	// `EINVAL` for a null id, for a source that does not describe the image it claims, and for a
 	// memory kind, format, or modifier this importer cannot take. `ENOMEM` where the device or the
 	// table has no room. Both are the caller's to answer, and neither reaches a frame.
 	[[nodiscard]] virtual Result<void> Adopt(TextureId id, const TextureSource& source) = 0;
 
-	// Drop what an id names, and say nothing about an id this does not hold — the same answer a frame
-	// gives one.
+	// Give up an id, and say nothing about one this does not hold — the same answer a frame gives one.
 	//
-	// **Safe only below Publication/Return.h's watermark**, which is the whole of this verb's
-	// difficulty and is the caller's to honour rather than something the seam can check: the frame
-	// thread is composing from a published sequence, and a texture that sequence names is one it may be
-	// sampling right now. What makes the rule cheap is that the dispatch side already derives the
-	// buffer releases and the frame callbacks from the same number, so a texture retires alongside them
-	// rather than needing a mechanism of its own.
+	// **Called below Publication/Return.h's watermark**, which is the caller's half of the rule and is
+	// not something the seam can check: the frame thread composes from a published sequence, and a
+	// texture that sequence still names is one it may be recording right now. What makes that half
+	// cheap is that the dispatch side already derives the buffer releases and the frame callbacks from
+	// the same number, so a texture retires alongside them rather than needing a mechanism of its own.
+	//
+	// **It returns having promised to release rather than having released**, which is the
+	// implementation's half *(2026-08-23)*. The watermark says the scene has stopped naming the id; it
+	// does not say the renderer has stopped reading it, because a device composite outlives the frame
+	// thread's `Record` by however long its queue takes. So an importer that submits work holds the
+	// image until its own completion says otherwise, and reclaims it at a frame boundary rather than
+	// inside this call — which must not block, since the dispatch thread has a scene to serialise and
+	// waiting here would pace authoring to the GPU. What the caller gets either way is that the id is
+	// dead from this call onward.
 	//
 	// Deliberately not a consequence of anything else. An image outlives the target set it was drawn
 	// into, so a mode change that rebinds targets does not change which windows exist.

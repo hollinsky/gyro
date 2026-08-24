@@ -10231,3 +10231,74 @@ both. The gym swaps its buffer forever — mint, adopt, attach, give up the one 
 a client's buffer cycle with no client, and the test that matters stops playing the frame thread and
 checks that *nothing* is released. Without it `Forget` would have no caller in a running gyro until
 `Protocol` landed, and the first exercise of the rule would be a use-after-free in somebody's window.
+
+### 137. The Vulkan texture table belongs to the device, and a mapped buffer needs host image copy
+
+*(Decided 2026-08-23, answering the Vulkan arm of [Open.md](Open.md)'s *how a texture is minted, and
+who holds it* — the half [decision 136](#136-the-texture-minter-is-dispatchs-own-and-a-retirement-is-sealed-with-the-sequence-that-stops-naming-it)
+left open when it settled the minter.)*
+
+[Render/Textures.h](../Source/Render/Textures.h) implements `ITextureImporter` against the
+`VulkanDevice` rather than against a renderer, holds one `VkImage` and one descriptor set per id, and
+defers every destruction behind the renderers that might still be reading it.
+
+**It is per device and not per renderer, which is where this parts company with `Blit`.**
+[Decision 131](#131-texture-import-is-a-second-interface-and-a-texture-retires-on-the-watermark) says
+one object implements `IRenderer` and `ITextureImporter`, and that is a description of the CPU
+renderer rather than a rule — `Blit` has one of each. A `VulkanRenderer` is per output, so a table
+hung off one would give a two-monitor machine two `VkImage`s over every client dmabuf, two descriptor
+sets, and two device-side copies of every `wl_shm` client's pixels. What decision 131 actually rests
+on is that the *id space* outlives a renderer, and a device-level table satisfies that as
+completely: [decision 41](#41-device-migration-is-exercised-on-every-boot) destroys the device too,
+so a migration re-adopts against the same ids either way. Decision 136's registry adopts into every
+registered importer and is unaffected — a Vulkan session registers one covering every output, where a
+`Blit` session registers one per renderer, and the loop is the same loop.
+
+**Retirement is what per-device ownership costs, and `ITextureFence` is the price.** One importer with
+N renderers cannot ask itself whether its work has finished; it asks each renderer for the highest
+value it has submitted, stamps the doomed image with all of them, and destroys it when every one has
+landed. One value per renderer rather than a single high-water mark, because the timelines are
+separate and 4000 on one says nothing about 4000 on the other. Rejected: a device-wide timeline every
+renderer signals, which is a larger change to
+[decision 108](#108-a-sync-point-is-a-device-property-not-a-frame-property)'s export than the problem
+justifies, and reaches into the one thing on this path that is already measured against two drivers.
+
+**A `wl_shm` buffer needs `VK_EXT_host_image_copy`, and without it it is refused by name.** Filling a
+device image the ordinary way is a staging buffer and `vkCmdCopyBufferToImage`, which is a queue
+submission — and `Adopt` runs on the dispatch thread while the `SCHED_FIFO` frame thread is submitting
+composites to the only queue gyro creates. Sharing that queue behind a lock is a priority inversion
+that lands as a dropped frame every time a client posts a software buffer. Host image copy makes the
+question go away rather than answering it: the driver writes tiled pixels on the calling thread, with
+no queue in the picture. It is asked for the way decision 108 taught — the feature query, not the
+extension list — because the extension can be present with the feature false and enabling it then
+fails device creation, which on this path is a machine that comes up with no renderer at all.
+
+**Rejected: a second queue for the dispatch thread.** It is what the first sketch of this reached for,
+and [Render/Device.cpp](../Source/Render/Device.cpp)'s existing argument against one still holds for
+the reason it was written — a second submission order for work the frame loop already ordered. Host
+image copy removes the need without touching it.
+
+**Rejected: a linear host-visible image where the extension is missing.** It samples every frame out
+of memory the GPU reads across the bus, on exactly the older hardware least able to absorb it — and it
+*still* needs one queue-side transition out of `PREINITIALIZED`, so it does not even buy the property
+it was reached for. Rejected with it: performing that transition on the frame thread at first use,
+which makes "first" a thing N renderers have to agree about across submissions that are not ordered.
+Every current Mesa driver and both proprietary ones carry the extension; where it is missing, the
+refusal reaches the dispatch thread, which decision 131 already says is the party that can act on it.
+
+**A dmabuf needs none of it.** The descriptor becomes a `VkImage` under its explicit modifier and
+nothing is written, so the only queue-side work is the acquire from `VK_QUEUE_FAMILY_FOREIGN_EXT` that
+the frame thread already emits for every render target — one per sampled image per frame, batched
+before the pass opens, needing no state shared between the threads. A frame naming more distinct
+images than one batch holds is refused at the pre-flight walk, beside every other refusal, where
+nothing has been recorded yet.
+
+**And the lattice gained two bits, one of which is a correction.** `QuadRunSample` says where the
+item's colour comes from. `QuadRunPremultiply` is the one place
+[Render/Pipeline.h](../Source/Render/Pipeline.h)'s own count was wrong rather than merely different:
+it reads *the alpha mode is not a reason to convert* off the argument that a solid is four numbers,
+which is true of a fill and false of a texture — a straight-alpha client has an alpha per texel and
+nowhere to fold it but the shader. Sixty variants a binding rather than twenty, and about
+seventy-five milliseconds of pipeline creation at every mode set. Rejected: binding a 1×1 white image
+behind every solid so that sampling is unconditional, which is twenty fewer pipelines and one
+dependent texture read on the most common draw the compositor makes.

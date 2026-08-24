@@ -212,19 +212,18 @@ ShadowFor(const DrawItem& item, const ShadowFrame& frame, PixelSize<DeviceSpace>
 
 // What the quad pipeline can express, asked of one item.
 //
-// **Every branch here is a picture somebody would otherwise have to notice was wrong.** A texture
-// drawn as nothing is a window that disappears; a group drawn unflattened is a menu whose overlap
-// shows through mid-fade; a dressing drawn as nothing is a panel that stops being glass; an elevation
-// drawn as nothing is a dialog that stops looking lifted. Each of those composites successfully and
-// is not what the scene said, which is the failure Seam/Renderer.h's *an item the renderer cannot
-// express* exists to keep out of the tree.
+// **Every branch here is a picture somebody would otherwise have to notice was wrong.** A group drawn
+// unflattened is a menu whose overlap shows through mid-fade; a dressing drawn as nothing is a panel
+// that stops being glass; an elevation drawn as nothing is a dialog that stops looking lifted. Each
+// of those composites successfully and is not what the scene said, which is the failure
+// Seam/Renderer.h's *an item the renderer cannot express* exists to keep out of the tree.
+//
+// **A `DrawTexture` is no longer among them** *(2026-08-23)*, and what replaced the refusal is
+// Render/Textures.h. What did not change is the shape of the answer for an id that resolves to
+// nothing: that is skipped at the draw rather than refused here, because Core/Texture.h makes a stale
+// id a lifetime bug reported somewhere other than a frame.
 [[nodiscard]] Result<void> Expressible(const DrawItem& item, ColorState output) noexcept
 {
-	if (std::holds_alternative<DrawTexture>(item.Content))
-	{
-		return Failure(EINVAL, "this renderer samples no textures yet");
-	}
-
 	if (std::holds_alternative<DrawGroup>(item.Content))
 	{
 		return Failure(EINVAL, "this renderer flattens no groups yet; decision 60's offscreen is not built");
@@ -350,6 +349,32 @@ void Depend(
 // blends in the item's own space, so the premultiply is consistent with the blend; a variant that
 // converts undoes this divide before it linearises, which is exactly the un-premultiply that section
 // requires. What is refused either way is applying alpha in one space and blending in another.
+// The four numbers a sampling variant reads out of `Fill`: the source rectangle in normalized
+// texture coordinates.
+//
+// **Both of Seam/Renderer.h's conventions are resolved here, on the CPU.** `DrawTexture::Source` is
+// in `BufferSpace` texels and *empty means the whole image*, and the shader wants neither — it wants
+// an origin and an extent it can multiply a surface-local fraction by. Doing it per item is two
+// divides; doing it in the shader would be two divides and the image's own size in the push block,
+// which is sixteen bytes the block does not have.
+[[nodiscard]] std::array<float, 4> SourceRect(const DrawTexture& texture, PixelSize<BufferSpace> size) noexcept
+{
+	const auto width = static_cast<float>(size.Width);
+	const auto height = static_cast<float>(size.Height);
+
+	// A zero-sized image cannot be adopted — `TextureSource::IsValid` refuses one — so this is the
+	// belt on a braces, and the whole-image answer is the one that draws something rather than a NaN.
+	if (texture.Source.IsEmpty() || width <= 0.0F || height <= 0.0F)
+	{
+		return { 0.0F, 0.0F, 1.0F, 1.0F };
+	}
+
+	return { texture.Source.Origin.X / width,
+		     texture.Source.Origin.Y / height,
+		     texture.Source.Extent.Width / width,
+		     texture.Source.Extent.Height / height };
+}
+
 [[nodiscard]] QuadConstants
 Constants(const DrawItem& item, DrawSolid solid, PixelSize<DeviceSpace> target, ColorState output) noexcept
 {
@@ -390,8 +415,8 @@ Constants(const DrawItem& item, DrawSolid solid, PixelSize<DeviceSpace> target, 
 }
 } // namespace
 
-VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device, Fusion fusion)
-	: m_Clock{ &clock }, m_Device{ &device }, m_Fusion{ fusion }
+VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device, VulkanTextures& textures, Fusion fusion)
+	: m_Clock{ &clock }, m_Device{ &device }, m_Textures{ &textures }, m_Fusion{ fusion }
 {
 	if (!device.IsValid())
 	{
@@ -509,17 +534,30 @@ VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device, Fusion
 		}
 	}
 
-	if (Result<void> created = m_Pipeline.Create(device); !created)
+	if (Result<void> created = m_Pipeline.Create(device, textures.SetLayout()); !created)
 	{
 		m_Status = created;
 		Destroy();
 
 		return;
 	}
+
+	// Last, and only once everything above came up. A renderer registered and then abandoned would
+	// leave the importer holding a pointer to an object whose timeline never advances, which stalls
+	// every retirement on the machine behind a renderer that never draws.
+	textures.Attach(*this);
 }
 
 VulkanRenderer::~VulkanRenderer()
 {
+	// **Before anything is torn down**, because `Detach` is what waits for this renderer's queued work
+	// and releases the images that were waiting on it. Doing it after `Destroy` would destroy the
+	// timeline the wait is against.
+	if (m_Textures != nullptr)
+	{
+		m_Textures->Detach(*this);
+	}
+
 	ReleaseTargets();
 	Destroy();
 }
@@ -977,7 +1015,10 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 			return std::unexpected{ expressible.error() };
 		}
 
-		if (m_Pipeline.For(slot.Format, QuadVariant::For(item.Color, m_Output, item.Radius > 0.0F)) == VK_NULL_HANDLE)
+		const bool samples = std::holds_alternative<DrawTexture>(item.Content);
+
+		if (m_Pipeline.For(slot.Format, QuadVariant::For(item.Color, m_Output, item.Radius > 0.0F, samples)) ==
+		    VK_NULL_HANDLE)
 		{
 			return Failure(EINVAL, "no pipeline was built for this item's colour conversion on this target's format");
 		}
@@ -986,6 +1027,17 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		{
 			return Failure(EINVAL, "no shadow pipeline was built for this target's format");
 		}
+	}
+
+	// The distinct client images this list reads, collected in the same *nothing has been recorded
+	// yet* window as the checks above, because overflowing the batch is the one thing about sampling
+	// that has to be a refusal rather than a skip: a texture drawn without its ownership acquired is
+	// not a missing window, it is a window drawn out of a cache the client wrote behind.
+	const std::uint32_t sampled = GatherSampled(request.Items);
+
+	if (sampled > MaxSampledImages)
+	{
+		return Failure(EINVAL, "this frame samples more distinct images than one composite acquires at once");
 	}
 
 	// Nothing to redraw. The seam is explicit that this is not the same as the caller skipping the
@@ -1058,6 +1110,10 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 			);
 		}
 	}
+
+	// Before the render pass opens, because a queue-family ownership transfer is not something Vulkan
+	// permits inside a rendering instance — and because everything the pass draws may read them.
+	TransferSampled(command, sampled, true);
 
 	BeginTarget(command, slot, request);
 
@@ -1145,26 +1201,52 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 			}
 
 			const DrawSolid* solid = std::get_if<DrawSolid>(&item.Content);
+			const DrawTexture* texture = std::get_if<DrawTexture>(&item.Content);
 
 			// A dressing with nothing to draw. What is left after the branch above is an item whose
 			// whole content was a dressing nobody set — a caller's bug that draws nothing, which is
 			// the same answer Seam/Renderer.h gives an empty `DrawGroup`.
-			if (solid == nullptr)
+			if (solid == nullptr && texture == nullptr)
 			{
 				continue;
+			}
+
+			BoundTexture image{};
+
+			if (texture != nullptr)
+			{
+				image = m_Textures->Find(texture->Texture);
+
+				// Core/Texture.h's answer, and the only silent skip in this loop: a client destroyed
+				// the buffer while a published snapshot still named it, which resolves to nothing
+				// rather than to whatever took the slot. Drawing a black rectangle instead would put
+				// a hole in the screen for a condition the dispatch thread has already handled.
+				if (!image.IsValid())
+				{
+					continue;
+				}
 			}
 
 			// Decision 62's reference execution, where this renderer was built for it: the same
 			// chain, one pass per element, through an intermediate that rounds.
+			//
+			// **It draws fills only, and a texture under it is skipped rather than refused.** The
+			// reference path has no sampling element yet, so there is nothing for the oracle to
+			// compare a textured item against — and this renderer is only ever constructed this way
+			// by a test that asked for it by name. Docs/Open.md carries what is owed.
 			if (m_Fusion == Fusion::Separate)
 			{
-				Separate(command, slot, item, *solid, request, std::span{ rects.data(), count }, bound);
+				if (solid != nullptr)
+				{
+					Separate(command, slot, item, *solid, request, std::span{ rects.data(), count }, bound);
+				}
 
 				continue;
 			}
 
-			const VkPipeline pipeline =
-				m_Pipeline.For(slot.Format, QuadVariant::For(item.Color, m_Output, item.Radius > 0.0F));
+			const VkPipeline pipeline = m_Pipeline.For(
+				slot.Format, QuadVariant::For(item.Color, m_Output, item.Radius > 0.0F, texture != nullptr)
+			);
 
 			if (pipeline != bound)
 			{
@@ -1172,7 +1254,28 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 				bound = pipeline;
 			}
 
-			const QuadConstants constants = Constants(item, *solid, slot.Size, m_Output);
+			// Bound per textured item rather than tracked, because a set binding is cheap and the
+			// state that would have to be tracked is invalidated by the dressing and shadow programs
+			// this loop interleaves. Nothing is bound for a fill: those variants declare the set and
+			// make no static use of it, so Vulkan requires none.
+			if (image.Set != VK_NULL_HANDLE)
+			{
+				vkCmdBindDescriptorSets(
+					command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_Pipeline.Layout(), 0, 1, &image.Set, 0, nullptr
+				);
+			}
+
+			QuadConstants constants = Constants(item, solid != nullptr ? *solid : DrawSolid{}, slot.Size, m_Output);
+
+			if (texture != nullptr)
+			{
+				const std::array<float, 4> source = SourceRect(*texture, image.Size);
+
+				constants.Fill[0] = source[0];
+				constants.Fill[1] = source[1];
+				constants.Fill[2] = source[2];
+				constants.Fill[3] = source[3];
+			}
 			vkCmdPushConstants(
 				command,
 				m_Pipeline.Layout(),
@@ -1191,6 +1294,11 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 	}
 
 	vkCmdEndRendering(command);
+
+	// Handed back in the same breath as the target, and for the mirror of the target's reason: these
+	// pixels are a client's, and holding ownership past the frame that read them would leave the next
+	// acquire without a release to match.
+	TransferSampled(command, sampled, false);
 
 	const VkImageMemoryBarrier release =
 		Transfer(slot.Image, family, VK_QUEUE_FAMILY_FOREIGN_EXT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0);
@@ -1212,7 +1320,7 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		return std::unexpected{ ended.error() };
 	}
 
-	const std::uint64_t value = m_Submitted + 1;
+	const std::uint64_t value = m_Submitted.load(std::memory_order_relaxed) + 1;
 	const VkTimelineSemaphoreSubmitInfo timelineInfo{ .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
 		                                              .pNext = nullptr,
 		                                              .waitSemaphoreValueCount = 0,
@@ -1229,14 +1337,26 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		                           .signalSemaphoreCount = 1,
 		                           .pSignalSemaphores = &m_Timeline };
 
+	// **Published before the submit rather than after, and that order is the retirement rule.**
+	// Render/Textures.h stamps a doomed image with this number on the dispatch thread, so a value that
+	// lags the queue by even one submission is an image freed while a command buffer naming it is
+	// still executing — which is the whole of what Seam/Importer.h's second half is about. Storing
+	// first can only *overstate* what is in flight, and that costs a retirement one dispatch iteration.
+	m_Submitted.store(value, std::memory_order_release);
+
 	if (Result<void> submitted =
 	        Check(vkQueueSubmit(m_Device->Queue(), 1, &submitInfo, VK_NULL_HANDLE), "vkQueueSubmit");
 	    !submitted)
 	{
+		// Nothing reached the queue, so nothing can be reading anything — and leaving the number
+		// raised would have every retirement on the machine waiting for a value the timeline will
+		// never signal. The next successful submit takes this same value, so a stamp taken in between
+		// is satisfied rather than stranded.
+		m_Submitted.store(value - 1, std::memory_order_release);
+
 		return std::unexpected{ submitted.error() };
 	}
 
-	m_Submitted = value;
 	slot.LastSubmit = value;
 
 	// **Decision 108 in five lines.** A device that cannot export a timeline has no descriptor to put
@@ -1869,6 +1989,99 @@ Result<void> VulkanRenderer::Dress(
 	}
 
 	return {};
+}
+
+std::uint32_t VulkanRenderer::GatherSampled(std::span<const DrawItem> items) noexcept
+{
+	std::uint32_t count = 0;
+
+	for (const DrawItem& item : items)
+	{
+		const DrawTexture* const texture = std::get_if<DrawTexture>(&item.Content);
+
+		if (texture == nullptr)
+		{
+			continue;
+		}
+
+		const VkImage image = m_Textures->Find(texture->Texture).Foreign;
+
+		// Null for an image this device filled itself, which never left this queue's ownership, and
+		// null for an id that resolves to nothing — which the draw loop skips for Core/Texture.h's
+		// reason and which therefore has nothing to acquire either.
+		if (image == VK_NULL_HANDLE)
+		{
+			continue;
+		}
+
+		bool seen = false;
+
+		// A linear scan, because the same client image appearing twice in one list is the ordinary
+		// case rather than the exception — decision 99's overview draws every window's own texture as
+		// a tile *and* the focused one at full size — and an unmatched second acquire on an image
+		// already owned is not a pair. At these sizes the scan is cheaper than anything with a hash
+		// in it, and it allocates nothing, which is the constraint that decides it.
+		for (std::uint32_t index = 0; index < count && index < MaxSampledImages; ++index)
+		{
+			seen = seen || m_Sampled[index] == image;
+		}
+
+		if (seen)
+		{
+			continue;
+		}
+
+		if (count < MaxSampledImages)
+		{
+			m_Sampled[count] = image;
+		}
+
+		// Counted past the cap so the caller can refuse on the true number rather than on a clamped
+		// one, which would silently draw the first hundred and twenty-eight correctly and the rest
+		// out of a stale cache.
+		++count;
+	}
+
+	return count;
+}
+
+void VulkanRenderer::TransferSampled(VkCommandBuffer command, std::uint32_t count, bool acquiring) const noexcept
+{
+	if (count == 0)
+	{
+		return;
+	}
+
+	const std::uint32_t family = m_Device->QueueFamily();
+
+	// On the stack rather than a member, and it is not an allocation: decision 36 forbids the heap
+	// inside the frame section and says nothing about automatic storage, which is what every other
+	// arena in this function already uses.
+	std::array<VkImageMemoryBarrier, MaxSampledImages> barriers{};
+
+	for (std::uint32_t index = 0; index < count; ++index)
+	{
+		barriers[index] =
+			acquiring ? Transfer(m_Sampled[index], VK_QUEUE_FAMILY_FOREIGN_EXT, family, 0, VK_ACCESS_SHADER_READ_BIT) :
+						Transfer(m_Sampled[index], family, VK_QUEUE_FAMILY_FOREIGN_EXT, 0, 0);
+	}
+
+	// `TOP_OF_PIPE` to `FRAGMENT_SHADER` acquiring, and `FRAGMENT_SHADER` to `BOTTOM_OF_PIPE`
+	// releasing — the same two directions the target's own pair uses one screenful up, because the
+	// dependency is the same shape: nothing in this submission produced these pixels, and nothing in
+	// it consumes them after the pass.
+	vkCmdPipelineBarrier(
+		command,
+		acquiring ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		acquiring ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+		0,
+		0,
+		nullptr,
+		0,
+		nullptr,
+		count,
+		barriers.data()
+	);
 }
 
 bool VulkanRenderer::Reached(std::uint64_t value) const noexcept

@@ -42,10 +42,16 @@
 //   admits two runs, not ten, and every additional run the formula counts is a chain shape no
 //   `DrawItem` can encode.
 //
-// So the run mask is **two bits** — `QuadRunCorner` and `QuadRunConvert` — and the lattice's size is
-// the conversion's selector rather than the mask. See `QuadVariantsPerBinding` for what that comes
-// to. Decision 103's conclusion survives: the set is enumerable at build time, which is the property
-// decision 109 rests on. Its arithmetic does not.
+// So the pointwise chain's run mask is **two bits** — `QuadRunCorner` and `QuadRunConvert` — and the
+// lattice's size is the conversion's selector rather than the mask. Decision 103's conclusion
+// survives: the set is enumerable at build time, which is the property decision 109 rests on. Its
+// arithmetic does not.
+//
+// **Two more bits arrived with the first `DrawTexture`, and neither is a chain element**
+// *(2026-08-23)*. `QuadRunSample` says where the item's colour comes from, which is upstream of the
+// chain rather than in it; `QuadRunPremultiply` is the one place the count above was wrong rather
+// than merely different, because it rests on an alpha mode being foldable on the CPU and that is
+// only true of a fill. See `QuadVariantsPerBinding` for what the four bits come to together.
 //
 // **A pipeline per colour format, because dynamic rendering names the attachment's format at
 // creation.** There is no render pass object to be compatible with, so the format is baked in.
@@ -69,17 +75,45 @@
 // overrun in a frame.
 inline constexpr std::size_t MaxCompositeFormats = 4;
 
-// The run mask, mirroring Chain.glsl's `ChainRun*`. Two bits, for the reason counted above.
+// The run mask, mirroring Chain.glsl's `ChainRun*`.
+//
+// The first two are the pointwise chain's, counted above. The second two arrived with the first
+// `DrawTexture` and are the two ways sampling differs from filling *(2026-08-23)*.
 inline constexpr std::uint32_t QuadRunCorner = 1U << 0;
 inline constexpr std::uint32_t QuadRunConvert = 1U << 1;
+
+// Where the item's colour comes from: the bound image rather than the push block.
+//
+// **A specialization constant rather than a white texture bound behind every solid.** The two are
+// the same picture, and the difference is one texture fetch on the most common draw the compositor
+// makes — a solid fill is the wallpaper, every panel's ground, and every window's shadowless
+// rectangle, and a dependent read per fragment on all of them to save twenty pipelines at a mode set
+// is the wrong end of that trade. What it costs is that a set has to be *bound* for the sampling
+// variants and not for the others, which is one branch at the call site rather than a lattice
+// dimension.
+inline constexpr std::uint32_t QuadRunSample = 1U << 2;
+
+// Whether the sampled texel needs its alpha applied before anything else touches it.
+//
+// **The one place Pipeline.h's own reasoning did not survive the second content kind**
+// *(2026-08-23).* `QuadVariant::For` says below that the alpha mode is absorbed without a fragment
+// doing anything, and its argument is *a solid is four numbers* — three multiplies on the CPU, once
+// per item. A texture is not four numbers. A client that commits straight-alpha content has an alpha
+// per texel and the fold has to happen per texel, after the fetch and before every element that
+// assumes premultiplied components — which is all of them, since Chain.glsl converts on the
+// assumption and `over` blends on it.
+//
+// Meaningless without `QuadRunSample`, and never set without it: a straight-alpha *solid* is still
+// folded on the CPU, exactly as before.
+inline constexpr std::uint32_t QuadRunPremultiply = 1U << 3;
 
 // Source colour states one binding builds a converting variant for: every pair of primaries and
 // transfer function except the ones naming `TransferFunction::Hlg`, which Render/Renderer.cpp
 // refuses by name because converting it needs a display peak luminance `ColorState` does not carry.
 inline constexpr std::size_t QuadSourceStates = 3 * 3;
 
-// What one `Prepare` builds: the two corner variants that convert nothing, and a converting pair for
-// every source state.
+// What one `Prepare` builds for items whose colour is in the push block: the two corner variants
+// that convert nothing, and a converting pair for every source state.
 //
 // Twenty, and about twenty-five milliseconds of `vkCreateGraphicsPipelines` for them on the floor
 // tier — measured by Pipeline.Test.cpp, which prints the figure rather than asserting it, because a
@@ -89,7 +123,22 @@ inline constexpr std::size_t QuadSourceStates = 3 * 3;
 // tried. Enumerating the *target* end as well would be a hundred and sixty-four variants and over two
 // hundred milliseconds per format, at every binding, which is the whole of why `Prepare` is told a
 // colour state instead.
-inline constexpr std::size_t QuadVariantsPerBinding = 2 + (QuadSourceStates * 2);
+inline constexpr std::size_t QuadFilledVariants = 2 + (QuadSourceStates * 2);
+
+// And the whole set: the same twenty again for a sampled item, doubled by whether its alpha has to
+// be folded per texel.
+//
+// **Sixty, and about seventy-five milliseconds a binding** *(2026-08-23)*. That is three times what
+// it was, at every mode set and every output that comes up, and it is worth saying plainly rather
+// than leaving in the arithmetic: a hotplug on a four-monitor machine spends a third of a second in
+// the driver where it used to spend a tenth. `Prepare` is called from `BindTargets`, which the seam
+// declares unbounded and which no frame is inside — so what this delays is the first frame on a
+// newly configured output, not a frame already being served on another one.
+//
+// **The premultiply arm doubles only the sampled half**, because a straight-alpha solid is still
+// folded on the CPU. Doubling the whole lattice would build twenty programs that differ in an
+// element none of them contains.
+inline constexpr std::size_t QuadVariantsPerBinding = QuadFilledVariants * 3;
 
 // Which program draws one item onto one output.
 //
@@ -108,16 +157,29 @@ struct QuadVariant
 
 	friend constexpr bool operator==(QuadVariant, QuadVariant) noexcept = default;
 
-	// What an item wants: the corner mask where it is rounded, and a conversion where its light is
-	// not the output's.
+	// What an item wants: where its colour comes from, the corner mask where it is rounded, and a
+	// conversion where its light is not the output's.
 	//
-	// **The alpha mode is deliberately not a reason to convert.** It is the one difference the
-	// renderer absorbs without a fragment doing anything: a solid is four numbers, so a straight-alpha
-	// fill becomes a premultiplied one with three multiplies on the CPU. Everything else — primaries,
-	// transfer function, what the content calls its own 1.0 — is arithmetic per fragment.
-	[[nodiscard]] static constexpr QuadVariant For(ColorState item, ColorState output, bool rounded) noexcept
+	// **The alpha mode is a reason to convert only where the item samples**, which is the correction
+	// `QuadRunPremultiply` carries. For a fill it is still absorbed without a fragment doing anything
+	// — a solid is four numbers, so a straight-alpha fill becomes a premultiplied one with three
+	// multiplies on the CPU. For a texture there is an alpha per texel and nowhere to fold it but the
+	// shader. Everything else — primaries, transfer function, what the content calls its own 1.0 — is
+	// arithmetic per fragment either way.
+	[[nodiscard]] static constexpr QuadVariant
+	For(ColorState item, ColorState output, bool rounded, bool sampled = false) noexcept
 	{
 		QuadVariant variant{ .Run = rounded ? QuadRunCorner : 0U };
+
+		if (sampled)
+		{
+			variant.Run |= QuadRunSample;
+
+			if (item.Alpha == AlphaMode::Straight)
+			{
+				variant.Run |= QuadRunPremultiply;
+			}
+		}
 
 		// Reference luminance counts. Two states alike in both enumerators still describe different
 		// light, and the conversion between them is a decode, a scale and an encode with no matrix —
@@ -166,7 +228,7 @@ struct QuadLuminance
 // decision 36. A vertex buffer is memory the frame thread would have to fill and the driver would
 // have to fence, for four points that already exist in the draw item; a uniform buffer is an
 // allocation and a descriptor write per item on a path that may not allocate at all. The block is
-// 104 bytes against a 128-byte floor every Vulkan implementation guarantees.
+// 112 bytes against a 128-byte floor every Vulkan implementation guarantees.
 //
 // **`Corner` is four `vec4`s and not four `vec2`s beside four floats**, because `std140` and
 // `std430` disagree about the stride of an array of `vec2` and agree about an array of `vec4`. A
@@ -180,7 +242,23 @@ struct QuadConstants
 	// avoids is named.
 	float Corner[4][4]{};
 
-	// Premultiplied, in whatever the item's colour state says its components mean.
+	// What the item's colour comes from, read two ways by two variants.
+	//
+	// Without `QuadRunSample` it is the fill: four components, premultiplied unless
+	// `QuadRunPremultiply`, in whatever the item's colour state says they mean.
+	//
+	// With it, it is the source rectangle in *normalized* texture coordinates — origin in the first
+	// two, extent in the last two — so that a fragment's coordinate is `Fill.xy + (Local / Extent) *
+	// Fill.zw` and the image's own size never has to cross. Both the normalization and the *empty
+	// means the whole image* rule from Seam/Renderer.h's `DrawTexture` are resolved on the CPU, where
+	// they are two divides per item rather than per fragment.
+	//
+	// **One `vec4` read two ways rather than sixteen more bytes**, and the block is why: it is 112
+	// against a 128-byte floor, and `ElementConstants` — which is this block plus four selectors —
+	// is at exactly 128. Growing this would put the unfused path over what the weakest conforming
+	// device guarantees. What makes the overload honest rather than a squeeze is that the two
+	// readings are disjoint by construction: a `DrawSolid` has no source and a `DrawTexture` has no
+	// colour, so there is no item for which both meanings exist.
 	float Fill[4]{ 0.0F, 0.0F, 0.0F, 0.0F };
 
 	// Extent x, extent y, corner radius, per-node opacity. Four numbers that vary per item and are
@@ -247,7 +325,14 @@ public:
 	// The parts that do not depend on a target: two shader modules and the pipeline layout. Called
 	// once, from the renderer's constructor, so that a device which refuses the SPIR-V says so at
 	// startup rather than at the first frame with a window in it.
-	[[nodiscard]] Result<void> Create(VulkanDevice& device);
+	//
+	// `textures` is Render/Textures.h's set layout, which every sampling variant is built against and
+	// which the shadow program does not name — a shadow reads nothing. It is passed in rather than
+	// created here because the sets allocated against it belong to the importer, which outlives every
+	// binding and is shared by every output's renderer; a layout minted here would be a second one
+	// that happens to match, and a set allocated against one layout and bound against another is
+	// undefined behaviour that works until a driver checks.
+	[[nodiscard]] Result<void> Create(VulkanDevice& device, VkDescriptorSetLayout textures);
 
 	// Every variant this attachment format and this output's colour state can want, built if they are
 	// not there yet.

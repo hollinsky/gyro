@@ -901,3 +901,29 @@ nothing only proves the grep.
   no syncobj protocol and a composite long enough to see: the answer is either a measured figure, or
   the observation that a GPU completion should be a descriptor and belongs in
   [KernelWishlist.md](KernelWishlist.md).
+- **Whether decision 62's oracle should cover a textured item.** The unfused path has no sampling
+  element: [Render/Unfused.h](../Source/Render/Unfused.h)'s chain begins at `Element::Emit`, which is
+  where an item's *fill* enters, and a `VulkanRenderer` built `Fusion::Separate` therefore skips a
+  `DrawTexture` rather than drawing one. Decision 62 says the separate-pass form is what correctness is
+  defined against, so a content kind the reference cannot express is a content kind nothing checks the
+  fusion of. It is small — one more enumerator, one branch in `Element.frag`, and the texture's
+  descriptor bound for the emit pass instead of the intermediate nobody reads — and the reason it is
+  an entry rather than done is that `ElementConstants` is at exactly 128 bytes, so the source
+  rectangle has to travel in the field the fill would have used, which is the same overload the fused
+  path already makes and worth deciding once for both rather than twice.
+- **What a minified texture should be filtered with.** [Render/Textures.cpp](../Source/Render/Textures.cpp)
+  mints one sampler, bilinear and clamped, because that is `Blit`'s answer and the two renderers have
+  to produce one picture — and bilinear at unit scale is exact, so a still window is not softened by
+  being composited. What it is not is *good* under minification: decision 99's overview shrinks every
+  window to a tile, and bilinear with no mip chain aliases visibly on text at anything past about half
+  scale. A mip chain is the obvious answer and its cost is the interesting part — it would be rebuilt
+  on the dispatch thread at every client commit, which is where the trade actually is.
+  [DrawItem::Sampling](../Source/Seam/Renderer.h) already carries decision 56's classification of
+  whether the resample is a no-op, so the producer side of the question is answered and the renderer
+  currently ignores it.
+- **What a planar client buffer becomes.** `NV12` is a real client format and
+  [Render/Textures.cpp](../Source/Render/Textures.cpp) refuses it: one plane, one view, one descriptor.
+  A second plane needs a `VkSamplerYcbcrConversion`, which is an *immutable* sampler baked into a
+  descriptor set layout — so it is a second set layout and a second lattice arm rather than a runtime
+  branch, which is what makes it a decision rather than a gap. Nothing asks for it until there is a
+  video client, and the refusal is loud meanwhile.

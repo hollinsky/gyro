@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -12,6 +13,7 @@
 #include "Render/Backdrop.h"
 #include "Render/Device.h"
 #include "Render/Pipeline.h"
+#include "Render/Textures.h"
 #include "Render/Unfused.h"
 #include "Render/Vulkan.h"
 #include "Seam/RenderTarget.h"
@@ -20,16 +22,22 @@
 
 // The Vulkan renderer: `Seam/Renderer.h`'s `Record` half, against images the presenter allocated.
 //
-// **It draws solids, it dresses them, and it lifts them — and it still refuses what it cannot
-// express.** Render/Pipeline.h is the quad pipeline and it covers one alternative of `DrawContent`: a
-// fill, over a projected quad, with a corner radius and a per-node opacity. Beside it are the two
-// dressings: Render/Backdrop.h's chain for a material, and the shadow pipeline for decision 104's
-// elevation, which reads nothing and costs one draw. A `DrawTexture` and a `DrawGroup` are `EINVAL` —
-// Seam/Renderer.h's *an item the renderer cannot express* — rather than a window that silently comes
-// out as a flat rectangle or vanishes, and so is a shadow asked of a turned quad, whose direction
-// Docs/Open.md has not settled. The refusal is the half of this file worth keeping as the pipeline
-// set grows: the alternative failure mode is a screen that is subtly wrong with nothing in any log
-// saying why, which nobody can report and nobody can bisect.
+// **It draws solids, it samples images, it dresses them, and it lifts them — and it still refuses
+// what it cannot express.** Render/Pipeline.h is the quad pipeline and it covers two alternatives of
+// `DrawContent`: a fill or a read from an image Render/Textures.h holds, over a projected quad, with
+// a corner radius and a per-node opacity. Beside it are the two dressings: Render/Backdrop.h's chain
+// for a material, and the shadow pipeline for decision 104's elevation, which reads nothing and costs
+// one draw. A `DrawGroup` is still `EINVAL` — Seam/Renderer.h's *an item the renderer cannot express*
+// — rather than a menu whose overlap shows through mid-fade, and so is a shadow asked of a turned
+// quad, whose direction Docs/Open.md has not settled. The refusal is the half of this file worth
+// keeping as the pipeline set grows: the alternative failure mode is a screen that is subtly wrong
+// with nothing in any log saying why, which nobody can report and nobody can bisect.
+//
+// **A texture whose id resolves to nothing is skipped rather than refused**, which is the one place
+// this file answers differently from the rest. Core/Texture.h fixes that answer: a client destroying
+// a buffer while a published snapshot still names it resolves to nothing, and *what a renderer does
+// with a null or stale id is draw nothing and say nothing* — a frame is not where a lifetime bug gets
+// reported, and the frame after it would report the same one again.
 //
 // **The colour-state conversion is the next thing owed, and it is why a mismatch is refused.**
 // Decision 47 composites in linear light at wide primaries; nothing here converts anything yet, so an
@@ -78,7 +86,7 @@ enum class Fusion : std::uint8_t
 	Separate,
 };
 
-class VulkanRenderer final : public IRenderer
+class VulkanRenderer final : public IRenderer, public ITextureFence
 {
 public:
 	// **Construction cannot fail, and `Status()` is where the reason lives.** Same shape as
@@ -97,7 +105,18 @@ public:
 	// it needs are reserved at a binding, and a renderer that could change its mind between two
 	// binds would be one whose two paths were never both available at once — which is the one
 	// arrangement the oracle cannot be written against.
-	VulkanRenderer(const IClock& clock, VulkanDevice& device, Fusion fusion = Fusion::Selected);
+	// `textures` is the device's importer, shared by every output's renderer and outliving all of
+	// them. Held rather than owned for the device's own reason one paragraph up: the composition root
+	// destroys the renderers, then the importer, then the device, and a renderer that owned the table
+	// would make a two-output machine hold two of every window. Registering for retirement and
+	// unregistering happen here rather than at the root, because the pairing is what makes it correct
+	// and a root that forgot the second half would free an image mid-composite.
+	VulkanRenderer(
+		const IClock& clock,
+		VulkanDevice& device,
+		VulkanTextures& textures,
+		Fusion fusion = Fusion::Selected
+	);
 
 	~VulkanRenderer() override;
 
@@ -118,6 +137,20 @@ public:
 	// the composite on an accelerated device and is very nearly right on the floor tier, where the
 	// wait below folds the GPU half into the CPU figure anyway.
 	[[nodiscard]] std::size_t CollectCosts(std::span<GpuCost> into) override;
+
+	// Render/Textures.h's half, answered on the dispatch thread while this thread composites.
+	//
+	// **`m_Submitted` is atomic for exactly these two readers and nothing else.** The frame thread
+	// stores it once per submission, which is a release of everything that submission recorded; the
+	// dispatch thread loads it to stamp a doomed image. It is not on the sampling path, not on the
+	// per-item path, and not read inside the frame section at all — `Record` uses the plain value it
+	// just computed.
+	[[nodiscard]] std::uint64_t Submitted() const noexcept override
+	{
+		return m_Submitted.load(std::memory_order_acquire);
+	}
+
+	[[nodiscard]] bool Reached(std::uint64_t value) const noexcept override;
 
 	// Why the renderer is not usable, where it is not. Success once construction completed.
 	[[nodiscard]] const Result<void>& Status() const noexcept { return m_Status; }
@@ -281,7 +314,21 @@ private:
 
 	[[nodiscard]] Result<void> Settle();
 
-	[[nodiscard]] bool Reached(std::uint64_t value) const noexcept;
+	// Every distinct client image the list samples, brought back from `VK_QUEUE_FAMILY_FOREIGN_EXT`
+	// before the render pass opens and handed back after it closes.
+	//
+	// **A pair per frame rather than once at import, and the ownership rule is why.** A dmabuf's
+	// pixels are written by something that is not this queue, so what the acquire buys is that the
+	// device's caches see them; doing it once would need a submission on the dispatch thread, which
+	// Render/Textures.h declines for the reason stated there. Doing it per frame needs no shared state
+	// between the two threads at all — the barrier is derived from the item list this thread is
+	// already walking.
+	//
+	// **Only the imported arm.** An image this device filled itself never left, so it has no ownership
+	// to reacquire and appears here as a null handle that is skipped.
+	[[nodiscard]] std::uint32_t GatherSampled(std::span<const DrawItem> items) noexcept;
+
+	void TransferSampled(VkCommandBuffer command, std::uint32_t count, bool acquiring) const noexcept;
 
 	void Destroy() noexcept;
 
@@ -307,6 +354,14 @@ private:
 	// never draw this way.
 	class Unfused m_Unfused;
 
+	// The device's texture table. Never null after construction — the constructor refuses a null
+	// reference by taking one.
+	VulkanTextures* m_Textures = nullptr;
+
+	// The images `GatherSampled` found, reused across frames so that the walk allocates nothing.
+	// Decision 36's rule, and the reason `MaxSampledImages` is a refusal rather than a resize.
+	std::array<VkImage, MaxSampledImages> m_Sampled{};
+
 	Fusion m_Fusion = Fusion::Selected;
 
 	// What the composite is encoded to, from the binding rather than from the frame. Held because
@@ -319,7 +374,7 @@ private:
 	// cannot export one, and decision 108 is what that means for the points handed out.
 	VkSemaphore m_Timeline = VK_NULL_HANDLE;
 	Fd m_TimelineFd;
-	std::uint64_t m_Submitted = 0;
+	std::atomic<std::uint64_t> m_Submitted = 0;
 
 	std::array<Slot, MaxRenderTargets> m_Slots{};
 	std::uint32_t m_TargetCount = 0;

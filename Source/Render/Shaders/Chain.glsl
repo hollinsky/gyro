@@ -45,6 +45,12 @@ const int ChainPrimariesBt2020 = 2;
 const uint ChainRunCorner = 1u;
 const uint ChainRunConvert = 2u;
 
+// Where the fragment's colour comes from, and whether its alpha has to be folded in before anything
+// else touches it. Render/Pipeline.h argues both; the second exists because premultiplying a texture
+// is per texel where premultiplying a fill is three multiplies on the CPU.
+const uint ChainRunSample = 4u;
+const uint ChainRunPremultiply = 8u;
+
 // SMPTE ST 2084, and the constants are the ratios the standard states rather than the decimals a
 // blog post rounded them to.
 const float PqM1 = 2610.0 / 16384.0;
