@@ -5,9 +5,9 @@
 
 Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 {
-	// Neither is touched yet: `wl_compositor` mints surfaces and regions, and neither reaches the world
-	// until there is a buffer behind it. Named rather than dropped so the signature reads as the
-	// contract it implements.
+	// Neither is touched here: a scene made of client windows starts with no clients in it, and both
+	// arrive again on every `Advance` — which is where a request that needs them runs. Named rather
+	// than dropped so the signature reads as the contract it implements.
 	(void)scene;
 	(void)textures;
 
@@ -28,14 +28,29 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		return Failure(ENOMEM, "advertising wl_compositor");
 	}
 
+	m_ShmGlobal = Wayland::Server::WlShm::Advertise(*display, ShmVersion, m_Shm);
+
+	if (m_ShmGlobal == nullptr)
+	{
+		// Fatal for `wl_compositor`'s reason and one more: `wl_shm` is the only way a client hands over
+		// pixels at all, so a compositor without it is one every application connects to and then hangs
+		// against, with nothing on screen and nothing in a log to explain it.
+		return Failure(ENOMEM, "advertising wl_shm");
+	}
+
 	return {};
 }
 
 Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 {
 	(void)scene;
-	(void)textures;
 	(void)now;
+
+	// The world, reachable for exactly the length of this call. Every request below runs inside the
+	// dispatch, so a `wl_surface.commit` finds the texture space on the stack rather than in a
+	// reference this object had to keep — which is the arrangement `ISceneAuthor` is shaped for and
+	// [Context.h](Context.h) carries the argument for.
+	const HostContext::Dispatching dispatching{ m_Context, textures };
 
 	// **A failed dispatch is swallowed here and cannot be otherwise**, which is `ISceneAuthor`'s shape
 	// rather than an omission: `Advance` runs on every wake and returns no `Result`, because a failure

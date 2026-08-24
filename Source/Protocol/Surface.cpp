@@ -1,8 +1,10 @@
 #include "Protocol/Surface.h"
 
 #include <algorithm>
+#include <utility>
 #include <vector>
 
+#include "Protocol/Buffer.h"
 #include "Protocol/Region.h"
 
 namespace
@@ -40,6 +42,19 @@ template<typename S>
 
 ClientSurface::~ClientSurface()
 {
+	// The client is gone and its window with it, so the pixels stop being drawn. Retiring is the id
+	// giving up its name, not the memory going away — the registry holds both until the frame thread's
+	// watermark says no published snapshot can still be recording from it.
+	//
+	// Outside a dispatch there is nothing to retire into: the display is destroyed with the host, and
+	// the texture space is the composition root's and on its way out too.
+	if (ITextures* const textures = m_Context->Textures(); textures != nullptr)
+	{
+		textures->Retire(m_Current.Content);
+	}
+
+	ReleaseStaged();
+
 	// Destroying a callback runs its `OnGone`, which calls `Forget` back into this object and erases
 	// from the list being walked. So the lists are emptied first and the resources destroyed out of
 	// local copies — `Forget` then finds nothing and does nothing, which is what it is written to do.
@@ -95,13 +110,16 @@ void ClientSurface::OnGone()
 
 void ClientSurface::OnAttach(Wayland::Server::WlBuffer buffer, std::int32_t x, std::int32_t y)
 {
-	// **The buffer is deliberately not held yet.** `wl_shm` is the next step and there is nothing to
-	// adopt one into, so a surface still has no content and Wayland's own rule — a surface with no
-	// buffer is not shown — is the honest state rather than a stub. What is honoured here is the
-	// offset, because it is surface state and not buffer state: the protocol folded `attach`'s `x` and
-	// `y` into `wl_surface.offset` at version 5 precisely because they were never about the buffer.
-	(void)buffer;
+	// A second attach before a commit supersedes the first, and the buffer nobody ever read goes
+	// straight back — the client is free to reuse it, and holding it would be a toolkit waiting on a
+	// release for pixels gyro never looked at.
+	ReleaseStaged();
 
+	m_Attached = buffer;
+
+	// The offset is surface state rather than buffer state, which is why it survives the attach being
+	// superseded: the protocol folded `attach`'s `x` and `y` into `wl_surface.offset` at version 5
+	// precisely because they were never about the buffer.
 	if (Object().Version() >= 5)
 	{
 		if (x != 0 || y != 0)
@@ -238,6 +256,52 @@ void ClientSurface::OnCommit()
 	Apply();
 }
 
+void ClientSurface::ReleaseStaged() noexcept
+{
+	if (m_Attached.has_value() && m_Attached->IsValid())
+	{
+		m_Attached->Release();
+	}
+
+	m_Attached.reset();
+}
+
+void ClientSurface::TakeContent(ITextures& textures)
+{
+	const TextureId replaced = m_Pending.Content;
+
+	m_Pending.Content = {};
+	m_Pending.ContentSize = {};
+
+	// A client that attached nothing is taking its window off the screen. Everything else about the
+	// surface survives, which is what makes the next attach put it straight back.
+	ClientBuffer* const buffer = m_Attached->IsValid() ? ClientBuffer::Of(*m_Attached) : nullptr;
+
+	if (buffer != nullptr)
+	{
+		if (const Result<TextureId> adopted = buffer->Adopt(textures); adopted)
+		{
+			m_Pending.Content = *adopted;
+			m_Pending.ContentSize = buffer->Extent();
+		}
+		else
+		{
+			// gyro could not take the pixels — the texture space is full, or a renderer refused them.
+			// The client is told so rather than left with a window that never appears, because a
+			// compositor that quietly draws nothing is a bug report nobody can reproduce.
+			Object().PostNoMemory();
+		}
+	}
+
+	// Retired after the new id exists rather than before, so a device that fails the import leaves the
+	// surface holding nothing rather than holding a name it has already given up.
+	textures.Retire(replaced);
+
+	// The pixels are gyro's now. The client may draw the next frame into the same memory immediately,
+	// which is the whole reason for copying rather than sampling in place.
+	ReleaseStaged();
+}
+
 void ClientSurface::Apply()
 {
 	// The callbacks the client asked for since the last commit are the ones this commit owes. Appended
@@ -246,6 +310,21 @@ void ClientSurface::Apply()
 	// inside one frame.
 	m_DueCallbacks.insert(m_DueCallbacks.end(), m_PendingCallbacks.begin(), m_PendingCallbacks.end());
 	m_PendingCallbacks.clear();
+
+	// **A commit that did not attach keeps the content it had**, which is the protocol's rule and the
+	// reason this is gated on the attach rather than on the buffer: a client committing a new input
+	// region and nothing else must not lose its window.
+	if (m_Attached.has_value())
+	{
+		if (ITextures* const textures = m_Context->Textures(); textures != nullptr)
+		{
+			TakeContent(*textures);
+		}
+		else
+		{
+			ReleaseStaged();
+		}
+	}
 
 	m_Current = m_Pending;
 

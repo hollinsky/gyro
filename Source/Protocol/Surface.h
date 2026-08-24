@@ -5,7 +5,9 @@
 #include <optional>
 #include <vector>
 
+#include "Core/Texture.h"
 #include "Geometry/Space.h"
+#include "Protocol/Context.h"
 #include "Protocol/Region.h"
 #include "Wayland/Server/Wayland.h"
 
@@ -20,12 +22,19 @@
 // is not an optimisation or a convenience for the client; it is what makes a surface's whole change
 // arrive as one commit with one origin.
 //
-// **Nothing here reaches the scene yet, and the file is honest about which half is which.** A surface
-// with no buffer is not shown by Wayland's own definition, and the buffer path — `wl_shm`, the
-// adoption into the texture space, the entity parented into the floor — is the step after this one.
-// What is complete is the state machine: the fields, the staging, the protocol errors a client can
-// provoke, and the atomicity. What is absent is a consumer, so `Apply` moves pending to current and
-// stops there.
+// **A commit turns the attached buffer into a texture id, and hands the buffer straight back.** gyro
+// copies the pixels rather than sampling the client's memory for as long as it draws them, so the
+// moment `Apply` returns there is nothing left to wait for — `wl_buffer.release` goes out in the same
+// step, and a toolkit that keeps one buffer never stalls behind a compositor that has not finished
+// with it. Every commit that attaches produces a *new* id and retires the old one, which is
+// [Seam/Importer.h](../Seam/Importer.h)'s own rule: the previous frame's pixels stay drawable while
+// the next frame's arrive, because the frame thread may still be recording from a snapshot that names
+// them.
+//
+// **What is still absent is the node.** A surface with content has an id and an extent and nothing
+// showing it, because a window is shown when it is *placed* and there is no shell to place it — that
+// is the step after this one. What is complete is the state machine, the pixels, and the texture
+// space's side of the handoff.
 //
 // **Damage is accumulated in both spaces and reconciled later, rather than converted on arrival.**
 // `wl_surface.damage` is surface-local and `damage_buffer` is in buffer coordinates, and the adapter
@@ -78,12 +87,19 @@ struct SurfaceState
 	// What changed, in each of the two spaces the client may name it in.
 	std::vector<PixelRect<SurfaceSpace>> SurfaceDamage;
 	std::vector<PixelRect<BufferSpace>> BufferDamage;
+
+	// The pixels the last commit adopted, and the extent they were adopted at. Null until a buffer has
+	// been attached and committed, which is Wayland's own definition of a surface that is not shown —
+	// and null again the moment a client attaches nothing, which is how a window takes itself off the
+	// screen without destroying anything.
+	TextureId Content{};
+	PixelSize<BufferSpace> ContentSize{};
 };
 
 class ClientSurface final : public Wayland::Server::WlSurfaceHandler
 {
 public:
-	ClientSurface() = default;
+	explicit ClientSurface(HostContext& context) noexcept : m_Context{ &context } {}
 
 	~ClientSurface() override;
 
@@ -169,8 +185,27 @@ private:
 	// copy, per Region.h: the client may destroy the region the instant this returns and usually does.
 	[[nodiscard]] static SurfaceRegion ShapeOf(Wayland::Server::WlRegion region);
 
+	// Turn the staged buffer into pending content, retire what it replaces, and release it back to the
+	// client. Called by `Apply` and only when an attach is actually pending, because a commit that did
+	// not attach keeps the content it had.
+	void TakeContent(ITextures& textures);
+
+	// Hand a buffer back and forget it was staged. Safe on an invalid resource, which is what a detach
+	// stages.
+	void ReleaseStaged() noexcept;
+
+	// The world this surface's requests act on, for the duration of the `Advance` they arrive in. Never
+	// null; what is null outside a dispatch is what it points at.
+	HostContext* m_Context = nullptr;
+
 	// True once the client has been ended for overrunning `MaxDamageRects`.
 	bool m_Overrun = false;
+
+	// The buffer `wl_surface.attach` staged, if it staged one. **The `optional` is the attach and the
+	// resource inside it is the buffer**, which is not the same question: attaching nothing is a client
+	// taking its window off the screen and has to be told apart from a commit that did not attach at
+	// all, which keeps whatever was there.
+	std::optional<Wayland::Server::WlBuffer> m_Attached;
 
 	SurfaceState m_Pending;
 	SurfaceState m_Current;

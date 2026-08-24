@@ -1312,7 +1312,7 @@ private:
 			// One global, and a client that binds it can build a surface and has nowhere to show it.
 			// Said out loud because the alternative is somebody concluding the socket is broken when a
 			// toolkit starts up, finds no shell, and exits without drawing anything.
-			spdlog::info("wl_compositor is the only global; a client will find no shell and no buffers yet");
+			spdlog::info("wl_compositor and wl_shm are the globals; a client can draw a frame and find no shell to show it on");
 
 			author = std::move(*made);
 		}

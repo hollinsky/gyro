@@ -476,6 +476,20 @@ void EmitHandler(std::string& out, const Interface& interface)
 		"\t//\n"
 		"\t// `Object()` is already invalid when this runs, and this handler may delete itself from it.\n"
 		"\tvirtual void OnGone() = 0;\n"
+		"\n"
+		"\t// **The object exists and `Object()` names it.** Called once, immediately after the resource\n"
+		"\t// is created and before the client is told anything about it.\n"
+		"\t//\n"
+		"\t// This is the only moment an interface whose contract *begins* with events can honour it, and\n"
+		"\t// there are two of those in the core protocol alone: `wl_shm` owes a `format` for every pixel\n"
+		"\t// layout it accepts, and `wl_output` owes its geometry, mode and `done`. Neither is a reply to\n"
+		"\t// a request — a client binds and expects the events to be already on their way — so a handler\n"
+		"\t// with nowhere to send them would have to be poked from outside by whoever called the factory,\n"
+		"\t// which is a step every such call site would have to remember.\n"
+		"\t//\n"
+		"\t// Not pure, unlike `OnGone`: most interfaces owe nothing at creation, and forgetting to send an\n"
+		"\t// event is a client that waits rather than an abort that takes the compositor down.\n"
+		"\tvirtual void OnBound() {{}}\n"
 		"\n",
 		interface.Name,
 		resource,
@@ -898,6 +912,10 @@ void EmitTrampoline(std::string& out, const Interface& interface, const Message&
 			"\t\t// itself. Without it, every request that mints an object leaks one under memory\n"
 			"\t\t// pressure, which is the moment it can least afford to.\n"
 			"\t\twireImplementation->OnGone();\n"
+			"\t}}\n"
+			"\telse\n"
+			"\t{{\n"
+			"\t\twireImplementation->OnBound();\n"
 			"\t}}\n",
 			HandlerName(created->Interface),
 			Pascal(request.Name),
@@ -984,7 +1002,18 @@ void EmitBindTrampoline(std::string& out, const Interface& interface)
 		"\t\treturn;\n"
 		"\t}}\n"
 		"\n"
-		"\t(void){3}::Create(*wireClient, wireVersion, wireId, *wireImplementation);\n"
+		"\tconst {3} wireObject = {3}::Create(*wireClient, wireVersion, wireId, *wireImplementation);\n"
+		"\n"
+		"\tif (!wireObject.IsValid())\n"
+		"\t{{\n"
+		"\t\t// `Create` has already ended the client, and the handler it was built for was adopted by\n"
+		"\t\t// nothing. Same contract as a request that mints an object: `OnGone` is what says so.\n"
+		"\t\twireImplementation->OnGone();\n"
+		"\n"
+		"\t\treturn;\n"
+		"\t}}\n"
+		"\n"
+		"\twireImplementation->OnBound();\n"
 		"}}\n\n",
 		Trampoline(interface, "Bind"),
 		BindingName(interface.Name),
@@ -1371,6 +1400,12 @@ std::string EmitServerHeader(
 		   "// interface and the dispatch table before it reads any user data. Reading it unchecked is not\n"
 		   "// a client crash but a type confusion inside the compositor, and it is reachable by a client\n"
 		   "// passing the wrong id deliberately.\n"
+		   "//\n"
+		   "// **And a moment at which a new object exists.** `OnBound` runs once, straight after the\n"
+		   "// resource is created, because some interfaces owe events before their client has sent\n"
+		   "// anything at all — `wl_shm` its format list, `wl_output` its geometry. Without it every call\n"
+		   "// site that mints one of those would have to remember a second step, and the failure would be\n"
+		   "// a client waiting forever for a list nobody sent.\n"
 		   "//\n"
 		   "// Read a handler's `Ignoring` sibling as the deliberate opposite: it answers every ignorable\n"
 		   "// request by doing nothing, and a call site that derives from it has said so in one word that\n"

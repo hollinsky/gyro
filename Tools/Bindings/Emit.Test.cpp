@@ -750,6 +750,46 @@ GYRO_TEST(Emit, AHandlerIsToldWhenTheObjectItWasBuiltForCouldNotBeMade)
 	GYRO_CHECK(Occurrences(*text, "wireImplementation->OnGone();") > 5);
 }
 
+GYRO_TEST(Emit, AHandlerIsToldTheMomentTheObjectItAnswersForExists)
+{
+	// Some interfaces owe events before their client has asked anything: `wl_shm` its format list,
+	// `wl_output` its geometry and mode. There is no request to hang those on and the factory is the
+	// generated trampoline, so without a hook the call site would have to remember a second step after
+	// every bind — and forgetting it is a toolkit that waits forever for a list nobody sent.
+	//
+	// Not pure, unlike `OnGone`: most interfaces owe nothing at creation, and the failure is a client
+	// that waits rather than the abort a missing `OnGone` is.
+	const std::string_view paths[] = { WaylandXml, XdgShellXml };
+	const Generated generated = Generate(paths, Direction::Server);
+
+	if (!generated.Note.empty())
+	{
+		GYRO_FAIL(generated.Note);
+		return;
+	}
+
+	const std::string* const header = generated.Find("Wayland/Server/Wayland.h");
+	const std::string* const text = generated.Find("Wayland/Server/Wayland.cpp");
+	GYRO_REQUIRE(header != nullptr && text != nullptr);
+
+	GYRO_CHECK(header->find("virtual void OnBound() {}") != std::string_view::npos);
+
+	const std::string_view bind = Body(*text, "void WireWlShmBind(");
+	GYRO_REQUIRE(!bind.empty());
+
+	// The order is the whole of it: created, checked, and only then told. A hook that ran before the
+	// resource existed would be one that could not send anything.
+	const std::size_t created = bind.find("WlShm::Create(");
+	const std::size_t bound = bind.find("wireImplementation->OnBound();");
+
+	GYRO_REQUIRE(created != std::string_view::npos && bound != std::string_view::npos);
+	GYRO_CHECK(created < bound);
+
+	// And on every creation path rather than only the globals — a `new_id` in a request mints objects
+	// the same way, and `xdg_toplevel` owes a `configure` the moment it is made.
+	GYRO_CHECK(Occurrences(*text, "wireImplementation->OnBound();") > 20);
+}
+
 GYRO_TEST(Emit, TheEmittedWireTablesSayWhatTheProtocolSays)
 {
 	// The one part of the output no compiler checks. libwayland demarshals a client's bytes against

@@ -8,7 +8,7 @@ Wayland::Server::WlSurfaceHandler* ClientCompositor::OnCreateSurface()
 	// A surface owns itself from here: it is deleted by its own `OnGone`, which runs when the client
 	// destroys it or when the client goes away. Returning null would end the client with `no_memory`,
 	// and there is nothing here that can fail short of the allocator.
-	return new ClientSurface{};
+	return new ClientSurface{ *m_Context };
 }
 
 Wayland::Server::WlRegionHandler* ClientCompositor::OnCreateRegion()
@@ -21,5 +21,5 @@ Wayland::Server::WlCompositorHandler* CompositorGlobal::OnBind(wl_client& client
 	(void)client;
 	(void)version;
 
-	return new ClientCompositor{};
+	return new ClientCompositor{ *m_Context };
 }

@@ -112,7 +112,7 @@ class CountingTextures final : public ITextures
 {
 public:
 	[[nodiscard]] Result<TextureId>
-	Adopt(PixelSize<BufferSpace>, std::uint32_t, std::span<const std::byte> pixels) override
+	Adopt(PixelSize<BufferSpace>, std::uint32_t, std::span<const std::byte> pixels, TextureAlpha) override
 	{
 		if (pixels.empty())
 		{

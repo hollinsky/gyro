@@ -538,7 +538,7 @@ private:
 	{
 		const Card& buffer = *m_Buffers[static_cast<std::size_t>(m_Phase)];
 
-		return textures.Adopt(buffer.Size(), buffer.Stride(), buffer.Bytes());
+		return textures.Adopt(buffer.Size(), buffer.Stride(), buffer.Bytes(), TextureAlpha::Premultiplied);
 	}
 
 	std::array<std::optional<Card>, 2> m_Buffers{};

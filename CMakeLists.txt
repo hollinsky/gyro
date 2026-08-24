@@ -815,11 +815,13 @@ gyro_add_module(Protocol DISPATCH
 		Host.cpp
 		Region.cpp
 		Server.cpp
+		Shm.cpp
 		Surface.cpp
 	TESTS
 		Host.Test.cpp
 		Region.Test.cpp
 		Server.Test.cpp
+		Shm.Test.cpp
 		Surface.Test.cpp
 )
 

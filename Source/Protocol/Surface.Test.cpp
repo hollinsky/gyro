@@ -1,6 +1,7 @@
 #include "Protocol/Surface.h"
 
 #include "Geometry/Space.h"
+#include "Protocol/Context.h"
 #include "Testing/Test.h"
 
 // The double buffering, and the two ways it is asymmetric.
@@ -22,7 +23,8 @@
 
 GYRO_TEST(Surface, NothingIsVisibleUntilCommit)
 {
-	ClientSurface surface;
+	HostContext context;
+	ClientSurface surface{ context };
 
 	surface.OnSetBufferScale(2);
 	surface.OnOffset(4, 5);
@@ -38,7 +40,8 @@ GYRO_TEST(Surface, NothingIsVisibleUntilCommit)
 
 GYRO_TEST(Surface, StateIsStickyAcrossCommits)
 {
-	ClientSurface surface;
+	HostContext context;
+	ClientSurface surface{ context };
 
 	surface.OnSetBufferScale(3);
 	surface.OnSetBufferTransform(Wayland::Server::WlOutputTransform::_90);
@@ -54,7 +57,8 @@ GYRO_TEST(Surface, StateIsStickyAcrossCommits)
 
 GYRO_TEST(Surface, DamageIsConsumedByTheCommitThatCarriesIt)
 {
-	ClientSurface surface;
+	HostContext context;
+	ClientSurface surface{ context };
 
 	surface.OnDamage(0, 0, 10, 10);
 	surface.OnDamageBuffer(0, 0, 20, 20);
@@ -74,7 +78,8 @@ GYRO_TEST(Surface, DamageIsConsumedByTheCommitThatCarriesIt)
 
 GYRO_TEST(Surface, DamageIsKeptInTheSpaceItArrivedIn)
 {
-	ClientSurface surface;
+	HostContext context;
+	ClientSurface surface{ context };
 
 	surface.OnDamage(1, 2, 3, 4);
 	surface.OnDamageBuffer(5, 6, 7, 8);
@@ -90,7 +95,8 @@ GYRO_TEST(Surface, DamageIsKeptInTheSpaceItArrivedIn)
 
 GYRO_TEST(Surface, ANegativeExtentIsClampedRatherThanCarried)
 {
-	ClientSurface surface;
+	HostContext context;
+	ClientSurface surface{ context };
 
 	surface.OnDamage(10, 10, -5, -5);
 	surface.OnCommit();
@@ -104,7 +110,8 @@ GYRO_TEST(Surface, ANegativeExtentIsClampedRatherThanCarried)
 
 GYRO_TEST(Surface, AnInvalidScaleIsRejectedRatherThanStaged)
 {
-	ClientSurface surface;
+	HostContext context;
+	ClientSurface surface{ context };
 
 	surface.OnSetBufferScale(2);
 	surface.OnSetBufferScale(0);
@@ -118,7 +125,8 @@ GYRO_TEST(Surface, AnInvalidScaleIsRejectedRatherThanStaged)
 
 GYRO_TEST(Surface, AnInvalidTransformIsRejectedRatherThanStaged)
 {
-	ClientSurface surface;
+	HostContext context;
+	ClientSurface surface{ context };
 
 	surface.OnSetBufferTransform(Wayland::Server::WlOutputTransform::Flipped180);
 
@@ -132,7 +140,8 @@ GYRO_TEST(Surface, AnInvalidTransformIsRejectedRatherThanStaged)
 
 GYRO_TEST(Surface, AnUnsetInputRegionIsInfiniteAndAnUnsetOpaqueRegionIsEmpty)
 {
-	ClientSurface surface;
+	HostContext context;
+	ClientSurface surface{ context };
 
 	surface.OnCommit();
 
@@ -145,7 +154,8 @@ GYRO_TEST(Surface, AnUnsetInputRegionIsInfiniteAndAnUnsetOpaqueRegionIsEmpty)
 
 GYRO_TEST(Surface, ANullInputRegionRestoresTheInfiniteDefault)
 {
-	ClientSurface surface;
+	HostContext context;
+	ClientSurface surface{ context };
 
 	surface.OnSetInputRegion({});
 	surface.OnCommit();

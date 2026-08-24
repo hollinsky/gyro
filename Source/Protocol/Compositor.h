@@ -2,6 +2,7 @@
 
 #include <cstdint>
 
+#include "Protocol/Context.h"
 #include "Wayland/Server/Wayland.h"
 
 // The `wl_compositor` global: where a client's surfaces and regions come from, and gyro's first
@@ -28,7 +29,7 @@ inline constexpr std::uint32_t CompositorVersion = 5;
 class ClientCompositor final : public Wayland::Server::WlCompositorHandler
 {
 public:
-	ClientCompositor() = default;
+	explicit ClientCompositor(HostContext& context) noexcept : m_Context{ &context } {}
 
 	void OnGone() override { delete this; }
 
@@ -38,13 +39,21 @@ public:
 	Wayland::Server::WlSurfaceHandler* OnCreateSurface() override;
 
 	Wayland::Server::WlRegionHandler* OnCreateRegion() override;
+
+private:
+	// Handed to every surface this client makes, because a `wl_surface.commit` is a change to the world
+	// and the world arrives as an argument to `Advance`. Context.h carries that argument.
+	HostContext* m_Context = nullptr;
 };
 
 // The global itself, owned by whoever advertises it and outliving every client that binds it.
 class CompositorGlobal final : public Wayland::Server::WlCompositorBinding
 {
 public:
-	CompositorGlobal() = default;
+	explicit CompositorGlobal(HostContext& context) noexcept : m_Context{ &context } {}
 
 	Wayland::Server::WlCompositorHandler* OnBind(wl_client& client, std::uint32_t version) override;
+
+private:
+	HostContext* m_Context = nullptr;
 };

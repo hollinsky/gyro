@@ -33,8 +33,9 @@
 // otherwise copy per line — so somebody has to keep the memory alive for as long as the id is live and
 // then some. The author is the wrong somebody: that would put the watermark rule in every scene that
 // ever draws a picture. What it costs is one copy on the dispatch thread, which owes no deadline.
-// *(When these bytes are a client's `wl_shm` pool the copy becomes a reference to the mapping, dropped
-// at the same instant — the shape does not change, only what is held.)*
+// *(A client's `wl_shm` pool is that same copy, and it buys something extra there: gyro stops needing
+// the client's memory the moment `Adopt` returns, so `wl_buffer.release` goes back in the same step
+// and a toolkit drawing into one buffer never waits for a second.)*
 //
 // **It retires on the watermark, which is Publication/Publisher/Outbox.h's own rule with a different
 // payload.** `Reclaim` there returns snapshot buffers whose sequence is strictly below the watermark;
@@ -71,8 +72,12 @@ public:
 	TextureRegistry(TextureRegistry&&) = delete;
 	TextureRegistry& operator=(TextureRegistry&&) = delete;
 
-	[[nodiscard]] Result<TextureId>
-	Adopt(PixelSize<BufferSpace> size, std::uint32_t stride, std::span<const std::byte> pixels) override
+	[[nodiscard]] Result<TextureId> Adopt(
+		PixelSize<BufferSpace> size,
+		std::uint32_t stride,
+		std::span<const std::byte> pixels,
+		TextureAlpha alpha
+	) override
 	{
 		if (const Result<void> described = Describes(size, stride, pixels); !described)
 		{
@@ -98,9 +103,11 @@ public:
 
 		Held& held = m_Held[id->Index];
 
-		held = Held{
-			.Id = *id, .Pixels = std::vector<std::byte>{ pixels.begin(), pixels.end() }, .Size = size, .Stride = stride
-		};
+		held = Held{ .Id = *id,
+			         .Pixels = std::vector<std::byte>{ pixels.begin(), pixels.end() },
+			         .Size = size,
+			         .Stride = stride,
+			         .Alpha = alpha };
 
 		if (const Result<void> imported = Import(held); !imported)
 		{
@@ -239,6 +246,11 @@ private:
 		PixelSize<BufferSpace> Size{};
 		std::uint32_t Stride = 0;
 
+		// What the author said its top byte means. Held rather than folded into the fourcc at adoption
+		// because `Rebind` imports the same bytes again onto a new renderer and has to say the same
+		// thing about them.
+		TextureAlpha Alpha = TextureAlpha::Premultiplied;
+
 		// Zero until `Seal`, which is why sequences start at one.
 		std::uint64_t Stamp = 0;
 
@@ -248,11 +260,18 @@ private:
 	// The one place the format is named, which is Scene/Textures.h's whole division: an author writes
 	// bytes in a layout it states in words, and the party that can name `Seam` says which fourcc that
 	// is. Linear because these are the CPU's own pixels and there is no device that tiled them.
+	//
+	// The two fourccs differ in one byte's meaning and nothing else, which is why the author's word for
+	// it is a two-valued enumeration rather than a format it had to learn: an opaque window arrives as
+	// `xrgb8888` from every toolkit there is, and the alternative to carrying that here was for the
+	// caller to walk the image forcing the byte to full — a second pass over every pixel of every
+	// window, to say what one code already says.
 	[[nodiscard]] Result<void> Import(Held& held)
 	{
 		const TextureSource source{
 			.Size = held.Size,
-			.Format = { .Code = FormatArgb8888, .Modifier = ModifierLinear },
+			.Format = { .Code = held.Alpha == TextureAlpha::Premultiplied ? FormatArgb8888 : FormatXrgb8888,
+			            .Modifier = ModifierLinear },
 			.Memory = MappedPixels{ .Pixels = held.Pixels.data(), .Stride = held.Stride, .Length = held.Pixels.size() },
 		};
 

@@ -38,6 +38,26 @@
 // snapshot atlas are all ids from here, because Docs/Animation.md#exit-pixels has a window's live
 // surface become a compositor-owned snapshot mid-transition and an id space per origin would make that
 // a different node rather than the same one.
+// What the byte above red means, which is the one thing an author has to say about its pixels that
+// the layout alone does not.
+//
+// **Not a format, deliberately.** Decision 87 keeps a fourcc out of every module that authors a world,
+// and this is not one: both values are the same eight-bits-a-channel little-endian word, and the only
+// question is whether the top byte carries coverage or is left over. What the answer changes is real
+// and visible — a window whose pixels were never given an alpha, drawn as though they had one, is a
+// window you can see the desktop through in whatever pattern its toolkit happened to leave behind.
+//
+// The party that adopts turns this into a fourcc, which is the same division the rest of this file
+// rests on.
+enum class TextureAlpha : std::uint8_t
+{
+	// The top byte is coverage, already multiplied into the other three.
+	Premultiplied,
+
+	// The top byte means nothing and the image is fully opaque.
+	None,
+};
+
 class ITextures
 {
 public:
@@ -58,14 +78,15 @@ public:
 	// that has to understand the watermark. The registry holds them instead. What that costs is a copy
 	// on the dispatch thread, which owes no deadline.
 	//
-	// The layout is eight bits a channel with alpha in the top byte of a 32-bit little-endian word —
-	// Gym/Card.h's own spelling, and the only one an author writes today. `stride` is bytes per row,
-	// which is not `width * 4` the moment anything is padded.
+	// The layout is eight bits a channel in a 32-bit little-endian word, blue lowest, and `alpha` says
+	// what the byte above red means — Gym/Card.h's own spelling, and a client's `argb8888` and
+	// `xrgb8888` are the same two answers. `stride` is bytes per row, which is not `width * 4` the
+	// moment anything is padded.
 	//
 	// `EINVAL` for an extent, a stride or a span that do not describe each other; whatever the importer
 	// answered where it refused; `ENOSPC` where the id space or a renderer's table is full.
 	[[nodiscard]] virtual Result<TextureId>
-	Adopt(PixelSize<BufferSpace> size, std::uint32_t stride, std::span<const std::byte> pixels) = 0;
+	Adopt(PixelSize<BufferSpace> size, std::uint32_t stride, std::span<const std::byte> pixels, TextureAlpha alpha) = 0;
 
 	// Stop drawing this id. It stays valid for the frames already published that name it, and the
 	// registry is what waits — Seam/Importer.h's watermark rule is one party's to honour and this is not

@@ -102,14 +102,14 @@ GYRO_TEST(DispatchTextures, AnAdoptReachesEveryRendererAndARefusalUndoesTheOnesT
 	const std::array<ITextureImporter*, 2> importers{ &first, &second };
 	TextureRegistry textures{ importers };
 
-	const Result<TextureId> both = textures.Adopt(Extent(), Stride, Pixels);
+	const Result<TextureId> both = textures.Adopt(Extent(), Stride, Pixels, TextureAlpha::Premultiplied);
 
 	GYRO_REQUIRE(both);
 	GYRO_CHECK(first.Holds(*both) && second.Holds(*both));
 
 	second.Refuse(true);
 
-	const Result<TextureId> refused = textures.Adopt(Extent(), Stride, Pixels);
+	const Result<TextureId> refused = textures.Adopt(Extent(), Stride, Pixels, TextureAlpha::Premultiplied);
 
 	GYRO_REQUIRE(!refused);
 	GYRO_CHECK_EQ(refused.error().Code(), ENOMEM);
@@ -127,9 +127,11 @@ GYRO_TEST(DispatchTextures, PixelsThatDoNotDescribeTheImageAreRefusedBeforeAnyIm
 	const std::array<ITextureImporter*, 1> importers{ &importer };
 	TextureRegistry textures{ importers };
 
-	GYRO_CHECK_EQ(textures.Adopt({ 0, 0 }, Stride, Pixels).error().Code(), EINVAL);
-	GYRO_CHECK_EQ(textures.Adopt(Extent(), Stride - 4, Pixels).error().Code(), EINVAL);
-	GYRO_CHECK_EQ(textures.Adopt({ Width, Height + 1 }, Stride, Pixels).error().Code(), EINVAL);
+	GYRO_CHECK_EQ(textures.Adopt({ 0, 0 }, Stride, Pixels, TextureAlpha::Premultiplied).error().Code(), EINVAL);
+	GYRO_CHECK_EQ(textures.Adopt(Extent(), Stride - 4, Pixels, TextureAlpha::Premultiplied).error().Code(), EINVAL);
+	GYRO_CHECK_EQ(
+		textures.Adopt({ Width, Height + 1 }, Stride, Pixels, TextureAlpha::Premultiplied).error().Code(), EINVAL
+	);
 	GYRO_CHECK(importer.Held.empty());
 }
 
@@ -139,7 +141,7 @@ GYRO_TEST(DispatchTextures, WithNoRendererThereIsNothingToImportInto)
 {
 	TextureRegistry textures{ {} };
 
-	const Result<TextureId> none = textures.Adopt(Extent(), Stride, Pixels);
+	const Result<TextureId> none = textures.Adopt(Extent(), Stride, Pixels, TextureAlpha::Premultiplied);
 
 	GYRO_REQUIRE(!none);
 	GYRO_CHECK_EQ(none.error().Code(), ENODEV);
@@ -153,7 +155,7 @@ GYRO_TEST(DispatchTextures, ARetiredTextureIsForgottenOnlyOnceTheWatermarkHasPas
 	const std::array<ITextureImporter*, 1> importers{ &importer };
 	TextureRegistry textures{ importers };
 
-	const Result<TextureId> id = textures.Adopt(Extent(), Stride, Pixels);
+	const Result<TextureId> id = textures.Adopt(Extent(), Stride, Pixels, TextureAlpha::Premultiplied);
 
 	GYRO_REQUIRE(id);
 
@@ -186,7 +188,7 @@ GYRO_TEST(DispatchTextures, ALiveTextureSurvivesEveryWatermark)
 	const std::array<ITextureImporter*, 1> importers{ &importer };
 	TextureRegistry textures{ importers };
 
-	const Result<TextureId> id = textures.Adopt(Extent(), Stride, Pixels);
+	const Result<TextureId> id = textures.Adopt(Extent(), Stride, Pixels, TextureAlpha::Premultiplied);
 
 	GYRO_REQUIRE(id);
 
@@ -205,11 +207,11 @@ GYRO_TEST(DispatchTextures, TheOldAndTheNewAreBothAdoptedAcrossASwap)
 	const std::array<ITextureImporter*, 1> importers{ &importer };
 	TextureRegistry textures{ importers };
 
-	const Result<TextureId> first = textures.Adopt(Extent(), Stride, Pixels);
+	const Result<TextureId> first = textures.Adopt(Extent(), Stride, Pixels, TextureAlpha::Premultiplied);
 
 	GYRO_REQUIRE(first);
 
-	const Result<TextureId> second = textures.Adopt(Extent(), Stride, Pixels);
+	const Result<TextureId> second = textures.Adopt(Extent(), Stride, Pixels, TextureAlpha::Premultiplied);
 
 	GYRO_REQUIRE(second);
 	GYRO_CHECK(*first != *second);
@@ -233,8 +235,8 @@ GYRO_TEST(DispatchTextures, ARebuiltRendererIsHandedEveryLiveImageAgainUnderTheS
 	const std::array<ITextureImporter*, 1> first{ &before };
 	TextureRegistry textures{ first };
 
-	const Result<TextureId> kept = textures.Adopt(Extent(), Stride, Pixels);
-	const Result<TextureId> dropped = textures.Adopt(Extent(), Stride, Pixels);
+	const Result<TextureId> kept = textures.Adopt(Extent(), Stride, Pixels, TextureAlpha::Premultiplied);
+	const Result<TextureId> dropped = textures.Adopt(Extent(), Stride, Pixels, TextureAlpha::Premultiplied);
 
 	GYRO_REQUIRE(kept && dropped);
 

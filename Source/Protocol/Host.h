@@ -7,7 +7,9 @@
 #include "Core/Time.h"
 #include "Core/Wake.h"
 #include "Protocol/Compositor.h"
+#include "Protocol/Context.h"
 #include "Protocol/Server.h"
+#include "Protocol/Shm.h"
 #include "Scene/Author.h"
 
 // The author with clients behind it: gyro's Wayland server standing where a gym stands.
@@ -34,11 +36,12 @@
 // acting on the callback it never received. `Flush` is therefore public and the root calls it
 // immediately before the wait, which is the one place that knows the thread is about to sleep.
 //
-// **One global is advertised, and it is the one a client cannot start without.** `wl_compositor` is
-// where a `wl_surface` and a `wl_region` come from, so a client that binds it can build the objects it
-// draws with — and then finds nothing to show them on, because a shell and a buffer are the two steps
-// after this one. A toolkit will get as far as creating its surface and stop, which is exactly as far
-// as this layer honestly goes.
+// **Two globals are advertised, and together they are everything a client needs to have pixels
+// accepted.** `wl_compositor` is where a `wl_surface` and a `wl_region` come from and `wl_shm` is where
+// its pixels do, so a client can now draw a frame, commit it, and have gyro take a copy and hand the
+// buffer straight back. What it still cannot do is make anything appear: a window is shown when it is
+// *placed*, and a shell is the step after this one. A toolkit will get as far as its first committed
+// frame and then wait, which is exactly as far as this layer honestly goes.
 //
 // The global is a member rather than something the root passes in, because its lifetime is the
 // server's: `wl_compositor` exists for as long as there is a socket to reach it through, and unlike a
@@ -92,8 +95,15 @@ private:
 	// calls to answer a bind, and the display is what can still be calling: `~Server` destroys the
 	// display, which drops every client and every global with it. Member order is the whole of the
 	// guarantee that the thing being called into still exists while that is happening.
-	CompositorGlobal m_Compositor;
+	// What a request handler reaches the world through, for the one call it is inside. Declared first
+	// because the bindings below point at it.
+	HostContext m_Context;
+
+	CompositorGlobal m_Compositor{ m_Context };
 	wl_global* m_CompositorGlobal = nullptr;
+
+	ShmGlobal m_Shm;
+	wl_global* m_ShmGlobal = nullptr;
 
 	Server m_Server;
 };

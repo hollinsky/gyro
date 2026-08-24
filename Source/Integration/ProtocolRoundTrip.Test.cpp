@@ -3,16 +3,23 @@
 // platform is stated rather than inherited.
 #define _POSIX_C_SOURCE 200809L
 
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Core/Clock.h"
+#include "Core/Fd.h"
 #include "Core/Result.h"
 #include "Core/Texture.h"
 #include "Core/Time.h"
@@ -67,22 +74,90 @@ struct PrivateRuntimeDir
 
 const PrivateRuntimeDir g_RuntimeDir;
 
-// The texture space as the nothing a host touches yet, per Protocol/Host.Test.cpp's own fake. It
-// counts so that "never reached" is asserted rather than assumed.
+// The texture space as a fake that mints real ids and remembers what it was handed. Real ids matter:
+// a surface retires the one it replaces, and an id that was never valid would make the replacement
+// indistinguishable from nothing having happened.
 class CountingTextures final : public ITextures
 {
 public:
-	[[nodiscard]] Result<TextureId> Adopt(PixelSize<BufferSpace>, std::uint32_t, std::span<const std::byte>) override
+	[[nodiscard]] Result<TextureId> Adopt(
+		PixelSize<BufferSpace> size,
+		std::uint32_t stride,
+		std::span<const std::byte> pixels,
+		TextureAlpha alpha
+	) override
 	{
 		++Adopted;
 
-		return Failure(ENOSYS, "no texture space in this test");
+		Size = size;
+		Stride = stride;
+		Alpha = alpha;
+		First = pixels.empty() ? std::byte{} : pixels.front();
+		Bytes = pixels.size();
+
+		return TextureId{ Adopted, 1 };
 	}
 
-	void Retire(TextureId) noexcept override { ++Retired; }
+	void Retire(TextureId id) noexcept override { Retired += id.IsNull() ? 0U : 1U; }
 
 	std::uint32_t Adopted = 0;
 	std::uint32_t Retired = 0;
+	PixelSize<BufferSpace> Size{};
+	std::uint32_t Stride = 0;
+	TextureAlpha Alpha = TextureAlpha::Premultiplied;
+	std::byte First{};
+	std::size_t Bytes = 0;
+};
+
+// A pool the way a toolkit makes one, filled with a byte a test can recognise on the far side.
+struct ClientPool
+{
+	explicit ClientPool(std::size_t size) : Size{ size }
+	{
+		const int descriptor = ::memfd_create("gyro-roundtrip", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+
+		if (descriptor < 0 || ::ftruncate(descriptor, static_cast<off_t>(size)) != 0)
+		{
+			return;
+		}
+
+		Descriptor = Fd{ descriptor };
+	}
+
+	void Fill(std::byte value) const
+	{
+		void* const writable = ::mmap(nullptr, Size, PROT_READ | PROT_WRITE, MAP_SHARED, Descriptor.Borrow().Value, 0);
+
+		if (writable != MAP_FAILED)
+		{
+			std::memset(writable, static_cast<int>(value), Size);
+			::munmap(writable, Size);
+		}
+	}
+
+	[[nodiscard]] Fd Take() { return std::move(Descriptor); }
+
+	std::size_t Size = 0;
+	Fd Descriptor;
+};
+
+// What the client hears about a buffer, which for `wl_buffer` is one event and it is the one that
+// matters: whether it may draw into that memory again.
+// The format list `wl_shm` owes a client the moment it binds.
+class ShmFormats final : public Wayland::WlShmListener
+{
+public:
+	void OnFormat(Wayland::WlShmFormat format) override { Seen.push_back(format); }
+
+	std::vector<Wayland::WlShmFormat> Seen;
+};
+
+class BufferEvents final : public Wayland::WlBufferListener
+{
+public:
+	void OnRelease() override { ++Released; }
+
+	std::uint32_t Released = 0;
 };
 
 // What the registry announced, in the order it announced it.
@@ -169,12 +244,13 @@ struct Session
 	bool Opened = false;
 };
 
-// Everything a client needs before it can make a surface: the display, the registry, and the one
-// global gyro advertises.
+// Everything a client needs before it can draw: the display, the registry, and both globals.
 struct BoundCompositor
 {
 	Registry Listener;
 	Wayland::WlCompositor Compositor;
+	ShmFormats ShmEvents;
+	Wayland::WlShm Shm;
 };
 
 [[nodiscard]] bool Bind(Session& session, BoundCompositor& bound)
@@ -200,11 +276,20 @@ struct BoundCompositor
 
 	bound.Compositor = bound.Listener.Object().Bind<Wayland::WlCompositor>(compositor->Name, compositor->Version);
 
-	return bound.Compositor.IsValid();
+	const Registry::Global* const shm = bound.Listener.Find(Wayland::WlShm::WireName);
+
+	if (shm == nullptr)
+	{
+		return false;
+	}
+
+	bound.Shm = bound.Listener.Object().Bind<Wayland::WlShm>(shm->Name, shm->Version, bound.ShmEvents);
+
+	return bound.Compositor.IsValid() && bound.Shm.IsValid();
 }
 } // namespace
 
-GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheCompositorAndNothingElseYet)
+GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheCompositorAndTheBufferPool)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
@@ -223,10 +308,37 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheCompositorAndNothingElseYet)
 	// corrected. See Protocol/Compositor.h.
 	GYRO_CHECK_EQ(compositor->Version, std::uint32_t{ 5 });
 
-	// The list is exactly one long, which is the honest state of this layer: a client can build the
-	// objects it draws with and has nowhere to show them. When `wl_shm` and `xdg_wm_base` land, this
-	// number goes up in the same commit as the thing it counts.
-	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 1 });
+	const Registry::Global* const shm = bound.Listener.Find(Wayland::WlShm::WireName);
+	GYRO_REQUIRE(shm != nullptr);
+
+	// Version 2 is `wl_shm.release`, which is a request rather than an event — so naming it owes the
+	// client nothing that is not already implemented.
+	GYRO_CHECK_EQ(shm->Version, std::uint32_t{ 2 });
+
+	// The list is exactly two long, which is the honest state of this layer: a client can draw a frame
+	// and hand it over, and has nowhere to show it. When `xdg_wm_base` lands, this number goes up in
+	// the same commit as the thing it counts.
+	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 2 });
+}
+
+GYRO_TEST(ProtocolRoundTrip, BindingWlShmAnnouncesTheFormatsBeforeAnythingIsAsked)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-formats" };
+	GYRO_REQUIRE(session.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	session.Turn();
+
+	// **The client asked nothing and is owed events anyway**, which is the whole of what `OnBound`
+	// exists for: `wl_shm`'s contract begins with the compositor telling a client what it may draw in.
+	// A toolkit that finds no `argb8888` in this list will not draw at all.
+	GYRO_REQUIRE(bound.ShmEvents.Seen.size() == 2);
+	GYRO_CHECK(bound.ShmEvents.Seen[0] == Wayland::WlShmFormat::Argb8888);
+	GYRO_CHECK(bound.ShmEvents.Seen[1] == Wayland::WlShmFormat::Xrgb8888);
 }
 
 GYRO_TEST(ProtocolRoundTrip, ASurfaceAndARegionSurviveAWholeCommit)
@@ -361,4 +473,186 @@ GYRO_TEST(ProtocolRoundTrip, AnOffsetOnAttachEndsAModernClient)
 
 	GYRO_REQUIRE(session.Client.Fault().has_value());
 	GYRO_CHECK_EQ(session.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::WlSurfaceError::InvalidOffset));
+}
+
+namespace
+{
+// A surface with one committed frame behind it, which is as far as a client can get before there is a
+// shell to place its window with.
+struct DrawnSurface
+{
+	Wayland::WlSurfaceIgnoring Events;
+	Wayland::WlSurface Surface;
+	BufferEvents Released;
+	Wayland::WlShmPool Pool;
+	Wayland::WlBuffer Buffer;
+};
+
+// 16x8 at four bytes a pixel, which is small enough that a whole-buffer assertion is a number a
+// reader can check by hand.
+constexpr std::int32_t Width = 16;
+constexpr std::int32_t Height = 8;
+constexpr std::int32_t Stride = Width * 4;
+constexpr std::size_t PoolBytes = static_cast<std::size_t>(Stride) * static_cast<std::size_t>(Height) * 2;
+
+[[nodiscard]] bool Draw(BoundCompositor& bound, DrawnSurface& drawn, std::byte fill)
+{
+	ClientPool pool{ PoolBytes };
+
+	if (!pool.Descriptor.IsValid())
+	{
+		return false;
+	}
+
+	pool.Fill(fill);
+
+	drawn.Surface = bound.Compositor.CreateSurface(drawn.Events);
+	drawn.Pool = bound.Shm.CreatePool(pool.Take(), static_cast<std::int32_t>(PoolBytes));
+
+	if (!drawn.Surface.IsValid() || !drawn.Pool.IsValid())
+	{
+		return false;
+	}
+
+	drawn.Buffer = drawn.Pool.CreateBuffer(0, Width, Height, Stride, Wayland::WlShmFormat::Argb8888, drawn.Released);
+
+	return drawn.Buffer.IsValid();
+}
+} // namespace
+
+GYRO_TEST(ProtocolRoundTrip, AnAttachedBufferReachesTheTextureSpaceAndComesStraightBack)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-shm" };
+	GYRO_REQUIRE(session.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	DrawnSurface drawn;
+	GYRO_REQUIRE(Draw(bound, drawn, std::byte{ 0xC3 }));
+
+	drawn.Surface.Attach(drawn.Buffer, 0, 0);
+	drawn.Surface.DamageBuffer(0, 0, Width, Height);
+	drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_CHECK(!session.Client.Fault().has_value());
+
+	// The pixels made it across a real socket, through a descriptor libwayland passed with
+	// `SCM_RIGHTS`, into a mapping gyro sealed, and out the far side as an id. The byte is what says
+	// the offset and stride arithmetic landed on the rows the client meant rather than on a page of
+	// zeroes next to them.
+	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 1 });
+	GYRO_CHECK(session.Textures.Size == (PixelSize<BufferSpace>{ Width, Height }));
+	GYRO_CHECK_EQ(session.Textures.Stride, static_cast<std::uint32_t>(Stride));
+	GYRO_CHECK(session.Textures.Alpha == TextureAlpha::Premultiplied);
+	GYRO_CHECK_EQ(session.Textures.Bytes, static_cast<std::size_t>(Stride) * static_cast<std::size_t>(Height));
+	GYRO_CHECK(session.Textures.First == std::byte{ 0xC3 });
+
+	// **Released in the same step it was committed in**, which is the point of copying rather than
+	// sampling the client's memory: a toolkit with one buffer can draw its next frame immediately,
+	// instead of allocating a second one to have somewhere to draw while gyro finishes with the first.
+	GYRO_CHECK_EQ(drawn.Released.Released, std::uint32_t{ 1 });
+}
+
+GYRO_TEST(ProtocolRoundTrip, ACommitThatDidNotAttachKeepsTheContentItHad)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-keep" };
+	GYRO_REQUIRE(session.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	DrawnSurface drawn;
+	GYRO_REQUIRE(Draw(bound, drawn, std::byte{ 0x40 }));
+
+	drawn.Surface.Attach(drawn.Buffer, 0, 0);
+	drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_REQUIRE(session.Textures.Adopted == 1);
+
+	// A client that commits a new input region and nothing else must not lose its window, which is
+	// what makes this gated on the attach rather than on there being a buffer.
+	drawn.Surface.SetBufferScale(2);
+	drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(session.Textures.Retired, std::uint32_t{ 0 });
+}
+
+GYRO_TEST(ProtocolRoundTrip, EveryAttachedFrameIsANewIdAndRetiresTheOneItReplaces)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-redraw" };
+	GYRO_REQUIRE(session.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	DrawnSurface drawn;
+	GYRO_REQUIRE(Draw(bound, drawn, std::byte{ 0x08 }));
+
+	drawn.Surface.Attach(drawn.Buffer, 0, 0);
+	drawn.Surface.Commit();
+
+	session.Turn();
+
+	// The same `wl_buffer` again, which is what a toolkit that reuses one buffer does on every frame.
+	drawn.Surface.Attach(drawn.Buffer, 0, 0);
+	drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_CHECK(!session.Client.Fault().has_value());
+
+	// **A new id rather than an overwrite of the old one.** The frame thread may still be recording
+	// from a snapshot that names the previous id, so writing over its pixels would tear a window that
+	// is on screen right now; the old id stays drawable and retires when the watermark says nothing
+	// can still be reading it. Seam/Importer.h carries the argument.
+	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 2 });
+	GYRO_CHECK_EQ(session.Textures.Retired, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(drawn.Released.Released, std::uint32_t{ 2 });
+}
+
+GYRO_TEST(ProtocolRoundTrip, AttachingNothingTakesTheContentAway)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-detach" };
+	GYRO_REQUIRE(session.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	DrawnSurface drawn;
+	GYRO_REQUIRE(Draw(bound, drawn, std::byte{ 0x99 }));
+
+	drawn.Surface.Attach(drawn.Buffer, 0, 0);
+	drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_REQUIRE(session.Textures.Adopted == 1);
+
+	// Attaching a null buffer is how a client takes its window off the screen without destroying
+	// anything, and it has to be told apart from a commit that simply did not attach.
+	drawn.Surface.Attach(Wayland::WlBuffer{}, 0, 0);
+	drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(session.Textures.Retired, std::uint32_t{ 1 });
 }
