@@ -18,37 +18,12 @@ namespace
 // apart, and `/sys/dev/char/226:<minor>` is the kobject the driver hangs its attributes off.
 constexpr int DrmMajor = 226;
 
-[[nodiscard]] std::string NodeBase(std::int64_t primaryMinor)
-{
-	return std::format("/sys/dev/char/{}:{}", DrmMajor, primaryMinor);
-}
-
-// The kernel driver bound to this DRM node, read from the `device/driver` symlink and returned as its
-// last path component — `i915`, `xe`, `msm`, `amdgpu`. Empty where nothing is bound or the link is
-// unreadable, which the caller reports as an unrecognised driver.
-[[nodiscard]] std::string BoundDriver(std::int64_t primaryMinor)
-{
-	const std::string link = NodeBase(primaryMinor) + "/device/driver";
-	std::array<char, 256> target{};
-	const ssize_t length = readlink(link.c_str(), target.data(), target.size() - 1);
-
-	if (length <= 0)
-	{
-		return {};
-	}
-
-	const std::string_view resolved{ target.data(), static_cast<std::size_t>(length) };
-	const std::size_t slash = resolved.find_last_of('/');
-
-	return std::string{ slash == std::string_view::npos ? resolved : resolved.substr(slash + 1) };
-}
-
 // msm reports through devfreq under a node whose name is assigned at boot rather than fixed, so the
 // path cannot be a constant the way i915's and xe's are — the one entry under `device/devfreq` is
 // scanned for here. Empty where the directory is absent or holds nothing.
 [[nodiscard]] std::string MsmDevfreqNode(std::int64_t primaryMinor)
 {
-	const std::string directory = NodeBase(primaryMinor) + "/device/devfreq";
+	const std::string directory = GpuClock::NodeBase(primaryMinor) + "/device/devfreq";
 	DIR* const handle = opendir(directory.c_str());
 
 	if (handle == nullptr)
@@ -75,6 +50,30 @@ constexpr int DrmMajor = 226;
 	return node;
 }
 } // namespace
+
+std::string GpuClock::NodeBase(std::int64_t primaryMinor)
+{
+	return std::format("/sys/dev/char/{}:{}", DrmMajor, primaryMinor);
+}
+
+// The kernel driver bound to this DRM node, read from the `device/driver` symlink and returned as its
+// last path component — `i915`, `xe`, `msm`, `amdgpu`.
+std::string GpuClock::BoundDriver(std::int64_t primaryMinor)
+{
+	const std::string link = NodeBase(primaryMinor) + "/device/driver";
+	std::array<char, 256> target{};
+	const ssize_t length = readlink(link.c_str(), target.data(), target.size() - 1);
+
+	if (length <= 0)
+	{
+		return {};
+	}
+
+	const std::string_view resolved{ target.data(), static_cast<std::size_t>(length) };
+	const std::size_t slash = resolved.find_last_of('/');
+
+	return std::string{ slash == std::string_view::npos ? resolved : resolved.substr(slash + 1) };
+}
 
 GpuClock::Source GpuClock::Resolve(std::string_view driver, std::int64_t primaryMinor)
 {

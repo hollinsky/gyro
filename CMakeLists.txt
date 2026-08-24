@@ -707,6 +707,7 @@ gyro_add_module(Render
 		Deadline.cpp
 		Device.cpp
 		GpuClock.cpp
+		GpuFloor.cpp
 		Pipeline.cpp
 		Renderer.cpp
 		Textures.cpp
@@ -716,6 +717,7 @@ gyro_add_module(Render
 		Deadline.Test.cpp
 		Device.Test.cpp
 		GpuClock.Test.cpp
+		GpuFloor.Test.cpp
 		Pipeline.Test.cpp
 		Textures.Test.cpp
 		Unfused.Test.cpp

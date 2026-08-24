@@ -15,9 +15,16 @@
 // an elapsed time, and an elapsed time is meaningless without the clock the work ran at — the part
 // this was written against sits parked at 350 MHz of a 1250 MHz range because the kernel's frequency
 // governor cannot see a frame deadline, so a window of cost samples that mixes clocks is a window of
-// nothing. The number belongs on `GpuCost`, and this is what fills it. The governing half — stating a
-// `dma_fence` deadline and commanding `rps_min_freq_mhz` where the deadline does not reach the clock —
-// is deliberately not here; a write verb on this object is the shape it would grow into.
+// nothing. The number belongs on `GpuCost`, and this is what fills it.
+//
+// **The governing half went next door rather than growing a write verb here**, which is the opposite
+// of what this paragraph predicted. *(Revised 2026-08-24.)* Render/Deadline.h states the `dma_fence`
+// deadline and Render/GpuFloor.h commands the minimum clock where the deadline does not reach it, and
+// what separates them from this object is lifetime rather than subject: a floor has to be *restored*,
+// so it owns a destructor, and a destructor on the object the frame thread samples every frame would
+// put a sysfs write on a path that only reads and cost the reader its default moves. What the two do
+// share is the per-driver node resolution, which is why `NodeBase` and `BoundDriver` below are
+// public.
 //
 // **The read is a `pread` of one small sysfs attribute and it is rate-limited, because the clock it
 // reports moves no faster than the governor's evaluation interval — tens of milliseconds — while a
@@ -66,6 +73,15 @@ public:
 	};
 
 	[[nodiscard]] static Source Resolve(std::string_view driver, std::int64_t primaryMinor);
+
+	// The sysfs kobject a DRM minor's driver hangs its attributes off, and the name of the driver bound
+	// to it. Public because Render/GpuFloor.h resolves its own pair of nodes off exactly these two, and
+	// a second copy of `/sys/dev/char/226:<minor>` in the tree is a second place to get it wrong.
+	[[nodiscard]] static std::string NodeBase(std::int64_t primaryMinor);
+
+	// Empty where nothing is bound or the `device/driver` symlink is unreadable, which a caller reports
+	// as an unrecognised driver rather than distinguishing.
+	[[nodiscard]] static std::string BoundDriver(std::int64_t primaryMinor);
 
 	// How stale a reading is allowed to be before the next `Sample` re-enters the kernel. Ten
 	// milliseconds is well under a refresh and well over how fast the governor moves the clock, so a
