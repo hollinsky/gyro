@@ -1,11 +1,13 @@
 #include "Dispatch/Loop.h"
 
+#include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <string_view>
+#include <vector>
 
 #include "Core/Clock.h"
 #include "Core/Time.h"
@@ -17,6 +19,7 @@
 #include "Publication/Return.h"
 #include "Publication/Ring.h"
 #include "Scene/Output.h"
+#include "Seam/Importer.h"
 #include "Testing/Test.h"
 #include "World/Node.h"
 
@@ -95,6 +98,81 @@ struct Fixture
 
 	// The newest bytes on the ring, parsed the way the frame thread parses them.
 	[[nodiscard]] SnapshotReader Newest() const noexcept { return SnapshotReader{ Ring.Acquire(0).Bytes }; }
+
+	std::uint64_t Held = 0;
+};
+
+// A renderer's dispatch half, remembering what it was told. Standing in for `Blit`, which is the real
+// one and belongs to a module this may not name.
+class FakeImporter final : public ITextureImporter
+{
+public:
+	[[nodiscard]] Result<void> Adopt(TextureId id, const TextureSource&) override
+	{
+		Adopted.push_back(id);
+
+		return {};
+	}
+
+	void Forget(TextureId id) noexcept override { Forgotten.push_back(id); }
+
+	[[nodiscard]] std::size_t Holding() const noexcept { return Adopted.size() - Forgotten.size(); }
+
+	std::vector<TextureId> Adopted;
+	std::vector<TextureId> Forgotten;
+};
+
+// The same loop with a renderer behind it, which is what a scene of images needs to open at all.
+struct ImportingFixture
+{
+	ManualClock Clock{ Start };
+	SnapshotRing Ring;
+	ReturnChannel Returns;
+
+	FakeImporter Importer;
+	std::array<ITextureImporter*, 1> Importers{ &Importer };
+
+	DispatchLoop Loop{ Clock, Ring, Returns, Importers };
+
+	[[nodiscard]] Result<void> Open()
+	{
+		Result<std::unique_ptr<IGym>> author = MakeGym("card");
+
+		if (!author)
+		{
+			return std::unexpected{ author.error() };
+		}
+
+		const SceneOutput outputs[] = { Panel() };
+
+		return Loop.Open(std::move(*author), outputs);
+	}
+
+	// One iteration of the pair, with the frame thread played by hand — or not, which is the whole
+	// point of the argument.
+	[[nodiscard]] Wake Step(bool consuming)
+	{
+		const Wake wake = Loop.Step();
+
+		if (consuming)
+		{
+			const AcquiredSnapshot acquired = Ring.Acquire(Held);
+
+			if (acquired.IsNewer())
+			{
+				Held = acquired.Sequence;
+			}
+
+			(void)Returns.Post(Held);
+		}
+
+		if (wake.Which == Wake::Kind::Timed)
+		{
+			Clock.Set(wake.When);
+		}
+
+		return wake;
+	}
 
 	std::uint64_t Held = 0;
 };
@@ -283,4 +361,65 @@ GYRO_TEST(DispatchLoop, AFullRingDefersRatherThanLosingAScene)
 
 	GYRO_REQUIRE(reader.IsValid());
 	GYRO_CHECK_EQ(reader.Sequence(), SnapshotRingDepth + 1);
+}
+
+// Seam/Importer.h's watermark rule, wired through the loop that has to honour it.
+//
+// **What is asserted is a negative, and it is the one that matters.** A texture the author has given up
+// stays adopted for as long as the frame thread might still be composing from a snapshot that names it
+// — so the test stops playing the frame thread and checks that nothing is released, then starts again
+// and checks that it is. Under a sanitiser the failing version of this is not a wrong picture; it is a
+// read of freed pixels on the thread that must not fault.
+GYRO_TEST(DispatchLoop, ATextureTheAuthorGaveUpIsForgottenOnlyOnceTheFrameThreadHasMovedPastIt)
+{
+	ImportingFixture fixture;
+
+	GYRO_REQUIRE(fixture.Open());
+
+	// The scene as authored: one image, adopted before anything was published.
+	GYRO_REQUIRE_EQ(fixture.Importer.Adopted.size(), 1U);
+	GYRO_REQUIRE_EQ(fixture.Loop.Textures().Live(), 1U);
+
+	// **The frame thread never runs**, which is the condition the rule is written for: the ring fills,
+	// publishes are deferred, and the watermark stands at nothing. Dispatch keeps authoring anyway —
+	// nothing here waits on the far side, which is decision 61's priority order — so the swap happens on
+	// schedule and the image it replaced becomes one the author has given up and the loop may not
+	// release.
+	std::size_t steps = 0;
+
+	while (fixture.Loop.Textures().Retiring() == 0 && steps < StepLimit)
+	{
+		static_cast<void>(fixture.Step(false));
+		++steps;
+	}
+
+	GYRO_REQUIRE(steps < StepLimit);
+	GYRO_REQUIRE_EQ(fixture.Importer.Adopted.size(), 2U);
+
+	const TextureId given = fixture.Importer.Adopted.front();
+
+	// Both are still on the renderer: the one the scene now draws, and the one whatever is in flight may
+	// still name. That overlap is what makes a swap invisible rather than a frame of nothing.
+	GYRO_CHECK_EQ(fixture.Importer.Holding(), 2U);
+
+	for (int stalled = 0; stalled < 64; ++stalled)
+	{
+		static_cast<void>(fixture.Step(false));
+	}
+
+	GYRO_CHECK(fixture.Importer.Forgotten.empty());
+	GYRO_CHECK(fixture.Loop.Textures().Retiring() > 0);
+
+	// And the frame thread starts. The watermark passes the sequence the retirement was sealed with, and
+	// the pixels go back on the step that reads it.
+	steps = 0;
+
+	while (fixture.Importer.Forgotten.empty() && steps < StepLimit)
+	{
+		static_cast<void>(fixture.Step(true));
+		++steps;
+	}
+
+	GYRO_REQUIRE(steps < StepLimit);
+	GYRO_CHECK_EQ(fixture.Importer.Forgotten.front(), given);
 }

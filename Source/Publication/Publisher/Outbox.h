@@ -174,6 +174,16 @@ public:
 	// been reclaimed.
 	[[nodiscard]] std::uint64_t Watermark() const noexcept { return m_Watermark; }
 
+	// The sequence the next `Publish` will carry — Publication/Ring.h's own answer, forwarded because
+	// the ring is this object's and a caller that needed the number would otherwise need the ring.
+	//
+	// **It is what dispatch stamps a released resource with**, and the reason it is knowable *before*
+	// publishing is that `NextSequence` is idempotent until a publish is consumed: a refused publish
+	// supersedes the pending slot under the same number, so the stamp stays the sequence that will
+	// eventually carry the scene without the resource in it. `Dispatch/Textures.h` is the first caller
+	// and the buffer releases will be the second.
+	[[nodiscard]] std::uint64_t NextSequence() const noexcept { return m_Ring.NextSequence(); }
+
 	[[nodiscard]] bool HasPending() const noexcept { return m_HasPending; }
 
 	// How many published snapshots the frame thread has not yet released, and how many buffers are

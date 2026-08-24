@@ -55,6 +55,7 @@
 #include "Render/Renderer.h"
 #include "Scene/Output.h"
 #include "Seam/EventSource.h"
+#include "Seam/Importer.h"
 #include "Seam/OutputConfiguration.h"
 #include "Seam/Presenter.h"
 #include "Seam/RenderTarget.h"
@@ -180,6 +181,20 @@ struct BoundOutput
 {
 	IPresenter* Presenter = nullptr;
 	std::unique_ptr<IRenderer> Renderer;
+
+	// The dispatch half of the same renderer, or null where it has none.
+	//
+	// **Two pointers to one object, and the second is not redundant.** Seam/Importer.h is a separate
+	// interface because the *thread* is the difference — everything on `IRenderer` runs on the frame
+	// thread and everything on `ITextureImporter` runs on dispatch — and the composition root is the
+	// only place both halves are visible at once, which decision 131 says is the reason the verb is at
+	// the waist rather than private to `Blit`. So the root is what pairs them, exactly as it pairs a
+	// renderer with a presenter.
+	//
+	// Null is an ordinary answer today: `Render`'s Vulkan arm is unwritten and the simulated renderer
+	// has no pixels to import into. A dispatch loop handed no importers refuses every adopt, which is
+	// what makes `--gym=card` fail to open on those backends instead of drawing four empty rectangles.
+	ITextureImporter* Importer = nullptr;
 	OutputConfiguration Configuration{};
 	Connection<> OnTargetsInvalidated;
 	Connection<const OutputConfiguration&> OnReconfigured;
@@ -398,6 +413,7 @@ public:
 
 		into.Presenter = presenter;
 		into.Configuration = presenter->Configuration();
+		into.Importer = renderer.get();
 		into.Renderer = std::move(renderer);
 
 		m_Dumps[index] = std::move(dump);
@@ -1134,7 +1150,23 @@ private:
 			return laid;
 		}
 
-		m_Dispatch = std::make_unique<DispatchLoop>(m_Clock, m_Snapshots, m_Returns);
+		// Every renderer that can sample, gathered for the texture registry. A renderer is per output, so
+		// an image a scene can draw anywhere has to be adopted everywhere it might be drawn — and the
+		// root is the only party holding the whole set.
+		std::array<ITextureImporter*, MaxOutputs> importers{};
+		std::size_t importing = 0;
+
+		for (std::size_t index = 0; index < m_Count; ++index)
+		{
+			if (m_Bound[index].Importer != nullptr)
+			{
+				importers[importing] = m_Bound[index].Importer;
+				++importing;
+			}
+		}
+
+		m_Dispatch =
+			std::make_unique<DispatchLoop>(m_Clock, m_Snapshots, m_Returns, std::span{ importers.data(), importing });
 
 		if (const Result<void> opened = m_Dispatch->Open(std::move(*author), { outputs.data(), m_Count }); !opened)
 		{

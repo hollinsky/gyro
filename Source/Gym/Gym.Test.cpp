@@ -2,19 +2,28 @@
 
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <span>
 #include <string_view>
+#include <vector>
 
 #include "Core/Clock.h"
 #include "Core/Handle.h"
+#include "Core/Result.h"
+#include "Core/Texture.h"
 #include "Core/Time.h"
 #include "Core/Wake.h"
 #include "Geometry/Scale.h"
 #include "Geometry/Space.h"
+#include "Gym/Textures.h"
 #include "Scene/Entity.h"
 #include "Scene/Output.h"
 #include "Scene/Store.h"
 #include "Testing/Test.h"
+#include "World/Content.h"
+#include "World/Node.h"
 
 // What a gym promises the loop above it: authors once, retargets what is due, and answers when it
 // wants to be called again.
@@ -93,6 +102,33 @@ void Walk(const SceneStore& store, EntityId id, const Visit& visit)
 
 	return moving;
 }
+// The texture space, as the little of it a gym can tell apart.
+//
+// `Dispatch/TextureRegistry` is the real one and is a module this may not name — `Dispatch` depends on
+// `Gym` and not the other way round, which is the whole reason Gym/Textures.h declares an interface at
+// all. What a gym needs from it is that ids come back distinct and that giving one up is counted, and
+// those are the two things asserted against here.
+class CountingTextures final : public ITextures
+{
+public:
+	[[nodiscard]] Result<TextureId>
+	Adopt(PixelSize<BufferSpace>, std::uint32_t, std::span<const std::byte> pixels) override
+	{
+		if (pixels.empty())
+		{
+			return Failure(EINVAL, "an image with no pixels");
+		}
+
+		++Adopted;
+
+		return TextureId{ Adopted, 1 };
+	}
+
+	void Retire(TextureId id) noexcept override { Retired.push_back(id); }
+
+	std::uint32_t Adopted = 0;
+	std::vector<TextureId> Retired;
+};
 } // namespace
 
 GYRO_TEST(Gym, EveryNameInTheVocabularyConstructs)
@@ -126,6 +162,8 @@ GYRO_TEST(Gym, AnUnknownNameIsRefusedRatherThanDefaulted)
 
 GYRO_TEST(Gym, EveryGymAuthorsAgainstAnOutputAndRefusesWithout)
 {
+	CountingTextures textures;
+
 	for (const std::string_view name : GymNames())
 	{
 		ManualClock clock{ Start };
@@ -137,28 +175,30 @@ GYRO_TEST(Gym, EveryGymAuthorsAgainstAnOutputAndRefusesWithout)
 
 		// The failure a gym is likeliest to meet in the field: constructed before the composition root
 		// has an output set to hand it. Refused with a sentence rather than laid out against zero.
-		GYRO_CHECK(!(*gym)->Open(bare));
+		GYRO_CHECK(!(*gym)->Open(bare, textures));
 
 		Fixture fixture;
 
-		GYRO_CHECK((*gym)->Open(fixture.Store));
+		GYRO_CHECK((*gym)->Open(fixture.Store, textures));
 	}
 }
 
 GYRO_TEST(Gym, ThePerpetualGymsNeverAnswerSettled)
 {
-	for (const GymKind kind : { GymKind::Lanes, GymKind::Turn, GymKind::Materials })
+	CountingTextures textures;
+
+	for (const GymKind kind : { GymKind::Lanes, GymKind::Turn, GymKind::Materials, GymKind::Card })
 	{
 		Fixture fixture;
 
 		const Result<std::unique_ptr<IGym>> gym = MakeGym(Name(kind));
 
 		GYRO_REQUIRE(gym);
-		GYRO_REQUIRE((*gym)->Open(fixture.Store));
+		GYRO_REQUIRE((*gym)->Open(fixture.Store, textures));
 
 		// Before the first edge there is nothing to do, and the answer is still a demand: the scene as
 		// authored is what the first frame shows, and the gym is owed a wake at the instant it moves.
-		const Wake first = (*gym)->Advance(fixture.Store, fixture.Clock.Now());
+		const Wake first = (*gym)->Advance(fixture.Store, textures, fixture.Clock.Now());
 
 		GYRO_REQUIRE(first.Which == Wake::Kind::Timed);
 		GYRO_CHECK(first.When > fixture.Clock.Now());
@@ -167,7 +207,7 @@ GYRO_TEST(Gym, ThePerpetualGymsNeverAnswerSettled)
 		// Past every lane's first edge. Something is now moving, and the gym is owed another wake — the
 		// only way a scene keeps moving is that something keeps retargeting it.
 		Instant now = fixture.Reach(WellPast);
-		Wake next = (*gym)->Advance(fixture.Store, now);
+		Wake next = (*gym)->Advance(fixture.Store, textures, now);
 
 		GYRO_REQUIRE(next.Which == Wake::Kind::Timed);
 		GYRO_CHECK(next.When > now);
@@ -183,7 +223,7 @@ GYRO_TEST(Gym, ThePerpetualGymsNeverAnswerSettled)
 
 			fixture.Clock.Set(now);
 
-			next = (*gym)->Advance(fixture.Store, now);
+			next = (*gym)->Advance(fixture.Store, textures, now);
 
 			GYRO_REQUIRE(next.Which == Wake::Kind::Timed);
 			GYRO_REQUIRE(next.When > now);
@@ -193,12 +233,14 @@ GYRO_TEST(Gym, ThePerpetualGymsNeverAnswerSettled)
 
 GYRO_TEST(Gym, TheSettlingGymAuthorsOnceAndThenAsksForNothing)
 {
+	CountingTextures textures;
+
 	Fixture fixture;
 
 	const Result<std::unique_ptr<IGym>> gym = MakeGym(Name(GymKind::Settle));
 
 	GYRO_REQUIRE(gym);
-	GYRO_REQUIRE((*gym)->Open(fixture.Store));
+	GYRO_REQUIRE((*gym)->Open(fixture.Store, textures));
 
 	// The whole of what this gym ever writes happens in `Open`, so the scene is already in motion before
 	// the loop has called it once. A gym that waited for its first `Advance` would make the settle
@@ -208,23 +250,86 @@ GYRO_TEST(Gym, TheSettlingGymAuthorsOnceAndThenAsksForNothing)
 	// And nothing is ever owed. That is what the frame side's fold is read against: once the springs
 	// have run down there is no contributor left, so no timer is armed and the frame thread blocks —
 	// which is the promise that doing nothing costs nothing, and the only instrument here for it.
-	GYRO_CHECK_EQ((*gym)->Advance(fixture.Store, fixture.Clock.Now()), Wake::Never());
-	GYRO_CHECK_EQ((*gym)->Advance(fixture.Store, fixture.Reach(WellPast)), Wake::Never());
+	GYRO_CHECK_EQ((*gym)->Advance(fixture.Store, textures, fixture.Clock.Now()), Wake::Never());
+	GYRO_CHECK_EQ((*gym)->Advance(fixture.Store, textures, fixture.Reach(WellPast)), Wake::Never());
+}
+
+// The card gym's swap, which is a client's buffer cycle with no client: a new id every period, the
+// previous one given up, and every copy in the scene naming the new one before the old is released.
+//
+// **The order is the whole assertion.** An id retired before the nodes stopped naming it is pixels the
+// frame thread may still be sampling — the failure Seam/Importer.h's watermark rule exists to prevent,
+// and the one this gym is here to keep exercised while there is no protocol to exercise it.
+GYRO_TEST(Gym, TheCardGymSwapsItsBufferAndGivesUpTheOneItReplaced)
+{
+	CountingTextures textures;
+	Fixture fixture;
+
+	const Result<std::unique_ptr<IGym>> gym = MakeGym(Name(GymKind::Card));
+
+	GYRO_REQUIRE(gym);
+	GYRO_REQUIRE((*gym)->Open(fixture.Store, textures));
+
+	// One image before anything has moved, and nothing given up: a gym that retired at `Open` would be
+	// authoring a scene around an id it had already released.
+	GYRO_REQUIRE_EQ(textures.Adopted, 1U);
+	GYRO_CHECK(textures.Retired.empty());
+
+	const TextureId first = TextureId{ 1, 1 };
+
+	// Far enough on for several swap periods, served the way a loop serves them.
+	Wake next = (*gym)->Advance(fixture.Store, textures, fixture.Clock.Now());
+
+	for (int served = 0; served < 48; ++served)
+	{
+		GYRO_REQUIRE(next.Which == Wake::Kind::Timed);
+
+		fixture.Clock.Set(next.When);
+
+		next = (*gym)->Advance(fixture.Store, textures, next.When);
+	}
+
+	GYRO_REQUIRE(textures.Adopted > 1U);
+
+	// Every adopt but the one the scene is currently drawing has been given up, and the first one is
+	// among them — a gym that adopted without retiring would exhaust a renderer's image table, which is
+	// eight entries wide on `Blit`.
+	GYRO_CHECK_EQ(textures.Retired.size(), static_cast<std::size_t>(textures.Adopted) - 1U);
+	GYRO_CHECK_EQ(textures.Retired.front(), first);
+
+	// And the scene names the newest, on every copy. One node left on a retired id is the picture that
+	// would still look right until the moment the registry freed it.
+	const TextureId newest{ textures.Adopted, 1 };
+	std::size_t drawing = 0;
+
+	Walk(fixture.Store, fixture.Store.FirstRoot(), [&](const Entity& entity) {
+		if (entity.Kind != NodeKind::Image)
+		{
+			return;
+		}
+
+		GYRO_CHECK_EQ(fixture.Store.Images()[entity.Content].Texture, newest);
+		++drawing;
+	});
+
+	GYRO_CHECK_EQ(drawing, 4U);
 }
 
 GYRO_TEST(Gym, ARetargetIsStampedWithTheInstantItFellDueRatherThanTheWakeItWasServedAt)
 {
+	CountingTextures textures;
+
 	Fixture fixture;
 
 	const Result<std::unique_ptr<IGym>> gym = MakeGym(Name(GymKind::Lanes));
 
 	GYRO_REQUIRE(gym);
-	GYRO_REQUIRE((*gym)->Open(fixture.Store));
+	GYRO_REQUIRE((*gym)->Open(fixture.Store, textures));
 
 	// Served a whole second late, which is what a busy dispatch thread or a coarse timer produces.
 	const Instant late = fixture.Reach(WellPast);
 
-	GYRO_REQUIRE((*gym)->Advance(fixture.Store, late).Which == Wake::Kind::Timed);
+	GYRO_REQUIRE((*gym)->Advance(fixture.Store, textures, late).Which == Wake::Kind::Timed);
 
 	bool stamped = false;
 

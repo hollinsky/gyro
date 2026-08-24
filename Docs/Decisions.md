@@ -9873,6 +9873,26 @@ ordinary dispatch-side reclamation beside the buffer releases and frame callback
 from that number. A replacing `Adopt` is the same hazard under a different verb and carries the same
 rule.
 
+*(Corrected 2026-08-23, by the Vulkan importer this entry was written to unblock.)* **That paragraph
+is half a rule, and the missing half is the implementation's.** A texture below the watermark is one
+the frame thread will not **record** again, which is only the same statement as *one no frame can
+still be sampling* for a renderer that finishes inside `Record`. `Blit` does, so the entry was written
+against the only implementation that could not see the difference. A device's frame is submitted and
+the thread moves on, so the watermark passes a snapshot whose composite is still executing; freeing a
+`VkImage` there frees it underneath a read in flight, and it surfaces as a corrupt window or a lost
+device on the frame after somebody closed something. [Frame/Loop.h](../Source/Frame/Loop.h) was
+already right about this in the same breath as the post — *a buffer recorded into a texture is held by
+GPU work rather than by the snapshot* — which is the tell that the rule had a second half the seam had
+not written down.
+
+So `Forget` is a promise to release rather than a release: the caller says when the scene has stopped
+naming an id, and only the implementation can say when its own queue has stopped reading one. **This
+is not the refcounted table rejected below.** That proposal made the *caller* safe at any moment and
+paid for it with an atomic on the sampling path; this leaves the caller's rule exactly as it was and
+defers only the destruction of a device object, checked where the renderer is already asked whether a
+frame has completed. Nothing is added to the frame path, and nothing crosses back to dispatch — which
+keeps both of the rejections below standing rather than reopening them.
+
 **A failed import is a surface that never reaches a frame.** `Adopt` reports to the dispatch thread,
 and the dispatch thread decides whether a snapshot names the id at all — so a refusal is answered by
 not publishing the surface, or by answering the client's commit with a protocol error, and the frame
@@ -10094,3 +10114,70 @@ several frames of the same shapes rather than one. Raised to thirty-two with thi
 left for per-node damage to discover, since a collapsed join is a whole-screen repaint on exactly the
 frame the accumulation existed to keep small, and the constant is a bandwidth dial the header says is
 meant to move.
+
+### 136. The texture minter is dispatch's own, and a retirement is sealed with the sequence that stops naming it
+
+[Decision 131](#131-texture-import-is-a-second-interface-and-a-texture-retires-on-the-watermark) put
+the import verb at the waist and left [Open.md](Open.md)'s minting entry with two things: the Vulkan
+arm, and *nothing mints an id yet*. This is the second. A `TextureRegistry` in `Dispatch` mints
+against [Core/SlotAllocator.h](../Source/Core/SlotAllocator.h), holds the pixels an importer borrows,
+adopts into every renderer, and releases on the watermark; an author reaches it through `ITextures`,
+which is two verbs and no `Seam`.
+
+**It is in `Dispatch` because that is the only module that can see all three halves of the problem.**
+Minting is dispatch-side by [decision 87](#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)
+and [Core/Texture.h](../Source/Core/Texture.h); importing goes through the control waist; releasing is
+[Publication/Return.h](../Source/Publication/Return.h)'s watermark. `Dispatch` already held the second
+and third and gained a `Seam` edge for the first. The composition root was the obvious alternative and
+is worse for the reason that moved the loop out of it in
+[decision 80](#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait): the root is not
+portable, so a minter there is one no test can run on a machine with no GPU — and this is the object
+whose whole difficulty is an ordering between two threads.
+
+**The author does not name a format, and that is decision 87 arriving one layer above where it was
+settled.** `Gym` is where a client will stand, and `Protocol` may not name `Seam` — so an author that
+reached for `TextureSource` or a fourcc would be building the shape the protocol layer is forbidden
+from copying. Instead the pixels cross as an extent, a stride and bytes in a layout the author states
+in words, and the party that adopts says which fourcc that is. The alternative was one line of CMake
+giving `Gym` a `Seam` edge, which would have worked and would have hidden the question until there was
+a protocol to answer it badly.
+
+**The registry holds the pixels because the seam borrows them.** [Seam/Importer.h](../Source/Seam/Importer.h)
+records a pointer rather than copying — the console's grid is thirty megabytes and printing a line into
+it is a `memmove` in memory it already owns — so something has to keep the memory alive for as long as
+an id is live and then some. The author is the wrong something: that puts a two-thread rule into every
+scene that ever draws a picture, and the boot splash and every client would each carry their own copy
+of it. What holding costs is one copy on the dispatch thread, which owes no deadline; what it buys,
+beyond the lifetime, is that a device rebuild can re-adopt every live image under the *same* ids, which
+is the reason [decision 41](#41-device-migration-is-exercised-on-every-boot) needs the verb at
+the waist in the first place.
+
+**A retirement is stamped with the sequence about to be published, and reclaimed at or after it.** The
+author gives an id up during `Advance`, so the snapshot that step is serialising is the *first* that
+cannot name it and the one before it is the last that can — which the frame thread is past exactly when
+its watermark reaches that number. `Seal` is where the number is applied, so an author never learns a
+sequence exists; `Reclaim` runs at the top of the step beside
+[Publication/Publisher/Outbox.h](../Source/Publication/Publisher/Outbox.h)'s own, under the same
+watermark, because *everything strictly below is dispatch's to take back* was already being applied to
+something else. The comparison reads `>=` where the outbox's reads `<` and the two say one thing: a
+stamp is the first sequence that does not name the texture, and a retained buffer's is the sequence it
+*is*. A publish the ring refuses does not disturb it, because the outbox supersedes the pending slot
+under the same unconsumed number.
+
+**A slot is not returned at the retire, and the reason is not the generation.** A stale id already
+resolves to nothing by [decision 15](#15-identity-is-a-generational-handle); what handing the index back
+early would do is put the old entry and its replacement in a renderer's table at once, and `Blit`'s is
+eight wide. So the slot comes back with the pixels.
+
+**Adopt is into every renderer or into none.** A renderer is per output, so an image a scene can draw
+anywhere has to exist everywhere it might be drawn — genuinely two imports the day the second panel is
+on the second card. A refusal partway rolls back the ones that took it: a texture on one renderer and
+not another is a window that is on one panel and missing from the other, which the caller cannot see and
+cannot act on, where a refusal is answered by not publishing the node.
+
+**What made it testable is the `card` gym**, which is the same argument [decision 79](#79-the-console-is-a-renderer-not-a-presenter)
+makes about the floor renderer: the rule is about two threads, so the only way to falsify it is to run
+both. The gym swaps its buffer forever — mint, adopt, attach, give up the one that was there — which is
+a client's buffer cycle with no client, and the test that matters stops playing the frame thread and
+checks that *nothing* is released. Without it `Forget` would have no caller in a running gyro until
+`Protocol` landed, and the first exercise of the rule would be a use-after-free in somebody's window.

@@ -682,8 +682,8 @@ nothing only proves the grep.
   composition root owns the import as it owns migration, which is a third party in a per-frame
   decision. This blocks nothing today and blocks plane assignment entirely, so it wants answering
   before that is written rather than during.
-- **How a texture is minted, and who holds it.** *(Shape answered 2026-08-23; the Vulkan arm and the
-  minter remain.)* [Decision 82](Decisions.md#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene)
+- **How a texture is minted, and who holds it.** *(Shape answered 2026-08-23; the minter answered the
+  same day. The Vulkan arm remains.)* [Decision 82](Decisions.md#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene)
   has a draw item name a `TextureId` and nothing in `IRenderer` creates one, on the grounds that a
   `wl_buffer` arrives on the dispatch thread and turning it into a device image must not happen inside
   the frame section — so import is the renderer's dispatch half, written when there is a protocol
@@ -704,12 +704,19 @@ nothing only proves the grep.
   forces it is device migration, since `Blit` had grown the verb privately and a private verb is one
   the composition root cannot call across a rebuild.
 
+  **The minter is [decision 136](Decisions.md#136-the-texture-minter-is-dispatchs-own-and-a-retirement-is-sealed-with-the-sequence-that-stops-naming-it),
+  and the entry's own observation is what decided it.** The snapshot atlas is minted from pixels that
+  are about to stop existing, which is an import with no client on the other end — so the id space
+  could not belong to whoever writes `Protocol`, and it went to the one module that can see minting,
+  the waist and the watermark at once. What an author sees is two verbs and no `Seam`, because a gym
+  stands where a client will stand and decision 87 forbids `Protocol` the waist; the party that adopts
+  is the one that names a format. The `card` gym is what runs it, and it swaps its buffer forever so
+  that `Forget` has a caller before there is a protocol.
+
   **What is left is the half with the device in it.** The Vulkan implementation is the dmabuf arm —
   an external-memory image, the format and modifier negotiation an import has to survive, and whether
-  `wl_shm` wants a staging copy — and nothing mints an id yet. The minter is where the entry's own
-  observation still stands: the snapshot atlas is minted by the *renderer* from pixels that are about
-  to stop existing, which is an import with no client on the other end, so the id space cannot simply
-  belong to whoever writes `Protocol`.
+  `wl_shm` wants a staging copy. Until it lands, `--gym=card` refuses to open on every backend but the
+  CPU one, with `no renderer to import an image into` rather than four rectangles that draw nothing.
 - **The cursor is a commit that is not a frame.** [Decision 29](Decisions.md#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)
   exempts the cursor plane from the budget on the grounds that it updates independently of the
   composite. That is a claim about the *rate* — the pointer moves at the input device's rate and not

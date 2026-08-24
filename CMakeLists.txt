@@ -341,9 +341,13 @@ gyro_add_module(Gym PORTABLE DISPATCH
 		Animation
 		Scene
 	SOURCES
+		Card.cpp
+		Cards.cpp
 		Gym.cpp
 		Lanes.cpp
 	TESTS
+		Card.Test.cpp
+		Cards.Test.cpp
 		Gym.Test.cpp
 		Lanes.Test.cpp
 )
@@ -360,16 +364,24 @@ gyro_add_module(Gym PORTABLE DISPATCH
 #
 # DEPENDS is what the code has. `Scene` for the store and the serializer, `Publication` for the ring,
 # the return channel and the outbox that owns a published snapshot's bytes, `Gym` because the scenes
-# gyro authors for itself are the only author there is until there is a protocol, and `Core` for the
-# clock, the result and the wake.
+# gyro authors for itself are the only author there is until there is a protocol, `Seam` for the
+# importer a texture is adopted into, and `Core` for the clock, the result and the wake.
+#
+# The `Seam` edge is what makes this the minter's home rather than the composition root's. A texture is
+# minted on the dispatch thread, imported through the waist, and released against the watermark — and
+# this is the only module that can see all three. `Gym` deliberately cannot: an author is where a
+# client will stand, and decision 87 forbids `Protocol` the waist, so the interface an author calls is
+# declared in `Gym` and implemented here.
 gyro_add_module(Dispatch PORTABLE DISPATCH
 	DEPENDS
 		Core
 		Publication
 		Scene
+		Seam
 		Gym
 	TESTS
 		Loop.Test.cpp
+		Textures.Test.cpp
 )
 
 # The control waist: every interface with more than one implementation, and the plain data that
@@ -628,6 +640,7 @@ gyro_add_module(Render
 		Device.cpp
 		Pipeline.cpp
 		Renderer.cpp
+		Textures.cpp
 		Unfused.cpp
 	TESTS
 		Backdrop.Test.cpp

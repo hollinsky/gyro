@@ -11,6 +11,7 @@
 #include "Core/Result.h"
 #include "Core/Time.h"
 #include "Core/Wake.h"
+#include "Gym/Textures.h"
 #include "Scene/Store.h"
 
 // The scenes gyro authors for itself: a handful of nodes moving under springs, with no protocol
@@ -69,17 +70,19 @@ enum class GymKind : std::uint8_t
 
 	// The lanes with a `Glass` and a `Smoke` panel over them. Wants the Vulkan renderer.
 	Materials,
+
+	// An imported image, drawn four times, with the buffer swapped underneath it forever. The only gym
+	// that needs a texture to exist, and therefore the only one that can fail for a reason that is not
+	// the store.
+	Card,
 };
 
-inline constexpr std::size_t GymCount = 4;
+inline constexpr std::size_t GymCount = 5;
 
-static_assert(static_cast<std::size_t>(GymKind::Materials) + 1 == GymCount);
+static_assert(static_cast<std::size_t>(GymKind::Card) + 1 == GymCount);
 
 inline constexpr std::array<GymKind, GymCount> AllGyms{
-	GymKind::Lanes,
-	GymKind::Settle,
-	GymKind::Turn,
-	GymKind::Materials,
+	GymKind::Lanes, GymKind::Settle, GymKind::Turn, GymKind::Materials, GymKind::Card,
 };
 
 // The list is the enumeration in order, so a sweep over it is a sweep over the enum. The size is fixed
@@ -111,6 +114,8 @@ static_assert([] {
 			return "turn";
 		case GymKind::Materials:
 			return "materials";
+		case GymKind::Card:
+			return "card";
 	}
 
 	return "unknown";
@@ -129,6 +134,8 @@ static_assert([] {
 			return "the rotation lane, driven; no CPU composite rasterizes a rotated quad";
 		case GymKind::Materials:
 			return "glass and smoke panels over the lanes; no CPU composite draws a material";
+		case GymKind::Card:
+			return "a test card imported and drawn four ways, its buffer swapped forever";
 	}
 
 	return "unknown";
@@ -149,6 +156,12 @@ static_assert([] {
 		case GymKind::Settle:
 			return true;
 
+		// The one gym whose CPU answer is the *interesting* one: `Blit` is the only renderer that
+		// samples a texture today, so this is the gym that draws there and nowhere else. The Vulkan arm
+		// of Docs/Open.md's minting entry is what makes that temporary.
+		case GymKind::Card:
+			return true;
+
 		// Refused by `Blit::Classify` on the quad: the corners of a rotated chain are not bit-identical
 		// in pairs, and the comparison is exact float equality deliberately — a tolerance there would
 		// draw a rotated logo unrotated and be invisible until somebody measured the picture.
@@ -167,10 +180,7 @@ static_assert([] {
 // codebase otherwise refuses — it is here because the fixed interface below answers in names rather
 // than in kinds, and the assertion underneath is what keeps the two from drifting.
 inline constexpr std::array<std::string_view, GymCount> AllGymNames{
-	"lanes",
-	"settle",
-	"turn",
-	"materials",
+	"lanes", "settle", "turn", "materials", "card",
 };
 
 static_assert([] {
@@ -220,7 +230,12 @@ public:
 
 	// Author the tree, once, into a store that already carries the output set. Called before the first
 	// `Advance` and never again.
-	[[nodiscard]] virtual Result<void> Open(SceneStore& scene) = 0;
+	//
+	// **The texture space arrives as an argument rather than being held**, on `SceneStore`'s terms and
+	// for the same reason: what a gym owns is a scene, and both of the things it authors that scene
+	// *into* belong to the loop around it. A gym that draws no images ignores it, which is three of the
+	// five and will be most of what a shell authors too.
+	[[nodiscard]] virtual Result<void> Open(SceneStore& scene, ITextures& textures) = 0;
 
 	// Retarget whatever is due at `now`, and answer when the next thing falls due.
 	//
@@ -229,7 +244,7 @@ public:
 	// elapsed amount rather than starting from zero — so lateness costs the first frame or two of an
 	// animation and never its shape, and a gym stamping `now` would hide precisely the lateness it
 	// exists to expose.
-	[[nodiscard]] virtual Wake Advance(SceneStore& scene, Instant now) = 0;
+	[[nodiscard]] virtual Wake Advance(SceneStore& scene, ITextures& textures, Instant now) = 0;
 
 protected:
 	IGym() = default;

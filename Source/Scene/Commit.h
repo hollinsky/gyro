@@ -7,11 +7,13 @@
 #include "Animation/Author/Motion.h"
 #include "Animation/Solve/Spring.h"
 #include "Core/Handle.h"
+#include "Core/Texture.h"
 #include "Core/Time.h"
 #include "Geometry/NodeTransform.h"
 #include "Geometry/Space.h"
 #include "Scene/Entity.h"
 #include "Scene/Store.h"
+#include "World/Content.h"
 
 // The transaction a mutation happens inside, and the only door onto an entity's channels.
 //
@@ -201,6 +203,35 @@ public:
 
 		entity->Orientation = orientation;
 		entity->Turn.AnimateFrom(deviation, velocity, RotationVector{}, motion, *m_Origin);
+
+		return true;
+	}
+
+	// The pixels a node draws, replaced — `wl_surface.attach` arriving in the store, and gyro's own
+	// authored images swapping a buffer for the same reason a client does.
+	//
+	// **Immediate, and there is no version of this that is sprung.** A texture id is an identity rather
+	// than a quantity: there is no value between the buffer a surface had and the one it has, so a
+	// channel here would have nothing to interpolate. What *does* animate across a buffer swap is the
+	// node — World/Content.h's exit pixels are a snapshot replacing a live surface underneath a spring
+	// that never notices, which is the whole reason an image and a snapshot are one kind — and that
+	// motion is already running on the transform when this lands.
+	//
+	// **It carries no origin and therefore works in a commit that has none**, which is the client shape:
+	// `wl_surface.commit` has no timestamp, and this is the write that shape exists for.
+	//
+	// False for a scope that is not the open one and for an id that is not a live image, which is
+	// `SceneStore::MutableImage`'s refusal reaching the call site unchanged.
+	bool Attach(EntityId id, TextureId texture) noexcept
+	{
+		ImageContent* const content = m_Open ? m_Scene->MutableImage(id) : nullptr;
+
+		if (content == nullptr)
+		{
+			return false;
+		}
+
+		content->Texture = texture;
 
 		return true;
 	}

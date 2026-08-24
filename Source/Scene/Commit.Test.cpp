@@ -6,12 +6,15 @@
 #include "Animation/Author/Motion.h"
 #include "Animation/Solve/Spring.h"
 #include "Core/Clock.h"
+#include "Core/ColorState.h"
 #include "Core/Handle.h"
+#include "Core/Texture.h"
 #include "Core/Time.h"
 #include "Geometry/NodeTransform.h"
 #include "Scene/Entity.h"
 #include "Scene/Store.h"
 #include "Testing/Test.h"
+#include "World/Content.h"
 
 // Docs/Decisions.md decision 112's scope, and decision 89's phase one through it.
 //
@@ -319,4 +322,57 @@ GYRO_TEST(SceneCommit, ARotationRetargetMovesTheChartAndCarriesTheVelocityIntoIt
 
 	GYRO_CHECK_EQ(again.Position, after.Position);
 	GYRO_CHECK_EQ(again.Velocity, after.Velocity);
+}
+
+// The buffer a node draws, replaced — and it is the client's shape rather than the shell's: no origin,
+// no motion, and nothing about the node except which pixels it names.
+//
+// **The refusals are what make this safe to hand a protocol layer.** A commit that is not the open one
+// writes nothing; a container handed an image verb is refused rather than writing into whichever image
+// happened to sit at its content index, which is a window silently wearing another window's pixels.
+GYRO_TEST(SceneCommit, AttachReplacesThePixelsAndRefusesAnythingThatIsNotALiveImage)
+{
+	ManualClock clock{ Origin };
+	SceneStore store{ clock };
+
+	constexpr TextureId first{ 4, 1 };
+	constexpr TextureId next{ 9, 2 };
+
+	const EntityId container = Only(store);
+	const EntityId image =
+		store
+			.CreateImage(
+				{}, {}, ImageContent{ .Texture = first, .Source = {}, .Frame = {}, .Color = ColorState::Srgb() }
+			)
+			.value();
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Client };
+
+		GYRO_REQUIRE(commit.IsOpen());
+		GYRO_CHECK(commit.Attach(image, next));
+
+		// A container has no pixels, and the sentinel says so — writing through its content index would
+		// reach whatever the image run holds at position `NoContent`.
+		GYRO_CHECK(!commit.Attach(container, next));
+		GYRO_CHECK(!commit.Attach(EntityId{}, next));
+	}
+
+	const Entity* const entity = store.Find(image);
+
+	GYRO_REQUIRE(entity != nullptr);
+	GYRO_CHECK_EQ(store.Images()[entity->Content].Texture, next);
+
+	// The rest of the payload is untouched. A verb that took a whole `ImageContent` would quietly reset
+	// the colour state on every buffer swap, which is a client's own frame rate.
+	GYRO_CHECK_EQ(store.Images()[entity->Content].Color, ColorState::Srgb());
+
+	// And a scope that is not open writes nothing, which is decision 112's *one at a time* reaching the
+	// one verb a client uses most.
+	SceneCommit outer{ store, CommitAuthor::Client };
+	SceneCommit nested{ store, CommitAuthor::Client };
+
+	GYRO_CHECK(!nested.IsOpen());
+	GYRO_CHECK(!nested.Attach(image, first));
+	GYRO_CHECK_EQ(store.Images()[entity->Content].Texture, next);
 }

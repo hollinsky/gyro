@@ -202,6 +202,27 @@ private:
 		return index ? &m_Entities[*index] : nullptr;
 	}
 
+	// The writable side of an image's payload, and it is the one payload with a standing reason to
+	// change: a client's next buffer is a new `TextureId` on a node that is otherwise exactly what it
+	// was. Behind the same friendship as `Mutable` and reached through an id for the same reason.
+	//
+	// **Null for anything that is not a live image**, which folds three different mistakes into one
+	// refusal a caller can act on: a stale id, a container or a solid handed to an image verb, and a
+	// content index that does not address the run. The last cannot happen by construction today —
+	// `Create` writes the index and the payload together — and is checked anyway, because what it would
+	// otherwise be is a write past the end of a vector on the thread that authors every window.
+	[[nodiscard]] ImageContent* MutableImage(EntityId id) noexcept
+	{
+		Entity* const entity = Mutable(id);
+
+		if (entity == nullptr || entity->Kind != NodeKind::Image || entity->Content >= m_Images.size())
+		{
+			return nullptr;
+		}
+
+		return &m_Images[entity->Content];
+	}
+
 	// Decision 112's *one is open at a time*, as a refusal. A commit opened inside another is a bug at a
 	// call site rather than a state to support, and answering it with `false` costs the nested scope
 	// every write instead of letting it borrow an origin that belongs to a different event.

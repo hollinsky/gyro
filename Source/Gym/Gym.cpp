@@ -1,6 +1,7 @@
 #include "Gym/Gym.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <memory>
@@ -9,11 +10,16 @@
 
 #include "Animation/Author/Bundle.h"
 #include "Animation/Author/Motion.h"
+#include "Core/ColorState.h"
 #include "Core/Result.h"
+#include "Core/Texture.h"
 #include "Core/Time.h"
 #include "Core/Wake.h"
 #include "Geometry/NodeTransform.h"
+#include "Gym/Card.h"
+#include "Gym/Cards.h"
 #include "Gym/Lanes.h"
+#include "Gym/Textures.h"
 #include "Scene/Commit.h"
 #include "Scene/Store.h"
 
@@ -26,6 +32,12 @@ constexpr Duration SlidePeriod = std::chrono::milliseconds{ 900 };
 constexpr Duration GrowPeriod = std::chrono::milliseconds{ 1300 };
 constexpr Duration FadePeriod = std::chrono::milliseconds{ 700 };
 constexpr Duration TurnPeriod = std::chrono::milliseconds{ 1100 };
+
+// How often the card gym swaps the buffer underneath its scene. Slower than every motion above,
+// because a swap is the one event here a person reads by *recognising* a picture rather than by seeing
+// something move — and out of step with all of them, so the swap does not habitually land on a
+// retarget and become invisible inside it.
+constexpr Duration SwapPeriod = std::chrono::milliseconds{ 2300 };
 
 // The motion each lane is driven under.
 //
@@ -117,7 +129,7 @@ class LanesGym : public LaneGym
 public:
 	[[nodiscard]] std::string_view Name() const noexcept override { return ::Name(GymKind::Lanes); }
 
-	[[nodiscard]] Result<void> Open(SceneStore& scene) override
+	[[nodiscard]] Result<void> Open(SceneStore& scene, ITextures&) override
 	{
 		const Result<void> authored = AuthorScene(scene);
 
@@ -138,7 +150,7 @@ public:
 		return {};
 	}
 
-	[[nodiscard]] Wake Advance(SceneStore& scene, Instant now) override
+	[[nodiscard]] Wake Advance(SceneStore& scene, ITextures&, Instant now) override
 	{
 		if (!m_Driving)
 		{
@@ -218,7 +230,7 @@ class SettleGym final : public LaneGym
 public:
 	[[nodiscard]] std::string_view Name() const noexcept override { return ::Name(GymKind::Settle); }
 
-	[[nodiscard]] Result<void> Open(SceneStore& scene) override
+	[[nodiscard]] Result<void> Open(SceneStore& scene, ITextures&) override
 	{
 		const Result<void> authored = AuthorScene(scene);
 
@@ -250,7 +262,7 @@ public:
 		return {};
 	}
 
-	[[nodiscard]] Wake Advance(SceneStore&, Instant) override { return Wake::Never(); }
+	[[nodiscard]] Wake Advance(SceneStore&, ITextures&, Instant) override { return Wake::Never(); }
 };
 
 // The rotation lane, driven.
@@ -266,7 +278,7 @@ class TurnGym final : public LaneGym
 public:
 	[[nodiscard]] std::string_view Name() const noexcept override { return ::Name(GymKind::Turn); }
 
-	[[nodiscard]] Result<void> Open(SceneStore& scene) override
+	[[nodiscard]] Result<void> Open(SceneStore& scene, ITextures&) override
 	{
 		const Result<void> authored = AuthorScene(scene);
 
@@ -280,7 +292,7 @@ public:
 		return {};
 	}
 
-	[[nodiscard]] Wake Advance(SceneStore& scene, Instant now) override
+	[[nodiscard]] Wake Advance(SceneStore& scene, ITextures&, Instant now) override
 	{
 		if (!m_Driving)
 		{
@@ -331,9 +343,9 @@ class MaterialsGym final : public LanesGym
 public:
 	[[nodiscard]] std::string_view Name() const noexcept override { return ::Name(GymKind::Materials); }
 
-	[[nodiscard]] Result<void> Open(SceneStore& scene) override
+	[[nodiscard]] Result<void> Open(SceneStore& scene, ITextures& textures) override
 	{
-		const Result<void> lanes = LanesGym::Open(scene);
+		const Result<void> lanes = LanesGym::Open(scene, textures);
 
 		if (!lanes)
 		{
@@ -350,6 +362,203 @@ public:
 		return {};
 	}
 };
+// An imported image, drawn four times, with the buffer swapped underneath it forever.
+//
+// **The swap is the half of this gym that no other instrument reaches.** Three copies moving under
+// springs exercise the sampler; what they do not exercise is the lifetime, and the lifetime is the part
+// Seam/Importer.h cannot check for itself — a texture is safe to forget only once the frame thread has
+// moved past every snapshot that named it, and nothing in a running gyro asked that question until
+// this gym did. So every swap here is a client's next buffer: mint, adopt, attach, give up the one
+// that was there, and let the registry hold it until the watermark says the frame thread is past it.
+//
+// **A scene that stops swapping is a picture that stops alternating**, which is why the card carries a
+// phase band at all. A swap that is dropped, that lands on the wrong buffer, or that frees pixels a
+// frame is still sampling are three different things to see rather than one crash to bisect — and
+// under a sanitiser the third is not a picture at all, which is the point of doing it here rather than
+// discovering it under a client's window.
+class CardGym final : public IGym
+{
+public:
+	[[nodiscard]] std::string_view Name() const noexcept override { return ::Name(GymKind::Card); }
+
+	[[nodiscard]] Result<void> Open(SceneStore& scene, ITextures& textures) override
+	{
+		// Both buffers are drawn once and kept, because a swap should cost what a client's swap costs —
+		// an adopt and a retire — rather than the drawing of a picture the gym could have had in hand.
+		// The registry copies what it adopts, so these are the gym's own and outlive every id minted
+		// from them.
+		Result<Card> first = Card::Draw(CardTexels, AlphaMode::Premultiplied, CardPhase::First);
+
+		if (!first)
+		{
+			return std::unexpected{ first.error() };
+		}
+
+		Result<Card> second = Card::Draw(CardTexels, AlphaMode::Premultiplied, CardPhase::Second);
+
+		if (!second)
+		{
+			return std::unexpected{ second.error() };
+		}
+
+		m_Buffers[0].emplace(std::move(*first));
+		m_Buffers[1].emplace(std::move(*second));
+
+		// **Adopted before anything is authored**, because a node naming an id no renderer holds draws
+		// nothing and says nothing — Core/Texture.h makes that silence deliberate, and a scene authored
+		// around a failed import would spend the whole run being the one failure that reports itself as
+		// a blank rectangle.
+		const Result<TextureId> adopted = AdoptPhase(textures);
+
+		if (!adopted)
+		{
+			return std::unexpected{ adopted.error() };
+		}
+
+		m_Texture = *adopted;
+
+		const Result<CardScene> cards = AuthorCards(scene, m_Texture);
+
+		if (!cards)
+		{
+			textures.Retire(m_Texture);
+
+			return std::unexpected{ cards.error() };
+		}
+
+		m_Scene = *cards;
+
+		const Instant now = scene.Now();
+
+		m_Slide = Advanced(now, SlidePeriod);
+		m_Grow = Advanced(now, GrowPeriod);
+		m_Fade = Advanced(now, FadePeriod);
+		m_Swap = Advanced(now, SwapPeriod);
+
+		return {};
+	}
+
+	[[nodiscard]] Wake Advance(SceneStore& scene, ITextures& textures, Instant now) override
+	{
+		if (!m_Driving)
+		{
+			return Wake::Never();
+		}
+
+		if (m_Slide <= now)
+		{
+			m_SlideFar = !m_SlideFar;
+			m_Driving = Tick(scene, m_Slide, [&](SceneCommit& commit) {
+				return commit.Move(
+					m_Scene.Sliding, m_SlideFar ? m_Scene.SlideFar : m_Scene.SlideNear, Animate(SlideMotion)
+				);
+			});
+
+			m_Slide = NextEdge(m_Slide, SlidePeriod, now);
+		}
+
+		if (m_Grow <= now)
+		{
+			m_Small = !m_Small;
+			m_Driving =
+				m_Driving && Tick(scene, m_Grow, [&](SceneCommit& commit) {
+					return commit.Scale(m_Scene.Scaled, m_Small ? CardScaleSmall : CardScaleFull, Animate(GrowMotion));
+				});
+
+			m_Grow = NextEdge(m_Grow, GrowPeriod, now);
+		}
+
+		if (m_Fade <= now)
+		{
+			m_Dim = !m_Dim;
+			m_Driving = m_Driving && Tick(scene, m_Fade, [&](SceneCommit& commit) {
+							return commit.Fade(m_Scene.Faded, m_Dim ? CardFadeDim : CardFadeFull, Animate(FadeMotion));
+						});
+
+			m_Fade = NextEdge(m_Fade, FadePeriod, now);
+		}
+
+		if (m_Swap <= now && m_Driving)
+		{
+			m_Driving = Swap(scene, textures);
+			m_Swap = NextEdge(m_Swap, SwapPeriod, now);
+		}
+
+		// A refused write latches the gym off and the freeze is the report, per `LanesGym`. A refused
+		// *import* latches it off the same way, and is the one refusal here that is not this file being
+		// wrong: a renderer's image table is bounded, so a gym that swapped faster than the watermark
+		// moved would exhaust it — which is a real answer about pacing rather than a bug, and stopping
+		// dead is how it gets read.
+		if (!m_Driving)
+		{
+			return Wake::Never();
+		}
+
+		return Wake::At(std::min({ m_Slide, m_Grow, m_Fade, m_Swap }));
+	}
+
+private:
+	// The client's whole buffer cycle, in the order that makes each step safe.
+	//
+	// **Adopt before attach, retire after.** The new id has to exist before a node can name it, or the
+	// scene spends a frame drawing nothing; the old one has to stay adopted until nothing names it, or
+	// the frame thread is sampling pixels the registry has been told to forget. Between those two the
+	// order is forced, and it is the same order `wl_surface.attach` imposes on a client.
+	[[nodiscard]] bool Swap(SceneStore& scene, ITextures& textures)
+	{
+		m_Phase = 1 - m_Phase;
+
+		const Result<TextureId> next = AdoptPhase(textures);
+
+		if (!next)
+		{
+			return false;
+		}
+
+		const TextureId previous = m_Texture;
+
+		m_Texture = *next;
+
+		const bool attached = Tick(scene, m_Swap, [&](SceneCommit& commit) {
+			return commit.Attach(m_Scene.Still, m_Texture) && commit.Attach(m_Scene.Scaled, m_Texture) &&
+			       commit.Attach(m_Scene.Faded, m_Texture) && commit.Attach(m_Scene.Sliding, m_Texture);
+		});
+
+		// Only where every copy took it. A partial attach leaves nodes naming the old id, and retiring
+		// it then is exactly the use-after-free this gym exists to make loud rather than to commit.
+		if (attached)
+		{
+			textures.Retire(previous);
+		}
+
+		return attached;
+	}
+
+	[[nodiscard]] Result<TextureId> AdoptPhase(ITextures& textures)
+	{
+		const Card& buffer = *m_Buffers[static_cast<std::size_t>(m_Phase)];
+
+		return textures.Adopt(buffer.Size(), buffer.Stride(), buffer.Bytes());
+	}
+
+	std::array<std::optional<Card>, 2> m_Buffers{};
+
+	CardScene m_Scene{};
+	TextureId m_Texture{};
+
+	Instant m_Slide{};
+	Instant m_Grow{};
+	Instant m_Fade{};
+	Instant m_Swap{};
+
+	int m_Phase = 0;
+
+	bool m_SlideFar = false;
+	bool m_Small = true;
+	bool m_Dim = true;
+
+	bool m_Driving = true;
+};
 } // namespace
 
 Result<std::unique_ptr<IGym>> MakeGym(std::string_view name)
@@ -358,10 +567,10 @@ Result<std::unique_ptr<IGym>> MakeGym(std::string_view name)
 
 	if (!kind)
 	{
-		return Failure(EINVAL, "--gym is one of lanes, settle, turn, materials");
+		return Failure(EINVAL, "--gym is not one of the scenes --help lists");
 	}
 
-	// A switch with no default label, so a fifth enumerator is a build failure here rather than a name
+	// A switch with no default label, so a sixth enumerator is a build failure here rather than a name
 	// that parses and constructs nothing.
 	switch (*kind)
 	{
@@ -373,9 +582,11 @@ Result<std::unique_ptr<IGym>> MakeGym(std::string_view name)
 			return std::make_unique<TurnGym>();
 		case GymKind::Materials:
 			return std::make_unique<MaterialsGym>();
+		case GymKind::Card:
+			return std::make_unique<CardGym>();
 	}
 
-	return Failure(EINVAL, "--gym is one of lanes, settle, turn, materials");
+	return Failure(EINVAL, "--gym is not one of the scenes --help lists");
 }
 
 std::span<const std::string_view> GymNames()

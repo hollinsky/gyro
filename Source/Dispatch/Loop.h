@@ -11,6 +11,7 @@
 #include "Core/Result.h"
 #include "Core/Time.h"
 #include "Core/Wake.h"
+#include "Dispatch/Textures.h"
 #include "Gym/Gym.h"
 #include "Publication/Publisher/Outbox.h"
 #include "Publication/Return.h"
@@ -18,6 +19,7 @@
 #include "Scene/Output.h"
 #include "Scene/Serializer.h"
 #include "Scene/Store.h"
+#include "Seam/Importer.h"
 
 // The dispatch thread's iteration, with the wait left to whoever owns the thread.
 //
@@ -73,8 +75,18 @@ inline constexpr Duration PublishRetryInterval = std::chrono::milliseconds{ 4 };
 class DispatchLoop
 {
 public:
-	DispatchLoop(const IClock& clock, SnapshotRing& ring, ReturnChannel& returns)
-		: m_Store{ clock }, m_Outbox{ ring, returns }
+	// The importers are the renderers a texture has to exist on, borrowed from the composition root —
+	// which is the only party that has them, since a renderer is per output and the seam is where the
+	// two halves of one meet. An empty set is legal and makes every adopt `ENODEV`, which is the shape
+	// of a run with no renderer that can sample: `--gym=card` refuses to open rather than authoring a
+	// scene of nodes that would draw nothing and say nothing.
+	DispatchLoop(
+		const IClock& clock,
+		SnapshotRing& ring,
+		ReturnChannel& returns,
+		std::span<ITextureImporter* const> importers = {}
+	)
+		: m_Store{ clock }, m_Outbox{ ring, returns }, m_Textures{ importers }
 	{}
 
 	// Neither copied nor moved, for `SnapshotOutbox`'s reason rather than a weaker one: the outbox is
@@ -120,7 +132,7 @@ public:
 
 		m_Store.SetOutputs(outputs);
 
-		if (const Result<void> opened = author->Open(m_Store); !opened)
+		if (const Result<void> opened = author->Open(m_Store, m_Textures); !opened)
 		{
 			return opened;
 		}
@@ -149,8 +161,19 @@ public:
 
 		Collect();
 
+		// **Beside the outbox's own reclamation and under the same number.** Everything strictly below
+		// the watermark is the dispatch side's to take back — snapshot buffers there, the pixels behind
+		// a retired texture here — and doing both at the top of the step is what makes *retirement rides
+		// on the watermark* one rule rather than two implementations of it.
+		m_Textures.Reclaim(m_Outbox.Watermark());
+
 		const Instant now = m_Store.Now();
-		const Wake authored = m_Author->Advance(m_Store, now);
+		const Wake authored = m_Author->Advance(m_Store, m_Textures, now);
+
+		// **Before the publish and not after**, because the number has to be the sequence this step's
+		// snapshot will carry: the author gave those textures up during the `Advance` above, so the
+		// scene about to go out is the first that does not name them.
+		m_Textures.Seal(m_Outbox.NextSequence());
 
 		// **`Serialize` takes the store by mutable reference and that is the point of calling it here
 		// rather than caching**: the walk that decides whether a coefficient crosses is the walk that
@@ -195,6 +218,12 @@ public:
 	// from the bytes that crossed.
 	[[nodiscard]] const SceneStore& Store() const noexcept { return m_Store; }
 
+	// The images the world holds, for the same reason: a test asserts that a swap retired what it
+	// replaced rather than that nothing crashed, and the root's report line says how many are live.
+	[[nodiscard]] const TextureRegistry& Textures() const noexcept { return m_Textures; }
+
+	[[nodiscard]] TextureRegistry& Textures() noexcept { return m_Textures; }
+
 	// What is still out and what has come back. Nothing in the design reads these; they are the
 	// composition root's report line and a test's way of asserting that reclamation happened rather than
 	// that nothing crashed.
@@ -227,6 +256,11 @@ private:
 	SceneStore m_Store;
 	SceneSerializer m_Serializer{};
 	SnapshotOutbox m_Outbox;
+
+	// The texture id space, which is the world's rather than the loop's — it outlives any one snapshot
+	// and is what a device migration re-adopts against. Held here because this is the object that knows
+	// both the watermark and the moment an author has finished giving things up.
+	TextureRegistry m_Textures;
 
 	std::unique_ptr<IGym> m_Author;
 
