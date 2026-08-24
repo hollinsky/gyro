@@ -409,6 +409,23 @@ private:
 
 	Region<DeviceSpace> m_Damage{};
 
+	// The published sequence this output was last evaluated against, or zero before it has drawn
+	// anything.
+	//
+	// **It is what makes a scene that changed while the loop was idle get drawn**, and it is here rather
+	// than left to the evaluator because the evaluator only runs on an output the loop has already
+	// decided to serve. Damage is what a frame is owed *for*, and until an output is evaluated there is
+	// none — so an idle loop asking *is a frame wanted?* from damage and the scene's own wake alone
+	// answers no, whatever arrived in the ring. The scene wake cannot cover it either: a still window
+	// appearing on a still desktop publishes a schedule that says *nothing falls due*, which is true and
+	// is not the question.
+	//
+	// What that cost before this existed was the whole feature: a client opened a window on a settled
+	// desktop and nothing was ever composited again. It is cheap to be right about because a publication
+	// happens only where the world changed — dispatch steps when something wakes it — so this is never
+	// the reason a quiet machine draws.
+	std::uint64_t m_Drawn = 0;
+
 	// What each target is stale by *over and above* `m_Damage`, which is what makes the two disjoint
 	// questions rather than two spellings of one: `m_Damage` is owed to the glass and decides whether a
 	// frame is wanted, and this is repair owed to an image and decides only how much of it to redraw. A
@@ -755,6 +772,10 @@ private:
 		(void)output.m_Cost.ObserveIrreducibleCpu(list.EvaluateCost);
 		output.m_Damage.Add(list.Damage);
 
+		// Recorded after the walk rather than before it, so an output that never reached here is still
+		// owed the frame it has not drawn.
+		output.m_Drawn = m_Held;
+
 		TraceCount("items", static_cast<std::int64_t>(list.Items.size()), output.m_Trace);
 
 		// The buffer-age join, and it is built after the evaluator has contributed so that this frame's
@@ -861,7 +882,7 @@ private:
 	// exactly the moment the schedule woke up to draw it.
 	[[nodiscard]] bool Wants(const FrameOutput& output, std::size_t index, const FrameDecision& decision) const noexcept
 	{
-		if (!output.m_Damage.IsEmpty())
+		if (!output.m_Damage.IsEmpty() || output.m_Drawn != m_Held)
 		{
 			return true;
 		}
@@ -919,7 +940,7 @@ private:
 
 		// Owed a frame as soon as one can be made: damage that has not reached the glass, a flip whose
 		// completion the clock is still waiting for, or a scene contributor that wants every frame.
-		const bool immediate = !output.m_Damage.IsEmpty() || output.IsFlipPending() ||
+		const bool immediate = !output.m_Damage.IsEmpty() || output.m_Drawn != m_Held || output.IsFlipPending() ||
 		                       (scene.Which == Wake::Kind::Continuous && scene.Interval == Duration::zero());
 
 		if (immediate)

@@ -858,6 +858,20 @@ GYRO_TEST(Schedulability, AnIdleSceneArmsNothingHoweverLongTheClockRuns)
 	Machine published{ panels, plan.Allocations(), std::span<const Wake>{ settled } };
 	Machine unpublished{ panels, plan.Allocations(), std::span<const Wake>{} };
 
+	// **The scene has to reach the glass once before idle is even the question.** A snapshot no output
+	// has drawn is owed a frame whatever its schedule says — *nothing falls due* is about the future,
+	// and a window opening on a quiet desktop publishes exactly that — so the settling below is the
+	// published machine showing its one scene and the unpublished one having nothing to show. What is
+	// under test is the state they both reach afterwards.
+	for (std::size_t settling = 0; settling < 8; ++settling)
+	{
+		published.Idle(kFast);
+		unpublished.Idle(kFast);
+
+		(void)published.Step();
+		(void)unpublished.Step();
+	}
+
 	GYRO_CHECK_EQ(published.Step(), Wake::Never());
 	GYRO_CHECK_EQ(unpublished.Step(), Wake::Never());
 
@@ -875,11 +889,13 @@ GYRO_TEST(Schedulability, AnIdleSceneArmsNothingHoweverLongTheClockRuns)
 		GYRO_REQUIRE(unpublished.Step() == Wake::Never());
 	}
 
-	// And nothing was presented in any of it. The fold is what the composition root arms; this is what
-	// the glass got, and an invariant about cost is about both.
+	// And nothing more was presented in any of it. The fold is what the composition root arms; this is
+	// what the glass got, and an invariant about cost is about both. One apiece for the machine that
+	// had a scene, none at all for the machine that never published one — the empty span is decision
+	// 84's *no information*, and there is no snapshot behind it to owe a frame for.
 	for (std::size_t index = 0; index < 2; ++index)
 	{
-		GYRO_CHECK_EQ(published.Commits(index), std::uint64_t{ 0 });
+		GYRO_CHECK_EQ(published.Commits(index), std::uint64_t{ 1 });
 		GYRO_CHECK_EQ(unpublished.Commits(index), std::uint64_t{ 0 });
 	}
 }

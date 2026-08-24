@@ -721,7 +721,7 @@ GYRO_TEST(FrameLoop, NotDrawingIsNotBeingRefused)
 	GYRO_CHECK_EQ(harness.Output().Refused(), std::uint64_t{ 0 });
 }
 
-GYRO_TEST(FrameLoop, AnIdleOutputArmsNothing)
+GYRO_TEST(FrameLoop, AStillSceneIsDrawnOnceAndThenTheOutputArmsNothing)
 {
 	Harness harness;
 	constexpr std::array<Wake, 1> settled{ Wake::Never() };
@@ -730,13 +730,55 @@ GYRO_TEST(FrameLoop, AnIdleOutputArmsNothing)
 	harness.Publish(1, settled);
 	harness.Clock.Set(At(1002));
 
+	(void)harness.Loop.Step();
+
+	// **A settled scene still has to reach the glass once.** *Nothing falls due* is a statement about
+	// the future and says nothing about whether this output has ever drawn what it is holding — and the
+	// case that makes the difference visible is a window opening on a desktop that has gone quiet, which
+	// publishes exactly this schedule. An output that read only the wake would leave the screen as it
+	// was, for good.
+	GYRO_CHECK_EQ(harness.Renderer.Records, 1);
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
+
+	harness.Presenter.Flip(At(1010), 8);
+
+	harness.Clock.Set(At(1012));
+
 	const Wake wake = harness.Loop.Step();
 
-	// Architecture.md#doing-nothing-must-cost-nothing, reached from both sides at once: nothing wants a
-	// frame and nothing is outstanding, so nothing is drawn and no timer is armed.
-	GYRO_CHECK_EQ(harness.Renderer.Records, 0);
-	GYRO_CHECK_EQ(harness.Presenter.Presents, 0);
+	// And then Architecture.md#doing-nothing-must-cost-nothing, reached from both sides at once: the
+	// scene the output holds is on the screen, nothing wants another frame, and nothing is armed.
+	GYRO_CHECK_EQ(harness.Renderer.Records, 1);
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
 	GYRO_CHECK(wake == Wake::Never());
+}
+
+GYRO_TEST(FrameLoop, ASceneThatChangedWhileTheOutputWasIdleIsDrawn)
+{
+	Harness harness;
+	constexpr std::array<Wake, 1> settled{ Wake::Never() };
+
+	harness.Anchor();
+	harness.Publish(1, settled);
+	harness.Clock.Set(At(1002));
+	(void)harness.Loop.Step();
+
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(At(1012));
+
+	GYRO_REQUIRE(harness.Loop.Step() == Wake::Never());
+
+	// A new scene, still settled, arriving at an output that has stopped arming anything. Nothing
+	// damaged it — there is no per-node damage on the wire yet, and a still scene's schedule says
+	// nothing falls due — so the only thing that says a frame is owed is that this snapshot has never
+	// been drawn.
+	harness.Publish(2, settled);
+	harness.Clock.Set(At(1022));
+
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Renderer.Records, 2);
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 2);
 }
 
 GYRO_TEST(FrameLoop, AContinuousContributorArmsAndDraws)
@@ -765,11 +807,18 @@ GYRO_TEST(FrameLoop, AWakeRunThatIsNotThisOutputSetsIsNoInformation)
 	harness.Publish(1, threeOutputs);
 	harness.Clock.Set(At(1002));
 
+	(void)harness.Loop.Step();
+
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(At(1012));
+
 	const Wake wake = harness.Loop.Step();
 
 	// Decision 84. The run is positional, and three wakes are not one output's schedule however
-	// enthusiastic they are — indexing it would have this output run on a neighbour's cadence.
-	GYRO_CHECK_EQ(harness.Presenter.Presents, 0);
+	// enthusiastic they are — indexing it would have this output run on a neighbour's cadence. So the
+	// snapshot is drawn once, because it arrived and has not been, and then nothing is armed: an
+	// unreadable schedule is no information, and `EveryFrame` is emphatically not what it says.
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
 	GYRO_CHECK(wake == Wake::Never());
 }
 

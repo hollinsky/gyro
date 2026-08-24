@@ -248,7 +248,7 @@ private:
 }
 } // namespace
 
-GYRO_TEST(SceneIdle, AStillSceneDrawsNothingAndArmsNothing)
+GYRO_TEST(SceneIdle, AStillSceneIsDrawnOnceAndThenDrawsNothingAndArmsNothing)
 {
 	Desktop desktop;
 
@@ -265,23 +265,24 @@ GYRO_TEST(SceneIdle, AStillSceneDrawsNothingAndArmsNothing)
 
 	GYRO_REQUIRE(desktop.RunUntilIdle());
 
-	// Nothing wants a frame and nothing is owed one, so nothing is drawn and no timer is armed —
-	// decision 58's invariant reached from the authoring side, which is the end it had never been
-	// reachable from before. It is the *cheap* half of the pair: publishing no schedule at all produces
-	// this same count, which is why the animating case below is the one that carries the claim.
-	GYRO_CHECK_EQ(desktop.Frames(), std::uint64_t{ 0 });
-	GYRO_CHECK_EQ(desktop.Commits(), std::uint64_t{ 0 });
+	// **One frame, because there is a window here and it has to be on the screen.** The schedule says
+	// nothing falls due, which is a statement about the future and not about whether this output has
+	// ever drawn what it is holding — and reading it as both is a window that is authored, published,
+	// acquired, and never composited. Then no timer is armed, which is decision 58's invariant reached
+	// from the authoring side: what it forbids is the *second* frame.
+	GYRO_CHECK_EQ(desktop.Frames(), std::uint64_t{ 1 });
+	GYRO_CHECK_EQ(desktop.Commits(), std::uint64_t{ 1 });
 	GYRO_CHECK_EQ(desktop.Publications, std::size_t{ 1 });
 
 	// Damage from outside the scene is the other way an output is owed a frame, and it outranks the
 	// schedule because pixels that have not reached the glass are not a question about timing. Exactly
-	// one, and then back to sleep: what the invariant forbids is the *second* one.
+	// one more, and then back to sleep.
 	desktop.Damage();
 
 	GYRO_REQUIRE(desktop.RunUntilIdle());
 
-	GYRO_CHECK_EQ(desktop.Frames(), std::uint64_t{ 1 });
-	GYRO_CHECK_EQ(desktop.Commits(), std::uint64_t{ 1 });
+	GYRO_CHECK_EQ(desktop.Frames(), std::uint64_t{ 2 });
+	GYRO_CHECK_EQ(desktop.Commits(), std::uint64_t{ 2 });
 	GYRO_CHECK_EQ(desktop.Publications, std::size_t{ 1 });
 }
 
