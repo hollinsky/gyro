@@ -2058,7 +2058,15 @@ the other way: many frames are drawn from one publication, so a budget keyed on 
 arrow per redraw, where the submission is one per frame and lands on the composite the budget was
 spent on. It exists at all because the other rows are drawn in units of loop iteration, which is not
 a frame — a ten-second capture held eighteen hundred iterations and five hundred and eighty-seven
-frames, the rest being the loop waking, finding the commit queue full and going back to sleep. *Which recorded frame was actually on the glass at a given vblank* — the `presented` mark
+frames, the rest being the loop waking, finding the commit queue full and going back to sleep. *Why
+did the frame wait* — the `commit full` span on the output's blocked lane, which runs from where the
+output first found the queue full with a frame it wanted to make to the flip that freed the slot. It
+is the other half of a publication's latency and usually the larger one: a scene published a moment
+after this output committed waits a whole refresh for the frame in front of it, and then a second for
+the vblank its own commit targets. It is a lane rather than a slice on the deadline row because a wait
+overlaps the budget of the frame ahead of it — that is what a pipeline is — and it opens only for an
+output that wanted the frame, since an idle panel with a commit in flight is full too and is waiting
+for nothing. *Which recorded frame was actually on the glass at a given vblank* — the `presented` mark
 on the output's own row, stamped at the host's presentation instant rather than the one the feedback
 was drained at, with the flow extended to it, and the `shown` counter that steps beside it to the
 published sequence the frame was drawn from: the counter reads as what the panel is showing between

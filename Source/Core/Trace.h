@@ -88,7 +88,17 @@ inline constexpr std::uint16_t TraceThread = 0;
 	return static_cast<std::uint16_t>(1 + 2 * TracedOutputs + (output < TracedOutputs ? output : 0));
 }
 
-inline constexpr std::uint16_t TraceScopes = static_cast<std::uint16_t>(1 + 3 * TracedOutputs);
+// The fourth row, and it holds what the output was *unable to do*. A wait overlaps the budget of the
+// frame ahead of it — that is what a pipeline is — and the flip that ends the wait is the flip that
+// was late, so on the deadline row it would be a slice starting inside its neighbour and ending after
+// it, which is the improper nesting that row exists to avoid. Its own lane costs nothing: a scope with
+// no records in it never gets a track.
+[[nodiscard]] constexpr std::uint16_t TraceBlocked(std::size_t output) noexcept
+{
+	return static_cast<std::uint16_t>(1 + 3 * TracedOutputs + (output < TracedOutputs ? output : 0));
+}
+
+inline constexpr std::uint16_t TraceScopes = static_cast<std::uint16_t>(1 + 4 * TracedOutputs);
 
 // Which chain a flow id belongs to.
 //

@@ -312,6 +312,18 @@ private:
 		}
 
 		m_InFlightSnapshots[m_InFlight] = 0;
+
+		// **The wait ends where the slot frees, which is this flip and not the iteration that notices
+		// it.** The whole argument for stamping `presented` at the host's instant applies to the far end
+		// of the wait for the same reason: a loop that woke late would otherwise lengthen the wait it was
+		// late for, and the row would blame the panel for the reader. Nothing is emitted where the queue
+		// is still full — a deeper presenter frees one slot at a time, and the wait is over when the
+		// output can commit rather than when it merely became less blocked.
+		if (m_BlockedSince != Instant{} && !IsCommitFull())
+		{
+			TraceSpanAt("commit full", m_BlockedSince, info.PresentedAt, m_TraceBlocked);
+			m_BlockedSince = {};
+		}
 	}
 
 	// The frame was accepted and never shown, which Seam/Presenter.h argues has to be its own signal.
@@ -401,6 +413,11 @@ private:
 		// the iteration a mode set landed in.
 		m_InFlightSnapshots = {};
 
+		// The wait goes with them, unclosed. What ended it was a mode set or an invalidation rather than
+		// a flip, so there is no instant that honestly closes the span — and a wait that never ended is
+		// better read as absent than as one this loop made a timestamp up for.
+		m_BlockedSince = {};
+
 		// An index into a set that no longer exists. `OnTargetsInvalidated` is the case this is here for
 		// — the images are released before the new ones exist, so a held index names memory that is gone
 		// and the next attempt has to ask the new set for one of its own.
@@ -421,6 +438,12 @@ private:
 	// resolve frames later, by which point the renderer has drawn for other outputs.
 	std::uint16_t m_TraceGpu = TraceThread;
 	std::uint16_t m_TraceDeadline = TraceThread;
+	std::uint16_t m_TraceBlocked = TraceThread;
+
+	// When this output last found the commit queue full with a frame it wanted to make, or the epoch
+	// where it is not waiting. It is the open end of a span the flip that frees the slot closes, and it
+	// is a member rather than a `TraceSpan` because the two ends are on opposite sides of a sleep.
+	Instant m_BlockedSince{};
 
 	OutputConfiguration m_Configuration{};
 	FrameClock m_Clock{};
@@ -521,6 +544,7 @@ public:
 			m_Outputs[index].m_Trace = TraceOutput(index);
 			m_Outputs[index].m_TraceGpu = TraceGpu(index);
 			m_Outputs[index].m_TraceDeadline = TraceDeadline(index);
+			m_Outputs[index].m_TraceBlocked = TraceBlocked(index);
 		}
 	}
 
@@ -723,12 +747,34 @@ private:
 		// second nonblocking commit on a CRTC that has not flipped is refused — and a nested window
 		// answers two, because its completion arrives from the host a whole refresh after the frame it
 		// is about.
-		if (output.IsCommitFull() || !decision.Renders())
+		if (output.IsCommitFull())
 		{
-			// Named apart, because they are different failures wearing one `return`. A full commit queue
-			// is an output waiting on the host or the panel and is ordinary; a verdict that declines is
-			// decision 35's third branch, which is gyro deciding it cannot fit the frame it owes.
-			TraceMark(output.IsCommitFull() ? "commit full" : "skipped", output.m_Trace);
+			// **Opened as a span rather than ticked, because what a reader needs from it is a length.**
+			// This is the wait that explains a frame's latency: a scene published a moment after this
+			// output committed cannot be drawn until the flip in front of it lands, and on a sixty hertz
+			// panel that is a whole refresh in which nothing on any other row happens. As a mark it was
+			// the most numerous event in the trace and said only *again*; as an extent it is the block of
+			// time a person is trying to account for. Closed by the flip that frees the slot, at the
+			// host's timestamp — see `OnPresented`.
+			//
+			// **Only for an output that wanted the frame.** An idle panel with a commit still in flight is
+			// full too, and opening a wait for it would paint this lane solid through every quiet second
+			// and make a real wait indistinguishable from a screen with nothing on it.
+			if (output.m_BlockedSince == Instant{} && Wants(output, index, decision))
+			{
+				output.m_BlockedSince = now;
+			}
+
+			return;
+		}
+
+		if (!decision.Renders())
+		{
+			// Kept a mark, and named apart from the wait above, because they are different failures
+			// wearing one `return`. A full commit queue is an output waiting on the host or the panel and
+			// is ordinary; a verdict that declines is decision 35's third branch, which is gyro deciding
+			// it cannot fit the frame it owes — an instant, not an interval.
+			TraceMark("skipped", output.m_Trace);
 
 			return;
 		}

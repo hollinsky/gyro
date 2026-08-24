@@ -1375,3 +1375,133 @@ GYRO_TEST(FrameLoop, ACommittedFrameGetsABudgetSpanEndingAtItsDeadline)
 	// what happened — a frame that finished after this instant is one whose row reaches past it.
 	GYRO_CHECK(ended > began);
 }
+
+// The wait that explains a frame's latency, and the reason it is an extent: a scene published just
+// after this output committed cannot be drawn until the flip in front of it lands, which on a sixty
+// hertz panel is a whole refresh in which no other row moves. As a mark it was the most numerous
+// event in the trace and carried no length; the length is the whole of what a reader wants.
+GYRO_TEST(FrameLoop, AFullCommitQueueIsAnExtentEndingAtTheFlipThatFreesTheSlot)
+{
+	Harness harness;
+
+	std::array<TraceRecord, 128> records{};
+	TraceBuffer trace;
+	trace.Arm(records, harness.Clock);
+	EnrollTracing(&trace);
+
+	harness.Anchor();
+	harness.Publish(1, {});
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE(harness.Output().IsCommitFull());
+
+	// A second scene arrives while the first is still in flight, which is the ordinary arrangement
+	// rather than a contrived one: dispatch publishes when the world changes and the panel flips when
+	// it flips.
+	harness.Publish(2, {});
+	harness.Clock.Set(At(1005));
+	(void)harness.Loop.Step();
+
+	// The flip lands at 1010 and the loop is not told until 1020. The wait ended at the flip.
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(At(1020));
+	(void)harness.Loop.Step();
+
+	EnrollTracing(nullptr);
+
+	std::array<TraceEvent, 128> events{};
+	const std::size_t count = trace.Copy(events);
+
+	std::size_t opened = 0;
+	std::size_t closed = 0;
+	std::size_t ticks = 0;
+	Instant began{};
+	Instant ended{};
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		const TraceEvent& event = events[index];
+
+		if (event.Scope == TraceBlocked(0))
+		{
+			if (event.Kind == TraceKind::Begin)
+			{
+				++opened;
+				began = event.Stamp;
+
+				GYRO_CHECK_EQ(std::string_view{ event.Name }, std::string_view{ "commit full" });
+			}
+
+			if (event.Kind == TraceKind::End)
+			{
+				++closed;
+				ended = event.Stamp;
+			}
+		}
+
+		// The mark it replaced, which used to land on the output's own row every iteration the queue was
+		// full and is gone rather than kept beside the span.
+		if (event.Scope == TraceOutput(0) && event.Kind == TraceKind::Mark &&
+		    std::string_view{ event.Name } == "commit full")
+		{
+			++ticks;
+		}
+	}
+
+	GYRO_REQUIRE_EQ(opened, std::size_t{ 1 });
+	GYRO_REQUIRE_EQ(closed, std::size_t{ 1 });
+	GYRO_CHECK_EQ(ticks, std::size_t{ 0 });
+
+	// Opened where the output first found the queue full, and closed at the host's instant rather than
+	// at 1020, where the loop learned of it — a late wake must not lengthen the wait it was late for.
+	GYRO_CHECK(began == At(1005));
+	GYRO_CHECK(ended == At(1010));
+}
+
+// An idle panel with a commit still in flight is full too, and it is not waiting for anything. Opening
+// a span for it would paint the lane solid through every quiet second and make a real wait
+// indistinguishable from a screen with nothing on it.
+GYRO_TEST(FrameLoop, AnOutputWithNothingToDrawIsNotRecordedAsWaiting)
+{
+	Harness harness;
+
+	std::array<TraceRecord, 128> records{};
+	TraceBuffer trace;
+	trace.Arm(records, harness.Clock);
+	EnrollTracing(&trace);
+
+	harness.Anchor();
+	harness.Publish(1, {});
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE(harness.Output().IsCommitFull());
+
+	// No new scene and no damage: the queue is full and the output owes nothing.
+	harness.Clock.Set(At(1005));
+	(void)harness.Loop.Step();
+
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(At(1020));
+	(void)harness.Loop.Step();
+
+	EnrollTracing(nullptr);
+
+	std::array<TraceEvent, 128> events{};
+	const std::size_t count = trace.Copy(events);
+
+	std::size_t records_on_the_lane = 0;
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		if (events[index].Scope == TraceBlocked(0))
+		{
+			++records_on_the_lane;
+		}
+	}
+
+	GYRO_CHECK_EQ(records_on_the_lane, std::size_t{ 0 });
+}
