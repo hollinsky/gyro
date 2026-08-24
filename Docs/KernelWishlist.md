@@ -216,7 +216,7 @@ This is the entry most likely to be the real-world cost, ahead of the modeset st
 it compounds with it at the one moment both occur. The AUX/DDC-over-DisplayPort paths were not
 measured and the 50 ms figure is i915 GMBUS-specific.
 
-## What this all adds up to for gyro's own shape
+## What the modesetting entries add up to for gyro's own shape
 
 The design forced by today's kernel and the design wanted against an ideal one **agree**, which is
 the finding that matters most here and the reason none of the above is a case for waiting.
@@ -237,3 +237,59 @@ So the contract to write down, and the one that absorbs every improvement above 
   admitted multi-frame stall
   [decision 41](Decisions.md#41-device-migration-is-exercised-on-every-boot) already takes for device
   migration, with the same guarantee: the last frame stays on glass.
+
+## The frequency governor cannot see a deadline
+
+### The deadline hint exists and reaches no driver gyro runs on
+
+`dma_fence_set_deadline()` (`dma-fence.c`) is the interface for this and it has been upstream since
+6.5. Its own documentation names gyro's case as the motivating one — the hint carries *"the vblank
+based deadline for page-flipping, or the start of a compositor's composition cycle"*, and the
+signaling driver "may react by increasing frequency."
+
+**The userspace path costs gyro nothing**, which is what makes the driver gap the whole of the
+problem. `drm_syncobj_array_wait_timeout()` (`drm_syncobj.c:1126`) calls `dma_fence_set_deadline()`
+**before** entering the wait loop, and the loop returns `-ETIME` immediately when the timeout is zero
+(`drm_syncobj.c:1164-1165`). So a `DRM_IOCTL_SYNCOBJ_WAIT` carrying
+`DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE` at zero timeout is a **non-blocking poll that states a
+deadline** — exactly the shape
+[decision 29](Decisions.md#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)'s
+frame thread needs, since blocking would put the GPU's schedule on a `SCHED_FIFO` thread.
+
+What is missing is entirely the driver end.
+
+| Implementer | `->set_deadline` | Reaches frequency control |
+| --- | --- | --- |
+| msm (`msm_fence.c:171`) | yes | **yes** — hrtimer 3 ms before the deadline, then `msm_devfreq_boost(gpu, 2)` |
+| `drm_sched` (`sched_fence.c:193`) | yes | no — records it, forwards to the hardware fence |
+| amdgpu (`amdgpu_fence_ops`) | **no** | forwarded out of `drm_sched` into a hole |
+| xe (`xe_hw_fence.c:178`) | **no** | same |
+| i915 | **no plumbing at all** | and it does not use `drm_sched` either |
+
+`dma-fence-chain`, `dma-fence-array` and `sw_sync` also implement the op, and all three only
+propagate it. **So on every part gyro runs on, the hint is a no-op.** msm is the sole existence proof
+that the mechanism works end to end, and it is not a part gyro is being built against.
+
+**The irony worth recording.** `drm_atomic_helper.c:1815` already calls `dma_fence_set_deadline()` on
+plane in-fences with the next vblank time. The kernel therefore already says *this buffer is needed by
+vblank* about a **client's** buffer that gyro is scanning out, and says nothing at all about gyro's own
+composite — because there gyro is the waiter, and has no driver willing to listen.
+
+**Why the utilization governors do not substitute.** Stated because it is what makes this an interface
+gap rather than a tuning problem. i915's `rps_up_threshold_pct` defaults to 95 (`intel_rps.c:2040`) and
+its evaluation-interval worker compares busy time against it (`intel_rps.c:1811`). A composite
+occupying 95% of a refresh is a frame with no headroom left, so the threshold is unreachable by any
+workload that is meeting its deadlines. And on gyro's traffic the worker does not run at all:
+`intel_rps_park`'s own comment says a caller that parks and unparks faster than the worker "will not
+respond to any EI and never see a change in frequency", which is a description of a compositor. A
+deadline is information that no occupancy measurement contains.
+
+**What gyro does instead.** Commands `rps_min_freq_mhz`, or the per-driver equivalent, on the systems
+where a startup probe shows the deadline does not move the clock —
+[decision 142](Decisions.md#142-gyro-states-the-deadline-and-commands-the-clock-only-where-the-deadline-does-not-reach-it)
+carries the argument and the probe. The cost is that gyro sets a power policy on the whole machine's
+behalf in order to compensate for a hint it is already sending correctly.
+
+**What would let gyro delete it.** `->set_deadline` on the i915, xe and amdgpu hardware fences, wired
+to RPS or DPM, with msm as a working reference for both halves. Nothing in gyro's userspace changes:
+it already sends the hint, and the probe simply stops selecting the floor.

@@ -10647,3 +10647,144 @@ authors it, and the two arguments above answer gyro.
 rather than a root so no walk pays for a node no reader needs; the floor is a node several readers
 need — session switching and the restart-survival above both address it — so it is a container gyro
 authors within the list, not the list itself.
+
+### 142. gyro states the deadline, and commands the clock only where the deadline does not reach it
+
+[Decision 140](#140-a-composite-is-cut-at-its-barriers-and-counted-by-its-fragments)'s fragment
+counter said the composite was achieving 2.3 billion fragments a second, and that number was recorded
+as the figure to hold against what the part is supposed to do. Holding it against the clock the part
+was *running at* is what this decision came out of: `gt_act_freq_mhz` reads 350 on a Tiger Lake whose
+range is 100 to 1250, and six and a half fragments per clock is roughly right for that back end. The
+part was never slow. Every cost figure gyro has recorded was taken at a quarter of the clock, and
+nothing in the record said so.
+
+**It is parked at the efficient frequency rather than at the bottom, and the autotuner did not choose
+it.** RPn is 100 and RP1 is 350; `intel_rps_unpark` jumps to RPe by design, and the busy test at
+`intel_rps.c:1811` is what would move it afterwards. That test never runs. `intel_rps_park`'s own
+comment says why — *"If we park/unpark more frequently than the rps worker can run, we will not
+respond to any EI and never see a change in frequency"* — and a compositor parks and unparks the GPU
+**every frame**. Park additionally ratchets `cur_freq` down each time and floors it at
+`efficient_freq`. So 350 is where a per-frame ratchet comes to rest, not a decision anything made.
+
+**And the threshold it would have compared against is unreachable by construction.**
+`rps_up_threshold_pct` is 95, so crossing it needs a composite occupying 95% of the refresh — 15.8 ms
+at 60 Hz, 6.6 ms at 144 Hz. That is a frame with no headroom left, which is to say a frame gyro has
+already missed. **The only condition under which the governor hands gyro clock is the condition in
+which gyro has already failed.** Measured against it, the materials gym's 5.4 ms is 32% of a 60 Hz
+refresh and a plain scene is 8%. This is not an Intel fact. A utilization governor measures occupancy;
+a frame-deadline workload is defined by *not* being occupancy-bound; so the healthier gyro is, the
+less clock it earns.
+
+**Which makes the quality ladder a control loop with the wrong sign.** The rule that answers a
+systematic overrun by stepping effect quality down
+([34](#34-effect-quality-is-a-tier-gyro-chooses-and-the-floor-tier-is-the-recovery-path)) reduces work
+when frames are slow; the governor reduces clock when there is less work. Same input, opposite senses,
+and no channel between them. Because the high-water mark is a maximum over a *window* rather than a
+running one it decays, so this does not latch — it sawtooths. **What a person sees is blur and shadow
+quality stepping up and down for no reason on a machine that could hold the top tier at a third of its
+capacity**, and it lands hardest on the population
+[decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget) says the whole
+allocation exists to protect: integrated graphics driving a large external display.
+
+**The unit is wrong too, and it is a separate fault.** Time is right for the *answer* — whether the
+work fits before vblank is a question in seconds — but a sample in seconds with no operating point
+attached is not a sample of anything, and the mark's window is currently mixing populations taken at
+different clocks. So `GpuCost` carries the clock the composite ran at. That is also what rescues
+decision 140's fragment rate, which reads as a slow part right up until the reader knows it was
+measured at 350 MHz.
+
+**No estimator fixes the picture, which is why the answer is not a better one.** A perfect model still
+says *at 350 MHz you cannot do this*, and gyro draws the same cheaper frame it would have drawn
+without the model. Better measurement buys an honest tier choice at a clock that should never have
+been 350.
+
+**The interface for saying what gyro actually knows already exists, and its own documentation names
+this case.** `dma_fence_set_deadline` has been upstream since 6.5, and `dma-fence.c` gives as its
+examples *"the vblank based deadline for page-flipping, or the start of a compositor's composition
+cycle."* It is also free at gyro's end: `drm_syncobj.c:1126` sets the deadline **before** the wait
+loop, and the loop returns `-ETIME` immediately at `timeout_nsec = 0`. So a `DRM_IOCTL_SYNCOBJ_WAIT`
+that polls is a poll that carries urgency, and nothing blocks on the `SCHED_FIFO` thread — which is
+the property that disqualified every other route to the same end.
+
+**Where the deadline reaches the hardware, gyro says it and stops there.** A driver holding gyro's
+deadline *and* its own utilization history has both terms of the problem and sits closer to the part
+than gyro does. What gyro would add is one frame at the start of a transition: it knows at commit time
+that a workspace switch is about to cost four times the last frame, and the driver learns it when the
+first expensive batch runs long. One frame at a step change is inside
+[decision 35](#35-a-miss-costs-one-frame-bounded-by-the-floor-composite)'s promise that a miss costs
+one frame and the animation stays exact, and it does not justify taking a policy that belongs to the
+whole machine.
+
+**Where it does not reach the hardware, gyro commands the frequency floor.**
+[KernelWishlist.md](KernelWishlist.md#the-deadline-hint-exists-and-reaches-no-driver-gyro-runs-on)
+carries the reading: `->set_deadline` is implemented by msm and by `drm_sched`, and `drm_sched` only
+forwards it to the hardware fence, where amdgpu and xe both drop it. i915 has no plumbing at all. So
+on every part gyro runs on today the hint is a no-op and the floor is the only lever that moves the
+clock.
+
+**The floor costs less than it looks like it costs.** `intel_rps_park` sets `idle_freq`, and
+`idle_freq` is the *hardware* minimum rather than the sysfs softlimit — two different fields
+(`intel_rps.c:2047` against `2570`). So a floor does not raise the parked frequency: the part still
+falls to 100 MHz between frames, and the floor applies from unpark. For a 5.4 ms composite in a
+16.7 ms period that is a third of the wall clock rather than all of it.
+
+**Which system is which is measured at startup, never inferred from the driver's name.** A name does
+not predict the behaviour — amdgpu *implements* the op and drops it one layer down, so it passes any
+presence test and fails in fact — and a name is the wrong granularity besides, because i915 gaining
+the op should retire gyro's floor by itself rather than waiting for gyro to ship a new table. The
+capability probe already runs the real pass chain off the frame path; running it once with a tight
+deadline and once without, reading the clock both times, answers the question that was actually asked.
+It has to be a question of *how much* rather than whether, because msm's response is `get_freq() * 2`
+fired by a timer three milliseconds before the deadline — a rescue heuristic, not a solver.
+
+**An unclear probe takes the floor.** The recoverable direction, on the reasoning `BudgetPolicy`
+already seeds its costs by: a false negative spends power gyro did not need, a false positive drops
+frames, and only one of those is visible.
+
+**A clock reader is needed on both arms, so the platform object exists either way.** Attaching the
+operating point to `GpuCost` stands whatever is decided about governing — `gt_act_freq_mhz` on i915,
+`device/tile0/gt0/freq0/act_freq` on xe, different again on amdgpu. So what this decision settles is
+not *whether to build a governor* but whether the per-driver object gyro needs anyway also carries a
+write verb. That is a much smaller commitment, and it is what makes the probe cheap: the reader it
+needs is already there.
+
+**The deadline is stated truthfully, and the honest one is earlier than vblank.** What gyro needs is
+the *fence*, not the pixels — the composite must be done in time for the flip to be submitted — so the
+deadline is `vblank − present overhead`. Setting vblank would understate it. Setting it inside the
+renderer's submit path is the earliest instant the fence exists, and re-publishing it on every poll
+costs nothing, because the driver keeps the earliest deadline it has been given and a repeated set is
+therefore idempotent.
+
+**Rejected: shading the deadline earlier when the frame is known to be more expensive than the last.**
+It buys nothing on the only implementation that exists — msm's magnitude is fixed at a doubling and
+the deadline decides only when the timer fires — and it actively misleads the implementation gyro
+wants to exist, which would solve for a frequency and over-clock by exactly the shade. It is also a
+ratchet rather than a dial: `drm_sched_fence_set_deadline_finished` keeps the earlier of the two, so
+the headroom is spent permanently and a frame that genuinely is more urgent has no way left to say so.
+
+**Rejected: a fence deadline as the carrier for lookahead.** The reason the entry above is structural
+rather than merely unwise — there is no fence until submit, and the knowledge that a burst is starting
+exists at commit, one dispatch iteration earlier. A deadline is a statement about one batch that
+already exists, and cannot be made to mean *and twenty more like it*.
+
+**Rejected: a deliberate wait on a side thread to trigger `intel_rps_boost`.** i915-only, needs a GEM
+handle Vulkan does not hand out, and it works by pretending to be latency-bound rather than saying so.
+The deadline is the same idea done honestly, for one struct field.
+
+**Rejected: `rps_up_threshold_pct` as the first lever.** Kept because it was the recommendation before
+the park path was read, and because it is the natural one: the knob is writable, it has a `.defaults`
+sibling to restore from, and lowering it makes the governor ramp at gyro's real occupancy. It does
+nothing, because the worker that would compare against it never runs.
+
+**Rejected: a hardcoded allowlist of drivers that honour the deadline.** Wrong granularity in both
+directions, and it makes a kernel improvement invisible to gyro until somebody edits a table.
+
+**Rejected: owning the frequency floor unconditionally.** Simpler, and it second-guesses a controller
+that — once it has the deadline — holds strictly more information than gyro does, while spending power
+on every part that did not need it.
+
+**Rejected: cost in fragments rather than in time.** The right numerator and the wrong unit for the
+answer. Whether the work fits before vblank is a question in seconds, and `frag_per_clock` is not the
+constant the substitution needs: [Open.md](Open.md)'s bandwidth entry puts this machine near its
+ceiling, where the rate falls with resolution and blend depth rather than with clock. It belongs in the
+trace, where it explains a number, rather than in the record, where it would have to predict one.

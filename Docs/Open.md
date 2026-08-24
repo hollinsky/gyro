@@ -954,21 +954,43 @@ nothing only proves the grep.
   CPU mark read off the report line. What would change the design is not a large number but a
   *variable* one — a store into a ring the frame thread has not touched for a frame is a cache miss,
   and a miss on the frame path is jitter rather than cost.
-- **The GPU runs gyro's composites at a quarter of its clock, and gyro is why.** `gt_act_freq_mhz`
-  reads 350 MHz on a part whose range is 100 to 1250 while the materials gym is drawing, and the
-  fragment rate that follows from it — 2.3 billion a second, about six and a half fragments per clock —
-  is roughly what Tiger Lake's back end should do *at 350 MHz* with blending into an uncompressed
-  target. The part is not slow; it is asleep. i915 has exactly one lever that ramps it promptly,
-  `intel_rps_boost`, and enumerating its call sites in `drivers/gpu/drm/i915/` — `i915_request.c`,
-  `gem/i915_gem_wait.c`, and `gt/intel_rps.c`'s own `boost_if_not_started` — says it fires when a
-  client *waits* on a request that has not started, or on the atomic modeset interactive path, and
-  nowhere else. gyro never waits — `IRenderer::IsComplete` is a poll and `CollectCosts` is a poll, both of them
-  deliberately, because blocking would put the GPU's schedule on the `SCHED_FIFO` thread — so it never
-  triggers the boost, and the autotuner sees a batch that occupies a third of a refresh and parks at
-  the bottom. What is open is what to do about it: a frequency floor is a policy gyro would be setting
-  on the whole machine's behalf, a deliberate wait is the inversion the frame thread exists to avoid,
-  and doing nothing means every cost figure gyro measures is taken at a clock no benchmark would report.
-  Nothing here is decided, and the three are not equally bad.
+- **What counts as a driver that honours the fence deadline.**
+  [Decision 142](Decisions.md#142-gyro-states-the-deadline-and-commands-the-clock-only-where-the-deadline-does-not-reach-it)
+  probes for this at startup rather than inferring it from the driver's name, because a name predicts
+  the wrong thing in both directions — amdgpu implements `->set_deadline` and drops it one layer down,
+  and i915 gaining it should retire gyro's frequency floor without gyro shipping a new table. What the
+  decision does not fix is the probe's numbers. The response is a matter of degree rather than a fact:
+  msm, the only driver that wires the hint to frequency at all, answers it with `get_freq() * 2` on a
+  timer three milliseconds out, which is a rescue heuristic and converges over several frames. So the
+  probe has to ask *how much did the clock move, within how long*, and both thresholds are unchosen —
+  as is how many samples it takes on a machine whose clock is also being moved by thermals and by
+  whatever else is on the GPU at boot. The decision's tie-break is that an unclear probe takes the
+  floor, which is the safe direction for frames and is also the direction that quietly spends power for
+  the life of the session if the threshold is set badly.
+- **Whether a known cost step needs a feedforward floor even where the deadline lands.** Decision 142
+  says a driver holding the deadline plus its own history has both terms and gyro should stop at
+  saying the deadline. The residue is one frame: gyro knows at commit time that a workspace switch is
+  about to cost several times the last frame, and the driver learns it when the first expensive batch
+  runs long. That is inside
+  [decision 35](Decisions.md#35-a-miss-costs-one-frame-bounded-by-the-floor-composite)'s promise, so
+  nothing is built for it — but the fix if it is ever wanted is small, because the floor writer exists
+  for the other arm anyway: raise it at the commit that steps the cost, release it once the driver has
+  seen one frame at the new cost. What holds it back is that it is speculative until a transition frame
+  is *measured* missing, and that the failure mode of a release that does not fire is a machine held at
+  high clock indefinitely — a worse bug than the one it fixes. The instrument is decision 140's spans
+  across the first frames of a gym transition, which nothing has yet looked at.
+- **The whole CPU side of the same question, which is unmeasured rather than answered.** Decision 142
+  is GPU-only and deliberately so. `kernel.sched_util_clamp_min_rt_default` is 1024
+  (`kernel/sched/core.c:1592`), so a `SCHED_FIFO` task requests the top of the frequency range — but
+  that is schedutil's path, and a machine running `intel_pstate` in active mode with HWP, which is the
+  default on the part this was measured on, does not take it. Whether the frame thread's core is
+  actually at the clock the cost figures assume has never been checked, and the check is cheap:
+  `scaling_cur_freq` beside a recorded `RecordCost`. big.LITTLE is a *placement* question rather than a
+  frequency one — an RT thread pinned to an efficiency core is slow at any clock — and it belongs with
+  the affinity constants
+  [decision 61](Decisions.md#61-the-frame-thread-is-sched_fifo-the-earliest-deadline-first-schedule-is-gyros-not-the-kernels)
+  already defers rather than with this. Nothing here has produced a symptom; it is carried because the
+  GPU side did not produce one either until somebody read the clock.
 - **Splitting the composite around every dressed panel costs more than the blur does.** At 1920x1048
   with two glass panels, [decision 140](Decisions.md#140-a-composite-is-cut-at-its-barriers-and-counted-by-its-fragments)'s
   spans put the frame at 3.0 ms in three composite segments, 1.6 ms in two extracts and 0.8 ms in
