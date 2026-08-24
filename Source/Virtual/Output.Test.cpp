@@ -226,7 +226,7 @@ GYRO_TEST(VirtualOutput, PresentRefusesATargetNobodyAcquired)
 	const std::array unacquired{ Whole(0) };
 	GYRO_CHECK_EQ(output.Present(unacquired).error().Code(), EINVAL);
 
-	const std::array past{ Whole(MaxVirtualTargets + 1) };
+	const std::array past{ Whole(MaxTargets + 1) };
 	GYRO_CHECK_EQ(output.Present(past).error().Code(), EINVAL);
 }
 
@@ -339,7 +339,7 @@ GYRO_TEST(VirtualOutput, ReleasingSomethingNotHeldChangesNothing)
 	GYRO_CHECK_EQ(output.FreeTargets(), DefaultVirtualTargets - 1);
 
 	// Past the set, and a double release, are both no-ops rather than corruption.
-	output.Release(MaxVirtualTargets + 1);
+	output.Release(MaxTargets + 1);
 	GYRO_CHECK_EQ(output.FreeTargets(), DefaultVirtualTargets - 1);
 }
 

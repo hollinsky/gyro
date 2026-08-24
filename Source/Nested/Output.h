@@ -73,13 +73,9 @@ namespace Nested
 // behaviour every time the host is a frame behind. A test that wants the stall says two.
 inline constexpr std::uint32_t DefaultNestedTargets = 3;
 
-// The ring's ceiling, matching the other presenters' for the reason they give — a queue past four is
-// headroom nobody has needed.
-inline constexpr std::uint32_t MaxNestedTargets = 4;
-
 struct NestedOutputPolicy
 {
-	// How many images the ring holds. Clamped into `[2, MaxNestedTargets]`; one is not expressible
+	// How many images the ring holds. Clamped into `[2, MaxTargets]`; one is not expressible
 	// here, because a host holds the committed buffer until it has finished with it and a ring of one
 	// would have nothing to draw into until it let go.
 	std::uint32_t Targets = DefaultNestedTargets;
@@ -346,8 +342,8 @@ private:
 	std::optional<Toplevel> m_ToplevelListener;
 	std::optional<Feedback> m_FeedbackListener;
 
-	std::array<Target, MaxNestedTargets> m_Targets{};
-	std::array<RenderTarget, MaxNestedTargets> m_Descriptions{};
+	std::array<Target, MaxTargets> m_Targets{};
+	std::array<RenderTarget, MaxTargets> m_Descriptions{};
 	std::uint32_t m_TargetCount = 0;
 	std::uint32_t m_Next = 0;
 

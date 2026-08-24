@@ -10072,11 +10072,18 @@ spends the entire saving to avoid a page of state.
 **Rejected: pushing it to the backends.** Three implementations, three chances to get it subtly wrong,
 and the party that knows what changed is not the party being asked.
 
-**`MaxFrameTargets` is Frame's own four rather than a seam constant.** Nothing at the waist needs the
-number — `IPresenter` publishes a span and `IRenderer` is handed one — so the cap belongs to whoever
-holds fixed storage per target, which `Headless`, `Blit` and `Nested` each already do at four of their
-own. An index past it is refused the way an index past the published set is, because a deeper ring would
-otherwise get this bug back in silence.
+**The ring ceiling is `Seam`'s `MaxTargets`.** An index past it is refused the way an index past the
+published set is, because a deeper ring would otherwise get this bug back in silence.
+
+*(Revised 2026-08-23. This shipped as `MaxFrameTargets`, Frame's own four, on the argument that nothing
+at the waist needs the number — `IPresenter` publishes a span and `IRenderer` is handed one — so the cap
+belongs to whoever holds fixed storage per target. What killed it was counting: not three other modules
+picking four, as that argument assumed, but five, and one of them — `Blit` — described its number as
+"what a DRM presenter binds at its widest", which is a party to an agreement writing the agreement down
+by hand. A number three modules must pick identically for the picture to be right is a waist type by
+Docs/Structure.md's own test, and the span argument only ever established that the waist need not carry
+a **length**. `Render` stays out of it at a deliberate doubling, written as that doubling, because a
+renderer's bind table is slack behind the ceiling rather than the ceiling.)*
 
 **What to expect and not mistake for a leak.** An output that settles and then wakes on one small change
 redraws more than moved for the first few frames, as each target in turn cashes in what it accumulated

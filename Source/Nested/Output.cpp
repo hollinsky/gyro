@@ -140,7 +140,7 @@ NestedOutput::NestedOutput(
 	: m_Host{ &host }, m_Allocator{ &allocator }, m_Completion{ completion }, m_Policy{ std::move(policy) },
 	  m_Configuration{ configuration }, m_Wanted{ configuration }
 {
-	m_Policy.Targets = std::clamp(m_Policy.Targets, 2U, MaxNestedTargets);
+	m_Policy.Targets = std::clamp(m_Policy.Targets, 2U, MaxTargets);
 	host.Adopt(*this);
 }
 

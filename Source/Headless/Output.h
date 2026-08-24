@@ -42,10 +42,6 @@
 // reconfigured inline would be the one implementation of this seam whose asynchrony nothing exercises,
 // and the DRM backend would be where the ordering is discovered.
 
-// Four, matching what a KMS driver will hand out for a flip queue and what a nested backend's host
-// will keep in flight. The interesting configurations are two and three; four is headroom.
-inline constexpr std::size_t MaxTargets = 4;
-
 // Modes this simulated panel will accept. An empty list means it accepts whatever it is asked for,
 // which is the ordinary sweep case; a populated one is how a request the hardware could not honour
 // becomes testable, since Seam/OutputConfiguration.h has no failure signal and reports that by the
@@ -111,7 +107,7 @@ public:
 	HeadlessOutput(const IClock& clock, const OutputConfiguration& configuration, HeadlessOutputPolicy policy = {})
 		: m_Clock{ &clock }, m_Policy{ policy }
 	{
-		m_Policy.Targets = std::clamp<std::uint32_t>(m_Policy.Targets, 1, MaxTargets);
+		m_Policy.Targets = std::clamp(m_Policy.Targets, 1U, MaxTargets);
 		m_Catalog = PlaneCatalog::Typical(configuration.Resolution);
 		Adopt(configuration, clock.Now());
 	}

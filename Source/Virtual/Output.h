@@ -57,8 +57,6 @@ inline constexpr std::uint32_t DefaultVirtualTargets = 3;
 
 // The ring's ceiling, matching Headless/Output.h's for the reason that file gives — a flip queue past
 // four is headroom nobody has needed.
-inline constexpr std::uint32_t MaxVirtualTargets = 4;
-
 // Which face of its images an output shows at the render seam.
 //
 // **Both are true of the same memory, and the composition root is the party that knows which to
@@ -84,7 +82,7 @@ enum class TargetFace : std::uint8_t
 
 struct VirtualOutputPolicy
 {
-	// How many images the ring holds. Clamped into `[1, MaxVirtualTargets]`.
+	// How many images the ring holds. Clamped into `[1, MaxTargets]`.
 	std::uint32_t Targets = DefaultVirtualTargets;
 
 	// Where the first frame boundary sits relative to construction. A recording usually wants zero;
@@ -150,7 +148,7 @@ public:
 	)
 		: m_Clock{ &clock }, m_Allocator{ &allocator }, m_Policy{ policy }
 	{
-		m_Policy.Targets = std::clamp(m_Policy.Targets, 1U, MaxVirtualTargets);
+		m_Policy.Targets = std::clamp(m_Policy.Targets, 1U, MaxTargets);
 		Adopt(configuration, clock.Now());
 	}
 
@@ -456,9 +454,9 @@ private:
 	VblankTimeline m_Timeline{};
 	Result<void> m_Status{};
 
-	std::array<DmabufBuffer, MaxVirtualTargets> m_Buffers{};
-	std::array<RenderTarget, MaxVirtualTargets> m_Descriptions{};
-	std::array<TargetState, MaxVirtualTargets> m_State{};
+	std::array<DmabufBuffer, MaxTargets> m_Buffers{};
+	std::array<RenderTarget, MaxTargets> m_Descriptions{};
+	std::array<TargetState, MaxTargets> m_State{};
 	std::uint32_t m_TargetCount = 0;
 	std::uint32_t m_Next = 0;
 

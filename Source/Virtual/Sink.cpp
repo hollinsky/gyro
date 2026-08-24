@@ -29,7 +29,7 @@ CapturingSink::CapturingSink(
 	// is why `OnFrame` may run where it does.
 	m_Pixels.resize(m_Stride * static_cast<std::size_t>(size.Height) * m_Depth);
 	m_Frames.reserve(m_Depth);
-	m_Held.reserve(MaxVirtualTargets);
+	m_Held.reserve(MaxTargets);
 }
 
 void CapturingSink::OnFrame(VirtualOutput& output, const VirtualFrame& frame)

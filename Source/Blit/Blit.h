@@ -73,10 +73,10 @@
 class Blit final : public IRenderer, public ITextureImporter
 {
 public:
-	// A ring three deep plus the one being scanned, which is what a DRM presenter binds at its
-	// widest. A set larger than this is `EINVAL` rather than a partial bind, per Seam/Renderer.h: half
-	// a set is a numbering with holes in it.
-	static constexpr std::size_t MaxTargets = 4;
+	// Seam/RenderTarget.h's ring ceiling, because this renderer binds exactly what a presenter hands it
+	// and has no reason to carry slack the way a device-side bind table does. A set larger than that is
+	// `EINVAL` rather than a partial bind, per Seam/Renderer.h: half a set is a numbering with holes in
+	// it.
 
 	// The most images held at once. Decision 110 names both consumers — the firmware logo the splash
 	// continues and the console's own text grid — and this is well clear of them, for

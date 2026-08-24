@@ -51,11 +51,13 @@
 // the types state.
 
 // SPEC: how many images one output's ring may hand over at once. Four is what both existing
-// presenters cap themselves at — a flip queue deeper than that is headroom nobody has needed — and
-// eight is one doubling of slack so that a presenter growing a cursor plane's target does not meet
-// this number first. Fixed because `BindTargets` must not allocate per target set on a path that
-// runs at every mode set.
-inline constexpr std::uint32_t MaxRenderTargets = 8;
+// presenters cap themselves at — Seam/RenderTarget.h's `MaxTargets`, a flip queue deeper than which is
+// headroom nobody has needed — and this is one doubling of slack so that a presenter growing a cursor
+// plane's target does not meet this number first. Written as that doubling rather than as an eight
+// *(2026-08-23)*, because the slack is the whole of the argument and a literal would stop being slack
+// the moment the ceiling moved. Fixed because `BindTargets` must not allocate per target set on a path
+// that runs at every mode set.
+inline constexpr std::uint32_t MaxRenderTargets = 2 * MaxTargets;
 
 // Which of decision 62's two executions this renderer draws.
 //

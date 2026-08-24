@@ -196,7 +196,7 @@ private:
 		return r > x && b > y ? PixelRect<DeviceSpace>::FromEdges({ x, y }, { r, b }) : PixelRect<DeviceSpace>{};
 	}
 
-	std::array<MutableImageView, MaxVirtualTargets> m_Views{};
+	std::array<MutableImageView, MaxTargets> m_Views{};
 	std::uint32_t m_Count = 0;
 };
 

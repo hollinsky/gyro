@@ -25,6 +25,7 @@
 #include "Seam/EventSource.h"
 #include "Seam/OutputConfiguration.h"
 #include "Seam/PresentationInfo.h"
+#include "Seam/RenderTarget.h"
 #include "Seam/Presenter.h"
 #include "Seam/Renderer.h"
 // See Docs/Architecture.md#the-frame-loop and decisions 29, 30, 35, 36, 80, 82, 83, and 84.
@@ -113,15 +114,6 @@
 // `MaxOutputs` is Admission.h's, because the capacity is the admission set's size and these outputs
 // are that set.
 inline constexpr std::size_t MaxDevices = 4;
-
-// SPEC: how deep a target ring this loop can carry a backlog for. Frame-local rather than a seam
-// constant, and the reason is that nothing at the waist needs the number: `IPresenter` publishes a
-// span and `IRenderer` is handed one, so a cap belongs to whoever holds fixed storage per target.
-// Three modules already pick four for their own storage — `Headless`, `Blit`, and `Nested` — and this
-// is a fourth of the same kind rather than a fifth party to an agreement. An index past it is refused
-// the way an index past the published set is, because a presenter deeper than this would silently get
-// the buffer-age bug back and a refusal says so.
-inline constexpr std::size_t MaxFrameTargets = 4;
 
 // One output's frame-thread state: the two figures `Timing` composes, and the three facts about this
 // output that neither of them can see.
@@ -325,7 +317,7 @@ private:
 	// So an output that settles and then wakes on one small change redraws more than moved for the first
 	// few frames, as each target in turn cashes in what it accumulated before the scene went quiet. That
 	// is bounded by the ring depth and it is the bill for the frames that were skipped, not a leak.
-	std::array<Region<DeviceSpace>, MaxFrameTargets> m_Backlog{};
+	std::array<Region<DeviceSpace>, MaxTargets> m_Backlog{};
 
 	FrameDecision m_Last{};
 
@@ -551,7 +543,7 @@ private:
 			return;
 		}
 
-		if (target >= MaxFrameTargets)
+		if (target >= MaxTargets)
 		{
 			// A ring deeper than this loop carries a backlog for. Refused rather than drawn without one,
 			// because drawing it is the buffer-age bug arriving silently — a stale band on one target in
@@ -635,7 +627,7 @@ private:
 		// target now owes this frame's change on top of what it already owed, and the one just drawn owes
 		// nothing — its content is complete as of now, which is true whether or not the glass ever shows
 		// it. Before the clear below, because the region being folded is the one being cleared.
-		for (std::size_t other = 0; other < MaxFrameTargets; ++other)
+		for (std::size_t other = 0; other < MaxTargets; ++other)
 		{
 			if (other != target)
 			{

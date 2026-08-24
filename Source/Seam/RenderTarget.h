@@ -124,6 +124,25 @@ struct MappedImage
 	friend constexpr bool operator==(MappedImage, MappedImage) noexcept = default;
 };
 
+// SPEC: how deep a presenter's ring may be, and therefore how many targets anything holding fixed
+// per-target storage has to size for. *(Hoisted to the waist 2026-08-23; see decision 134.)*
+//
+// **Four, and every party to it had already written the same argument down separately.** It is what a
+// KMS driver hands out for a flip queue and what a nested host keeps in flight; it is a ring three deep
+// plus the one being scanned. The interesting configurations are two and three, and four is headroom.
+//
+// **At the waist because it is an agreement rather than a capacity.** A presenter chooses its ring
+// depth, a renderer sizes a bind table for whatever it is handed, and the frame loop carries state per
+// target — three modules deciding independently, all of them wrong together the moment one picks a
+// different number. `Headless`, `Nested` and `Virtual` each capped themselves here, `Blit` sized its
+// bind table to "what a DRM presenter binds at its widest", and `Frame` needed one more of the same;
+// five copies of one number, one of which described the others by hand.
+//
+// A renderer may deliberately bind *more* than this — `Render` allows a doubling so that a presenter
+// growing a cursor plane's target does not meet its table first — which is why this is the presenter's
+// ceiling and not a renderer's.
+inline constexpr std::uint32_t MaxTargets = 4;
+
 struct RenderTarget
 {
 	PixelSize<DeviceSpace> Size{};
