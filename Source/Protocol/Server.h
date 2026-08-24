@@ -64,6 +64,16 @@ public:
 	// from libwayland and never closed here; valid only while the server is open, and `-1` before it is.
 	[[nodiscard]] int PollFd() const noexcept;
 
+	// The display the globals are advertised in, or null before `Open`.
+	//
+	// **Handed out rather than wrapped**, because a global's lifetime is not this object's to manage: a
+	// `wl_output` appears and disappears with a monitor and a `wl_seat` with a session, so a `Server`
+	// that owned the advertisements would have to grow a verb per protocol and know when each one is
+	// due. What it owns is the display, and `Wayland::Server::<Interface>::Advertise` takes one — so
+	// the party that knows when a global should exist calls it directly, and this stays the three
+	// things it says it is.
+	[[nodiscard]] wl_display* Display() const noexcept { return m_Display; }
+
 	// Read from every client that has data waiting and run the handlers their requests reach. Returns
 	// at once when nothing is ready — the root's wait is what parks the thread. A refused client is
 	// ended inside libwayland and is not a failure here; a failure is the loop itself faulting.

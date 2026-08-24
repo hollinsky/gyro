@@ -659,6 +659,97 @@ GYRO_TEST(Emit, AResourceIsNeverCreatedWithoutItsImplementation)
 	GYRO_CHECK(created > 20);
 }
 
+GYRO_TEST(Emit, AnObjectArgumentIsCheckedBeforeItsImplementationIsRead)
+{
+	// A client names its own objects in its requests, and the id it names is one it chose — so the
+	// `wl_region` in `set_input_region` may be a `wl_buffer`, or an object from another protocol
+	// entirely, or one it just destroyed. Reading the user data off it without asking is a type
+	// confusion inside gyro that a client can reach on purpose, which is worse than the aborts the
+	// rest of this file is about because nothing crashes.
+	const std::string_view paths[] = { WaylandXml, XdgShellXml, LinuxDmabufXml, PresentationTimeXml };
+	const Generated generated = Generate(paths, Direction::Server);
+
+	if (!generated.Note.empty())
+	{
+		GYRO_FAIL(generated.Note);
+		return;
+	}
+
+	std::size_t checked = 0;
+
+	for (const ProtocolSource& source : generated.Sources)
+	{
+		const std::string* const text =
+			generated.Find(std::format("Wayland/Server/{}.cpp", Pascalled(source.Model.Name)));
+		GYRO_REQUIRE(text != nullptr);
+
+		for (const Interface& interface : source.Model.Interfaces)
+		{
+			if (interface.Name == "wl_display" || interface.Name == "wl_registry")
+			{
+				continue;
+			}
+
+			const std::string name = Pascalled(interface.Name);
+			const std::string_view body = Body(*text, std::format("{0}Handler* {0}::Implementation(", name));
+
+			if (body.empty())
+			{
+				GYRO_FAIL(std::format("{} has no way back from an object to its implementation", interface.Name));
+				continue;
+			}
+
+			// The check is against the interface *and* the dispatch table, which is stricter than the
+			// interface alone: a resource of the right interface created by somebody else's bindings
+			// is refused rather than reinterpreted as one of these.
+			GYRO_CHECK(body.find("wl_resource_instance_of(") != std::string_view::npos);
+			GYRO_CHECK(body.find(std::format("&Wire{}Table", name)) != std::string_view::npos);
+			GYRO_CHECK(body.find("wl_resource_instance_of(") < body.find("wl_resource_get_user_data("));
+
+			++checked;
+		}
+	}
+
+	GYRO_CHECK(checked > 20);
+}
+
+GYRO_TEST(Emit, AHandlerIsToldWhenTheObjectItWasBuiltForCouldNotBeMade)
+{
+	// A request that mints an object asks the handler for an implementation and then creates the
+	// resource that adopts it. When the allocation fails, `Create` has already ended the client — and
+	// the implementation the call site just built belongs to nobody: no resource will ever destroy it
+	// and no `OnGone` will ever tell whoever is holding a pointer to it. Every object-minting request
+	// in the tree leaks one under memory pressure, which is the moment it can least afford to.
+	//
+	// `OnGone`'s contract already covers this exactly — the object is not there, and the handler may
+	// delete itself — so the fix is to call it rather than to invent a second verb.
+	const std::string_view paths[] = { WaylandXml, XdgShellXml };
+	const Generated generated = Generate(paths, Direction::Server);
+
+	if (!generated.Note.empty())
+	{
+		GYRO_FAIL(generated.Note);
+		return;
+	}
+
+	const std::string* const text = generated.Find("Wayland/Server/Wayland.cpp");
+	GYRO_REQUIRE(text != nullptr);
+
+	const std::string_view frame = Body(*text, "void WireWlSurfaceRequestFrame(");
+	GYRO_REQUIRE(!frame.empty());
+
+	GYRO_CHECK(frame.find("if (!wireObject.IsValid())") != std::string_view::npos);
+	GYRO_CHECK(frame.find("wireImplementation->OnGone();") != std::string_view::npos);
+
+	// And it is every one of them rather than this one: the two counts are the same number because
+	// the same emitter writes both halves, and a creation path added without the failure branch shows
+	// up here as a mismatch.
+	GYRO_CHECK_EQ(
+		Occurrences(*text, "if (!wireObject.IsValid())"), Occurrences(*text, "wireImplementation->OnGone();")
+	);
+	GYRO_CHECK(Occurrences(*text, "wireImplementation->OnGone();") > 5);
+}
+
 GYRO_TEST(Emit, TheEmittedWireTablesSayWhatTheProtocolSays)
 {
 	// The one part of the output no compiler checks. libwayland demarshals a client's bytes against

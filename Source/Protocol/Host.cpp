@@ -1,13 +1,32 @@
 #include "Protocol/Host.h"
 
+#include <cerrno>
 #include <utility>
 
 Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 {
-	// Neither is touched until there is a global to reach them from. Named rather than dropped so the
-	// signature reads as the contract it implements.
+	// Neither is touched yet: `wl_compositor` mints surfaces and regions, and neither reaches the world
+	// until there is a buffer behind it. Named rather than dropped so the signature reads as the
+	// contract it implements.
 	(void)scene;
 	(void)textures;
+
+	wl_display* const display = m_Server.Display();
+
+	if (display == nullptr)
+	{
+		return Failure(EBADF, "advertising globals on a Wayland server that was never opened");
+	}
+
+	m_CompositorGlobal = Wayland::Server::WlCompositor::Advertise(*display, CompositorVersion, m_Compositor);
+
+	if (m_CompositorGlobal == nullptr)
+	{
+		// A compositor with no `wl_compositor` is a socket clients connect to and cannot use, which is
+		// worse than one that refused to start: a person sees applications failing to open with no
+		// message anywhere that says why. So this is fatal rather than degraded.
+		return Failure(ENOMEM, "advertising wl_compositor");
+	}
 
 	return {};
 }

@@ -1309,9 +1309,10 @@ private:
 
 			spdlog::info("hosting clients on {}", m_Clients->SocketName());
 
-			// Nothing is advertised yet, so a client connects, asks the registry what there is, and is told
-			// nothing. Said out loud because the alternative is somebody concluding the socket is broken.
-			spdlog::info("no globals are advertised yet, so a client will connect and find an empty registry");
+			// One global, and a client that binds it can build a surface and has nowhere to show it.
+			// Said out loud because the alternative is somebody concluding the socket is broken when a
+			// toolkit starts up, finds no shell, and exits without drawing anything.
+			spdlog::info("wl_compositor is the only global; a client will find no shell and no buffers yet");
 
 			author = std::move(*made);
 		}

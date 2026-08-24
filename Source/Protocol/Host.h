@@ -6,6 +6,7 @@
 #include "Core/Result.h"
 #include "Core/Time.h"
 #include "Core/Wake.h"
+#include "Protocol/Compositor.h"
 #include "Protocol/Server.h"
 #include "Scene/Author.h"
 
@@ -33,10 +34,15 @@
 // acting on the callback it never received. `Flush` is therefore public and the root calls it
 // immediately before the wait, which is the one place that knows the thread is about to sleep.
 //
-// **Nothing is advertised yet.** No global is created, so a client connects, binds `wl_registry`, sees
-// an empty list and gets no further. That is the honest state of the protocol layer, and it is worth
-// running anyway: it is what proves the socket, the descriptor in the root's `ppoll`, and the step
-// order above are right before there is a surface to get them wrong with.
+// **One global is advertised, and it is the one a client cannot start without.** `wl_compositor` is
+// where a `wl_surface` and a `wl_region` come from, so a client that binds it can build the objects it
+// draws with — and then finds nothing to show them on, because a shell and a buffer are the two steps
+// after this one. A toolkit will get as far as creating its surface and stop, which is exactly as far
+// as this layer honestly goes.
+//
+// The global is a member rather than something the root passes in, because its lifetime is the
+// server's: `wl_compositor` exists for as long as there is a socket to reach it through, and unlike a
+// `wl_output` there is no event that should make it come or go.
 class ClientHost final : public ISceneAuthor
 {
 public:
@@ -55,9 +61,13 @@ public:
 
 	[[nodiscard]] std::string_view Name() const noexcept override { return "clients"; }
 
-	// Nothing to author: a scene made of client windows starts with no clients in it, and the first node
-	// arrives from a request rather than from here. It exists so that the tree a host builds later has
-	// somewhere to be built, and so that the two authors open the same way.
+	// Advertise the globals, and author nothing: a scene made of client windows starts with no clients
+	// in it, and the first node arrives from a request rather than from here.
+	//
+	// **The globals go up here rather than at `Listen`**, which is the only ordering question there is
+	// and it has slack in both directions: a client cannot send a request before there is a socket, and
+	// nothing it sends is dispatched before the first `Advance`, which follows this. Doing it here is
+	// what keeps every failure a client could notice on one side of the composition root's `Open`.
 	[[nodiscard]] Result<void> Open(SceneStore& scene, ITextures& textures) override;
 
 	// Read every client with a request waiting and run what it asked for.
@@ -77,6 +87,13 @@ private:
 	[[nodiscard]] Result<void> Listen(std::string_view socket) { return m_Server.Open(socket); }
 
 	friend Result<std::unique_ptr<ClientHost>> MakeClientHost(std::string_view socket);
+
+	// **Declared before the server, so that they are destroyed after it.** A binding is what libwayland
+	// calls to answer a bind, and the display is what can still be calling: `~Server` destroys the
+	// display, which drops every client and every global with it. Member order is the whole of the
+	// guarantee that the thing being called into still exists while that is happening.
+	CompositorGlobal m_Compositor;
+	wl_global* m_CompositorGlobal = nullptr;
 
 	Server m_Server;
 };

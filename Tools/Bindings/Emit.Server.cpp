@@ -304,6 +304,20 @@ void EmitResource(std::string& out, const Interface& interface, bool foreign)
 			"\t// allocation failure at startup.\n"
 			"\t[[nodiscard]] static wl_global* Advertise(wl_display& display, std::uint32_t version, Binding& "
 			"binding);\n"
+			"\n"
+			"\t// The implementation behind this object, or null where there is none.\n"
+			"\t//\n"
+			"\t// **A client names objects in its requests, and this is the only way from the name to the\n"
+			"\t// thing.** `wl_surface.set_input_region` hands over a `wl_region`, `wl_surface.attach` a\n"
+			"\t// `wl_buffer`, `xdg_wm_base.get_xdg_surface` a `wl_surface` — every one an id the client\n"
+			"\t// chose. Reading the user data off one without checking it is not a client crash, it is a\n"
+			"\t// type confusion inside the compositor, reachable by a client sending the wrong id on\n"
+			"\t// purpose.\n"
+			"\t//\n"
+			"\t// The check is against this interface *and this dispatch table*, which is stricter than\n"
+			"\t// the interface alone: a resource of the right interface that some other party created is\n"
+			"\t// refused rather than reinterpreted as one of these.\n"
+			"\t[[nodiscard]] Handler* Implementation() const noexcept;\n"
 			"\n",
 			resource
 		);
@@ -868,12 +882,23 @@ void EmitTrampoline(std::string& out, const Interface& interface, const Message&
 			"\t// The child is capped at this object's version — libwayland's rule, and the cap is not\n"
 			"\t// decoration: an interface that has only ever had one version is created at one however\n"
 			"\t// old the object that made it is.\n"
-			"\t(void){4}::Create(\n"
+			"\tconst {4} wireObject = {4}::Create(\n"
 			"\t\t*wireClient,\n"
 			"\t\tstatic_cast<std::uint32_t>(wl_resource_get_version(wireResource)),\n"
 			"\t\t{3},\n"
 			"\t\t*wireImplementation\n"
-			"\t);\n",
+			"\t);\n"
+			"\n"
+			"\tif (!wireObject.IsValid())\n"
+			"\t{{\n"
+			"\t\t// The allocation failed and `Create` has already ended the client. The handler the call\n"
+			"\t\t// site just built was never adopted by a resource, so nothing will ever destroy it and\n"
+			"\t\t// nothing will ever tell whoever is holding a pointer to it — `OnGone` is both, and its\n"
+			"\t\t// contract already covers this: the object is not there, and the handler may delete\n"
+			"\t\t// itself. Without it, every request that mints an object leaks one under memory\n"
+			"\t\t// pressure, which is the moment it can least afford to.\n"
+			"\t\twireImplementation->OnGone();\n"
+			"\t}}\n",
 			HandlerName(created->Interface),
 			Pascal(request.Name),
 			Joined(arguments),
@@ -1132,6 +1157,16 @@ void EmitResourceDefinitions(std::string& out, const Interface& interface, bool 
 			"\n"
 			"\treturn wl_global_create(&display, &{3}, static_cast<int>(version), &binding, &{5});\n"
 			"}}\n"
+			"\n"
+			"{1}* {0}::Implementation() const noexcept\n"
+			"{{\n"
+			"\tif (m_Resource == nullptr || wl_resource_instance_of(m_Resource, &{3}, &{4}) == 0)\n"
+			"\t{{\n"
+			"\t\treturn nullptr;\n"
+			"\t}}\n"
+			"\n"
+			"\treturn static_cast<{1}*>(wl_resource_get_user_data(m_Resource));\n"
+			"}}\n"
 			"\n",
 			resource,
 			HandlerName(interface.Name),
@@ -1329,6 +1364,13 @@ std::string EmitServerHeader(
 		   "// into; and the typed `Create` is the only way to make a resource, so there is no instant in\n"
 		   "// which a client's id is live and has nothing behind it. Both failures are `wl_abort` inside\n"
 		   "// libwayland, which on a compositor with no VTs is the machine going black with no way in.\n"
+		   "//\n"
+		   "// **And an object argument that cannot be reinterpreted.** A client names its own objects in\n"
+		   "// its requests — the `wl_region` in `set_input_region`, the `wl_buffer` in `attach` — and\n"
+		   "// getting from that name back to the implementation is `Implementation()`, which checks the\n"
+		   "// interface and the dispatch table before it reads any user data. Reading it unchecked is not\n"
+		   "// a client crash but a type confusion inside the compositor, and it is reachable by a client\n"
+		   "// passing the wrong id deliberately.\n"
 		   "//\n"
 		   "// Read a handler's `Ignoring` sibling as the deliberate opposite: it answers every ignorable\n"
 		   "// request by doing nothing, and a call site that derives from it has said so in one word that\n"

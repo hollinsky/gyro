@@ -811,17 +811,28 @@ gyro_add_module(Protocol DISPATCH
 		Geometry
 		Scene
 	SOURCES
+		Compositor.cpp
 		Host.cpp
+		Region.cpp
 		Server.cpp
+		Surface.cpp
 	TESTS
 		Host.Test.cpp
+		Region.Test.cpp
 		Server.Test.cpp
+		Surface.Test.cpp
 )
 
 # libwayland-server for the display, the event loop, and the socket, which are the core library's own
-# rather than anything generated. The typed globals over it are WaylandServerProtocols, and they
-# arrive the day Protocol advertises its first global; the lifecycle here needs no binding.
-target_link_libraries(Protocol PUBLIC PkgConfig::WAYLAND_SERVER)
+# rather than anything generated, and WaylandServerProtocols for everything above them — decision 2's
+# other half, and the reason a resource here cannot exist without an implementation. PUBLIC because
+# the module's headers name `Wayland::Server::` types: a handler derives from a generated base.
+target_link_libraries(Protocol
+	PUBLIC
+		PkgConfig::WAYLAND_SERVER
+		WaylandServerProtocols
+)
+
 
 # The composition root, and the only module that knows both sides of either waist. Docs/Structure.md
 # #orchestration is its whole brief: it constructs the clock, the backend, the rendering device, the
@@ -991,6 +1002,7 @@ add_executable(IntegrationTests
 	Source/Integration/SceneIdle.Test.cpp
 	Source/Integration/ScenePublication.Test.cpp
 	Source/Integration/SceneRoundTrip.Test.cpp
+	Source/Integration/ProtocolRoundTrip.Test.cpp
 	Source/Integration/Schedulability.Test.cpp
 	Source/Integration/VirtualComposite.Test.cpp
 	Source/Integration/WaylandBindings.Test.cpp
@@ -1005,6 +1017,7 @@ target_link_libraries(IntegrationTests
 		Render
 		Blit
 		Virtual
+		Protocol
 		WaylandProtocols
 		Wire
 		World
