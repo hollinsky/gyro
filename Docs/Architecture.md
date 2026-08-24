@@ -1993,6 +1993,49 @@ Three hazards that follow directly:
   deferring, which withdraws the entire property the flag is being bought for, invisibly and
   permanently. A constraint on the frame loop's reap site rather than on the kernel.
 
+### Tracing
+
+**The ring is always recording, and a snapshot is the rare event.** A compositor that stutters once
+an hour is not a thing to reproduce on demand: by the time a person has decided the stutter was real,
+the frame that caused it is thirty seconds gone. So a profiler that has to be started records the
+run after the interesting one, and gyro instead pays continuously — one fixed-capacity ring per
+recorded thread, overwriting its own oldest record — and spends nothing until `SIGUSR1` or the end
+of the run asks for the last however-many seconds to be written out.
+
+**A record is four stores and a release, and that is what makes it legal on the frame path.** No
+allocation, no lock, no syscall, no format string — a name is a pointer to a string literal, and the
+interning that turns it into a number happens on the writer thread, off both loops. The fields are
+individually atomic and read relaxed, which costs nothing on the hardware and keeps
+`GYRO_SANITIZE=thread` a configuration somebody can actually run; an instrument that has to be
+excluded from the sanitizer is one nobody runs under it. The snapshot copies against a live producer
+and validates afterwards by re-reading the write index, so the frame thread never waits for the
+thread reading its ring.
+
+**What is written is a Perfetto trace, and the format is the reason.** A `.pftrace` is a
+concatenation of self-delimiting packets, so gyro's trace and a system trace taken over the same run
+merge with `cat`. That is not a convenience — it is the only way to see the half of the picture gyro
+cannot see about itself: which thread the kernel ran instead of the frame thread, when the io_uring
+timeout actually fired, and when the GPU scheduler started the batch that was submitted three slices
+ago. gyro emits its own slices; `sched_switch`, `dma_fence` and `gpu_scheduler` are `traced`'s to
+record, and the two land on one timeline.
+
+**Merging needs the two clock domains related, and that is the one place the timebase bends.**
+ftrace stamps in the kernel's boot-time domain, which counts through suspend where
+[the monotonic one](#the-timebase) does not, so a trace that offered no relation between them is not
+a trace with a shifted timeline — it is one a reader drops every packet of. `Core/Clock.h`'s
+`ReadClockAnchor` is that relation: two readings taken together, in the one translation unit that is
+allowed to read a clock at all, returning raw counts rather than an `Instant` so that nothing can
+mistake the second domain for a now the schedule may decide against.
+
+**Three things a trace is asked, and what answers each.** *Was the frame late or was it stale* — the
+flow arrow from the dispatch thread's publish to the frame thread's acquire, keyed on the snapshot
+sequence. *Which part of the iteration was slow* — the nested spans, since the whole point of drawing
+`evaluate`, `record` and `present` separately is that they fail for unrelated reasons. *Is this
+machine about to start dropping frames* — the slack counter, which trends toward zero over a hundred
+frames and is invisible in any one of them.
+
+See [decision 139](Decisions.md#139-the-trace-ring-is-always-armed-and-the-format-is-somebody-elses).
+
 ## Sessions and users
 
 One compositor per machine means the isolation a per-session compositor gets for free from the

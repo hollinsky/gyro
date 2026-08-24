@@ -73,6 +73,11 @@ struct OutputRequest
 // filled the directory somebody ran it from.
 inline constexpr std::string_view DefaultDumpDirectory = "gyro-frames";
 
+// Where a trace snapshot lands when the command line does not say. Relative for the dump directory's
+// reason, and named for what opens it rather than for gyro — a person who has one of these in a
+// directory a month from now needs the extension to tell them what to do with it.
+inline constexpr std::string_view DefaultTracePath = "gyro.pftrace";
+
 struct Options
 {
 	BackendKind Backend = BackendKind::Auto;
@@ -120,6 +125,22 @@ struct Options
 	// what admission control does with it.
 	Duration PlannedCost = std::chrono::microseconds{ 2'000 };
 	Duration FloorCost = std::chrono::microseconds{ 500 };
+
+	// The always-armed trace ring, per recorded thread, in bytes. Zero records nothing at all.
+	//
+	// **Sized rather than timed, because how many seconds it buys is what the compositor is doing.** A
+	// still desktop writes a handful of records a frame and a four-panel machine under animation writes
+	// a few thousand a second; the report line at the end of a run prints what the ring actually held,
+	// which is the figure to size this against. The default is a minute or so of an ordinary two-panel
+	// machine — chosen because a person who noticed a stutter and reached for the keyboard takes a good
+	// part of that to do it.
+	std::size_t TraceBytes = 16U * 1024U * 1024U;
+
+	// Where a snapshot goes. `--trace` writes one when the run ends; `SIGUSR1` writes one whenever it
+	// arrives, numbered, and needs no flag — the ring is armed either way, which is the whole point of
+	// it being armed at all.
+	std::string TracePath{ DefaultTracePath };
+	bool TraceAtExit = false;
 
 	// Stop after this many iterations rather than running until signalled. Zero is *until signalled*,
 	// which is the ordinary case; anything else is a smoke test that terminates on its own.
@@ -250,6 +271,47 @@ namespace Detail
 	return true;
 }
 
+// `32M`, `512K`, or a plain count. A suffix because the number is a memory budget and nobody types
+// sixteen million by hand — and binary multiples because what is being sized is an allocation rather
+// than a disk.
+[[nodiscard]] inline Result<std::size_t> ParseBytes(std::string_view text)
+{
+	if (text.empty())
+	{
+		return Failure(EINVAL, "a size is a byte count, optionally suffixed K or M");
+	}
+
+	std::size_t scale = 1;
+	std::string_view digits = text;
+
+	if (const char suffix = text.back(); suffix == 'K' || suffix == 'k')
+	{
+		scale = 1024;
+		digits = text.substr(0, text.size() - 1);
+	}
+	else if (suffix == 'M' || suffix == 'm')
+	{
+		scale = 1024 * 1024;
+		digits = text.substr(0, text.size() - 1);
+	}
+
+	std::int64_t count = 0;
+
+	if (!ParseInteger(digits, count) || count < 0)
+	{
+		return Failure(EINVAL, "a size is a non-negative byte count, optionally suffixed K or M");
+	}
+
+	// A figure that cannot be allocated is a configuration error rather than a runtime one, and saying
+	// so here is cheaper than a `bad_alloc` on a boot service.
+	if (static_cast<std::uint64_t>(count) > (std::uint64_t{ 1 } << 40) / scale)
+	{
+		return Failure(EINVAL, "a size that large is not a buffer, it is a typo");
+	}
+
+	return static_cast<std::size_t>(count) * scale;
+}
+
 [[nodiscard]] inline Result<Duration> ParseMilliseconds(std::string_view text)
 {
 	double milliseconds = 0.0;
@@ -340,6 +402,34 @@ namespace Detail
 			}
 
 			options.DumpDirectory = value;
+
+			continue;
+		}
+
+		if (Detail::Matches(argument, "--trace", value))
+		{
+			// Bare is the default path, because somebody typing the flag wants the file rather than an
+			// argument about where it goes.
+			options.TraceAtExit = true;
+
+			if (!value.empty())
+			{
+				options.TracePath = value;
+			}
+
+			continue;
+		}
+
+		if (Detail::Matches(argument, "--trace-buffer", value))
+		{
+			const Result<std::size_t> bytes = Detail::ParseBytes(value);
+
+			if (!bytes)
+			{
+				return Failure(EINVAL, "--trace-buffer is a per-thread ring size, as bytes or 32M");
+			}
+
+			options.TraceBytes = *bytes;
 
 			continue;
 		}

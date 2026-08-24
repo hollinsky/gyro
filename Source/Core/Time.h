@@ -57,7 +57,8 @@ struct Monotonic
 		return Instant{ std::chrono::microseconds{ microseconds } };
 	}
 
-	// The one way back out, and it exists for exactly one caller: arming an absolute kernel timeout.
+	// The one way back out, and it exists for two callers: arming an absolute kernel timeout, and
+	// stamping a record in a trace file.
 	//
 	// io_uring's IORING_TIMEOUT_ABS wants a timespec in the same domain an Instant already counts, so
 	// this is FromNanoseconds run backwards rather than a new conversion — which is why it is named
@@ -68,7 +69,9 @@ struct Monotonic
 	// **It is not the escape hatch for arithmetic.** Elapsed and Advanced are the total forms and this
 	// is not a cheaper way to reach them; a caller doing sums on the result is the hand-rolled timebase
 	// CheckClockDiscipline.cmake exists to stop, one indirection further out. What is sanctioned is
-	// handing the count straight to a kernel interface that takes one.
+	// handing the count straight to something outside the process that takes one — io_uring's
+	// IORING_TIMEOUT_ABS, and Trace/Perfetto.cpp's packet timestamps, which are the same nanoseconds in
+	// the same domain being read by somebody else's tool rather than by gyro.
 	[[nodiscard]] static constexpr std::int64_t ToNanoseconds(Instant instant) noexcept
 	{
 		return instant.time_since_epoch().count();

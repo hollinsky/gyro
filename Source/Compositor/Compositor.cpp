@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -16,6 +17,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <format>
 #include <memory>
 #include <optional>
@@ -35,6 +37,7 @@
 #include "Core/Signal.h"
 #include "Core/SlotAllocator.h"
 #include "Core/Time.h"
+#include "Core/Trace.h"
 #include "Core/Wake.h"
 #include "Dispatch/Loop.h"
 #include "Frame/Evaluator.h"
@@ -61,6 +64,7 @@
 #include "Seam/Presenter.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/Renderer.h"
+#include "Trace/Recorder.h"
 #include "Virtual/Device.h"
 #include "Virtual/Dump.h"
 #include "Virtual/Heap.h"
@@ -140,6 +144,22 @@ extern "C" void OnStopSignal(int)
 	}
 }
 
+// What a person hits when the stutter just happened. A pointer for `g_Stopping`'s reason, and a
+// handler for the same one: the alternative is a thread parked in `sigwait`, and there is already a
+// thread waiting on this — the writer's — that would then have two ways to be woken.
+std::atomic<Recorder*> g_Recording{ nullptr };
+
+extern "C" void OnTraceSignal(int)
+{
+	// One relaxed store, which is why `Recorder::Request` is the verb rather than `Snapshot`. Interning,
+	// encoding and writing a file are none of them things a signal handler may do, and all of them
+	// happen on the writer thread a moment later.
+	if (Recorder* const recorder = g_Recording.load(std::memory_order_acquire))
+	{
+		recorder->Request();
+	}
+}
+
 [[nodiscard]] Result<void> InstallStopHandlers()
 {
 	struct sigaction action = {};
@@ -150,6 +170,20 @@ extern "C" void OnStopSignal(int)
 	if (::sigaction(SIGINT, &action, nullptr) != 0 || ::sigaction(SIGTERM, &action, nullptr) != 0)
 	{
 		return Failure(errno, "installing gyro's shutdown handlers");
+	}
+
+	// **`SIGUSR1` is installed whether or not anything is recording**, because the run that turns out to
+	// need a trace is the one nobody armed. With no ring behind it the handler is a load and a branch;
+	// with one it is the difference between having the last thirty seconds and asking the user to
+	// reproduce it.
+	struct sigaction trace = {};
+	trace.sa_handler = &OnTraceSignal;
+	trace.sa_flags = SA_RESTART;
+	::sigemptyset(&trace.sa_mask);
+
+	if (::sigaction(SIGUSR1, &trace, nullptr) != 0)
+	{
+		return Failure(errno, "installing gyro's trace handler");
 	}
 
 	return {};
@@ -756,6 +790,24 @@ public:
 			return ready;
 		}
 
+		// **Armed before the threads exist, because a ring cannot be handed to a thread that is already
+		// running without a moment where the thread has none.** The buffers are the root's and outlive
+		// both loops; what each thread does at its own start is take the pointer and its own id.
+		if (options.TraceBytes != 0)
+		{
+			m_Recorder.emplace(
+				TracePolicy{
+					.Bytes = options.TraceBytes, .Path = std::filesystem::path{ options.TracePath }, .Pid = ::getpid() }
+			);
+
+			m_FrameTrace = m_Recorder->Arm("frame", m_Clock);
+
+			if (m_Options.Gym)
+			{
+				m_DispatchTrace = m_Recorder->Arm("dispatch", m_Clock);
+			}
+		}
+
 		m_Sources[0] = &m_Backend->Source();
 		m_Sources[1] = &m_Interrupt;
 		m_Sources[2] = &m_Publication;
@@ -775,9 +827,16 @@ public:
 	{
 		g_Stopping.store(&m_Interrupt, std::memory_order_release);
 
+		if (m_Recorder)
+		{
+			g_Recording.store(&*m_Recorder, std::memory_order_release);
+			m_Recorder->Start();
+		}
+
 		if (const Result<void> installed = InstallStopHandlers(); !installed)
 		{
 			g_Stopping.store(nullptr, std::memory_order_release);
+			g_Recording.store(nullptr, std::memory_order_release);
 
 			return installed;
 		}
@@ -791,6 +850,8 @@ public:
 		if (m_Dispatch)
 		{
 			world = std::thread{ [this] {
+				Record(m_DispatchTrace);
+
 				m_DispatchResult = Pump();
 
 				// A dispatch thread that stopped is a world that stopped changing, and the frame thread has
@@ -807,7 +868,11 @@ public:
 		// The thread is the root's, per decision 80, and so is everything platform about it: its
 		// priority, its page residency, and the `while` inside it. What it runs is one portable call in a
 		// loop.
-		std::thread frame{ [this] { m_Result = Iterate(); } };
+		std::thread frame{ [this] {
+			Record(m_FrameTrace);
+
+			m_Result = Iterate();
+		} };
 
 		frame.join();
 
@@ -821,6 +886,29 @@ public:
 		}
 
 		g_Stopping.store(nullptr, std::memory_order_release);
+
+		// **The last snapshot is taken after both threads have stopped and before the writer thread is
+		// told to.** A signal arriving now would find nothing left to record; what is wanted is the ring
+		// as the run ended, which is what is in it at exactly this moment.
+		if (m_Recorder && m_Options.TraceAtExit)
+		{
+			const std::filesystem::path path{ m_Options.TracePath };
+
+			if (const Result<TraceSummary> written = m_Recorder->Snapshot(path); written)
+			{
+				m_Traced = *written;
+			}
+			else
+			{
+				spdlog::error("the trace could not be written to {}: {}", path.string(), written.error());
+			}
+		}
+
+		if (m_Recorder)
+		{
+			g_Recording.store(nullptr, std::memory_order_release);
+			m_Recorder->Stop();
+		}
 
 		// After the join and before the report, which is the ordering the whole two-thread dump rests
 		// on: nothing is still presenting, so the drain is a drain, and the counters the report reads
@@ -837,6 +925,16 @@ public:
 	}
 
 private:
+	// A thread taking its own ring, which is the one part of enrollment that cannot be done for it: the
+	// thread-local pointer belongs to this thread and so does the id the kernel knows it by.
+	void Record(TraceBuffer* buffer) noexcept
+	{
+		if (m_Recorder && buffer != nullptr)
+		{
+			m_Recorder->Join(*buffer, ::gettid());
+		}
+	}
+
 	// Everything the frame thread does, and it is decision 80's shape entire: step, and wait for the
 	// wake the step returned.
 	[[nodiscard]] Result<void> Iterate()
@@ -1401,6 +1499,53 @@ private:
 			}
 		}
 
+		if (m_Recorder && m_Recorder->IsRecording())
+		{
+			// **What the ring held rather than what it was sized for**, because the second is a constant
+			// and the first is the answer to the only question a person asks of it: is this long enough
+			// to still contain the thing I noticed. A run that overwrote records says so, since a ring
+			// that lapped is one where `--trace-buffer` is the knob that was wanted.
+			const std::uint64_t written = m_Recorder->Written();
+			const std::uint64_t capacity = m_Recorder->Capacity();
+
+			if (m_Traced)
+			{
+				spdlog::info(
+					"traced {} event(s) covering {:.1f}s to {} ({} bytes)",
+					m_Traced->Events,
+					ToSeconds(m_Traced->Covered),
+					m_Options.TracePath,
+					m_Traced->Bytes
+				);
+			}
+			else
+			{
+				spdlog::info(
+					"recorded {} trace event(s) in {} slot(s); SIGUSR1 writes them to {}",
+					written,
+					capacity,
+					m_Options.TracePath
+				);
+			}
+
+			if (written > capacity)
+			{
+				spdlog::warn(
+					"the trace ring lapped {} time(s); --trace-buffer is what buys more of the run", written / capacity
+				);
+			}
+
+			if (const std::uint64_t snapshots = m_Recorder->Snapshots(); snapshots != 0 && !m_Traced)
+			{
+				spdlog::info("{} snapshot(s) were written on request", snapshots);
+			}
+
+			if (!m_Recorder->Outcome())
+			{
+				spdlog::error("a requested trace snapshot failed: {}", m_Recorder->Outcome().error());
+			}
+		}
+
 		if (m_PriorityRefused)
 		{
 			spdlog::warn("running at normal priority: {}", *m_PriorityRefused);
@@ -1474,6 +1619,15 @@ private:
 	SlotAllocator<OutputTag> m_OutputIds{ MaxOutputs };
 
 	bool m_RealTime = false;
+
+	// **Declared after the clock it stamps with, and outliving both threads either way.** A ring is
+	// reached through a thread-local pointer that nothing ever clears, so the storage has to outlive
+	// every thread that might still write into it — which `Run` already guarantees by joining both
+	// before it returns, and which this ordering keeps true if that ever stops being so.
+	std::optional<Recorder> m_Recorder{};
+	TraceBuffer* m_FrameTrace = nullptr;
+	TraceBuffer* m_DispatchTrace = nullptr;
+	std::optional<TraceSummary> m_Traced{};
 
 	Result<void> m_Result{};
 	Result<void> m_DispatchResult{};

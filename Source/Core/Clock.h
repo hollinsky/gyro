@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 
 #include "Core/Time.h"
 
@@ -27,6 +28,27 @@ protected:
 	IClock(const IClock&) = default;
 	IClock& operator=(const IClock&) = default;
 };
+
+// Two clocks read at one instant, which is the only thing in the process that ever needs two.
+//
+// **It exists for one consumer and is useless to any other, which is what keeps decision 57 intact.**
+// A trace gyro writes stamps in this timebase; a system trace stamps in the kernel's boot-time domain,
+// which counts through suspend where this one does not. Merging the two is a matter of relating them
+// once, and relating them requires having read both at the same moment. Nothing else in gyro cares
+// what the other domain says.
+//
+// **Raw counts rather than `Instant`s, deliberately.** An `Instant` is a value the schedule is
+// entitled to compare against a deadline, and handing one back from a second clock reader is exactly
+// the reachable now decision 57 exists to prevent. These are two integers destined for a file.
+struct ClockAnchor
+{
+	std::int64_t Monotonic = 0;
+	std::int64_t Boottime = 0;
+};
+
+// Read together and as close together as two syscalls can be. The pair is a relation rather than a
+// measurement, so what matters is that nothing long happens between them, and nothing does.
+[[nodiscard]] ClockAnchor ReadClockAnchor() noexcept;
 
 // The one implementation that reads the kernel. clock_gettime appears in exactly one translation
 // unit in the process; CMake/CheckClockDiscipline.cmake makes that a build failure rather than a

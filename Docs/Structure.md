@@ -172,6 +172,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Scene` | portable | dispatch | `Core`, `Geometry`, `World`, `Animation`, `Publication` |
 | `Gym` | portable | dispatch | `Core`, `Geometry`, `World`, `Animation`, `Scene` |
 | `Dispatch` | portable | dispatch | `Core`, `Publication`, `Scene`, `Gym` |
+| `Trace` | portable | own | `Core` |
 | `Blit` | **portable** | frame | `Core`, `Geometry`, `Seam` |
 | `Frame` | portable | frame | `Core`, `Geometry`, `World`, `Animation`, `Publication`, `Seam` |
 | `Render` | platform | **both** | `Core`, `Geometry`, `Publication`, `Seam` |
@@ -285,8 +286,8 @@ inside the frame section — but that is a phase rather than a thread, and nothi
 dispatch. See
 [decision 102](Decisions.md#102-a-virtual-output-allocates-the-buffers-it-hands-out-and-that-is-what-stands-the-renderer-up).
 
-**It also runs a thread of its own, and it is the only portable-graph neighbour that does.** *(Added
-2026-08-22.)* [Virtual/Dump.h](../Source/Virtual/Dump.h) writes a PAM per presented frame, and a file
+**It also runs a thread of its own, and it was the only portable-graph neighbour that did until
+`Trace` became the second.** *(Added 2026-08-22, amended 2026-08-23.)* [Virtual/Dump.h](../Source/Virtual/Dump.h) writes a PAM per presented frame, and a file
 write from the frame thread is the hazard [Open.md](Open.md)'s *spdlog async sink* entry names — so
 the sink copies on the frame thread and a writer thread does the `open`, the `write`, and the
 `rename`. That thread is neither frame nor dispatch: it is off both partitions, it touches nothing
@@ -787,6 +788,34 @@ including why the observer owns the link and why a `Connection` cannot move.
 ownership puts `free` on the frame path wearing a destructor's clothes, where the debug allocator
 cannot catch it, and a shared lock rebuilds the priority inversion the thread ordering exists to
 prevent. Reclamation is deferred against the consumed-sequence watermark.
+
+### Trace depends on Core and nothing else, and that edge is the design
+
+*(Added 2026-08-23.)* The ring a thread writes into is in
+[Core/Trace.h](../Source/Core/Trace.h) rather than in `Trace`, for
+[Core/FrameSection.h](../Source/Core/FrameSection.h)'s reason one layer along: every module records,
+so the verb has to be reachable from everywhere the way the frame-path marker already is. What is in
+the module is the expensive half — interning, protobuf encoding, the file, and the thread that does
+all three.
+
+**`Core` is the whole of `DEPENDS`, and the temptation it forecloses is the point.** A tracing module
+permitted to name `Frame` would sooner or later read a budget, a clock or a decision to annotate a
+record with, and an instrument that reaches into what it measures is one whose absence changes the
+answer. Everything a record carries is pushed in by the call site: a literal, a track, and one
+number. Nothing is pulled.
+
+**`PORTABLE` is not free here and is worth the price.** The snapshot writes a file and runs a thread,
+which are ISO C++ rather than POSIX, so the encoder is testable on a machine with no GPU, no seat and
+no compositor — and it is tested there, against a decoder the test writes, because a trace nobody has
+parsed is a file nobody knows the shape of. What the tier forecloses is any attempt to *collect* the
+kernel's side of the picture from in here: scheduling, io_uring and the GPU scheduler are `traced`'s
+to record, and this module's entire claim on the format is that its output concatenates with that
+one. See [decision 139](Decisions.md#139-the-trace-ring-is-always-armed-and-the-format-is-somebody-elses).
+
+**The writer thread is neither frame nor dispatch, which is the "own" in the table's thread column** —
+the same answer `Virtual`'s dump writer carries, and now the second instance of it. It touches
+nothing either loop owns: it copies a ring against a live producer, validates the copy afterwards
+against the producer's own index, and never makes the frame thread wait for it.
 
 ### The root is where the platform collects
 

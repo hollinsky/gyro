@@ -10,6 +10,7 @@
 #include "Core/Clock.h"
 #include "Core/Result.h"
 #include "Core/Time.h"
+#include "Core/Trace.h"
 #include "Core/Wake.h"
 #include "Dispatch/Textures.h"
 #include "Gym/Gym.h"
@@ -165,7 +166,15 @@ public:
 			return Wake::Never();
 		}
 
-		Collect();
+		// The author's whole iteration, and the row it lands on is this thread's — so the trace reads as
+		// two rows with arrows between them rather than one interleaved column.
+		const TraceSpan step{ "step" };
+
+		{
+			const TraceSpan collect{ "collect" };
+
+			Collect();
+		}
 
 		// **Beside the outbox's own reclamation and under the same number.** Everything strictly below
 		// the watermark is the dispatch side's to take back — snapshot buffers there, the pixels behind
@@ -174,7 +183,12 @@ public:
 		m_Textures.Reclaim(m_Outbox.Watermark());
 
 		const Instant now = m_Store.Now();
+
+		TraceSpan advance{ "author" };
+
 		const Wake authored = m_Author->Advance(m_Store, m_Textures, now);
+
+		advance.Close();
 
 		// **Before the publish and not after**, because the number has to be the sequence this step's
 		// snapshot will carry: the author gave those textures up during the `Advance` above, so the
@@ -185,16 +199,34 @@ public:
 		// rather than caching**: the walk that decides whether a coefficient crosses is the walk that
 		// retires the channels which have settled, so a scene that is finishing gets smaller only
 		// because this ran.
+		// Read before the publish because the ring's answer is idempotent until one is consumed, and
+		// after the seal for the same reason the seal is where it is: this is the number the scene about
+		// to cross will carry, and it is the flow id the frame thread's `acquired` mark will match.
+		const std::uint64_t sequence = m_Outbox.NextSequence();
+
+		TraceSpan serialize{ "serialize", TraceThread, sequence };
+
 		const bool published = m_Outbox.Publish(m_Serializer.Serialize(m_Store));
+
+		serialize.Close();
 
 		if (published)
 		{
 			++m_Publications;
+
+			TraceMark("published", TraceThread, sequence);
 		}
 		else
 		{
 			++m_Deferrals;
+
+			// The frame thread being four publishes behind, which is the one thing on this row that is
+			// about the *other* row. Counted already; marked here because a run of these beside a gap in
+			// the frame thread's iterations is the pair that names which side is late.
+			TraceMark("deferred", TraceThread, sequence);
 		}
+
+		TraceCount("watermark", static_cast<std::int64_t>(m_Outbox.Watermark()));
 
 		// **`Flush` is deliberately not called beside `Publish`**, though `SnapshotOutbox`'s header
 		// sketches a loop that does. Flushing first would deliver the refused snapshot *and* then the

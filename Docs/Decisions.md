@@ -10415,3 +10415,75 @@ order and filtering linear out of it, which fixes this host on this driver and s
 next pair. Rejected: asking the device to rank the host's list without allocating — Vulkan exposes
 supported and unsupported and has no verb for *preferred*, which is why the list-taking create info
 exists in the first place.
+
+
+### 139. The trace ring is always armed, and the format is somebody else's
+
+Frame timings, the handoff between the two threads, and what the GPU did with the batch: three
+questions the compositor is asked constantly and answers today with a summary line at the end of a
+run. The instrument that answers them properly has to decide two things — when it records, and what
+it writes.
+
+**When: always, overwriting.** A profiler you switch on records the run after the interesting one.
+gyro is a boot service; the stutter worth chasing happens once, on somebody else's machine, three
+hours in. So the ring is armed for the life of the session and keeps the last however-many seconds,
+and `SIGUSR1` writes out what is in it. The cost is memory — sixteen mebibytes a thread by default,
+resident because `mlockall` — and the report line prints what the ring actually held so that
+`--trace-buffer` is sized against the machine rather than against a guess. Rejected: arming on a
+flag, which is the same instrument with the one property that matters removed.
+
+**A record is four relaxed stores and a release.** No allocation, no lock, no syscall, no formatting;
+a name is a pointer to a string literal and the interning that turns it into a number happens on the
+writer thread. `Core/FrameSection.h`'s guard is what proves it rather than the paragraph:
+`Trace.EmittingAllocatesNothing` emits inside one, and the debug allocator aborts if it is wrong.
+The fields are individually `std::atomic` and read relaxed rather than the struct being memcpy'd,
+which compiles to the same instructions on every target gyro runs on and keeps `GYRO_SANITIZE=thread`
+a configuration somebody can run. Rejected: a benign race with a comment, which makes the tracer the
+first thing every sanitizer run reports and therefore the first thing everybody suppresses.
+
+**What: a Perfetto protobuf trace, hand-encoded.** Rejected: linking Perfetto's SDK, whose
+in-process path allocates, takes locks and starts threads — none of which the `SCHED_FIFO` frame
+thread can host, so the emitter would have been fed from a ring like this one anyway and the library
+would have been carrying nothing but the encoder. Rejected: Chrome's JSON trace format, which the
+same UI opens and which would have been a tenth of the code, because a JSON trace cannot be
+concatenated with a system trace.
+
+**That concatenation is the whole argument for the format.** A `.pftrace` is a sequence of
+self-delimiting packets, so `cat gyro.pftrace system.pftrace` is a valid third trace. What it buys is
+the half of the picture gyro cannot see about itself — `sched_switch` says which thread the kernel
+ran instead of the frame thread, `dma_fence` and `gpu_scheduler` say when the GPU actually started
+the batch that was submitted three slices ago, and neither is reachable from inside the process at
+any price. gyro records what it did; `traced` records what was done to it.
+
+**Merging needs the clock domains related, and that is the one concession decision 57 makes.** ftrace
+stamps in `CLOCK_BOOTTIME`, which counts through suspend where `CLOCK_MONOTONIC` does not. A trace
+carrying monotonic timestamps and no relation between the two is not a trace with a shifted timeline:
+trace_processor drops every packet, which is how this was found — the first file this module produced
+loaded clean and contained nothing. So `Core/Clock.cpp` grew a second reader, `ReadClockAnchor`, in
+the one translation unit already allowed to read a clock. It returns two raw counts rather than an
+`Instant`, which is what keeps the concession narrow: an `Instant` is a value the schedule may
+compare against a deadline, and a second domain that could produce one is the reachable now decision
+57 exists to prevent.
+
+**The clock is reachable from the trace path and the now is not.** `TraceBuffer` holds an `IClock`
+and stamps records with it, and there is no accessor anywhere in `Core/Trace.h` that returns a time —
+a stamp leaves only inside a record the snapshot writer consumes. Decision 57's rule is not that a
+clock is untouchable; it is that a now something can reach is a now something eventually decides
+against, in a file whose subject is something else.
+
+**Tracks are the compositor's rather than a thread's, above the thread level.** An output has a row
+and its GPU work has a second one, because the work on that second row is not on any thread at all
+and because a person reading a stutter on one panel should not be reading four panels interleaved.
+The thread rows carry the real kernel thread id, so that in a merged trace gyro's slices land on the
+*same row* as that thread's scheduling rather than on a row beside it.
+
+**Unbalanced slices at both ends of the window are the ordinary case.** A ring holding thirty seconds
+begins in the middle of whatever was running thirty seconds ago and ends in the middle of the
+iteration the snapshot interrupted. Ends with no beginning are dropped; beginnings with no end are
+closed at the newest record, which draws the interrupted iteration reaching the right edge, which is
+what it was.
+
+What this does not do yet: a GPU timestamp pair still measures a duration with no position, so a
+composite's execution cannot be drawn against the CPU slice that submitted it.
+`VK_EXT_calibrated_timestamps` is what closes that, and until it lands the GPU row carries the cost
+as a counter rather than as a span.

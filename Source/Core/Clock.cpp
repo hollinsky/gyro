@@ -18,3 +18,34 @@ Instant MonotonicClock::Now() const noexcept
 
 	return Monotonic::FromNanoseconds(static_cast<std::int64_t>(now.tv_sec) * 1'000'000'000 + now.tv_nsec);
 }
+
+namespace
+{
+
+[[nodiscard]] std::int64_t Nanoseconds(const timespec& reading) noexcept
+{
+	return static_cast<std::int64_t>(reading.tv_sec) * 1'000'000'000 + reading.tv_nsec;
+}
+
+} // namespace
+
+ClockAnchor ReadClockAnchor() noexcept
+{
+	// CLOCK_BOOTTIME is Linux's rather than POSIX's, and the portable tier is where this has to live
+	// anyway — the reader is one file and this is that file. Where the platform has no such clock the
+	// anchor relates the monotonic domain to itself, which is true, and leaves a trace that merges with
+	// nothing rather than one that merges wrongly.
+#ifdef CLOCK_BOOTTIME
+	constexpr clockid_t Boottime = CLOCK_BOOTTIME;
+#else
+	constexpr clockid_t Boottime = CLOCK_MONOTONIC;
+#endif
+
+	timespec monotonic = {};
+	timespec boottime = {};
+
+	::clock_gettime(CLOCK_MONOTONIC, &monotonic);
+	::clock_gettime(Boottime, &boottime);
+
+	return ClockAnchor{ .Monotonic = Nanoseconds(monotonic), .Boottime = Nanoseconds(boottime) };
+}

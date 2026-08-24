@@ -941,3 +941,23 @@ nothing only proves the grep.
   decision 138's neighbourhood says it is at about a tenth of this machine's memory bandwidth, so
   probably not, and this may be worth much less than its 2.6x predecessor. Cheap to find out and
   expensive to assume.
+- **Where a GPU span actually sits on the timeline.** A timestamp pair measures how long a composite
+  took and says nothing about *when* it ran, so
+  [decision 139](Decisions.md#139-the-trace-ring-is-always-armed-and-the-format-is-somebody-elses)'s
+  GPU row carries the cost as a counter rather than as a span beside the CPU slice that submitted it —
+  which is the one arrangement that would show queue wait, the term
+  [Seam/Renderer.h](../Source/Seam/Renderer.h) already says the pair cannot separate.
+  `VK_EXT_calibrated_timestamps` is what closes it: one device-and-host pair sampled off the frame
+  path per second, against the tick period and wrap arithmetic
+  [Render/Device.h](../Source/Render/Device.h) already has. The reading is what settles whether the
+  extension is present on both drivers gyro targets and whether the correlation is stable enough to
+  place a span to within less than a frame. Until then the same picture is reachable from below —
+  `gpu_scheduler` and `dma_fence` tracepoints in a concatenated system trace — which is why this is a
+  refinement rather than a hole.
+- **What the trace ring costs when nothing is reading it.** Decision 139 spends sixteen mebibytes a
+  thread and a handful of stores per slice on the grounds that both are far below anything the frame
+  loop notices, and neither figure has been measured on a real panel. The instrument for the second
+  is the one already built: `--trace-buffer=0` against the same gym and the same output set, with the
+  CPU mark read off the report line. What would change the design is not a large number but a
+  *variable* one — a store into a ring the frame thread has not touched for a frame is a cache miss,
+  and a miss on the frame path is jitter rather than cost.

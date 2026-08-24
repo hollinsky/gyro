@@ -12,6 +12,7 @@
 #include "Core/Result.h"
 #include "Core/Signal.h"
 #include "Core/Time.h"
+#include "Core/Trace.h"
 #include "Core/Wake.h"
 #include "Frame/Admission.h"
 #include "Frame/Budget.h"
@@ -251,6 +252,12 @@ private:
 	// reason: the sequence is monotone, so the newer one's derivation already contains the older's.
 	void OnPresented(const PresentationInfo& info) noexcept
 	{
+		// **On the output's own row and at the host's timestamp, which is the point of tracing it here
+		// rather than counting it.** What a person is looking for is this mark landing at an even
+		// cadence; a frame that reached the glass late shows as a gap nothing in gyro's own slices
+		// explains, and that is the shape that says the answer is below us rather than in here.
+		TraceMark("presented", m_Trace);
+
 		m_Clock.Observe(info);
 
 		if (m_InFlight == 0)
@@ -286,6 +293,10 @@ private:
 	// screen, and the next frame's damage would otherwise be relative to a picture nobody saw.
 	void OnMissed() noexcept
 	{
+		// Decision 124's fourth signal, and the one worth seeing on a timeline: a frame that was drawn,
+		// accepted and never shown leaves every counter above it reporting success.
+		TraceMark("discarded", m_Trace);
+
 		m_Clock.Invalidate();
 		Discard();
 		DamageWholeOutput();
@@ -366,6 +377,11 @@ private:
 	IRenderer* m_Renderer = nullptr;
 	std::size_t m_Device = 0;
 
+	// Which row this output's work is drawn on. Assigned by `FrameLoop::Bind` rather than taken by
+	// `Bind` above, because an output's *position in the loop's set* is the loop's knowledge and not
+	// this object's — the same reason `m_Device` is passed in and this is not.
+	std::uint16_t m_Trace = TraceThread;
+
 	OutputConfiguration m_Configuration{};
 	FrameClock m_Clock{};
 	Budget m_Cost{};
@@ -436,6 +452,11 @@ public:
 	void Bind(std::span<FrameOutput> outputs) noexcept
 	{
 		m_Outputs = outputs.first(std::min(outputs.size(), MaxOutputs));
+
+		for (std::size_t index = 0; index < m_Outputs.size(); ++index)
+		{
+			m_Outputs[index].m_Trace = TraceOutput(index);
+		}
 	}
 
 	// The sources the loop drains, at whatever granularity the backend's descriptors actually have.
@@ -447,12 +468,22 @@ public:
 	// One iteration. Returns the wake the next one is owed at; `Wake::Never()` arms nothing.
 	[[nodiscard]] Wake Step()
 	{
-		// First, and for correctness rather than tidiness. See this file's header.
-		for (IEventSource* const source : m_Sources)
+		// **The iteration is one slice and everything below is inside it**, which is what makes the trace
+		// answer the question it exists for: a frame that arrived late is either an iteration that
+		// started late or one that took too long, and those are opposite problems with opposite fixes.
+		// The span begins before the drain because a source that blocks is the first of the two.
+		const TraceSpan iteration{ "iteration" };
+
 		{
-			if (source != nullptr)
+			const TraceSpan drain{ "drain" };
+
+			// First, and for correctness rather than tidiness. See this file's header.
+			for (IEventSource* const source : m_Sources)
 			{
-				(void)source->Drain();
+				if (source != nullptr)
+				{
+					(void)source->Drain();
+				}
 			}
 		}
 
@@ -468,6 +499,13 @@ public:
 
 			Acquire();
 			CollectCosts();
+
+			// **The flow the whole two-thread picture hangs off.** The sequence is the same number
+			// dispatch stamped on the publish that produced this scene, so a reader following the arrow
+			// lands on the `author` slice that wrote what is about to be drawn — which is how *the frame
+			// is stale* and *the frame is late* stop looking alike.
+			TraceMark("acquired", TraceThread, m_Held);
+			TraceCount("held", static_cast<std::int64_t>(m_Held));
 
 			std::array<std::uint8_t, MaxOutputs> order{};
 			const std::size_t due = OrderByDeadline(order);
@@ -589,10 +627,21 @@ private:
 
 	void Serve(FrameOutput& output, std::size_t index, Instant now, std::array<Instant, MaxDevices>& deviceFree)
 	{
+		// The whole of one output's attempt, on that output's row. It is a slice even when the attempt
+		// ends two lines below, because *this output was considered and declined* is a different picture
+		// from this output not being in the iteration at all.
+		const TraceSpan serve{ "serve", output.m_Trace };
+
 		Instant& free = deviceFree[output.m_Device];
 		const FrameDecision decision = m_Timing.Assess(output.m_Clock, output.m_Cost, now, output.m_Committed, free);
 
 		output.m_Last = decision;
+
+		// **What the machine has been costing, sampled where the decision that reads it is made.** A mark
+		// that climbs over a hundred frames is the picture that says the next thing to go wrong is a
+		// dropped frame, and it is invisible in any one of them.
+		TraceElapsed("cpu mark", output.m_Cost.PlannedCpu(), output.m_Trace);
+		TraceElapsed("gpu mark", output.m_Cost.PlannedGpu(), output.m_Trace);
 
 		// A commit the presenter cannot take yet is the disqualifier Architecture.md names, and it is
 		// separate from the arithmetic one `Assess` answers: it is the backend's condition rather than
@@ -602,7 +651,21 @@ private:
 		// is about.
 		if (output.IsCommitFull() || !decision.Renders())
 		{
+			// Named apart, because they are different failures wearing one `return`. A full commit queue
+			// is an output waiting on the host or the panel and is ordinary; a verdict that declines is
+			// decision 35's third branch, which is gyro deciding it cannot fit the frame it owes.
+			TraceMark(output.IsCommitFull() ? "commit full" : "skipped", output.m_Trace);
+
 			return;
+		}
+
+		// **Slack is only a number once this output has a prediction to be early or late against.** On a
+		// decision that does not render, and on the first frame of an output whose clock has not been
+		// seeded, `Deadline` is the unscheduled sentinel and the subtraction saturates — one sample of
+		// two hundred and ninety-two years flattens every real one on the same axis to a flat line.
+		if (decision.Deadline != FrameClock::Unscheduled)
+		{
+			TraceElapsed("slack", decision.Slack(), output.m_Trace);
 		}
 
 		// `Assess` answers whether a frame *can* be made and never whether one is *wanted* — it is
@@ -668,6 +731,10 @@ private:
 			return;
 		}
 
+		// Closed by hand rather than by a scope, because what the span measures is the walk and what the
+		// scope holds is its result.
+		TraceSpan evaluate{ "evaluate", output.m_Trace };
+
 		const DrawList list = m_Evaluator->Evaluate(
 			{ .Snapshot = m_Snapshot,
 		      .Output = index,
@@ -677,8 +744,12 @@ private:
 		      .Mode = decision.Mode() }
 		);
 
+		evaluate.Close();
+
 		(void)output.m_Cost.ObserveIrreducibleCpu(list.EvaluateCost);
 		output.m_Damage.Add(list.Damage);
+
+		TraceCount("items", static_cast<std::int64_t>(list.Items.size()), output.m_Trace);
 
 		// The buffer-age join, and it is built after the evaluator has contributed so that this frame's
 		// own damage is in it. A copy rather than a reference because `RecordRequest` takes the region by
@@ -693,10 +764,16 @@ private:
 			                         .Damage = stale,
 			                         .Items = list.Items };
 
+		TraceSpan record{ "record", output.m_Trace };
+
 		const Result<Submission> submission = output.m_Renderer->Record(request);
+
+		record.Close();
 
 		if (!submission)
 		{
+			TraceMark("refused", output.m_Trace);
+
 			// Seam/Renderer.h's *an item the renderer cannot express* arriving: the draw list held
 			// something this backend refuses to draw wrong, so it drew none of it. The reason is the
 			// renderer's own words and this is the only place they exist.
@@ -721,11 +798,16 @@ private:
 			.Color = output.m_Configuration.Color,
 		};
 
-		if (const Result<void> presented = output.m_Presenter->Present({ &layer, 1 }); !presented)
 		{
-			output.Refuse(presented.error());
+			const TraceSpan present{ "present", output.m_Trace };
 
-			return;
+			if (const Result<void> presented = output.m_Presenter->Present({ &layer, 1 }); !presented)
+			{
+				TraceMark("refused", output.m_Trace);
+				output.Refuse(presented.error());
+
+				return;
+			}
 		}
 
 		// Presented, so the presenter has it back and the loop is not holding one any more. Beside the

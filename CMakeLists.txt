@@ -186,6 +186,7 @@ gyro_add_module(Core PORTABLE OBJECT
 		Signal.Test.cpp
 		SlotAllocator.Test.cpp
 		Time.Test.cpp
+		Trace.Test.cpp
 		Wake.Test.cpp
 )
 
@@ -384,6 +385,33 @@ gyro_add_module(Dispatch PORTABLE DISPATCH
 	TESTS
 		Loop.Test.cpp
 		Textures.Test.cpp
+)
+
+# What the process was doing, written out for somebody else's tool to open.
+#
+# `Core` and nothing else, because a trace is a copy of Core/Trace.h's rings and a protobuf encoder,
+# and neither has anything to ask of the world it is recording. That edge is also the point: a module
+# that could name `Frame` would eventually read a budget or a clock to annotate a record with, and an
+# instrument that reaches into what it measures is one whose absence changes the answer.
+#
+# Portable, which is not free here and is worth having. The snapshot writes a file and starts a thread,
+# both of which are ISO C++ rather than POSIX, so the encoder is testable — and tested — on a machine
+# with no GPU, no seat, and no compositor. What is deliberately absent is any way to *collect* the
+# kernel's side of the picture: scheduling, io_uring, and the GPU scheduler are `traced`'s to record,
+# and this module's whole claim on the protobuf format is that its output concatenates with that one.
+#
+# No DISPATCH_HALF. Both threads write records and neither owns the ring; the composition root is what
+# hands each thread its own.
+gyro_add_module(Trace PORTABLE
+	DEPENDS
+		Core
+	SOURCES
+		Perfetto.cpp
+		Recorder.cpp
+	TESTS
+		Perfetto.Test.cpp
+		Protobuf.Test.cpp
+		Recorder.Test.cpp
 )
 
 # The control waist: every interface with more than one implementation, and the plain data that
@@ -751,6 +779,7 @@ gyro_add_module(Compositor
 		Nested
 		Gym
 		Dispatch
+		Trace
 	SOURCES
 		Compositor.cpp
 		RealTime.cpp
