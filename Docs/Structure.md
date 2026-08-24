@@ -677,6 +677,30 @@ for as long as they are moving, which is an empty directory somebody would other
 backend. `DrawsOnCpu` is a free function beside the interface rather than a verb on it, so the root
 can say so at startup without a gym having to answer a question about a renderer it never sees.
 
+### The dispatch loop steps one author, and there are two of them
+
+`ISceneAuthor` in [Scene/Author.h](../Source/Scene/Author.h) is the slot the dispatch loop steps:
+`Open` builds a tree once, `Advance` retargets what is due and answers when to come back. `Gym` is one
+implementor and `Protocol`'s `ClientHost` is the other — gyro authoring for itself against nothing,
+and a person's windows arriving over a socket. `--gym` selects between them, `--no-socket` selects
+neither, and the loop never learns which it has.
+
+**They meet at `SceneStore`, not at the interface**, which is the whole reason the contract is general.
+A gym opens a `SceneCommit` and retargets a lane; a host will open one and place a window. Both are
+writing the same tree, so the interface carries only what the *loop* needs — a wake, and a failure
+path that exists in `Open` and not in `Advance`.
+
+**What the host has and a gym does not is a descriptor, and that never becomes a verb here.** The
+composition root takes the host's one pollable fd — libwayland multiplexes every client behind it —
+and puts it in the dispatch thread's `ppoll` beside the stop. Reading it is the host's, inside its own
+`Advance`, because a request handler needs the store and the texture space at the instant it runs and
+`ISceneAuthor` passes both in as arguments precisely so no author retains them. Writing back is the
+root's, immediately before the wait: everything gyro owes a client is queued during the step, and a
+flush deferred to the next `Advance` deadlocks on a settled world, where the only thing that would
+wake dispatch is the client acting on the callback it never received.
+[Decision 143](Decisions.md#143-the-client-host-is-a-scene-author-and-the-flush-belongs-to-the-thread-that-sleeps)
+has the argument.
+
 ### The dispatch step is a module because the outbox is behind a dispatch half
 
 `Dispatch` holds one function: author, serialise, publish, reclaim, and answer when to come back. It

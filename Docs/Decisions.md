@@ -10248,6 +10248,17 @@ in words, and the party that adopts says which fourcc that is. The alternative w
 giving `Gym` a `Seam` edge, which would have worked and would have hidden the question until there was
 a protocol to answer it badly.
 
+*(Revised 2026-08-23: the division stands, the home moved.)* `ITextures` was declared in `Gym`, on the
+reading that a gym is where a client will stand and so the interface a gym calls is the one the
+protocol layer inherits. That was right about the shape and wrong about where to put it. When the
+second author arrived — [decision 143](#143-the-client-host-is-a-scene-author-and-the-flush-belongs-to-the-thread-that-sleeps)'s
+client host — it turned out to be the *heaviest* caller of these two verbs rather than a party that
+could ignore them, since a client's `wl_shm` pool is pixels arriving exactly the way a gym's card
+arrives. A host reaching into `Gym` for the interface would put the module that authors gyro's own
+scenes between a client and its window. It lives in `Scene/Textures.h` now, beside the `ISceneAuthor`
+whose signatures name it, and both authors reach one module rather than each other. Nothing about the
+argument above changes: neither of them names `Seam`, and the party that adopts still names the format.
+
 **The registry holds the pixels because the seam borrows them.** [Seam/Importer.h](../Source/Seam/Importer.h)
 records a pointer rather than copying — the console's grid is thirty megabytes and printing a line into
 it is a `memmove` in memory it already owns — so something has to keep the memory alive for as long as
@@ -10788,3 +10799,73 @@ answer. Whether the work fits before vblank is a question in seconds, and `frag_
 constant the substitution needs: [Open.md](Open.md)'s bandwidth entry puts this machine near its
 ceiling, where the rate falls with resolution and blend depth rather than with clock. It belongs in the
 trace, where it explains a number, rather than in the record, where it would have to predict one.
+
+### 143. The client host is a scene author, and the flush belongs to the thread that sleeps
+
+[Decision 141](#141-a-window-is-parented-into-gyros-floor-and-shown-when-placed-the-floorplanner-stands-in-for-an-absent-shell)
+says a client's window is a node in gyro's tree. This is the wiring that makes it one: `ClientHost` in
+`Protocol` implements `ISceneAuthor`, the dispatch loop steps it exactly as it steps a gym, and which
+of the two a run has is what `--gym` selects. A gym is gyro authoring for itself with nothing on the
+far end; the host is a person's windows. They meet at `SceneStore` and not at the interface, which is
+what the rename in
+[Scene/Author.h](../Source/Scene/Author.h) was for.
+
+**Reading the clients happens inside `Advance`, and the reason is the reference it avoids handing
+out.** A request handler needs the store and the texture space at the instant it runs — a
+`wl_surface.commit` is a change to the scene, a `wl_shm` buffer is an `Adopt` — and `ISceneAuthor`
+passes both in as arguments precisely so that no author retains them. Polling the socket anywhere else
+would force the host to hold a `SceneStore&` across the gap. Reading it inside `Advance` puts both on
+the stack at the moment a commit arrives, and the order inside one step is then the order the world
+wants: the loop drains what the frame thread returned, the host reads what the clients asked for, and
+the serializer walks what both of them left behind.
+
+**The flush is the composition root's, immediately before the wait, and the alternative deadlocks.**
+Everything gyro owes back — a frame callback for a frame that reached the glass, a `wl_buffer.release`
+for pixels it has finished with — is queued during the step and sits in a libwayland buffer until
+something pushes it. Flushing at the top of the *next* `Advance` reads as a one-iteration delay and is
+not: a settled world arms no deadline, so the only thing that would wake the dispatch thread is the
+client acting on the callback it has not been sent. What the person sees is a window that stops
+redrawing and never starts again. So the host exposes `Flush` and the root calls it, because the root
+is the only party that knows the thread is about to stop running — which is
+[decision 80](#80-the-frame-loop-is-a-step-the-composition-root-owns-the-wait)'s division holding on
+one more verb rather than an exception to it.
+
+**The socket joins the stop in the dispatch thread's `ppoll`, and two descriptors is still not a
+ring.** libwayland multiplexes every client behind one event-loop fd, so hosting takes the count from
+one to two rather than to one-per-client, and
+[decision 126](#126-the-dispatch-threads-wait-is-a-ppoll-on-one-descriptor-and-the-root-converts-the-wake)'s
+threshold was a second *kind* of thing to wait on — evdev, a control socket — which this is not. The
+descriptor is wired in by the root through `DispatchWait::Watch`, because `ISceneAuthor` has no verb
+for one: a gym would have to answer for a socket it does not have.
+
+**The host answers `Wake::Never()`, and that is truthful rather than a stub.** A host has no schedule
+of its own; what makes it run again is a client writing to the socket the root is already sleeping on.
+When a window is animating, the wake that says so comes from the retarget the commit performed and
+reaches the loop through the serializer, exactly as a gym's does. So a compositor with windows on it
+and nothing moving costs nothing, which is
+[Architecture.md](Architecture.md#doing-nothing-must-cost-nothing)'s claim surviving the arrival of
+clients.
+
+**Hosting is the default and `--no-socket` is what keeps the floor reachable.** A bare `gyro` binds a
+socket, because that is what a compositor is for. But the case with no author at all — no dispatch
+thread, a frame loop compositing an empty scene — is what every idle measurement is read against, and
+it was the default only until there was something worth giving it up for. Losing it silently would
+have retired the measurement rather than the flag.
+
+**Nothing is advertised yet, and the run says so.** No global is created, so a client connects, binds
+`wl_registry`, sees an empty list and gets no further. That is worth running anyway: it is what proves
+the socket, the descriptor in the root's `ppoll`, and the step order above are right before there is a
+surface to get them wrong with — and the startup line says it out loud, because the alternative is
+somebody concluding the socket is broken.
+
+**Rejected: the root pumping the server beside the author.** `Server::Poll()` before
+`DispatchLoop::Step()` and `Flush()` after reads cleaner and puts protocol ordering in a module that
+should not know it, and it is the version that forces the retained `SceneStore&` above.
+
+**Rejected: a third verb on `ISceneAuthor` for the flush, defaulted to nothing.** It is the same
+sentence as the descriptor: every gym would carry a verb for a far side it does not have, and a pure
+interface that grows a default is one whose contract is now two contracts.
+
+**Rejected: `--gym` and a socket together.** The loop steps one author. Accepting both would bind a
+socket the run never serves, which does not fail — it just never does the thing that was asked for,
+which is the failure `--dump` under the wrong backend is already refused for.

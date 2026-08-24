@@ -11,7 +11,7 @@
 #include "Core/SlotAllocator.h"
 #include "Core/Texture.h"
 #include "Geometry/Space.h"
-#include "Gym/Textures.h"
+#include "Scene/Textures.h"
 #include "Seam/Importer.h"
 #include "Seam/RenderTarget.h"
 
@@ -245,7 +245,7 @@ private:
 		bool Retired = false;
 	};
 
-	// The one place the format is named, which is Gym/Textures.h's whole division: an author writes
+	// The one place the format is named, which is Scene/Textures.h's whole division: an author writes
 	// bytes in a layout it states in words, and the party that can name `Seam` says which fourcc that
 	// is. Linear because these are the CPU's own pixels and there is no device that tiled them.
 	[[nodiscard]] Result<void> Import(Held& held)

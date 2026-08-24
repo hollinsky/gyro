@@ -19,9 +19,9 @@
 #include "Gym/Card.h"
 #include "Gym/Cards.h"
 #include "Gym/Lanes.h"
-#include "Gym/Textures.h"
 #include "Scene/Commit.h"
 #include "Scene/Store.h"
+#include "Scene/Textures.h"
 
 namespace
 {

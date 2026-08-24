@@ -149,15 +149,35 @@ struct Options
 	// Which scene gyro authors for itself, or nothing at all.
 	//
 	// **Nothing is the default and stays the default**, because a compositor whose only picture is an
-	// instrument is one somebody eventually ships. Absent, the dispatch thread is not started and the
-	// frame loop composites an empty scene, which is the floor case Docs/Architecture.md#doing-nothing-
-	// must-cost-nothing is about and has to keep being reachable in one command.
+	// instrument is one somebody eventually ships. Absent, the author is the client host below and the
+	// run hosts windows; the floor case that used to live here — no author, no dispatch thread, an
+	// empty scene — is `--no-socket`, and `Clients` carries why it still has a flag.
 	//
 	// **The kind rather than the name**, so that this header stays total: an unknown gym is an error
 	// naming itself here rather than a failure in the composition root, which is where an option that
 	// parses and then cannot be honoured always ends up. Gym/Gym.h owns the vocabulary and
 	// `GymNamed` is the parse, so there is no second spelling of the list to drift.
 	std::optional<GymKind> Gym{};
+
+	// Whether this run hosts clients, and on which socket.
+	//
+	// **Hosting is the default, and it is the default because that is what a compositor is for.** With
+	// no `--gym`, the author the dispatch loop steps is `ClientHost` — gyro's Wayland server standing
+	// where a gym stands — so a bare `gyro` binds a socket and waits for somebody to connect to it. A
+	// gym replaces that author rather than joining it: the loop steps one author, and a run cannot be
+	// both an instrument and a compositor at the same time.
+	//
+	// **`--no-socket` is what keeps the floor case reachable in one command.** No gym, no clients, no
+	// dispatch thread at all, and a frame loop compositing an empty scene — which is the case
+	// Docs/Architecture.md#doing-nothing-must-cost-nothing is about, and the thing every idle
+	// measurement is read against. It was the default before there was a server to make it worth
+	// giving up, and losing it silently would have retired the measurement rather than the flag.
+	bool Clients = true;
+
+	// The name to bind, or empty for the first free `wayland-N` under `XDG_RUNTIME_DIR` — which is what
+	// a client with nothing set finds. A name is for a second gyro on one machine, or for a test that
+	// wants to know where to connect without reading a log line.
+	std::string Socket{};
 
 	// The outputs actually requested, which is the default single 1080p60 when the command line named
 	// none. Returning a span keeps the "none means one" rule in one place rather than at each reader.
@@ -331,6 +351,10 @@ namespace Detail
 // believes is in effect.
 [[nodiscard]] inline Result<Options> ParseOptions(std::span<const std::string_view> arguments)
 {
+	// Whether a socket name was asked for, as opposed to inherited from the default. Only the asking
+	// conflicts with a gym.
+	bool socketNamed = false;
+
 	Options options{};
 
 	for (const std::string_view argument : arguments)
@@ -390,6 +414,28 @@ namespace Detail
 			}
 
 			options.Gym = *gym;
+
+			continue;
+		}
+
+		if (Detail::Matches(argument, "--socket", value))
+		{
+			options.Clients = true;
+			options.Socket = std::string{ value };
+
+			// Recorded so that `--gym --socket=foo` is refused below rather than binding a socket the
+			// run then never serves. Bare `--socket` is the default said out loud and conflicts with
+			// nothing, so it does not count as naming one.
+			socketNamed = !value.empty();
+
+			continue;
+		}
+
+		if (argument == "--no-socket")
+		{
+			options.Clients = false;
+			options.Socket.clear();
+			socketNamed = false;
 
 			continue;
 		}
@@ -586,6 +632,20 @@ namespace Detail
 	if (options.Backend == BackendKind::Dump && options.DumpDirectory.empty())
 	{
 		options.DumpDirectory = DefaultDumpDirectory;
+	}
+
+	// **A gym is an author and so is the client host, and the dispatch loop steps one.** Naming a
+	// socket alongside a gym is somebody expecting to connect to a run that will never listen, which is
+	// the same failure `--dump` under the wrong backend is refused for: it does not fail, it just never
+	// does the thing that was asked for.
+	if (options.Gym && socketNamed)
+	{
+		return Failure(EINVAL, "--gym authors the scene itself, so there is no socket for clients to reach");
+	}
+
+	if (options.Gym)
+	{
+		options.Clients = false;
 	}
 
 	return options;

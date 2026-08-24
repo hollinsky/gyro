@@ -56,14 +56,26 @@ Result<void> DispatchWait::WaitUntil(std::optional<Instant> deadline, Instant no
 		timeout = &relative;
 	}
 
-	struct pollfd watched = {};
-	watched.fd = m_Fd.Get();
-	watched.events = POLLIN;
+	// The stop first and the author's source second, so the array is a prefix whether or not one was
+	// wired in. Which of the two returned is never asked: the caller re-checks the stop flag and steps,
+	// and a step reads whatever the author has waiting anyway.
+	struct pollfd watched[2] = {};
+	watched[0].fd = m_Fd.Get();
+	watched[0].events = POLLIN;
+
+	nfds_t count = 1;
+
+	if (m_Watched >= 0)
+	{
+		watched[1].fd = m_Watched;
+		watched[1].events = POLLIN;
+		count = 2;
+	}
 
 	// `EINTR` is a return with nothing to show for it, which the contract above permits: the caller
 	// re-checks the flag and steps. Anything else is a descriptor that has stopped working, and on this
 	// thread that means the stop can no longer arrive — so it is carried out rather than absorbed.
-	if (::ppoll(&watched, 1, timeout, nullptr) < 0 && errno != EINTR)
+	if (::ppoll(watched, count, timeout, nullptr) < 0 && errno != EINTR)
 	{
 		return Failure(errno, "waiting for the dispatch thread's next iteration");
 	}

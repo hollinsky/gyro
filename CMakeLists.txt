@@ -795,12 +795,22 @@ target_link_libraries(Nested
 # the codec underneath is libwayland's. DISPATCH because a connection is pumped by one thread and that
 # thread is the author's, per decisions 45 and 81, and not PORTABLE because the display, the loop and
 # the socket are libwayland's own and libwayland is Linux's.
+#
+# `Scene` is the edge that makes it an author rather than a server somebody pumps: `ClientHost` is the
+# second `ISceneAuthor`, standing where a gym stands, and a client's window is a node in the same store
+# a gym writes. It reaches `Scene` and nothing above it — decision 87 keeps this module off the control
+# waist, which is why the texture verbs it will adopt a `wl_shm` pool through are `Scene/Textures.h`
+# rather than `Seam/Importer.h`.
 gyro_add_module(Protocol DISPATCH
 	DEPENDS
 		Core
+		Geometry
+		Scene
 	SOURCES
+		Host.cpp
 		Server.cpp
 	TESTS
+		Host.Test.cpp
 		Server.Test.cpp
 )
 
@@ -836,6 +846,7 @@ gyro_add_module(Compositor
 		Render
 		Nested
 		Gym
+		Protocol
 		Dispatch
 		Trace
 	SOURCES

@@ -12,18 +12,27 @@
 // again when the author stops drawing it.
 //
 // **This is declared here and implemented in `Dispatch`, which is the direction the module graph
-// requires and also the honest one.** `Dispatch/Textures.h` holds the registry — it is the half that
-// can name `Seam`, mint against the watermark, and re-adopt across a device rebuild — and `Dispatch`
-// depends on `Gym`, so the interface an author calls cannot live beside its implementation. That is
-// not a workaround: an author is a *caller* of the texture space in the same way it is a caller of
-// `Scene`, and what it needs to know is two verbs.
+// requires.** `Dispatch/Textures.h` holds the registry — it is the half that can name `Seam`, mint
+// against the watermark, and re-adopt across a device rebuild — and `Dispatch` depends on everything an
+// author does, so the interface an author calls cannot live beside its implementation. That is not a
+// workaround: an author is a *caller* of the texture space in the same way it is a caller of `Scene`,
+// and what it needs to know is two verbs.
 //
-// **A gym does not name `Seam`, and this file is what keeps that true.** Decision 87's rule is that
-// neither `Protocol` nor `Scene` may name the control waist; a gym stands where clients will stand, so
-// a gym reaching for `TextureSource` or a format code would be building the shape the protocol layer
-// is forbidden from copying. So the pixels cross as an extent, a stride and bytes, and *the party that
-// adopts names the format* — which is the same division that will hold when the bytes are a client's
-// `wl_shm` pool instead of a card gyro drew for itself.
+// **It lives in `Scene` because every scene author is handed one**, which is the correction to where it
+// started. It began in `Gym` on decision 136's argument — that a gym stands where a client will stand,
+// so the interface a gym calls is the one the protocol layer inherits — and that argument was right
+// about the *shape* and wrong about the *home*. The second author is the client host, and it is the
+// heaviest caller of these two verbs rather than an incidental one: a `wl_shm` pool is pixels arriving
+// exactly the way a gym's card arrives. A host reaching into `Gym` for the interface would be the
+// module that authors gyro's own scenes standing between a client and its window. So it sits beside
+// `Scene/Author.h`, whose signatures name it, and both authors reach one module rather than each other.
+//
+// **Neither author names `Seam`, and this file is what keeps that true.** Decision 87's rule is that
+// neither `Protocol` nor `Scene` may name the control waist, so a caller reaching for `TextureSource`
+// or a format code would be building the shape the protocol layer is forbidden from copying. The pixels
+// cross as an extent, a stride and bytes, and *the party that adopts names the format* — which is the
+// same division that holds whether the bytes are a client's `wl_shm` pool or a card gyro drew for
+// itself.
 //
 // **One id space and no second one, per Core/Texture.h.** A gym's card, a client's surface and the
 // snapshot atlas are all ids from here, because Docs/Animation.md#exit-pixels has a window's live

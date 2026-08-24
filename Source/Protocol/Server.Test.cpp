@@ -46,9 +46,20 @@ struct PrivateRuntimeDir
 // directory is one that collides with whatever is already there.
 const PrivateRuntimeDir g_RuntimeDir;
 
+// Read back from the environment rather than from `g_RuntimeDir`, because Host.Test.cpp installs one
+// of these too and which of the two wins is static initialisation order across translation units. Both
+// are private directories and either is fine to bind under; asking one where the other's socket is, is
+// not.
 [[nodiscard]] bool SocketFileExists(std::string_view name)
 {
-	const std::string path = g_RuntimeDir.Path + "/" + std::string{ name };
+	const char* const directory = ::getenv("XDG_RUNTIME_DIR");
+
+	if (directory == nullptr)
+	{
+		return false;
+	}
+
+	const std::string path = std::string{ directory } + "/" + std::string{ name };
 	struct stat info = {};
 
 	return ::stat(path.c_str(), &info) == 0;

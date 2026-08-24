@@ -16,6 +16,14 @@
 // the subject is that on the dispatch ring io_uring is a convenience and plain epoll would be defensible.
 // A `ppoll` is that sentence taken at its word until there is a second thing to wait on.
 //
+// **There is now a second thing, and it is still not enough to want a ring.** A run that hosts clients
+// waits on the Wayland event loop's one descriptor as well as the stop — libwayland multiplexes every
+// client socket behind that fd, so the count goes from one to two and not from one to one-per-client.
+// `Watch` is where the composition root hands it over: an author that drives from a descriptor owns
+// the descriptor, and the root is the only party that can put it in the set the thread actually sleeps
+// on. Decision 126's threshold was a second *kind* of thing to wait on — evdev, a control socket — and
+// two descriptors is not it.
+//
 // **The timeout is relative, which is the opposite of what Compositor/Uring.h argues for, and the
 // difference between the two threads is the argument.** The frame ring uses `IORING_TIMEOUT_ABS`
 // because a preemption between reading the clock and entering the kernel lands on the far side of a
@@ -46,6 +54,17 @@ public:
 
 	[[nodiscard]] Result<void> Open() noexcept;
 
+	// Also wake when this descriptor is readable. The root's, borrowed and never closed here — it
+	// belongs to whatever produced it, which today is the Wayland event loop inside the client host.
+	// Called once, before the dispatch thread starts; `-1` is the ordinary case of a run with no
+	// clients, and leaves the wait exactly what it was.
+	//
+	// **Level-triggered and deliberately not drained here**, unlike the stop. What makes it readable is
+	// a client with a request pending, and what makes it unreadable again is the author reading that
+	// request inside its own `Advance` — so the descriptor is the author's to quiet, and a wait that
+	// tried to consume it would be reading a client's traffic on behalf of nobody.
+	void Watch(int descriptor) noexcept { m_Watched = descriptor; }
+
 	// Dispatch thread. Blocks until the deadline falls due or the wait is stopped, whichever is first;
 	// `std::nullopt` is *the world has stopped changing*, and blocks until stopped. `now` is passed in
 	// rather than read because Core/Clock.cpp is the timebase's one reader.
@@ -63,5 +82,9 @@ public:
 
 private:
 	Fd m_Fd;
+
+	// Borrowed rather than owned, which is why it is a plain `int` beside an `Fd`.
+	int m_Watched = -1;
+
 	std::atomic<bool> m_Stopping{ false };
 };

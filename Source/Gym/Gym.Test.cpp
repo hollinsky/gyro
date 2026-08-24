@@ -17,10 +17,10 @@
 #include "Core/Wake.h"
 #include "Geometry/Scale.h"
 #include "Geometry/Space.h"
-#include "Gym/Textures.h"
 #include "Scene/Entity.h"
 #include "Scene/Output.h"
 #include "Scene/Store.h"
+#include "Scene/Textures.h"
 #include "Testing/Test.h"
 #include "World/Content.h"
 #include "World/Node.h"
@@ -105,7 +105,7 @@ void Walk(const SceneStore& store, EntityId id, const Visit& visit)
 // The texture space, as the little of it a gym can tell apart.
 //
 // `Dispatch/TextureRegistry` is the real one and is a module this may not name — `Dispatch` depends on
-// `Gym` and not the other way round, which is the whole reason Gym/Textures.h declares an interface at
+// `Gym` and not the other way round, which is the whole reason Scene/Textures.h declares an interface at
 // all. What a gym needs from it is that ids come back distinct and that giving one up is counted, and
 // those are the two things asserted against here.
 class CountingTextures final : public ITextures

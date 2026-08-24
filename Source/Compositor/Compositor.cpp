@@ -51,6 +51,7 @@
 #include "Headless/Renderer.h"
 #include "Nested/Host.h"
 #include "Nested/Output.h"
+#include "Protocol/Host.h"
 #include "Publication/Return.h"
 #include "Publication/Ring.h"
 #include "Render/Allocator.h"
@@ -802,7 +803,10 @@ public:
 
 			m_FrameTrace = m_Recorder->Arm("frame", m_Clock);
 
-			if (m_Options.Gym)
+			// Whichever author this run has, and none under `--no-socket`, where there is no second
+			// thread to give a row to. `OpenDispatch` runs after this, so the question is the options
+			// rather than the loop that does not exist yet.
+			if (m_Options.Gym || m_Options.Clients)
 			{
 				m_DispatchTrace = m_Recorder->Arm("dispatch", m_Clock);
 			}
@@ -1073,6 +1077,19 @@ private:
 				return {};
 			}
 
+			// **Immediately before the sleep, which is the only place it can be.** Everything gyro owes
+			// its clients — a frame callback for a frame that reached the glass, a `wl_buffer.release` for
+			// pixels it has finished with — was queued during the step above and is sitting in a libwayland
+			// buffer until something pushes it. Flushing at the top of the *next* iteration would be a
+			// deadlock rather than a delay: a settled world arms no deadline, so the only thing that would
+			// wake this thread is the client acting on the callback it has not been sent. The host is an
+			// author and reads its clients inside `Advance`; the writing back is the root's, because the
+			// root is what knows the thread is about to stop running.
+			if (m_Clients != nullptr)
+			{
+				m_Clients->Flush();
+			}
+
 			const Instant now = m_Clock.Now();
 
 			if (const Result<void> waited = m_DispatchWait.WaitUntil(DispatchDeadline(wake, now), now); !waited)
@@ -1238,42 +1255,81 @@ private:
 
 	// The world's author, and the outputs it authors against.
 	//
-	// Nothing here runs without `--gym`: no dispatch thread is started, the ring stays empty, and the
-	// frame loop evaluates an empty scene every iteration — which is the floor case
-	// Docs/Architecture.md#doing-nothing-must-cost-nothing is about rather than a stub, and has to stay
-	// reachable in one command.
+	// **There are two authors and the loop steps one**, which is what `--gym` selects between: a gym is
+	// gyro authoring for itself with nothing on the far end, and the client host is a person's windows
+	// arriving over a socket. Under `--no-socket` there is neither — no dispatch thread is started, the
+	// ring stays empty, and the frame loop evaluates an empty scene every iteration, which is the floor
+	// case Docs/Architecture.md#doing-nothing-must-cost-nothing is about rather than a stub, and has to
+	// stay reachable in one command.
+	//
+	// **The host's descriptor is wired into the wait here and nowhere else.** `ISceneAuthor` has no verb
+	// for one — a gym has no socket to answer for — so the concrete type is the thing that carries it,
+	// and this is the only party holding it before the author is handed over. `m_Clients` keeps that
+	// pointer afterwards for exactly two jobs: the flush before each sleep, and the log line.
 	[[nodiscard]] Result<void> OpenDispatch()
 	{
-		if (!m_Options.Gym)
+		std::unique_ptr<ISceneAuthor> author;
+
+		if (m_Options.Gym)
+		{
+			const GymKind gym = *m_Options.Gym;
+
+			spdlog::info("authoring the {} gym: {}", Name(gym), Describe(gym));
+
+			// The sentence Gym/Gym.h says a caller owes the person. `Blit` fails a whole record on one item
+			// it cannot express, so a gym authoring a material or a rotated quad under the CPU renderer
+			// writes no frames *at all* rather than frames missing a node — and the symptom is a directory
+			// that stays empty, which is what somebody would otherwise file as a bug against the dump
+			// backend. The test is the backend rather than a question put to `IRenderer`, because the seam
+			// has no verb for it and adding one for a warning would be an interface written for the fakes.
+			if (m_Options.Backend == BackendKind::Dump && !DrawsOnCpu(gym))
+			{
+				spdlog::warn("no CPU composite can draw it, so this run will write no frames at all");
+			}
+
+			Result<std::unique_ptr<ISceneAuthor>> made = MakeGym(Name(gym));
+
+			if (!made)
+			{
+				return std::unexpected{ made.error() };
+			}
+
+			author = std::move(*made);
+		}
+		else if (m_Options.Clients)
+		{
+			Result<std::unique_ptr<ClientHost>> made = MakeClientHost(m_Options.Socket);
+
+			if (!made)
+			{
+				return std::unexpected{ made.error() };
+			}
+
+			m_Clients = made->get();
+
+			spdlog::info("hosting clients on {}", m_Clients->SocketName());
+
+			// Nothing is advertised yet, so a client connects, asks the registry what there is, and is told
+			// nothing. Said out loud because the alternative is somebody concluding the socket is broken.
+			spdlog::info("no globals are advertised yet, so a client will connect and find an empty registry");
+
+			author = std::move(*made);
+		}
+		else
 		{
 			return {};
-		}
-
-		const GymKind gym = *m_Options.Gym;
-
-		spdlog::info("authoring the {} gym: {}", Name(gym), Describe(gym));
-
-		// The sentence Gym/Gym.h says a caller owes the person. `Blit` fails a whole record on one item it
-		// cannot express, so a gym authoring a material or a rotated quad under the CPU renderer writes no
-		// frames *at all* rather than frames missing a node — and the symptom is a directory that stays
-		// empty, which is what somebody would otherwise file as a bug against the dump backend. The test is
-		// the backend rather than a question put to `IRenderer`, because the seam has no verb for it and
-		// adding one for a warning would be an interface written for the fakes.
-		if (m_Options.Backend == BackendKind::Dump && !DrawsOnCpu(gym))
-		{
-			spdlog::warn("no CPU composite can draw it, so this run will write no frames at all");
-		}
-
-		Result<std::unique_ptr<ISceneAuthor>> author = MakeGym(Name(gym));
-
-		if (!author)
-		{
-			return std::unexpected{ author.error() };
 		}
 
 		if (const Result<void> ready = m_DispatchWait.Open(); !ready)
 		{
 			return ready;
+		}
+
+		// Beside the stop, so the thread wakes for a client with the same `ppoll` it wakes for a retry
+		// deadline with. Borrowed: the descriptor is the event loop's and dies with the host.
+		if (m_Clients != nullptr)
+		{
+			m_DispatchWait.Watch(m_Clients->PollFd());
 		}
 
 		std::array<SceneOutput, MaxOutputs> outputs{};
@@ -1315,7 +1371,7 @@ private:
 		m_Dispatch =
 			std::make_unique<DispatchLoop>(m_Clock, m_Snapshots, m_Returns, std::span{ importers.data(), importing });
 
-		if (const Result<void> opened = m_Dispatch->Open(std::move(*author), { outputs.data(), m_Count }); !opened)
+		if (const Result<void> opened = m_Dispatch->Open(std::move(author), { outputs.data(), m_Count }); !opened)
 		{
 			return opened;
 		}
@@ -1607,6 +1663,13 @@ private:
 	// the clock — so that it is destroyed before them, and after `m_Loop` so that the reader outlives
 	// nothing the writer still owns.
 	DispatchWait m_DispatchWait;
+
+	// The client host, when this run has one, borrowed from the author the dispatch loop owns. Non-null
+	// exactly when the author is a `ClientHost`, which is the one fact `ISceneAuthor` deliberately does
+	// not carry — a gym would have to answer for a socket it does not have. Two jobs: the flush before
+	// each sleep, and the descriptor the wait was given.
+	ClientHost* m_Clients = nullptr;
+
 	std::unique_ptr<DispatchLoop> m_Dispatch;
 
 	// Whether the author owes anything further. Written by dispatch, read by the frame thread, and read

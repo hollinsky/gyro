@@ -6,13 +6,7 @@
 #include "Core/Time.h"
 #include "Core/Wake.h"
 #include "Scene/Store.h"
-
-// What an author is handed onto the texture id space. Declared in `Gym` and implemented in
-// `Dispatch` — decision 136's placement, which this interface does not disturb — and named here only
-// by reference, because a scene author is a *caller* of the texture verbs rather than a definer of
-// them. Forward-declared rather than included so that `Scene` gains no edge to `Gym`, which depends on
-// it the other way.
-class ITextures;
+#include "Scene/Textures.h"
 
 // What the dispatch loop steps: the producer that authors the published scene, opened once and
 // advanced on every wake.
@@ -24,17 +18,25 @@ class ITextures;
 //
 // **It lives in `Scene` because it authors a scene.** A `SceneStore`, a `SceneCommit`, a
 // `SceneSerializer` — everything an author touches to make a frame is this module's, and the interface
-// names its own module the way `SceneStore` and `SceneReturn` do. The one thing an author is handed
-// that is *not* `Scene`'s is the texture space, and that is `ITextures` above: forward-declared, so
-// the author's home carries no dependency the author itself does not. An author that draws no images —
-// three of the five gyms, and most of what a shell authors — never names it at all.
+// names its own module the way `SceneStore` and `SceneReturn` do. That now includes the texture space:
+// `ITextures` began in `Gym` and moved here when the second author turned out to be its heaviest caller
+// rather than a party that could ignore it, since a client's `wl_shm` pool is pixels arriving exactly
+// the way a gym's card arrives. `Scene/Textures.h` carries that argument. An author that draws no
+// images — three of the five gyms — still never calls it.
 //
-// **An author that drives from a descriptor has that event source wired in beside it by the
-// composition root, which is why draining one is not a verb here.** The host reads its clients over a
-// socket; a gym reads nothing; the loop drains whatever source the root handed it before it calls
-// `Advance`. Putting the descriptor on this interface would make every gym answer for one it does not
-// have, and would drag `Seam`'s `IEventSource` into a contract decision 136 keeps clients' peers away
-// from.
+// **An author that drives from a descriptor owns that descriptor, drains it inside `Advance`, and
+// hands the composition root only the fd to sleep on.** The host reads its clients over a socket; a gym
+// reads nothing. Draining is not a verb here because a gym would have to answer for one it does not
+// have, and because a drain hoisted out of `Advance` would need the store to still be reachable when it
+// ran — which is the reference `Open` and `Advance` are shaped to avoid handing out. Reading inside
+// `Advance` puts the store and the texture space on the stack at the moment a `wl_surface.commit`
+// arrives, so a host retains neither.
+//
+// **What the root does own is the flush**, because the root owns the wait. Everything gyro owes its
+// clients back — a frame callback, a `wl_buffer.release` — is queued during the step and has to leave
+// before the thread parks, and only the root knows when that is. A host flushing at the top of its own
+// next `Advance` would hold a frame callback until something else woke dispatch, and with a settled
+// world and a client waiting on exactly that callback, nothing would.
 //
 // The two verbs are separate because they run at different rates and answer different questions:
 // `Open` builds a tree and can fail, `Advance` mutates one and cannot. An `Advance` that returned a
