@@ -205,7 +205,7 @@ GYRO_TEST(Trace, TheSnapshotRunsAgainstALiveProducer)
 		{
 			for (std::uint64_t index = 0; index < 256; ++index)
 			{
-				TraceMark("tick", TraceThread, index);
+				TraceMark("tick", TraceThread, TraceTag(index));
 			}
 		}
 	} };
@@ -255,7 +255,9 @@ GYRO_TEST(Trace, ASuppliedStampIsWhatComesBack)
 	EnrollTracing(&ring.Buffer);
 
 	TraceMark("now");
-	TraceSpanAt("composite", Monotonic::FromNanoseconds(1'000), Monotonic::FromNanoseconds(3'000), TraceGpu(0), 7);
+	TraceSpanAt(
+		"composite", Monotonic::FromNanoseconds(1'000), Monotonic::FromNanoseconds(3'000), TraceGpu(0), TraceTag(7)
+	);
 
 	EnrollTracing(nullptr);
 
@@ -309,7 +311,7 @@ GYRO_TEST(Trace, ALateMarkKeepsItsMoment)
 
 	EnrollTracing(&ring.Buffer);
 	TraceMark("now");
-	TraceMarkAt("presented", Monotonic::FromNanoseconds(500), TraceOutput(0), 12);
+	TraceMarkAt("presented", Monotonic::FromNanoseconds(500), TraceOutput(0), TraceTag(12));
 	EnrollTracing(nullptr);
 
 	std::array<TraceEvent, 4> into{};

@@ -178,6 +178,7 @@ constexpr std::uint32_t TypeField = 9;
 constexpr std::uint32_t TrackUuidField = 11;
 constexpr std::uint32_t NameIdField = 10;
 constexpr std::uint32_t FlowField = 47;
+constexpr std::uint32_t InlineNameField = 23;
 constexpr std::uint32_t CounterValueField = 30;
 constexpr std::uint32_t DescriptorNameField = 2;
 
@@ -245,11 +246,15 @@ At(std::int64_t nanoseconds,
    TraceKind kind,
    const char* name,
    std::uint64_t payload = 0,
-   std::uint16_t scope = TraceThread)
+   std::uint16_t scope = TraceThread,
+   bool arrow = false)
 {
-	return TraceEvent{
-		.Stamp = Monotonic::FromNanoseconds(nanoseconds), .Name = name, .Payload = payload, .Scope = scope, .Kind = kind
-	};
+	return TraceEvent{ .Stamp = Monotonic::FromNanoseconds(nanoseconds),
+		               .Name = name,
+		               .Payload = payload,
+		               .Scope = scope,
+		               .Kind = kind,
+		               .Arrow = arrow };
 }
 
 constexpr std::uint64_t SliceBegin = 1;
@@ -340,7 +345,7 @@ GYRO_TEST(Perfetto, AnOutputGetsARowOfItsOwn)
 	const std::vector<std::byte> trace = EncodeTrace(TraceIdentity{ .Pid = 7 }, sources);
 	const std::vector<std::string> names = DescriptorNames(trace);
 
-	GYRO_CHECK(Names(names, "output 1"));
+	GYRO_CHECK(Names(names, "output 1 frame"));
 	GYRO_CHECK(Names(names, "output 1 gpu"));
 
 	// The counter is a track of its own, parented to the row it is about.
@@ -381,9 +386,9 @@ GYRO_TEST(Perfetto, AFlowIdRidesOnTheSliceThatCarriesIt)
 {
 	// The arrow from the publish that produced a snapshot to the acquire that took it, which is the one
 	// thing a two-thread compositor is asked about most and the one thing two unrelated rows cannot say.
-	const std::vector<TraceEvent> published{ At(1'000, TraceKind::Begin, "publish", 77),
+	const std::vector<TraceEvent> published{ At(1'000, TraceKind::Begin, "publish", 77, TraceThread, true),
 		                                     At(1'500, TraceKind::End, nullptr) };
-	const std::vector<TraceEvent> acquired{ At(2'000, TraceKind::Begin, "acquire", 77),
+	const std::vector<TraceEvent> acquired{ At(2'000, TraceKind::Begin, "acquire", 77, TraceThread, true),
 		                                    At(2'500, TraceKind::End, nullptr) };
 
 	const std::array sources{ TraceSource{ .Name = "dispatch", .Tid = 2, .Events = published },
@@ -477,4 +482,96 @@ GYRO_TEST(Perfetto, NothingRecordedIsStillAValidTrace)
 	// rather than refusing the file.
 	GYRO_CHECK(!trace.empty());
 	GYRO_CHECK_EQ(CountEvents(trace, SliceBegin), std::size_t{ 0 });
+}
+
+// A labelled record spells its number into its name, which is what lets one frame be found on five
+// rows by reading them rather than by following an arrow between each pair. The name is written out
+// rather than interned because `frame 142` is used once and a table of four hundred single-use strings
+// is a table nobody reads twice.
+GYRO_TEST(Perfetto, ALabelIsSpelledIntoTheName)
+{
+	const std::vector<TraceEvent> events{ At(1'000, TraceKind::Begin, "frame", 142),
+		                                  At(2'000, TraceKind::End, nullptr) };
+	const std::array sources{ TraceSource{ .Name = "frame", .Events = events } };
+
+	const std::vector<std::byte> trace = EncodeTrace(TraceIdentity{ .Pid = 7 }, sources);
+
+	bool named = false;
+
+	for (const Field& packet : Packets(trace))
+	{
+		const std::optional<Field> event = Find(packet.Bytes, TrackEventField);
+
+		if (!event)
+		{
+			continue;
+		}
+
+		if (const std::optional<Field> name = Find(event->Bytes, InlineNameField))
+		{
+			named = named || std::string_view{ reinterpret_cast<const char*>(name->Bytes.data()),
+				                               name->Bytes.size() } == "frame 142";
+		}
+	}
+
+	GYRO_CHECK(named);
+}
+
+// A label draws no arrow unless it was asked to. Every flow this trace used to carry said only *these
+// slices are the same frame* — eight of them per frame, three thousand in a seven-second capture — and
+// the name above says it without drawing anything.
+GYRO_TEST(Perfetto, ATagCarriesNoFlow)
+{
+	const std::vector<TraceEvent> events{ At(1'000, TraceKind::Begin, "frame", 142),
+		                                  At(2'000, TraceKind::End, nullptr) };
+	const std::array sources{ TraceSource{ .Name = "frame", .Events = events } };
+
+	const std::vector<std::byte> trace = EncodeTrace(TraceIdentity{ .Pid = 7 }, sources);
+
+	std::size_t flows = 0;
+
+	for (const Field& packet : Packets(trace))
+	{
+		const std::optional<Field> event = Find(packet.Bytes, TrackEventField);
+
+		if (event && Find(event->Bytes, FlowField))
+		{
+			++flows;
+		}
+	}
+
+	GYRO_CHECK_EQ(flows, std::size_t{ 0 });
+}
+
+// One screen's rows are declared consecutively and in the order a frame happens, so that reading down
+// a column is reading the life of a frame. Grouped the other way — every output's GPU row together —
+// two monitors put four rows between a frame and its own pixels.
+GYRO_TEST(Perfetto, AnOutputsRowsAreDeclaredInTheOrderAFrameHappens)
+{
+	const std::vector<TraceEvent> events{ At(1'000, TraceKind::Mark, "glass", 0, TraceGlass(0)),
+		                                  At(1'100, TraceKind::Mark, "gpu", 0, TraceGpu(0)),
+		                                  At(1'200, TraceKind::Mark, "grid", 0, TraceGrid(0)),
+		                                  At(1'300, TraceKind::Mark, "frame", 0, TraceOutput(0)) };
+	const std::array sources{ TraceSource{ .Name = "frame", .Events = events } };
+
+	const std::vector<std::byte> trace = EncodeTrace(TraceIdentity{ .Pid = 7 }, sources);
+	const std::vector<std::string> names = DescriptorNames(trace);
+
+	std::vector<std::string> rows;
+
+	for (const std::string& name : names)
+	{
+		if (name.starts_with("output "))
+		{
+			rows.push_back(name);
+		}
+	}
+
+	// Declared in lane order rather than in the order a lane first spoke, which above is deliberately
+	// backwards.
+	GYRO_REQUIRE_EQ(rows.size(), std::size_t{ 4 });
+	GYRO_CHECK_EQ(rows[0], std::string{ "output 0 refresh" });
+	GYRO_CHECK_EQ(rows[1], std::string{ "output 0 frame" });
+	GYRO_CHECK_EQ(rows[2], std::string{ "output 0 gpu" });
+	GYRO_CHECK_EQ(rows[3], std::string{ "output 0 glass" });
 }

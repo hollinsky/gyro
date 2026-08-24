@@ -201,10 +201,12 @@ public:
 		// because this ran.
 		// Read before the publish because the ring's answer is idempotent until one is consumed, and
 		// after the seal for the same reason the seal is where it is: this is the number the scene about
-		// to cross will carry, and it is the flow id the frame thread's `acquired` mark will match.
+		// to cross will carry, and it is the number every row downstream of here is named for — the
+		// `acquired` mark it draws an arrow to, and the slice on the glass row that says which scene a
+		// person was looking at.
 		const std::uint64_t sequence = m_Outbox.NextSequence();
 
-		TraceSpan serialize{ "serialize", TraceThread, TraceFlowId(TraceFlow::Snapshot, sequence) };
+		TraceSpan serialize{ "serialize", TraceThread, TraceTag(sequence) };
 
 		const bool published = m_Outbox.Publish(m_Serializer.Serialize(m_Store));
 
@@ -214,7 +216,7 @@ public:
 		{
 			++m_Publications;
 
-			TraceMark("published", TraceThread, TraceFlowId(TraceFlow::Snapshot, sequence));
+			TraceMark("published", TraceThread, TraceFlow(TraceDomain::Scene, sequence));
 		}
 		else
 		{
@@ -223,7 +225,7 @@ public:
 			// The frame thread being four publishes behind, which is the one thing on this row that is
 			// about the *other* row. Counted already; marked here because a run of these beside a gap in
 			// the frame thread's iterations is the pair that names which side is late.
-			TraceMark("deferred", TraceThread, TraceFlowId(TraceFlow::Snapshot, sequence));
+			TraceMark("deferred", TraceThread, TraceFlow(TraceDomain::Scene, sequence));
 		}
 
 		TraceCount("watermark", static_cast<std::int64_t>(m_Outbox.Watermark()));

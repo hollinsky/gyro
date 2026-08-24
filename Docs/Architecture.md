@@ -2030,7 +2030,7 @@ mistake the second domain for a now the schedule may decide against.
 **A GPU row is a real row, because the composite is placed rather than merely measured.**
 `VK_EXT_calibrated_timestamps` reads the device counter and `CLOCK_MONOTONIC` in one window, so a
 submission's timestamps convert into instants on the same timeline as everything else and the composite
-is drawn under the iteration that submitted it, with a flow arrow between them. The span is cut where
+is drawn under the frame that submitted it, carrying that frame's number rather than an arrow to it. The span is cut where
 the command buffer already synchronises — composite, extract, blur, resumed composite — and never
 inside a render pass, because a mark between two draws would order two things the hardware was
 overlapping and the instrument would be reporting the cost it had just created. What decomposes a pass
@@ -2039,45 +2039,72 @@ panel's pixels is how much of the screen gyro drew twice and divided by the span
 is achieving. None of it touches what the frame loop is fed — the cost is still the first stamp
 against the last — so tracing can be switched on without moving the tier a panel draws at.
 
-**Five things a trace is asked, and what answers each.** *Was the frame late or was it stale* — the
-flow arrow from the dispatch thread's publish to the frame thread's acquire, keyed on the snapshot
-sequence. The arrow is drawn once per link and not once per iteration: `acquired` is marked where the
-held snapshot *changed*, and `presented` carries the sequence only on the first flip that showed it,
-because Perfetto chains every event sharing a flow id and a mark re-emitted on an iteration that
-acquired nothing links a publication to itself. What the frame thread is holding *between* those
-events is the `held` counter, sampled every iteration precisely because it is a state and not an
-event. A flow id also carries the domain that minted it in its top bits — the snapshot sequence and
-the renderer's submission value are independent counters that both start near one, and untagged they
-splice a Vulkan composite into a scene it had nothing to do with. *Did the frame fit its budget* —
-the `frame` span on the output's deadline row, which runs from the instant the iteration read the
-clock to the deadline the frame was admitted against, so a frame that overran is work on the row
-above reaching past the end of the span below. It is a row of its own rather than a slice the work
-nests inside because the case worth seeing is a child outliving its parent, which nesting cannot
-draw. Its flow is the renderer's submission value rather than the snapshot, for the reason above read
-the other way: many frames are drawn from one publication, so a budget keyed on the scene would fan an
-arrow per redraw, where the submission is one per frame and lands on the composite the budget was
-spent on. It exists at all because the other rows are drawn in units of loop iteration, which is not
-a frame — a ten-second capture held eighteen hundred iterations and five hundred and eighty-seven
-frames, the rest being the loop waking, finding the commit queue full and going back to sleep. *Why
-did the frame wait* — the `commit full` span on the output's blocked lane, which runs from where the
-output first found the queue full with a frame it wanted to make to the flip that freed the slot. It
-is the other half of a publication's latency and usually the larger one: a scene published a moment
-after this output committed waits a whole refresh for the frame in front of it, and then a second for
-the vblank its own commit targets. It is a lane rather than a slice on the deadline row because a wait
-overlaps the budget of the frame ahead of it — that is what a pipeline is — and it opens only for an
-output that wanted the frame, since an idle panel with a commit in flight is full too and is waiting
-for nothing. *Which recorded frame was actually on the glass at a given vblank* — the `presented` mark
-on the output's own row, stamped at the host's presentation instant rather than the one the feedback
-was drained at, with the flow extended to it, and the `shown` counter that steps beside it to the
-published sequence the frame was drawn from: the counter reads as what the panel is showing between
-flips, so a run of steps at the same number is the same scene shown twice and a vblank with no step
-is one the host spent on a frame gyro did not draw. *Which part of the iteration was slow* — the
-nested spans, since the whole point of drawing `evaluate`, `record` and `present` separately is that
-they fail for unrelated reasons. *Is this machine about to start dropping frames* — the slack counter,
-which trends toward zero over a hundred frames and is invisible in any one of them.
+**A frame is one object, and every row that draws it says its number.** This is the whole of what
+makes a capture readable, and it was learned by producing one that was not: seven seconds of
+`--gym=materials` on a Tiger Lake iGPU, correct in every particular, that took an afternoon to read.
+Each row had been drawn in the units of whatever produced it — the frame thread's in loop iterations,
+of which there are three per refresh and one is the frame; the GPU's in passes, seven flat siblings
+with three called `composite` — and the thing joining them was eight flow arrows per frame, three
+thousand in the capture, each saying only *these slices are the same frame*. So a label is spelled
+into the name instead. `frame 142` on the refresh ruler, on the frame thread's row, on the GPU row
+and in the flight lane is four drawings of one object, joined by reading, or by searching the words
+and having every row light up at once. It costs no line, it survives the two ends being scrolled
+apart, and it does not degrade as the capture gets longer.
 
-See [decision 139](Decisions.md#139-the-trace-ring-is-always-armed-and-the-format-is-somebody-elses)
-and [decision 140](Decisions.md#140-a-composite-is-cut-at-its-barriers-and-counted-by-its-fragments).
+**One arrow is left, and it joins the two things that count differently.** A publication is numbered
+by the dispatch thread and a frame by the panel it is shown on, so no name on either side can find
+the other. It runs from the dispatch thread's `published` to the frame thread's `acquired`, and it is
+drawn once per link rather than once per iteration: `acquired` is marked where the held snapshot
+*changed*, because Perfetto chains every event sharing a flow id and a mark re-emitted on an
+iteration that acquired nothing links a publication to itself. What the frame thread is holding
+*between* those events is the `held` counter, sampled every iteration precisely because it is a state
+and not an event.
+
+**One screen's rows are consecutive and run in the order a frame happens.** Reading down a column is
+reading the life of a frame; a stutter is a step that is wide or a step that is missing.
+
+*The refresh ruler* is the top row and it tiles: one slice per refresh interval, ending at the
+deadline the frame was admitted against, so every other row is read against it. Each tile begins
+where the last one ended, which is remembered rather than recomputed — the clock re-anchors on every
+flip, so its answer for the previous deadline drifts by microseconds, and Perfetto has no *slightly
+overlapping*: a tile starting a microsecond early becomes a child of its neighbour. A tile wider than
+one refresh is a refresh gyro drew nothing for. It is a row of its own rather than a slice the work
+nests inside, because the case worth seeing is a child outliving its parent, which nesting cannot
+draw.
+
+*The frame thread's row* is one slice per frame, containing `evaluate`, `record` and `present` —
+drawn separately because they fail for unrelated reasons. A wake that declines to draw is one mark
+naming the reason instead: `queue full`, `over budget`, `idle`. Two thirds of this loop's wakes are
+the panel still holding the frame in front, and drawing them the same shape as a frame is what made
+the old picture unreadable.
+
+*The GPU row* is the batch, named for the frame, with the passes nested inside it and each carrying
+its position in the run. `VK_EXT_calibrated_timestamps` is what places it: the device counter and
+`CLOCK_MONOTONIC` are read in one window, so the composite is drawn under the frame that submitted it
+rather than under the iteration that read it back two frames later. `gpu cost` is sampled beside it,
+so what a frame cost sits on the same axis as the `gpu mark` admission was fed.
+
+*The flight lanes* are the wait between the present that hands a frame over and the vblank that shows
+it — on a sixty hertz panel a whole refresh in which the frame appears in no other row. There are
+several because commits complete in the order they were made, so frame N opens before N+1 and closes
+before it, which is the one shape a track refuses; a lane per commit slot is the honest drawing
+anyway, since how many lanes are occupied at an instant is the queue depth read without a counter.
+
+*The glass row* is what a person saw. One slice per scene rather than per vblank, opened at the
+host's presentation instant rather than where the feedback was drained — a slice placed where the
+loop *learned* of a flip moves with every late wake, and would read a stutter of the reader as a
+lateness of the host — and running until the scene changes, so its width is how long somebody was
+looking at one picture. It is the only row in the trace about what happened rather than about what
+gyro did.
+
+**And two counters that trend.** *Is this machine about to start dropping frames* — the slack
+counter, which walks toward zero over a hundred frames and is invisible in any one of them. *Was a
+long span work or a low clock* — the operating point sampled beside each batch, which is what turns
+a slow part into a parked one.
+
+See [decision 139](Decisions.md#139-the-trace-ring-is-always-armed-and-the-format-is-somebody-elses),
+[decision 140](Decisions.md#140-a-composite-is-cut-at-its-barriers-and-counted-by-its-fragments) and
+[decision 144](Decisions.md#144-a-frame-is-one-object-drawn-on-five-rows-and-the-rows-say-its-number-rather-than-pointing-at-each-other).
 
 ## Sessions and users
 

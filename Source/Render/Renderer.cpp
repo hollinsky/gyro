@@ -1488,6 +1488,7 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		pending.Generation = request.CostGeneration;
 		pending.Mode = request.Mode;
 		pending.Trace = request.Trace;
+		pending.Frame = request.Frame;
 
 		// Sampled here, near the work, rather than at collection frames later where the clock has moved.
 		// `started` is this record's `Now()`, a few hundred microseconds stale against a reading that is
@@ -2400,10 +2401,28 @@ void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uin
 
 	const DeviceDescription& description = m_Device->Description();
 
-	// The flow id is the timeline value, tagged with its domain because the snapshot sequence counts
-	// publications from one and would otherwise splice a composite into a scene it had nothing to do
-	// with. It is the number Frame/Loop.h's `frame` budget span carries — so a reader clicking the
-	// composite arrives at the frame that asked for it rather than at the one that read it back.
+	const Instant opened = TimestampAt(description, m_Calibration, stamps[0]);
+	const Instant closed = TimestampAt(description, m_Calibration, stamps[pending.Stamps - 1]);
+
+	// **The batch is a slice and the passes are inside it, which is the whole of what this row was
+	// missing.** A frame's device work is a run — composite, extract, blur, resumed composite, and
+	// twice more for a second glass node — and it used to be emitted as that run and nothing else:
+	// seven flat siblings, three of them named `composite`, with no boundary saying where one frame's
+	// work stopped and the next began. A reader asking *what did the GPU spend on this frame* was
+	// summing slices by eye.
+	//
+	// **Named for the frame rather than for the submission, and that is what replaced the arrows.**
+	// The run used to carry a flow id on every one of its seven spans, so clicking any of them fanned
+	// eight lines across four rows and a seven-second capture held three thousand of them — every one
+	// saying only *these are the same frame*, which the name now says without drawing anything. The
+	// number is the output's own frame sequence, so this slice and the one on the frame thread's row
+	// are the same words and a search finds both.
+	TraceSpanAt("frame", opened, closed, pending.Trace, TraceTag(pending.Frame));
+
+	// **Each pass carries its position in the run**, because three siblings called `composite` inside
+	// one parent is still three siblings called `composite`. `composite 0`, `extract 1`, `blur 2`,
+	// `composite 3` reads as the chain it is, and the numbers are the stamp indices the driver actually
+	// wrote — so a run that lost a pass shows as a gap in the counting rather than as nothing.
 	for (std::uint32_t index = 0; index + 1 < pending.Stamps; ++index)
 	{
 		if (pending.Names[index] == nullptr)
@@ -2416,20 +2435,21 @@ void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uin
 			TimestampAt(description, m_Calibration, stamps[index]),
 			TimestampAt(description, m_Calibration, stamps[index + 1]),
 			pending.Trace,
-			TraceFlowId(TraceFlow::Submission, pending.Submit)
+			TraceTag(index)
 		);
 	}
+
+	// **What the frame actually cost on the device, beside what it was predicted to cost.** Frame/Loop.h
+	// samples `gpu mark` where the admission test reads it; this is the measurement that mark is an
+	// estimate of, and the two are only comparable because they are on the same axis in nanoseconds.
+	// A trace that carried only the prediction was asking a reader to trust it.
+	TraceElapsedAt("gpu cost", closed, description.TimestampSpan(stamps[0], stamps[pending.Stamps - 1]), pending.Trace);
 
 	// The operating point beside the spans, so a reader sees the clock the composite was measured at
 	// without leaving the trace — decision 142's number, and the one that turns the fragment rate below
 	// from a slow part into a parked one. Emitted whether or not the device counts fragments, because it
 	// answers a question the timestamps alone cannot: whether a long span was work or a low clock.
-	TraceCountAt(
-		"clock (MHz)",
-		TimestampAt(description, m_Calibration, stamps[pending.Stamps - 1]),
-		static_cast<std::int64_t>(pending.ClockMhz),
-		pending.Trace
-	);
+	TraceCountAt("clock (MHz)", closed, static_cast<std::int64_t>(pending.ClockMhz), pending.Trace);
 
 	if (m_Statistics == VK_NULL_HANDLE)
 	{
@@ -2455,12 +2475,7 @@ void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uin
 	// Stamped at the end of the batch rather than at the start, because a counter in Perfetto steps at
 	// the sample and holds until the next one — and what this figure describes is a submission that
 	// has finished, not one that is about to.
-	TraceCountAt(
-		"fragments",
-		TimestampAt(description, m_Calibration, stamps[pending.Stamps - 1]),
-		static_cast<std::int64_t>(fragments),
-		pending.Trace
-	);
+	TraceCountAt("fragments", closed, static_cast<std::int64_t>(fragments), pending.Trace);
 }
 
 void VulkanRenderer::Destroy() noexcept

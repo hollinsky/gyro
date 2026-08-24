@@ -39,9 +39,12 @@
 // `TraceEvent` the snapshot writer consumes. The clock is reachable; the now is not.
 //
 // **A name is a pointer to a string literal and is never copied, hashed, or formatted here.** The
-// snapshot writer interns them, which it can afford to do because it runs on its own thread, off both
-// loops. That is also why there is no formatted trace event and never will be: a message with a value
-// in it is a counter, and a counter is a number.
+// snapshot writer interns them, and where a record carries a `TraceLabel` it is the writer that spells
+// the number into the name — which it can afford because it runs on its own thread, off both loops.
+// The rule this leaves intact is the one that mattered: a call site hands over a literal and a word,
+// never a string it built. There is still no *formatted message*, because a message with a value in it
+// is a counter and a counter is a number; what a label adds is an identity, which is the one thing a
+// counter cannot carry and the one thing every row of a frame has to agree on.
 
 // What a record says happened. `Begin` and `End` nest into a slice on the record's track; `Mark` is an
 // instant; `Count` and `Elapsed` are the same counter sample differing only in what the writer labels
@@ -55,73 +58,149 @@ enum class TraceKind : std::uint8_t
 	Elapsed = 4,
 };
 
-// How many outputs a trace can name a track for. Frame/Admission.h's `MaxOutputs` is the number this
+// How many outputs a trace can name rows for. Frame/Admission.h's `MaxOutputs` is the number this
 // may not be smaller than, and Frame/Loop.h static_asserts that rather than this header reaching up a
 // tier for it — the Trace module cannot, since it depends on `Core` alone and may not say `MaxOutputs`.
 inline constexpr std::size_t TracedOutputs = 16;
 
-// Which track a record lands on, relative to the thread that emitted it.
+// How many commits a trace can draw as lanes. Seam/RenderTarget.h's `MaxTargets` bounds what any
+// presenter will take, and the same rule as above keeps the number here rather than reached for.
+inline constexpr std::size_t TracedFlights = 4;
+
+// Which row a record lands on, relative to the thread that emitted it.
 //
-// Zero is the emitting thread's own track, which is where a slice belongs unless it is about one
-// screen in particular. The rest are the compositor's tracks rather than a thread's: an output has a
-// row of its own so that a person looking at a stutter on one panel is not reading four panels
-// interleaved, and its GPU work has a second row because that work is not on any thread at all.
+// **Zero is the emitting thread's own row and every other row belongs to one output.** A thread's row
+// holds what the thread did; an output's rows hold what happened to one screen, which outlives
+// whichever thread said it and is the unit a person actually reads a compositor in.
 inline constexpr std::uint16_t TraceThread = 0;
 
+// **The lanes of one output are consecutive, so a reader scrolls to a screen rather than to a kind.**
+// The rows were previously grouped the other way — every output's GPU row together, every output's
+// deadline row together — which reads fine with one monitor and puts four screens' worth of rows
+// between a frame and its own pixels with two.
+inline constexpr std::uint16_t TraceLanesPerOutput = static_cast<std::uint16_t>(4 + TracedFlights);
+
+[[nodiscard]] constexpr std::uint16_t TraceLane(std::size_t output, std::uint16_t lane) noexcept
+{
+	const std::size_t clamped = output < TracedOutputs ? output : 0;
+
+	return static_cast<std::uint16_t>(1 + clamped * TraceLanesPerOutput + lane);
+}
+
+// **The rows are declared in the order a frame happens, because that is the order a person reads.**
+// Down one output's lanes is the life of a frame: the refresh it was aimed at, the work that built it,
+// the work the device did, the wait for the panel, and the pixels a person saw. A stutter is a step
+// that is wide, or a step that is missing, and either way the eye finds it by going down a column.
+
+// The ruler. One slice per refresh interval, ending at the deadline the frame was admitted against, so
+// the row tiles the timeline and every other row can be read against it. It is a row of its own rather
+// than a slice the work nests inside because the case worth seeing is the child outliving the parent,
+// which nesting cannot draw.
+[[nodiscard]] constexpr std::uint16_t TraceGrid(std::size_t output) noexcept
+{
+	return TraceLane(output, 0);
+}
+
+// The frame thread's work for this output: one slice per frame, and one mark per wake that declined.
 [[nodiscard]] constexpr std::uint16_t TraceOutput(std::size_t output) noexcept
 {
-	return static_cast<std::uint16_t>(1 + (output < TracedOutputs ? output : 0));
+	return TraceLane(output, 1);
 }
 
+// The device's work, which is on no thread at all — it is the queue, and a person reading a dropped
+// frame needs to see it beside the record that submitted it rather than inside it.
 [[nodiscard]] constexpr std::uint16_t TraceGpu(std::size_t output) noexcept
 {
-	return static_cast<std::uint16_t>(1 + TracedOutputs + (output < TracedOutputs ? output : 0));
+	return TraceLane(output, 2);
 }
 
-// The third row, and it holds what the output was *aiming at* rather than what it did. A budget is a
-// span whose end is a deadline, so a frame that overran is a span on the row above that reaches past
-// the end of the one here — which is the whole reason this is a row of its own and not a slice the
-// work nests inside. Nesting cannot express a child outliving its parent, and the overrun is the one
-// case the picture exists for.
-[[nodiscard]] constexpr std::uint16_t TraceDeadline(std::size_t output) noexcept
+// **The wait between a frame being submitted and the pixels landing, and the lane is the commit slot.**
+// This is the extent nothing in the trace used to draw: a frame handed to the presenter is gone from
+// every row until a vblank mentions it, and on a sixty hertz panel that is a whole refresh a person is
+// trying to account for. It could not be one row, because commits complete in the order they were made
+// and a track's slices have to nest — so frame N would open before N+1 and close before it, which is
+// the one shape Perfetto refuses. A lane per slot is the honest drawing anyway: how many lanes are
+// occupied at an instant *is* the queue depth, read without a counter.
+[[nodiscard]] constexpr std::uint16_t TraceFlight(std::size_t output, std::size_t slot) noexcept
 {
-	return static_cast<std::uint16_t>(1 + 2 * TracedOutputs + (output < TracedOutputs ? output : 0));
+	return TraceLane(output, static_cast<std::uint16_t>(3 + (slot < TracedFlights ? slot : 0)));
 }
 
-// The fourth row, and it holds what the output was *unable to do*. A wait overlaps the budget of the
-// frame ahead of it — that is what a pipeline is — and the flip that ends the wait is the flip that
-// was late, so on the deadline row it would be a slice starting inside its neighbour and ending after
-// it, which is the improper nesting that row exists to avoid. Its own lane costs nothing: a scope with
-// no records in it never gets a track.
-[[nodiscard]] constexpr std::uint16_t TraceBlocked(std::size_t output) noexcept
+// What is on the glass. One slice per vblank, tiling, named for the scene it showed — so a scene shown
+// twice is one wide slice rather than two marks a reader has to notice are the same number.
+[[nodiscard]] constexpr std::uint16_t TraceGlass(std::size_t output) noexcept
 {
-	return static_cast<std::uint16_t>(1 + 3 * TracedOutputs + (output < TracedOutputs ? output : 0));
+	return TraceLane(output, static_cast<std::uint16_t>(3 + TracedFlights));
 }
 
-inline constexpr std::uint16_t TraceScopes = static_cast<std::uint16_t>(1 + 4 * TracedOutputs);
+inline constexpr std::uint16_t TraceScopes = static_cast<std::uint16_t>(1 + TracedOutputs * TraceLanesPerOutput);
 
-// Which chain a flow id belongs to.
+// Which chain an arrow belongs to.
 //
 // **A flow id is a name in one global space, and two unrelated chains that pick the same number are
 // spliced into one.** That is not a theoretical hazard: the snapshot sequence counts publications and
-// the submission value counts queue submits, both start near one, and a trace of ten seconds had
+// an output's frame sequence counts vblanks, both start near one, and a trace of ten seconds had
 // forty-two chains in which a Vulkan composite was linked to a scene it had nothing to do with. So
 // every id carries the domain that minted it in its top bits, and the domains are enumerated here
 // rather than agreed on by convention at four call sites.
-enum class TraceFlow : std::uint64_t
+enum class TraceDomain : std::uint64_t
 {
-	Snapshot = 1,
-	Submission = 2,
+	Scene = 1,
+	Frame = 2,
 };
 
-// **Zero is not tagged, because zero is how a call site says *no flow at all*.** Trace/Perfetto.cpp
-// suppresses the field on a zero payload, and a vblank that showed a frame this compositor did not
-// draw relies on that: tagging it would turn *nothing to link to* into a chain of its own.
-[[nodiscard]] constexpr std::uint64_t TraceFlowId(TraceFlow domain, std::uint64_t value) noexcept
+// What a record carries beside its name.
+//
+// **The number is printed into the name, and that is the change the whole picture turned on.** A trace
+// used to join one frame's rows with arrows: the budget, the composite, the extract, the blur and the
+// resumed composite all carried one id, so clicking any of them fanned eight lines across four rows and
+// a seven-second capture held three thousand of them. What a person wanted from all that machinery was
+// to know the slices were the same frame — and a slice that simply *says* `frame 142` answers it
+// without drawing anything, keeps answering it when the two ends are scrolled apart, and lets a search
+// for `frame 142` light up every row at once. So a label is printed by default and an arrow is the
+// exception.
+//
+// **An arrow is for a join where the two sides count differently**, which after the change is one join
+// and not eight: a publication is numbered by the dispatch thread and a frame by the panel, so nothing
+// in the name of one can find the other and only a line can say which scene a frame drew. `TraceTag`
+// is everything else.
+//
+// **Zero is no label at all**, which is how a call site says it has nothing to add — Trace/Perfetto.cpp
+// suppresses both the suffix and the arrow on a zero value. A vblank that showed a frame this
+// compositor did not draw relies on it: labelling it would turn *nothing to say* into a name.
+class TraceLabel
+{
+public:
+	constexpr TraceLabel() = default;
+
+	[[nodiscard]] constexpr std::uint64_t Value() const noexcept { return m_Value; }
+
+	[[nodiscard]] constexpr bool IsArrow() const noexcept { return m_Arrow; }
+
+	[[nodiscard]] constexpr bool IsEmpty() const noexcept { return m_Value == 0; }
+
+private:
+	friend constexpr TraceLabel TraceTag(std::uint64_t) noexcept;
+	friend constexpr TraceLabel TraceFlow(TraceDomain, std::uint64_t) noexcept;
+
+	constexpr TraceLabel(std::uint64_t value, bool arrow) noexcept : m_Value{ value }, m_Arrow{ arrow } {}
+
+	std::uint64_t m_Value = 0;
+	bool m_Arrow = false;
+};
+
+// The number this record is about, printed beside its name and joined to nothing.
+[[nodiscard]] constexpr TraceLabel TraceTag(std::uint64_t value) noexcept
+{
+	return TraceLabel{ value, false };
+}
+
+// The same, and an arrow through every record that names the same id in the same domain.
+[[nodiscard]] constexpr TraceLabel TraceFlow(TraceDomain domain, std::uint64_t value) noexcept
 {
 	constexpr std::uint64_t Mask = (std::uint64_t{ 1 } << 60) - 1;
 
-	return value == 0 ? 0 : (static_cast<std::uint64_t>(domain) << 60) | (value & Mask);
+	return value == 0 ? TraceLabel{} : TraceLabel{ (static_cast<std::uint64_t>(domain) << 60) | (value & Mask), true };
 }
 
 // A record as the ring holds it: every field separately atomic, because the reader is another thread
@@ -136,14 +215,14 @@ struct TraceRecord
 	std::atomic<Instant> Stamp{};
 	std::atomic<const char*> Name{ nullptr };
 
-	// A flow id on `Begin` and `Mark`, the counter's value on `Count` and `Elapsed`, and unread on
-	// `End`. A flow id is what draws the arrow from the publish that produced a snapshot to the acquire
-	// that took it, which is the one question a two-thread compositor is asked most often and the one a
-	// pair of unrelated slices cannot answer.
+	// A label's value on `Begin` and `Mark`, the counter's value on `Count` and `Elapsed`, and unread on
+	// `End`. A label is the number the slice is about — the frame, the scene — which the writer prints
+	// into the name, and which on the one join that needs it also draws an arrow. See `TraceLabel`.
 	std::atomic<std::uint64_t> Payload{ 0 };
 
-	// Kind in the low byte, track in the next two. One word so that the record's tail is not three
-	// separate atomics the reader has to agree with each other about.
+	// Kind in the low byte, row in the next two, and whether the payload draws an arrow in the byte
+	// above them. One word so that the record's tail is not four separate atomics the reader has to
+	// agree with each other about.
 	std::atomic<std::uint32_t> Detail{ 0 };
 };
 
@@ -160,14 +239,20 @@ struct TraceEvent
 	std::uint64_t Payload = 0;
 	std::uint16_t Scope = TraceThread;
 	TraceKind Kind = TraceKind::Mark;
+
+	// Whether `Payload` is a flow id the writer should draw a line through, as against a number it
+	// should only print. See `TraceLabel`.
+	bool Arrow = false;
 };
 
 namespace Detail
 {
 
-[[nodiscard]] constexpr std::uint32_t PackTrace(TraceKind kind, std::uint16_t scope) noexcept
+inline constexpr std::uint32_t TraceArrowBit = std::uint32_t{ 1 } << 24;
+
+[[nodiscard]] constexpr std::uint32_t PackTrace(TraceKind kind, std::uint16_t scope, bool arrow = false) noexcept
 {
-	return static_cast<std::uint32_t>(kind) | (static_cast<std::uint32_t>(scope) << 8);
+	return static_cast<std::uint32_t>(kind) | (static_cast<std::uint32_t>(scope) << 8) | (arrow ? TraceArrowBit : 0U);
 }
 
 } // namespace Detail
@@ -205,14 +290,14 @@ public:
 	// difference between this and the capacity is how much of the run has already been overwritten.
 	[[nodiscard]] std::uint64_t Written() const noexcept { return m_Written.load(std::memory_order_acquire); }
 
-	void Emit(TraceKind kind, const char* name, std::uint64_t payload, std::uint16_t scope) noexcept
+	void Emit(TraceKind kind, const char* name, std::uint64_t payload, std::uint16_t scope, bool arrow = false) noexcept
 	{
 		if (m_Records.empty())
 		{
 			return;
 		}
 
-		EmitAt(m_Clock->Now(), kind, name, payload, scope);
+		EmitAt(m_Clock->Now(), kind, name, payload, scope, arrow);
 	}
 
 	// The same record with its time supplied rather than read, for the one thing that happens and is
@@ -225,7 +310,14 @@ public:
 	// covers would drift out of the window the frame-thread slice that submitted it covers, and the
 	// one question a GPU track is opened to answer is which of the two the frame was waiting on. One
 	// ring means one window. Trace/Recorder.h sorts what it copied, on a thread that can afford to.
-	void EmitAt(Instant stamp, TraceKind kind, const char* name, std::uint64_t payload, std::uint16_t scope) noexcept
+	void EmitAt(
+		Instant stamp,
+		TraceKind kind,
+		const char* name,
+		std::uint64_t payload,
+		std::uint16_t scope,
+		bool arrow = false
+	) noexcept
 	{
 		if (m_Records.empty())
 		{
@@ -238,7 +330,7 @@ public:
 		record.Stamp.store(stamp, std::memory_order_relaxed);
 		record.Name.store(name, std::memory_order_relaxed);
 		record.Payload.store(payload, std::memory_order_relaxed);
-		record.Detail.store(Detail::PackTrace(kind, scope), std::memory_order_relaxed);
+		record.Detail.store(Detail::PackTrace(kind, scope, arrow), std::memory_order_relaxed);
 
 		// The publish, and the only ordered store in the function. Everything above it is visible to a
 		// reader that acquires this, and everything after it is a record the reader will not copy.
@@ -277,7 +369,8 @@ public:
 				                      .Name = record.Name.load(std::memory_order_relaxed),
 				                      .Payload = record.Payload.load(std::memory_order_relaxed),
 				                      .Scope = static_cast<std::uint16_t>((detail >> 8) & 0xFFFFU),
-				                      .Kind = static_cast<TraceKind>(detail & 0xFFU) };
+				                      .Kind = static_cast<TraceKind>(detail & 0xFFU),
+				                      .Arrow = (detail & Detail::TraceArrowBit) != 0 };
 
 			++count;
 		}
@@ -347,11 +440,11 @@ inline void EnrollTracing(TraceBuffer* buffer) noexcept
 }
 
 // A point in time worth naming: a frame skipped, a target refused, a flip that landed.
-inline void TraceMark(const char* name, std::uint16_t scope = TraceThread, std::uint64_t flow = 0) noexcept
+inline void TraceMark(const char* name, std::uint16_t scope = TraceThread, TraceLabel label = {}) noexcept
 {
 	if (TraceBuffer* const buffer = Detail::Tracing)
 	{
-		buffer->Emit(TraceKind::Mark, name, flow, scope);
+		buffer->Emit(TraceKind::Mark, name, label.Value(), scope, label.IsArrow());
 	}
 }
 
@@ -388,12 +481,45 @@ inline void TraceElapsed(const char* name, Duration value, std::uint16_t scope =
 // measure zero — the counter's tick is 52 ns on the hardware this was written against — and a
 // conversion that came out backwards is a calibration defect the picture should show.
 inline void
-TraceSpanAt(const char* name, Instant began, Instant ended, std::uint16_t scope, std::uint64_t flow = 0) noexcept
+TraceSpanAt(const char* name, Instant began, Instant ended, std::uint16_t scope, TraceLabel label = {}) noexcept
 {
 	if (TraceBuffer* const buffer = Detail::Tracing)
 	{
-		buffer->EmitAt(began, TraceKind::Begin, name, flow, scope);
+		buffer->EmitAt(began, TraceKind::Begin, name, label.Value(), scope, label.IsArrow());
 		buffer->EmitAt(ended, TraceKind::End, nullptr, 0, scope);
+	}
+}
+
+// One end of a span whose other end is somewhere else entirely — the flight lanes, where a frame is
+// opened by the submission and closed by a vblank several milliseconds and one row of bookkeeping
+// later, and the glass row, where each slice is closed by the vblank that opens the next one. A
+// `TraceSpan` cannot express it: there is no scope either end lives in, and the two are separated by a
+// sleep. Balancing is the writer's, exactly as it is for the ring's own truncated ends.
+inline void TraceOpenAt(const char* name, Instant began, std::uint16_t scope, TraceLabel label = {}) noexcept
+{
+	if (TraceBuffer* const buffer = Detail::Tracing)
+	{
+		buffer->EmitAt(began, TraceKind::Begin, name, label.Value(), scope, label.IsArrow());
+	}
+}
+
+inline void TraceCloseAt(Instant ended, std::uint16_t scope) noexcept
+{
+	if (TraceBuffer* const buffer = Detail::Tracing)
+	{
+		buffer->EmitAt(ended, TraceKind::End, nullptr, 0, scope);
+	}
+}
+
+// The same, closed where control is rather than at a remembered instant, for the end that arrives as a
+// cancellation rather than as a completion: a commit dropped by a mode set is a frame whose flight
+// lane nothing will ever close, and a lane left open runs to the end of the trace as a slice claiming
+// the panel spent thirty seconds on one frame.
+inline void TraceClose(std::uint16_t scope) noexcept
+{
+	if (TraceBuffer* const buffer = Detail::Tracing)
+	{
+		buffer->Emit(TraceKind::End, nullptr, 0, scope);
 	}
 }
 
@@ -407,14 +533,25 @@ inline void TraceCountAt(const char* name, Instant stamp, std::int64_t value, st
 	}
 }
 
-// A mark belonging to a moment that has passed, for the same reason as the two above: a flip
-// happens at the panel's vblank and is only learned about when the feedback is drained, and what
-// is worth reading is the moment it happened rather than the moment it was reported.
-inline void TraceMarkAt(const char* name, Instant stamp, std::uint16_t scope, std::uint64_t flow = 0) noexcept
+// The same for a figure that is a duration, so that what a frame *cost* can be sampled where it was
+// measured and land on the same axis as what it was *predicted* to cost. Without it a trace carried
+// only the prediction, and an estimate with nothing beside it is a number a reader has to trust.
+inline void TraceElapsedAt(const char* name, Instant stamp, Duration value, std::uint16_t scope) noexcept
 {
 	if (TraceBuffer* const buffer = Detail::Tracing)
 	{
-		buffer->EmitAt(stamp, TraceKind::Mark, name, flow, scope);
+		buffer->EmitAt(stamp, TraceKind::Elapsed, name, static_cast<std::uint64_t>(value.count()), scope);
+	}
+}
+
+// A mark belonging to a moment that has passed, for the same reason as the two above: a flip
+// happens at the panel's vblank and is only learned about when the feedback is drained, and what
+// is worth reading is the moment it happened rather than the moment it was reported.
+inline void TraceMarkAt(const char* name, Instant stamp, std::uint16_t scope, TraceLabel label = {}) noexcept
+{
+	if (TraceBuffer* const buffer = Detail::Tracing)
+	{
+		buffer->EmitAt(stamp, TraceKind::Mark, name, label.Value(), scope, label.IsArrow());
 	}
 }
 
@@ -428,12 +565,12 @@ inline void TraceMarkAt(const char* name, Instant stamp, std::uint16_t scope, st
 class TraceSpan
 {
 public:
-	explicit TraceSpan(const char* name, std::uint16_t scope = TraceThread, std::uint64_t flow = 0) noexcept
+	explicit TraceSpan(const char* name, std::uint16_t scope = TraceThread, TraceLabel label = {}) noexcept
 		: m_Scope{ scope }
 	{
 		if (TraceBuffer* const buffer = Detail::Tracing)
 		{
-			buffer->Emit(TraceKind::Begin, name, flow, scope);
+			buffer->Emit(TraceKind::Begin, name, label.Value(), scope, label.IsArrow());
 		}
 	}
 

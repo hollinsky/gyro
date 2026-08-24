@@ -391,6 +391,12 @@ struct RecordRequest
 	// work is already a slice on the frame thread's own track.
 	std::uint16_t Trace = TraceThread;
 
+	// The frame this submission is, as the output's clock counts vblanks. It travels for `Trace`'s
+	// reason and it is what the GPU row's slices are *named* — `frame 142` on the device's row is the
+	// same words as `frame 142` on the frame thread's, which is how a reader joins the two without
+	// following an arrow across the intervening rows. Zero from a caller that has no frame to name.
+	std::uint64_t Frame = 0;
+
 	// `Budget::Generation()`, stamped onto whatever timestamp query this frame writes so that a sample
 	// resolving after a mode set can be dropped rather than filed against an output it does not
 	// describe. It travels in because the query is written here and read frames later; see

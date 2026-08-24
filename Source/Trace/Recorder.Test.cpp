@@ -128,7 +128,7 @@ GYRO_TEST(Recorder, ASnapshotWritesWhatBothThreadsSaid)
 		clock.Advance(std::chrono::milliseconds{ 1 });
 
 		const TraceSpan step{ "step" };
-		TraceMark("published", TraceThread, 12);
+		TraceMark("published", TraceThread, TraceFlow(TraceDomain::Scene, 12));
 	} };
 
 	other.join();

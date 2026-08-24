@@ -259,46 +259,51 @@ private:
 		// vblank showed, and zero where the host answered a commit this loop never made.
 		const std::uint64_t frame = m_InFlight > 0 ? m_InFlightSnapshots[0] : 0;
 
-		// **On the output's own row and at the host's timestamp, which is the point of tracing it here
-		// rather than counting it.** The stamp is `info.PresentedAt` and not the one the feedback was
-		// drained at, because the flip happened at the panel's vblank and a mark stamped where it was
-		// *learned* moves with every late wake of this loop: a stutter of the reader would read as a
-		// lateness of the host, which is the opposite of what the row is for. What a person is looking
-		// for is this mark landing at an even cadence; a frame that reached the glass late shows as a
-		// gap nothing in gyro's own slices explains, and that is the shape that says the answer is
-		// below us rather than in here.
+		// **The glass row, at the host's timestamp, and it is a slice rather than a mark.** The stamp is
+		// `info.PresentedAt` and not the one the feedback was drained at, because the flip happened at
+		// the panel's vblank and a row stamped where it was *learned* moves with every late wake of this
+		// loop: a stutter of the reader would read as a lateness of the host, which is the opposite of
+		// what the row is for.
 		//
-		// **The flow is the published sequence the frame was drawn from, and that extends the arrow
-		// the loop already carries on `acquired` to the glass.** It is the same number dispatch stamped
-		// on the publish, so a reader following it from a vblank lands on the `author` slice that wrote
-		// the scene the panel is showing; a vblank that showed somebody else's frame names nothing, and
-		// a flow of zero is no flow, which is the honest picture of one.
-		// **The flow rides only on the flip that first showed this scene.** A flip that showed the same
-		// snapshot again is a real event and keeps its mark, but it has nothing new to link to: the
-		// publish it would point at is already the far end of an arrow, and re-attaching it turns one
-		// scene's journey into a fan of forty. What *repetition* looks like is the `shown` counter
-		// stepping to the same number, which is the reading the counter is there for.
-		const bool first = frame > m_Shown;
+		// **It is an extent and it merges, which is the difference between this and the mark it
+		// replaces.** A mark said *a flip happened* and left a reader counting ticks to decide whether
+		// the cadence was even. A slice that runs until the scene *changes* says how long a person was
+		// looking at one picture — so every slice is one refresh wide on a compositor that is keeping
+		// up, and a stutter is a wide block seen without measuring anything. That is the row
+		// Docs/Experience.md's promise is read off, and it is the only row in the trace that is about
+		// what happened rather than about what gyro did.
+		//
+		// **A vblank that showed the same scene again therefore draws nothing**, and the cadence it
+		// would have shown is on the refresh row, where it belongs: the ruler is the ruler, and two
+		// rows spelling one fact is the habit that made these charts hard to read. What is lost is a
+		// repeat flip's own instant, which no question asked of this row wants.
+		//
+		// **The name is the published sequence the flip showed**, so searching for `scene 12` lights up
+		// the publish that wrote it, the acquire that took it, and every millisecond it was on the
+		// glass. A vblank that showed a frame gyro did not draw names nothing and says so.
+		if (frame != m_Glass)
+		{
+			TraceCloseAt(info.PresentedAt, m_TraceGlass);
+			TraceOpenAt("scene", info.PresentedAt, m_TraceGlass, frame != 0 ? TraceTag(frame) : TraceLabel{});
 
-		TraceMarkAt("presented", info.PresentedAt, m_Trace, first ? TraceFlowId(TraceFlow::Snapshot, frame) : 0);
+			m_Glass = frame;
+		}
 
 		if (m_InFlight == 0)
 		{
 			return;
 		}
 
-		// **The recorded frame the vblank showed, stepped where the vblank is.** A counter keeps the
-		// value it was last given, so between flips it reads as what is on the glass right now, and
-		// each step is a vblank that changed it: a run of steps at the same number is the same scene
-		// shown twice, and a vblank with no step is one the host spent on a frame gyro did not draw.
-		// The value is the published sequence rather than the panel's own counter because it is the
-		// one number dispatch can turn back into a scene — `held` on the compositor's row is what the
-		// loop is rendering from, and an output that is showing what it just recorded is the one where
-		// the two agree.
-		TraceCountAt("shown", info.PresentedAt, static_cast<std::int64_t>(frame), m_Trace);
+		// **The far end of the flight lane, and it closes the wait nothing used to draw.** Between the
+		// present that handed this frame over and this instant the frame was in no row at all, and on a
+		// sixty hertz panel that gap is a whole refresh a person is trying to account for. The lane is
+		// the commit slot, so how many lanes are occupied here *is* the queue depth.
+		TraceCloseAt(info.PresentedAt, m_InFlightRows[0]);
 
-		m_Shown = std::max(m_Shown, frame);
-
+		// **No counter beside it, which is the row earning its keep.** What a `shown` counter said was
+		// *the scene on the glass is 12*, held between samples and stepped at each flip — which is
+		// exactly what the slice above draws, with the number in the name and the duration as its
+		// width. Two spellings of one fact is the thing that made these charts hard to read.
 		if (frame >= m_Presented.Sequence)
 		{
 			m_Presented = { .Sequence = frame, .At = info.PresentedAt };
@@ -309,21 +314,11 @@ private:
 		for (std::uint32_t index = 0; index < m_InFlight; ++index)
 		{
 			m_InFlightSnapshots[index] = m_InFlightSnapshots[index + 1];
+			m_InFlightRows[index] = m_InFlightRows[index + 1];
 		}
 
 		m_InFlightSnapshots[m_InFlight] = 0;
-
-		// **The wait ends where the slot frees, which is this flip and not the iteration that notices
-		// it.** The whole argument for stamping `presented` at the host's instant applies to the far end
-		// of the wait for the same reason: a loop that woke late would otherwise lengthen the wait it was
-		// late for, and the row would blame the panel for the reader. Nothing is emitted where the queue
-		// is still full — a deeper presenter frees one slot at a time, and the wait is over when the
-		// output can commit rather than when it merely became less blocked.
-		if (m_BlockedSince != Instant{} && !IsCommitFull())
-		{
-			TraceSpanAt("commit full", m_BlockedSince, info.PresentedAt, m_TraceBlocked);
-			m_BlockedSince = {};
-		}
+		m_InFlightRows[m_InFlight] = TraceThread;
 	}
 
 	// The frame was accepted and never shown, which Seam/Presenter.h argues has to be its own signal.
@@ -404,6 +399,16 @@ private:
 	// arrive.
 	void Discard() noexcept
 	{
+		// **Closed here rather than left to the writer, because these are the one unbalanced end that is
+		// not the window's fault.** A truncated span at either edge of the ring is the last thirty
+		// seconds honestly reported; a flight lane whose frame was dropped by a mode set is a claim that
+		// the panel is still working on it, and left open it runs to the end of the trace as the widest
+		// slice in the picture. Closed at now, which is when the frame stopped being in flight.
+		for (std::uint32_t index = 0; index < m_InFlight; ++index)
+		{
+			TraceClose(m_InFlightRows[index]);
+		}
+
 		m_InFlight = 0;
 		m_Committed = FrameClock::NoSequence;
 
@@ -412,11 +417,10 @@ private:
 		// happened and is still owed to dispatch, and dropping it here would lose a frame callback on
 		// the iteration a mode set landed in.
 		m_InFlightSnapshots = {};
+		m_InFlightRows = {};
 
-		// The wait goes with them, unclosed. What ended it was a mode set or an invalidation rather than
-		// a flip, so there is no instant that honestly closes the span — and a wait that never ended is
-		// better read as absent than as one this loop made a timestamp up for.
-		m_BlockedSince = {};
+		// The ruler restarts rather than bridging the discontinuity. See `m_Tiled`.
+		m_Tiled = {};
 
 		// An index into a set that no longer exists. `OnTargetsInvalidated` is the case this is here for
 		// — the images are released before the new ones exist, so a held index names memory that is gone
@@ -433,17 +437,27 @@ private:
 	// this object's — the same reason `m_Device` is passed in and this is not.
 	std::uint16_t m_Trace = TraceThread;
 
-	// The second row: the GPU work this output's composites cost, which is not on any thread and so
-	// cannot be a slice on one. Travels out on the record request because the timestamps that fill it
-	// resolve frames later, by which point the renderer has drawn for other outputs.
+	// The GPU work this output's composites cost, which is not on any thread and so cannot be a slice
+	// on one. Travels out on the record request because the timestamps that fill it resolve frames
+	// later, by which point the renderer has drawn for other outputs.
 	std::uint16_t m_TraceGpu = TraceThread;
-	std::uint16_t m_TraceDeadline = TraceThread;
-	std::uint16_t m_TraceBlocked = TraceThread;
 
-	// When this output last found the commit queue full with a frame it wanted to make, or the epoch
-	// where it is not waiting. It is the open end of a span the flip that frees the slot closes, and it
-	// is a member rather than a `TraceSpan` because the two ends are on opposite sides of a sleep.
-	Instant m_BlockedSince{};
+	// The refresh this output is aiming at, and what is on its glass.
+	std::uint16_t m_TraceGrid = TraceThread;
+	std::uint16_t m_TraceGlass = TraceThread;
+
+	// Where this output's refresh ruler has been drawn up to, so the next tile abuts it exactly. The
+	// epoch is *no chain yet*, which is the state a mode set returns it to — the deadlines on the far
+	// side of one are not continuous with the deadlines before it, and a tile bridging the two would
+	// draw a refresh that never happened.
+	Instant m_Tiled{};
+
+	// The first of this output's flight lanes; the rest are the ones after it, which Core/Trace.h
+	// numbers consecutively for exactly this. A lane is picked by rotation rather than by queue
+	// position, because a queue that pops from the front renumbers everything behind it and a slice
+	// has to close on the row it opened on.
+	std::uint16_t m_TraceFlight = TraceThread;
+	std::uint32_t m_FlightLane = 0;
 
 	OutputConfiguration m_Configuration{};
 	FrameClock m_Clock{};
@@ -461,15 +475,18 @@ private:
 	// the dispatch side turns back into surfaces.
 	std::array<std::uint64_t, MaxCommitsInFlight> m_InFlightSnapshots{};
 
+	// The flight lane each of those commits was drawn on, shifted with them. Kept beside the queue
+	// rather than derived from a position in it for the reason `m_TraceFlight` gives.
+	std::array<std::uint16_t, MaxCommitsInFlight> m_InFlightRows{};
+
 	// The most recent flip this output has not yet reported, staged in the drain and cleared by the post
 	// that carries it.
 	PresentedFrame m_Presented{};
 
-	// The highest published sequence a flip has shown, kept for the trace alone and deliberately not
-	// `m_Presented.Sequence`, which is cleared every iteration by the report that drains it. A flip
-	// that already happened stays true across a `Discard` for the same reason it stays true across the
-	// report: it is a thing the panel did, not a thing this loop is still owed.
-	std::uint64_t m_Shown = 0;
+	// What the glass row is currently showing, so that a flip repeating it extends the slice instead of
+	// starting another. It survives a `Discard` deliberately: a mode set does not change what is on the
+	// panel, and closing the slice there would draw a gap where a person saw a picture.
+	std::uint64_t m_Glass = 0;
 
 	Region<DeviceSpace> m_Damage{};
 
@@ -543,8 +560,9 @@ public:
 		{
 			m_Outputs[index].m_Trace = TraceOutput(index);
 			m_Outputs[index].m_TraceGpu = TraceGpu(index);
-			m_Outputs[index].m_TraceDeadline = TraceDeadline(index);
-			m_Outputs[index].m_TraceBlocked = TraceBlocked(index);
+			m_Outputs[index].m_TraceGrid = TraceGrid(index);
+			m_Outputs[index].m_TraceGlass = TraceGlass(index);
+			m_Outputs[index].m_TraceFlight = TraceFlight(index, 0);
 		}
 	}
 
@@ -661,6 +679,13 @@ private:
 		// `author` slice that wrote what is about to be drawn — which is how *the frame is stale* and
 		// *the frame is late* stop looking alike.
 		//
+		// **The one arrow left in the whole picture, and it is here because it joins two counts.** A
+		// publication is numbered by the dispatch thread and a frame by the panel it is shown on, so
+		// nothing in the name of one can find the other — which is exactly the join a line is for.
+		// Every other flow this trace used to carry said only *these slices are the same frame*, and
+		// they are all tags now: the number is spelled into the name and a reader joins the rows by
+		// reading them.
+		//
 		// **Inside the check rather than above it, and that is the difference between an arrow and a
 		// thicket.** Perfetto chains every event carrying a flow id, so a mark re-emitted on an
 		// iteration that acquired nothing links the same publish to itself again: a ten-second trace
@@ -668,7 +693,7 @@ private:
 		// arrows, which is a picture with no information in it and one a reader has to disbelieve
 		// before they can read anything else. What the scene *is* between acquisitions is the `held`
 		// counter, sampled every iteration precisely because it is a state and not an event.
-		TraceMark("acquired", TraceThread, TraceFlowId(TraceFlow::Snapshot, m_Held));
+		TraceMark("acquired", TraceThread, TraceFlow(TraceDomain::Scene, m_Held));
 	}
 
 	// Every renderer reports what its finished work actually cost, filed against the generation it was
@@ -725,21 +750,20 @@ private:
 
 	void Serve(FrameOutput& output, std::size_t index, Instant now, std::array<Instant, MaxDevices>& deviceFree)
 	{
-		// The whole of one output's attempt, on that output's row. It is a slice even when the attempt
-		// ends two lines below, because *this output was considered and declined* is a different picture
-		// from this output not being in the iteration at all.
-		const TraceSpan serve{ "serve", output.m_Trace };
-
+		// **Nothing is opened before the decision, because a slice cannot be named for what it did not
+		// know yet.** This row used to carry a `serve` span per wake, and two thirds of them were four
+		// microseconds long with nothing inside: the loop wakes about three times a refresh, finds the
+		// panel still busy with the frame in front, and goes back to sleep. Three identical blocks per
+		// vblank of which one is the frame is the single thing that made this chart unreadable — a
+		// reader had to open each one to find out which.
+		//
+		// So a wake that declines costs one mark that says *why*, and a wake that draws opens a slice
+		// named for the frame. Five ways out of this function and every one of them now says something,
+		// where before there were two marks and three silent returns.
 		Instant& free = deviceFree[output.m_Device];
 		const FrameDecision decision = m_Timing.Assess(output.m_Clock, output.m_Cost, now, output.m_Committed, free);
 
 		output.m_Last = decision;
-
-		// **What the machine has been costing, sampled where the decision that reads it is made.** A mark
-		// that climbs over a hundred frames is the picture that says the next thing to go wrong is a
-		// dropped frame, and it is invisible in any one of them.
-		TraceElapsed("cpu mark", output.m_Cost.PlannedCpu(), output.m_Trace);
-		TraceElapsed("gpu mark", output.m_Cost.PlannedGpu(), output.m_Trace);
 
 		// A commit the presenter cannot take yet is the disqualifier Architecture.md names, and it is
 		// separate from the arithmetic one `Assess` answers: it is the backend's condition rather than
@@ -749,43 +773,28 @@ private:
 		// is about.
 		if (output.IsCommitFull())
 		{
-			// **Opened as a span rather than ticked, because what a reader needs from it is a length.**
-			// This is the wait that explains a frame's latency: a scene published a moment after this
-			// output committed cannot be drawn until the flip in front of it lands, and on a sixty hertz
-			// panel that is a whole refresh in which nothing on any other row happens. As a mark it was
-			// the most numerous event in the trace and said only *again*; as an extent it is the block of
-			// time a person is trying to account for. Closed by the flip that frees the slot, at the
-			// host's timestamp — see `OnPresented`.
-			//
-			// **Only for an output that wanted the frame.** An idle panel with a commit still in flight is
-			// full too, and opening a wait for it would paint this lane solid through every quiet second
-			// and make a real wait indistinguishable from a screen with nothing on it.
-			if (output.m_BlockedSince == Instant{} && Wants(output, index, decision))
-			{
-				output.m_BlockedSince = now;
-			}
+			// **A mark rather than the wait this used to open, because the flight lanes draw the wait
+			// properly now.** The old span ran from the first blocked wake to the flip that freed the
+			// slot, which meant a reader was shown the *waiting* and never the frame being waited on —
+			// and it was gated behind `Wants` to stop an idle panel painting the lane solid, which in
+			// practice meant it never fired at all: a seven-second capture with eight hundred blocked
+			// wakes in it had an empty row where the explanation should have been. Core/Trace.h's
+			// flight lanes hold the frame itself from submission to glass, so the length is drawn by
+			// the thing that has it and this only has to say the loop came back too early.
+			TraceMark("queue full", output.m_Trace);
 
 			return;
 		}
 
 		if (!decision.Renders())
 		{
-			// Kept a mark, and named apart from the wait above, because they are different failures
-			// wearing one `return`. A full commit queue is an output waiting on the host or the panel and
-			// is ordinary; a verdict that declines is decision 35's third branch, which is gyro deciding
-			// it cannot fit the frame it owes — an instant, not an interval.
-			TraceMark("skipped", output.m_Trace);
+			// Named apart from the wait above because they are different failures wearing one `return`.
+			// A full commit queue is an output waiting on the host or the panel and is ordinary; a
+			// verdict that declines is decision 35's third branch, which is gyro deciding it cannot fit
+			// the frame it owes.
+			TraceMark("over budget", output.m_Trace);
 
 			return;
-		}
-
-		// **Slack is only a number once this output has a prediction to be early or late against.** On a
-		// decision that does not render, and on the first frame of an output whose clock has not been
-		// seeded, `Deadline` is the unscheduled sentinel and the subtraction saturates — one sample of
-		// two hundred and ninety-two years flattens every real one on the same axis to a flat line.
-		if (decision.Deadline != FrameClock::Unscheduled)
-		{
-			TraceElapsed("slack", decision.Slack(), output.m_Trace);
 		}
 
 		// `Assess` answers whether a frame *can* be made and never whether one is *wanted* — it is
@@ -793,8 +802,71 @@ private:
 		// it is the scene's `Wake` rather than a second opinion about timing.
 		if (!Wants(output, index, decision))
 		{
+			// **The loop woke and nothing was due, which is a defect rather than a rest.** A settled
+			// world answers `Wake::Never()` and this function is not reached at all, so a mark here is
+			// the schedule having armed for an instant that turned out to want nothing — the exact
+			// shape Architecture.md#doing-nothing-must-cost-nothing forbids, and one no counter was
+			// ever going to show.
+			TraceMark("idle", output.m_Trace);
+
 			return;
 		}
+
+		// **The frame as a person means the word, and everything below is inside it.** One slice per
+		// frame on this output's own row, named for the frame it is — so `frame 142` on this row, on the
+		// GPU row, on the flight lane and on the refresh ruler are four drawings of one thing that a
+		// reader joins by reading, or by searching for the words, rather than by following eight arrows
+		// across four rows. It is a scope guard because every refusal below returns, and each of those
+		// is a frame that was started and abandoned: the slice is short and the mark inside it says why.
+		const TraceSpan frame{ "frame", output.m_Trace, TraceTag(decision.Sequence) };
+
+		// **The ruler, and the row is only readable because it tiles.** The span runs from the previous
+		// refresh's deadline to this one's, so consecutive frames abut and the row becomes the grid
+		// every other row is read against. It used to start at `now` instead, which drew a four
+		// millisecond sliver with a twelve millisecond gap after it — an extent that looked like a
+		// budget, was actually the time left when the loop woke up, and made a composite that fit
+		// comfortably inside its refresh read as an overrun on every single frame.
+		//
+		// A row of its own rather than a slice the work nests inside, because the case worth seeing is
+		// the child outliving the parent and nesting cannot draw that.
+		if (decision.Deadline != FrameClock::Unscheduled)
+		{
+			// **The tile starts where the last one ended, and it is remembered rather than recomputed.**
+			// Asking the clock for `DeadlineAt(sequence - 1)` is the obvious spelling and it is wrong by
+			// microseconds: the clock re-anchors on every flip, so the deadline it names for a frame is
+			// not quite the one it named a refresh ago, and consecutive tiles overlap by the drift.
+			// Perfetto has no *slightly overlapping* — a slice that starts before its neighbour ended is
+			// a child of it, so the ruler came out as a staircase nesting deeper every frame.
+			//
+			// A tile wider than one refresh is a refresh gyro drew nothing for, which is the honest
+			// reading and the one worth seeing.
+			const bool chained = output.m_Tiled != Instant{} && output.m_Tiled < decision.Deadline;
+
+			TraceSpanAt(
+				"frame",
+				chained ? output.m_Tiled : std::min(now, decision.Deadline),
+				decision.Deadline,
+				output.m_TraceGrid,
+				TraceTag(decision.Sequence)
+			);
+
+			output.m_Tiled = decision.Deadline;
+
+			// **Slack is only a number once this output has a prediction to be early or late against.**
+			// On the first frame of an output whose clock has not been seeded, `Deadline` is the
+			// unscheduled sentinel and the subtraction saturates — one sample of two hundred and ninety
+			// two years flattens every real one on the same axis to a flat line.
+			TraceElapsed("slack", decision.Slack(), output.m_Trace);
+		}
+
+		// **What the machine has been costing, sampled on the frames that read it.** These used to be
+		// sampled on every wake, which meant three identical samples per refresh of a figure that only
+		// moves when a cost is observed — two thirds of the points on the chart were the loop repeating
+		// itself. Their measured counterparts are `cpu cost` here and `gpu cost` on the GPU row, and the
+		// pair is the whole point: a mark that climbs away from what frames actually cost is the picture
+		// that says the next thing to go wrong is a dropped frame.
+		TraceElapsed("cpu mark", output.m_Cost.PlannedCpu(), output.m_Trace);
+		TraceElapsed("gpu mark", output.m_Cost.PlannedGpu(), output.m_Trace);
 
 		// **Acquired once and held until it is presented, which is the whole of the fix and reads as an
 		// omission until you follow the other path out of here.** `AcquireTarget` is the loop taking a
@@ -885,6 +957,7 @@ private:
 		const RecordRequest request{ .Target = target,
 			                         .Mode = decision.Mode(),
 			                         .Trace = output.m_TraceGpu,
+			                         .Frame = decision.Sequence,
 			                         .CostGeneration = output.m_Cost.Generation(),
 			                         // Decision 142's hint, and the translation of one sentinel into
 			                         // another: an unscheduled clock has no instant to name, and the
@@ -952,6 +1025,25 @@ private:
 		// per attempt because acquisition is once per iteration — every output served in this pass drew
 		// from the same scene.
 		output.m_InFlightSnapshots[output.m_InFlight] = m_Held;
+
+		// **The lane the frame flies in, opened here and closed by the vblank that shows it.** Rotation
+		// rather than queue position, because `OnPresented` pops from the front and shuffles everything
+		// behind it down — a slice has to close on the row it opened on, and a row derived from a
+		// position would move under it. The rotation cannot collide: at most `MaxCommitsInFlight` are
+		// outstanding and there are exactly that many lanes.
+		//
+		// **Stamped at the iteration's clock read rather than at this line**, and the difference is
+		// deliberate. What the lane draws is the latency a person waits: from the loop deciding to make
+		// this frame to the pixels arriving, evaluate and record included. Decision 57 also has nothing
+		// to say to it, since there is no second clock read here to have.
+		const std::uint16_t lane =
+			static_cast<std::uint16_t>(output.m_TraceFlight + output.m_FlightLane % TracedFlights);
+
+		++output.m_FlightLane;
+		output.m_InFlightRows[output.m_InFlight] = lane;
+
+		TraceOpenAt("frame", now, lane, TraceTag(decision.Sequence));
+
 		++output.m_InFlight;
 
 		// The backlogs fold forward, and this is the whole of the buffer-age bookkeeping. Every *other*
@@ -968,39 +1060,6 @@ private:
 
 		output.m_Backlog[target].Clear();
 		output.m_Damage.Clear();
-
-		// **The frame as a person means the word, which is the one object the trace did not have.** The
-		// rows above are drawn in units of loop iteration, and an iteration is not a frame: a ten-second
-		// trace had eighteen hundred of them and five hundred and eighty-seven frames, the other two
-		// thirds being the loop waking, finding the commit queue full and going back to sleep. So a
-		// reader looking for *this* frame was reading a sea of marks with no boundary in it.
-		//
-		// The span runs from the instant this iteration read the clock to the deadline the frame was
-		// admitted against, so its extent *is* the budget and the work on the row above either fits
-		// inside that extent or reaches past the end of it. That is why the deadline could not be a
-		// slice the work nests in — the case worth seeing is the child outliving the parent, which
-		// nesting cannot draw. Emitted after the present rather than before it because a budget belongs
-		// to a frame that was actually committed; an attempt that fell out above is `commit full` or
-		// `skipped`, and giving it a span here would make declining to draw look like drawing.
-		//
-		// **The flow is the submission and deliberately not the snapshot**, which is the same trap the
-		// `acquired` mark was in one direction along. Many frames are drawn from one publication — a
-		// twenty-second capture drew eleven hundred from seventy-seven — so a budget carrying the
-		// snapshot would fan thirty-nine arrows out of one publish and say nothing by saying it forty
-		// times. The submission value is one per frame and it crosses to a row the work above cannot
-		// reach: it is the number the renderer's own timestamp spans are keyed by, so following it
-		// arrives at the composite this budget was actually spent on. Zero where the renderer finished
-		// on the CPU and has no timeline to name, which is no flow rather than a false one.
-		if (decision.Deadline != FrameClock::Unscheduled)
-		{
-			TraceSpanAt(
-				"frame",
-				now,
-				decision.Deadline,
-				output.m_TraceDeadline,
-				TraceFlowId(TraceFlow::Submission, submission->Point.Value)
-			);
-		}
 	}
 
 	// Whether this output is owed the frame `Assess` says it could make.

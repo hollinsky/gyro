@@ -10482,6 +10482,8 @@ a stamp leaves only inside a record the snapshot writer consumes. Decision 57's 
 clock is untouchable; it is that a now something can reach is a now something eventually decides
 against, in a file whose subject is something else.
 
+*Revised 2026-08-24 by [decision 144](#144-a-frame-is-one-object-drawn-on-five-rows-and-the-rows-say-its-number-rather-than-pointing-at-each-other): the rows are right and there are more of them, they are grouped by output rather than by kind, and the flow arrows this entry reached for are one arrow and a name spelled into every slice.*
+
 **Tracks are the compositor's rather than a thread's, above the thread level.** An output has a row
 and its GPU work has a second one, because the work on that second row is not on any thread at all
 and because a person reading a stutter on one panel should not be reading four panels interleaved.
@@ -10869,3 +10871,93 @@ interface that grows a default is one whose contract is now two contracts.
 **Rejected: `--gym` and a socket together.** The loop steps one author. Accepting both would bind a
 socket the run never serves, which does not fail — it just never does the thing that was asked for,
 which is the failure `--dump` under the wrong backend is already refused for.
+
+### 144. A frame is one object drawn on five rows, and the rows say its number rather than pointing at each other
+
+Decision 139 built the ring and decision 140 cut the composite; what came out the far end was a
+correct trace that a person could not read. A seven-second capture of `--gym=materials` on a Tiger
+Lake iGPU held 22,068 events, hit 387 of 388 refreshes exactly, and took an afternoon to establish
+that from the picture. The failure is worth naming precisely, because it is not a bug in anything:
+**the unit a person reads a compositor in is one frame, and no row drew one frame as one thing.**
+
+Every row was drawn in the units of whatever produced it. The frame thread's row was loop iterations
+— 1,200 of them for 392 frames, because the loop wakes about three times a refresh, finds the panel
+still holding the frame in front, and goes back to sleep. Three identically named `iteration` slices
+per vblank, of which one is the frame, and the only way to tell was to open each. The GPU row was
+the seven passes of a batch as seven flat siblings, three of them called `composite`, with nothing
+saying where one frame's device work stopped. The output row carried a `serve` span per wake whose
+median length was four microseconds. And the thing joining them was eight flow arrows per frame,
+three thousand in the capture, every one of them saying only *these slices are the same frame*.
+
+**The change is that a frame has a number and the number is in the name.** `frame 142` on the
+refresh ruler, on the frame thread's row, on the GPU row and in the flight lane is four drawings of
+one object that a reader joins by reading, or by searching the words and having every row light up
+at once. That is strictly better than an arrow: it costs no line, it survives the two ends being
+scrolled apart, and it does not degrade as the trace gets longer. `Core/Trace.h`'s `TraceLabel` is
+the mechanism — one payload, printed into the name by the writer thread, which draws an arrow only
+where it was asked to.
+
+**One arrow is left, and it is the one that joins two different counts.** A publication is numbered
+by the dispatch thread and a frame by the panel it is shown on, so no name on either side can find
+the other and only a line can say which scene a frame drew. Everything else is a tag.
+
+**The rows are now the life of a frame, read downward, and one screen's rows are consecutive.** The
+refresh ruler, the frame thread's work, the device's work, the flight lanes, the glass. They were
+grouped by *kind* before — every output's GPU row together — which reads the same with one monitor
+and puts four screens between a frame and its own pixels with two.
+
+Three of the rows are new or were wrong:
+
+**The refresh ruler tiles.** The old `frame` span ran from the instant the loop woke to the deadline
+— a 3.95 ms sliver with a 12.7 ms gap after it, on a 16.67 ms panel. It looked like a budget, it was
+actually the time left on arrival, and it made a 5.36 ms composite that fit comfortably inside its
+refresh read as an overrun on every single frame. Each tile now begins where the last one ended,
+which is *remembered* rather than recomputed: asking the clock for the previous deadline is the
+obvious spelling and is wrong by microseconds, because the clock re-anchors on every flip — and
+Perfetto has no *slightly overlapping*, so a tile starting a microsecond early becomes a child of its
+neighbour and the ruler nests one level deeper every frame.
+
+**The flight lanes draw the wait that nothing drew.** Between the present that hands a frame to the
+panel and the vblank that shows it, the frame was in no row at all — twenty milliseconds a person is
+trying to account for. It could not be one row: commits complete in the order they were made, so
+frame N opens before N+1 and closes before it, which is the one shape a Perfetto track refuses. A
+lane per commit slot is the honest drawing anyway, since how many lanes are occupied at an instant
+*is* the queue depth. It replaces the `commit full` span, which was gated behind *did this output
+want the frame* to stop an idle panel painting the lane solid, and in practice therefore never fired
+at all: the capture had eight hundred blocked wakes and an empty row where the explanation should
+have been.
+
+**The glass row is what a person saw.** One slice per scene rather than per vblank, opened at the
+host's presentation instant and running until the scene *changes*, so its width is how long somebody
+was looking at one picture and a stutter is a wide block seen without measuring anything. It replaces
+the `presented` mark and the `shown` counter together — two spellings of one fact, which is the habit
+that made these charts hard to read.
+
+**Every way out of `Serve` now says something.** Five exits, two of which used to emit a mark and
+three of which returned in silence. A wake that declines costs one mark naming the reason — `queue
+full`, `over budget`, `idle` — where it used to cost six events describing a slice with nothing in
+it. `idle` is worth having even though it should never appear: a settled world answers `Wake::Never()`
+and `Serve` is not reached, so a mark there is the schedule having armed for an instant that wanted
+nothing, which is the shape Architecture.md#doing-nothing-must-cost-nothing forbids and which no
+counter was going to show.
+
+**Rejected: filtering the no-op wakes out of the trace.** They are two thirds of the loop's
+iterations and they are real. What was wrong was that they were drawn the same shape as a frame, not
+that they were drawn.
+
+**Rejected: keeping the arrows and adding the names.** Tried first, on the reading that they answer
+different questions. They do not — clicking a slice still fanned eight lines across four rows, and
+the names had made every one of them redundant. An arrow that duplicates a name is worse than no
+arrow, because a reader has to follow it to find out.
+
+**Rejected: merging the three same-named GPU passes into one slice per frame.** The batch parent
+already scopes them and the pass boundaries are where the cost actually is — `extract` at 0.94 ms
+against `blur` at 0.48 ms is the number that says which half of a glass panel to attack. They carry
+their index in the run instead, so `composite 0`, `extract 1`, `blur 2`, `composite 3` reads as the
+chain it is.
+
+**What the redrawn picture immediately showed.** The iGPU spends the whole capture at 300–400 MHz
+against a part that reaches roughly 1.3 GHz, which is why a blur chain over an 800×450 window costs
+5.4 ms; and `gpu mark`, the figure admission is fed, sits at 10.6 ms against a measured 5.36 ms and
+takes four distinct values in 1,200 samples. Neither is a new fact — both numbers were in the old
+trace. They were unreadable beside 3,000 arrows, which is the entire argument for this entry.

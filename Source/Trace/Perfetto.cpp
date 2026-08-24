@@ -66,6 +66,7 @@ struct Event
 	static constexpr std::uint32_t Type = 9;
 	static constexpr std::uint32_t NameId = 10;
 	static constexpr std::uint32_t TrackUuid = 11;
+	static constexpr std::uint32_t Name = 23;
 	static constexpr std::uint32_t CounterValue = 30;
 	static constexpr std::uint32_t FlowIds = 47;
 };
@@ -125,9 +126,8 @@ constexpr std::uint64_t SourceSequenceBase = 2;
 	return ScopeTrackBase + scope;
 }
 
-// What an output's rows are called. The GPU row is a row rather than a slice depth on the output's own
-// because the work on it is not on any thread — it is the queue, and a person reading a dropped frame
-// needs to see it beside the record that submitted it rather than inside it.
+// What an output's rows are called, and they are the whole of decision 139's vocabulary made legible:
+// one screen's rows are consecutive and they run in the order a frame happens. See Core/Trace.h.
 [[nodiscard]] std::string ScopeName(std::uint16_t scope)
 {
 	if (scope == TraceThread)
@@ -135,22 +135,40 @@ constexpr std::uint64_t SourceSequenceBase = 2;
 		return "compositor";
 	}
 
-	if (scope <= TracedOutputs)
+	const std::uint16_t offset = static_cast<std::uint16_t>(scope - 1);
+	const std::uint16_t output = static_cast<std::uint16_t>(offset / TraceLanesPerOutput);
+	const std::uint16_t lane = static_cast<std::uint16_t>(offset % TraceLanesPerOutput);
+
+	if (lane == 0)
 	{
-		return std::format("output {}", scope - 1);
+		return std::format("output {} refresh", output);
 	}
 
-	if (scope <= 2 * TracedOutputs)
+	if (lane == 1)
 	{
-		return std::format("output {} gpu", scope - 1 - TracedOutputs);
+		return std::format("output {} frame", output);
 	}
 
-	if (scope <= 3 * TracedOutputs)
+	if (lane == 2)
 	{
-		return std::format("output {} deadline", scope - 1 - 2 * TracedOutputs);
+		return std::format("output {} gpu", output);
 	}
 
-	return std::format("output {} blocked", scope - 1 - 3 * TracedOutputs);
+	if (lane < 3 + TracedFlights)
+	{
+		return std::format("output {} flight {}", output, lane - 3);
+	}
+
+	return std::format("output {} glass", output);
+}
+
+// A label's number, with the domain a flow id carries in its top bits taken back off. What is printed
+// is what the call site counted — a frame, a scene — rather than the tagged form only the arrow needs.
+[[nodiscard]] std::uint64_t LabelValue(std::uint64_t payload) noexcept
+{
+	constexpr std::uint64_t Mask = (std::uint64_t{ 1 } << 60) - 1;
+
+	return payload & Mask;
 }
 
 // A counter is a track of its own, named for the figure and parented to whatever the figure is about.
@@ -196,6 +214,33 @@ void InternName(Inventory& inventory, const char* name)
 	return found != inventory.NameIds.end() ? found->second : 0;
 }
 
+// **What the record is called on the timeline, which is where a number becomes part of the name.**
+// An unlabelled record uses the interned literal and costs two bytes; a labelled one spells the number
+// after it and is written out in full, because `frame 142` is unique per frame and interning a table of
+// four hundred single-use strings would be a table nobody reads twice.
+//
+// **The arrow is the exception and the suffix is the rule.** Both come off one payload, so a call site
+// that wants a line gets the number in the name as well — which is what makes an arrow readable at the
+// far end of a scroll, where the line itself has long since left the screen.
+void Label(ProtoWriter& event, const Inventory& inventory, const TraceEvent& record)
+{
+	if (record.Payload == 0)
+	{
+		event.Varint(Event::NameId, NameId(inventory, record.Name));
+
+		return;
+	}
+
+	event.Text(
+		Event::Name, std::format("{} {}", record.Name != nullptr ? record.Name : "?", LabelValue(record.Payload))
+	);
+
+	if (record.Arrow)
+	{
+		event.Fixed64(Event::FlowIds, record.Payload);
+	}
+}
+
 void NoteScope(Inventory& inventory, std::uint16_t scope)
 {
 	if (scope == TraceThread || std::ranges::find(inventory.Scopes, scope) != inventory.Scopes.end())
@@ -204,6 +249,11 @@ void NoteScope(Inventory& inventory, std::uint16_t scope)
 	}
 
 	inventory.Scopes.push_back(scope);
+
+	// **Sorted, because the order rows are declared in is the order they are read in.** Core/Trace.h
+	// numbers an output's lanes in the order a frame happens, and a descriptor written when a lane
+	// first said something would order the rows by whichever of them spoke first instead.
+	std::ranges::sort(inventory.Scopes);
 }
 
 [[nodiscard]] std::uint64_t CounterUuid(const Inventory& inventory, const TraceEvent& event)
@@ -472,12 +522,7 @@ std::vector<std::byte> EncodeTrace(const TraceIdentity& identity, std::span<cons
 				{
 					event.Varint(Event::Type, SliceBegin);
 					event.Varint(Event::TrackUuid, track(record.Scope));
-					event.Varint(Event::NameId, NameId(inventory, record.Name));
-
-					if (record.Payload != 0)
-					{
-						event.Fixed64(Event::FlowIds, record.Payload);
-					}
+					Label(event, inventory, record);
 
 					++depth[record.Scope];
 					break;
@@ -501,12 +546,7 @@ std::vector<std::byte> EncodeTrace(const TraceIdentity& identity, std::span<cons
 				{
 					event.Varint(Event::Type, InstantEvent);
 					event.Varint(Event::TrackUuid, track(record.Scope));
-					event.Varint(Event::NameId, NameId(inventory, record.Name));
-
-					if (record.Payload != 0)
-					{
-						event.Fixed64(Event::FlowIds, record.Payload);
-					}
+					Label(event, inventory, record);
 
 					break;
 				}

@@ -262,6 +262,10 @@ private:
 		// for whichever outputs it serves and cannot be asked which one this was.
 		std::uint16_t Trace = TraceThread;
 
+		// The frame the submission was made for, carried so the run of spans can be named for it when
+		// the timestamps resolve. See `RecordRequest::Frame`.
+		std::uint64_t Frame = 0;
+
 		// How many timestamps the submission actually wrote, and what each of them opens. `Stamps`
 		// is zero on a frame that was not being traced, one more than the number of spans otherwise —
 		// the last stamp closes the one before it and names nothing.

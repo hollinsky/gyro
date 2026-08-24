@@ -1109,22 +1109,26 @@ GYRO_TEST(FrameLoop, AFrameTheHostAcceptedAndNeverShowedIsNeverReportedPresented
 
 	GYRO_CHECK_EQ(harness.Reported().Presented()[0].Sequence, std::uint64_t{ 0 });
 }
-
-// A flip is marked at the moment the panel scanned out and named for the recorded frame the vblank
-// showed, rather than at the moment its feedback was drained. A mark stamped where it was *learned*
-// would move with every late wake of the loop and read a stutter of the reader as a lateness of the
-// host; and the number on the step is the published sequence, which is the one the dispatch side can
-// turn back into the scene the glass is holding.
-GYRO_TEST(FrameLoop, ThePresentedMarkLandsWhereThePanelScannedOutAndNamesTheScene)
+// A flip opens a slice on the glass row at the moment the panel scanned out, named for the recorded
+// frame the vblank showed. Stamped where it *happened* rather than where it was drained, because a
+// slice placed where the loop learned of it moves with every late wake and reads a stutter of the
+// reader as a lateness of the host. And it is a slice rather than a mark because what a person wants
+// from this row is how long a scene was on the screen, which a mark cannot say.
+GYRO_TEST(FrameLoop, TheGlassRowOpensWhereThePanelScannedOutAndNamesTheScene)
 {
 	Harness harness;
 
 	std::array<TraceRecord, 64> records{};
 	TraceBuffer trace;
 	trace.Arm(records, harness.Clock);
+
+	// Armed after the anchor, because anchoring the clock is a flip with nothing in flight behind it —
+	// a vblank that showed a frame gyro did not draw. That opens a slice on this row too, correctly and
+	// with no name, and counting it here would be counting the harness rather than the loop.
+	harness.Anchor();
+
 	EnrollTracing(&trace);
 
-	harness.Anchor();
 	harness.Publish(1, {});
 	harness.Clock.Set(At(1002));
 	harness.Output().DamageWholeOutput();
@@ -1141,76 +1145,70 @@ GYRO_TEST(FrameLoop, ThePresentedMarkLandsWhereThePanelScannedOutAndNamesTheScen
 	std::array<TraceEvent, 64> events{};
 	const std::size_t count = trace.Copy(events);
 
-	bool markedAtTheVblank = false;
-	bool namedTheScene = false;
+	std::size_t opened = 0;
 	bool stampedWhereLearned = false;
 
 	for (std::size_t index = 0; index < count; ++index)
 	{
 		const TraceEvent& event = events[index];
 
-		if (event.Scope != TraceOutput(0))
+		if (event.Scope != TraceGlass(0) || event.Kind != TraceKind::Begin)
 		{
 			continue;
 		}
 
-		if (event.Kind == TraceKind::Mark && std::string_view{ event.Name } == "presented")
-		{
-			if (event.Stamp == At(1010) && event.Payload == TraceFlowId(TraceFlow::Snapshot, 1))
-			{
-				markedAtTheVblank = true;
-			}
+		++opened;
 
-			if (event.Stamp == At(1020))
-			{
-				stampedWhereLearned = true;
-			}
-		}
+		GYRO_CHECK_EQ(std::string_view{ event.Name }, std::string_view{ "scene" });
+		GYRO_CHECK(event.Stamp == At(1010));
 
-		if (event.Kind == TraceKind::Count && std::string_view{ event.Name } == "shown" && event.Stamp == At(1010) &&
-		    event.Payload == 1)
-		{
-			namedTheScene = true;
-		}
+		// The label is the published sequence, printed into the name by the writer. It is a tag rather
+		// than a flow: the scene it names is already the far end of the one arrow this picture has, and
+		// a second link from every vblank that showed it would fan forty lines out of one publish.
+		GYRO_CHECK_EQ(event.Payload, std::uint64_t{ 1 });
+		GYRO_CHECK(!event.Arrow);
+
+		stampedWhereLearned = stampedWhereLearned || event.Stamp == At(1020);
 	}
 
-	GYRO_CHECK(markedAtTheVblank);
-	GYRO_CHECK(namedTheScene);
+	GYRO_CHECK_EQ(opened, std::size_t{ 1 });
 	GYRO_CHECK(!stampedWhereLearned);
 }
 
-// Perfetto chains every event carrying a flow id, so a mark emitted on an iteration that acquired
-// nothing links a publish to itself: the frame thread wakes far more often than dispatch publishes,
-// and a snapshot held across a hundred iterations drew a hundred arrows out of one publication. The
-// mark is the *event* of taking a new scene; what the loop is holding between those events is the
-// `held` counter, which is sampled every iteration precisely because it is a state.
+// The scene the loop is drawing from is a state and not an event, so the arrow that names it is drawn
+// only where it changed. Re-marking it every iteration links one publish to itself over and over: a
+// ten-second trace held one snapshot for a hundred and eighteen iterations and drew a hundred and
+// eighteen arrows, which is a picture a reader has to disbelieve before they can read anything else.
 GYRO_TEST(FrameLoop, AcquiredIsMarkedOnlyWhereTheHeldSnapshotChanged)
 {
 	Harness harness;
 
-	std::array<TraceRecord, 64> records{};
+	std::array<TraceRecord, 128> records{};
 	TraceBuffer trace;
 	trace.Arm(records, harness.Clock);
 	EnrollTracing(&trace);
 
 	harness.Anchor();
 	harness.Publish(1, {});
+	harness.Clock.Set(At(1002));
+	(void)harness.Loop.Step();
 
-	// One publication and four iterations over it, which is the ordinary ratio rather than a contrived
-	// one: dispatch publishes when the scene changes and the frame thread wakes for every vblank.
-	for (int step = 0; step < 4; ++step)
-	{
-		harness.Clock.Set(At(1002 + step));
-		(void)harness.Loop.Step();
-	}
+	harness.Clock.Set(At(1004));
+	(void)harness.Loop.Step();
+
+	harness.Clock.Set(At(1006));
+	(void)harness.Loop.Step();
 
 	harness.Publish(2, {});
+	harness.Clock.Set(At(1008));
+	(void)harness.Loop.Step();
+
 	harness.Clock.Set(At(1010));
 	(void)harness.Loop.Step();
 
 	EnrollTracing(nullptr);
 
-	std::array<TraceEvent, 64> events{};
+	std::array<TraceEvent, 128> events{};
 	const std::size_t count = trace.Copy(events);
 
 	std::size_t marks = 0;
@@ -1224,9 +1222,11 @@ GYRO_TEST(FrameLoop, AcquiredIsMarkedOnlyWhereTheHeldSnapshotChanged)
 		{
 			++marks;
 
-			// Tagged, so that a snapshot sequence and a queue submission that happen to be the same small
-			// number are not spliced into one chain.
-			GYRO_CHECK(event.Payload == TraceFlowId(TraceFlow::Snapshot, marks));
+			// **The one arrow left in the picture, and it earns its place by joining two counts.** A
+			// publication is numbered by the dispatch thread and a frame by the panel, so no name on one
+			// side can find the other. Everything else that used to be a flow is a tag now.
+			GYRO_CHECK(event.Arrow);
+			GYRO_CHECK(event.Payload == TraceFlow(TraceDomain::Scene, marks).Value());
 		}
 
 		if (event.Kind == TraceKind::Count && std::string_view{ event.Name } == "held")
@@ -1239,15 +1239,16 @@ GYRO_TEST(FrameLoop, AcquiredIsMarkedOnlyWhereTheHeldSnapshotChanged)
 	GYRO_CHECK_EQ(samples, std::size_t{ 5 });
 }
 
-// A flip that showed the same scene again is a real event and keeps its mark, but the publish it
-// would link to is already the far end of an arrow. Re-attaching it fans one journey into as many
-// arrows as the panel had refreshes; what repetition looks like instead is the `shown` counter
-// stepping to a number it already held.
-GYRO_TEST(FrameLoop, OnlyTheFirstFlipShowingASceneCarriesItsFlow)
+// The refresh ruler tiles: a frame's span runs from the previous refresh's deadline to its own, so
+// consecutive frames abut and the row is the grid every other row is read against. It used to start
+// where the loop woke instead, which drew a sliver with a gap after it — an extent that looked like a
+// budget, was actually the time left on arrival, and made work that fit inside its refresh read as an
+// overrun on every frame.
+GYRO_TEST(FrameLoop, TheRefreshRulerTilesSoConsecutiveFramesAbut)
 {
 	Harness harness;
 
-	std::array<TraceRecord, 64> records{};
+	std::array<TraceRecord, 256> records{};
 	TraceBuffer trace;
 	trace.Arm(records, harness.Clock);
 	EnrollTracing(&trace);
@@ -1259,64 +1260,70 @@ GYRO_TEST(FrameLoop, OnlyTheFirstFlipShowingASceneCarriesItsFlow)
 	(void)harness.Loop.Step();
 
 	harness.Presenter.Flip(At(1010), 8);
-	harness.Clock.Set(At(1020));
-	(void)harness.Loop.Step();
-
-	// A second frame drawn from the same snapshot, and a second flip that therefore shows it again.
+	harness.Clock.Set(At(1012));
 	harness.Output().DamageWholeOutput();
-	harness.Clock.Set(At(1022));
-	(void)harness.Loop.Step();
-	harness.Presenter.Flip(At(1026), 9);
-	harness.Clock.Set(At(1030));
 	(void)harness.Loop.Step();
 
 	EnrollTracing(nullptr);
 
-	std::array<TraceEvent, 64> events{};
+	std::array<TraceEvent, 256> events{};
 	const std::size_t count = trace.Copy(events);
 
-	std::size_t marks = 0;
-	std::size_t flowed = 0;
-	std::size_t steps = 0;
+	std::vector<std::pair<Instant, std::uint64_t>> opened;
+	std::vector<Instant> closed;
 
 	for (std::size_t index = 0; index < count; ++index)
 	{
 		const TraceEvent& event = events[index];
 
-		if (event.Kind == TraceKind::Mark && std::string_view{ event.Name } == "presented")
+		if (event.Scope != TraceGrid(0))
 		{
-			++marks;
-
-			if (event.Payload != 0)
-			{
-				++flowed;
-				GYRO_CHECK(event.Payload == TraceFlowId(TraceFlow::Snapshot, 1));
-			}
+			continue;
 		}
 
-		if (event.Kind == TraceKind::Count && std::string_view{ event.Name } == "shown")
+		if (event.Kind == TraceKind::Begin)
 		{
-			++steps;
+			opened.emplace_back(event.Stamp, event.Payload);
+
+			GYRO_CHECK_EQ(std::string_view{ event.Name }, std::string_view{ "frame" });
+
+			// A tag rather than a flow: the frame it names is drawn on four rows and the words are what
+			// join them, which is what let three thousand arrows out of a seven-second capture.
+			GYRO_CHECK(!event.Arrow);
+		}
+
+		if (event.Kind == TraceKind::End)
+		{
+			closed.push_back(event.Stamp);
 		}
 	}
 
-	// Three marks and one arrow: the anchoring flip is a vblank this loop did not draw for, so it names
-	// nothing, and of the two that showed a frame only the first showed it for the first time. Both of
-	// those step the counter — it is only the arrow that is drawn once.
-	GYRO_CHECK_EQ(marks, std::size_t{ 3 });
-	GYRO_CHECK_EQ(flowed, std::size_t{ 1 });
-	GYRO_CHECK_EQ(steps, std::size_t{ 2 });
+	GYRO_REQUIRE_EQ(opened.size(), std::size_t{ 2 });
+	GYRO_REQUIRE_EQ(closed.size(), std::size_t{ 2 });
+
+	// Consecutive frames, named for consecutive refreshes.
+	GYRO_CHECK_EQ(opened[1].second, opened[0].second + 1);
+
+	// **The second tile begins exactly where the first ended**, which is the whole property this row
+	// has to have. Asked of the clock instead, the two edges disagree by the drift a re-anchoring flip
+	// put between them — and Perfetto has no *slightly overlapping*, so a tile that starts a microsecond
+	// early becomes a child of its neighbour and the ruler nests one level deeper every frame.
+	GYRO_CHECK(opened[1].first == closed[0]);
+
+	// The first has no predecessor to abut, so it runs from the wake that made it. Every one after it
+	// is a whole refresh.
+	GYRO_CHECK_EQ(Elapsed(opened[1].first, closed[1]), harness.Output().Clock().Period());
 }
 
-// The one object the trace did not have: a span whose extent is the budget the frame was admitted
-// against. It is on the output's deadline row rather than nested inside the work, because the case
-// worth seeing is a frame that overran — and a child outliving its parent is exactly what nesting
-// cannot draw.
-GYRO_TEST(FrameLoop, ACommittedFrameGetsABudgetSpanEndingAtItsDeadline)
+// The wait nothing used to draw: between the present that hands a frame over and the vblank that shows
+// it, the frame is in no row at all, and on a sixty hertz panel that is a whole refresh a person is
+// trying to account for. The lane is the commit slot, so how many lanes are occupied at an instant is
+// the queue depth read without a counter.
+GYRO_TEST(FrameLoop, AFrameOccupiesAFlightLaneFromItsCommitToTheVblankThatShowsIt)
 {
 	Harness harness;
 
-	std::array<TraceRecord, 64> records{};
+	std::array<TraceRecord, 128> records{};
 	TraceBuffer trace;
 	trace.Arm(records, harness.Clock);
 	EnrollTracing(&trace);
@@ -1327,9 +1334,17 @@ GYRO_TEST(FrameLoop, ACommittedFrameGetsABudgetSpanEndingAtItsDeadline)
 	harness.Output().DamageWholeOutput();
 	(void)harness.Loop.Step();
 
+	GYRO_REQUIRE(harness.Output().IsFlipPending());
+
+	// The vblank happens at 1010 and is drained at 1020. The lane closes at the host's instant, for the
+	// same reason the glass row opens there: a late wake must not lengthen the wait it was late for.
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(At(1020));
+	(void)harness.Loop.Step();
+
 	EnrollTracing(nullptr);
 
-	std::array<TraceEvent, 64> events{};
+	std::array<TraceEvent, 128> events{};
 	const std::size_t count = trace.Copy(events);
 
 	std::size_t opened = 0;
@@ -1341,7 +1356,7 @@ GYRO_TEST(FrameLoop, ACommittedFrameGetsABudgetSpanEndingAtItsDeadline)
 	{
 		const TraceEvent& event = events[index];
 
-		if (event.Scope != TraceDeadline(0))
+		if (event.Scope != TraceFlight(0, 0))
 		{
 			continue;
 		}
@@ -1352,10 +1367,7 @@ GYRO_TEST(FrameLoop, ACommittedFrameGetsABudgetSpanEndingAtItsDeadline)
 			began = event.Stamp;
 
 			GYRO_CHECK_EQ(std::string_view{ event.Name }, std::string_view{ "frame" });
-
-			// The harness renders on a stub that finishes on the CPU, so there is no timeline to name and
-			// the budget carries no flow — which is the honest picture of one rather than a false link.
-			GYRO_CHECK_EQ(event.Payload, std::uint64_t{ 0 });
+			GYRO_CHECK(!event.Arrow);
 		}
 
 		if (event.Kind == TraceKind::End)
@@ -1365,29 +1377,23 @@ GYRO_TEST(FrameLoop, ACommittedFrameGetsABudgetSpanEndingAtItsDeadline)
 		}
 	}
 
-	GYRO_REQUIRE_EQ(opened, std::size_t{ 1 });
-	GYRO_REQUIRE_EQ(closed, std::size_t{ 1 });
-
+	GYRO_CHECK_EQ(opened, std::size_t{ 1 });
+	GYRO_CHECK_EQ(closed, std::size_t{ 1 });
 	GYRO_CHECK(began == At(1002));
-	GYRO_CHECK(ended == harness.Output().Last().Deadline);
-
-	// The deadline is ahead of the work, which is what makes the span a budget rather than a record of
-	// what happened — a frame that finished after this instant is one whose row reaches past it.
-	GYRO_CHECK(ended > began);
+	GYRO_CHECK(ended == At(1010));
 }
 
-// The wait that explains a frame's latency, and the reason it is an extent: a scene published just
-// after this output committed cannot be drawn until the flip in front of it lands, which on a sixty
-// hertz panel is a whole refresh in which no other row moves. As a mark it was the most numerous
-// event in the trace and carried no length; the length is the whole of what a reader wants.
-GYRO_TEST(FrameLoop, AFullCommitQueueIsAnExtentEndingAtTheFlipThatFreesTheSlot)
+// A wake that draws nothing says why it drew nothing. Two thirds of this loop's iterations are the
+// panel still holding the frame in front, and they used to leave a `serve` span four microseconds long
+// with nothing inside it — three identical blocks per refresh of which one was the frame, which is the
+// single thing that made these charts unreadable.
+GYRO_TEST(FrameLoop, AWakeThatDeclinesToDrawSaysWhy)
 {
 	Harness harness;
 
 	std::array<TraceRecord, 128> records{};
 	TraceBuffer trace;
 	trace.Arm(records, harness.Clock);
-	EnrollTracing(&trace);
 
 	harness.Anchor();
 	harness.Publish(1, {});
@@ -1397,16 +1403,11 @@ GYRO_TEST(FrameLoop, AFullCommitQueueIsAnExtentEndingAtTheFlipThatFreesTheSlot)
 
 	GYRO_REQUIRE(harness.Output().IsCommitFull());
 
-	// A second scene arrives while the first is still in flight, which is the ordinary arrangement
-	// rather than a contrived one: dispatch publishes when the world changes and the panel flips when
-	// it flips.
+	// Armed only now, so that what is counted below is the blocked wake alone.
+	EnrollTracing(&trace);
+
 	harness.Publish(2, {});
 	harness.Clock.Set(At(1005));
-	(void)harness.Loop.Step();
-
-	// The flip lands at 1010 and the loop is not told until 1020. The wait ended at the flip.
-	harness.Presenter.Flip(At(1010), 8);
-	harness.Clock.Set(At(1020));
 	(void)harness.Loop.Step();
 
 	EnrollTracing(nullptr);
@@ -1414,94 +1415,31 @@ GYRO_TEST(FrameLoop, AFullCommitQueueIsAnExtentEndingAtTheFlipThatFreesTheSlot)
 	std::array<TraceEvent, 128> events{};
 	const std::size_t count = trace.Copy(events);
 
-	std::size_t opened = 0;
-	std::size_t closed = 0;
-	std::size_t ticks = 0;
-	Instant began{};
-	Instant ended{};
+	std::size_t declined = 0;
+	std::size_t framesOnTheRow = 0;
 
 	for (std::size_t index = 0; index < count; ++index)
 	{
 		const TraceEvent& event = events[index];
 
-		if (event.Scope == TraceBlocked(0))
+		if (event.Scope != TraceOutput(0))
 		{
-			if (event.Kind == TraceKind::Begin)
-			{
-				++opened;
-				began = event.Stamp;
-
-				GYRO_CHECK_EQ(std::string_view{ event.Name }, std::string_view{ "commit full" });
-			}
-
-			if (event.Kind == TraceKind::End)
-			{
-				++closed;
-				ended = event.Stamp;
-			}
+			continue;
 		}
 
-		// The mark it replaced, which used to land on the output's own row every iteration the queue was
-		// full and is gone rather than kept beside the span.
-		if (event.Scope == TraceOutput(0) && event.Kind == TraceKind::Mark &&
-		    std::string_view{ event.Name } == "commit full")
+		if (event.Kind == TraceKind::Mark && std::string_view{ event.Name } == "queue full")
 		{
-			++ticks;
+			++declined;
+		}
+
+		if (event.Kind == TraceKind::Begin)
+		{
+			++framesOnTheRow;
 		}
 	}
 
-	GYRO_REQUIRE_EQ(opened, std::size_t{ 1 });
-	GYRO_REQUIRE_EQ(closed, std::size_t{ 1 });
-	GYRO_CHECK_EQ(ticks, std::size_t{ 0 });
-
-	// Opened where the output first found the queue full, and closed at the host's instant rather than
-	// at 1020, where the loop learned of it — a late wake must not lengthen the wait it was late for.
-	GYRO_CHECK(began == At(1005));
-	GYRO_CHECK(ended == At(1010));
-}
-
-// An idle panel with a commit still in flight is full too, and it is not waiting for anything. Opening
-// a span for it would paint the lane solid through every quiet second and make a real wait
-// indistinguishable from a screen with nothing on it.
-GYRO_TEST(FrameLoop, AnOutputWithNothingToDrawIsNotRecordedAsWaiting)
-{
-	Harness harness;
-
-	std::array<TraceRecord, 128> records{};
-	TraceBuffer trace;
-	trace.Arm(records, harness.Clock);
-	EnrollTracing(&trace);
-
-	harness.Anchor();
-	harness.Publish(1, {});
-	harness.Clock.Set(At(1002));
-	harness.Output().DamageWholeOutput();
-	(void)harness.Loop.Step();
-
-	GYRO_REQUIRE(harness.Output().IsCommitFull());
-
-	// No new scene and no damage: the queue is full and the output owes nothing.
-	harness.Clock.Set(At(1005));
-	(void)harness.Loop.Step();
-
-	harness.Presenter.Flip(At(1010), 8);
-	harness.Clock.Set(At(1020));
-	(void)harness.Loop.Step();
-
-	EnrollTracing(nullptr);
-
-	std::array<TraceEvent, 128> events{};
-	const std::size_t count = trace.Copy(events);
-
-	std::size_t records_on_the_lane = 0;
-
-	for (std::size_t index = 0; index < count; ++index)
-	{
-		if (events[index].Scope == TraceBlocked(0))
-		{
-			++records_on_the_lane;
-		}
-	}
-
-	GYRO_CHECK_EQ(records_on_the_lane, std::size_t{ 0 });
+	// One mark saying why, and nothing opened — a wake that declined is not a slice, because a slice
+	// the same shape as the one a frame makes is what a reader has to open to tell them apart.
+	GYRO_CHECK_EQ(declined, std::size_t{ 1 });
+	GYRO_CHECK_EQ(framesOnTheRow, std::size_t{ 0 });
 }
