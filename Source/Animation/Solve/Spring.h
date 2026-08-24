@@ -150,7 +150,10 @@ template<std::floating_point T>
 {
 	const Duration elapsed = Elapsed(origin, now);
 
-	if (elapsed <= Duration::zero())
+	// count() rather than a comparison against Duration::zero(): some libstdc++ versions expose a
+	// rewritten <= candidate there that trips -Wzero-as-null-pointer-constant, which is an error under
+	// the project warning set. The two spellings are the same test.
+	if (elapsed.count() <= 0)
 	{
 		return T(0);
 	}
