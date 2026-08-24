@@ -40,8 +40,38 @@ template<typename S>
 }
 } // namespace
 
+bool ClientSurface::AdoptRole(SurfaceRole& role) noexcept
+{
+	if (m_Role != nullptr)
+	{
+		return false;
+	}
+
+	m_Role = &role;
+
+	return true;
+}
+
+void ClientSurface::ForgetRole(const SurfaceRole& role) noexcept
+{
+	if (m_Role == &role)
+	{
+		m_Role = nullptr;
+	}
+}
+
 ClientSurface::~ClientSurface()
 {
+	// The role is told first, while the surface is still readable: it has a window in the scene to take
+	// down, and a client destroying a `wl_surface` before its `xdg_surface` is a protocol error the
+	// compositor still has to survive without leaving a node nothing can ever author again.
+	if (SurfaceRole* const role = m_Role; role != nullptr)
+	{
+		m_Role = nullptr;
+
+		role->OnSurfaceGone();
+	}
+
 	// The client is gone and its window with it, so the pixels stop being drawn. Retiring is the id
 	// giving up its name, not the memory going away — the registry holds both until the frame thread's
 	// watermark says no published snapshot can still be recording from it.
@@ -334,4 +364,12 @@ void ClientSurface::Apply()
 	// is one whose sticky fields are sticky only until somebody reorders this function.
 	m_Pending.SurfaceDamage.clear();
 	m_Pending.BufferDamage.clear();
+
+	// **Last, so the role reads a surface that has finished committing.** Everything above is what the
+	// commit made true; the role turns that into a window, and it must not see a half-applied state —
+	// which is the same atomicity the double buffering exists for, one level up.
+	if (m_Role != nullptr)
+	{
+		m_Role->OnSurfaceCommitted(*this);
+	}
 }

@@ -812,12 +812,15 @@ gyro_add_module(Protocol DISPATCH
 		Scene
 	SOURCES
 		Compositor.cpp
+		Floor.cpp
 		Host.cpp
 		Region.cpp
 		Server.cpp
+		Shell.cpp
 		Shm.cpp
 		Surface.cpp
 	TESTS
+		Floor.Test.cpp
 		Host.Test.cpp
 		Region.Test.cpp
 		Server.Test.cpp

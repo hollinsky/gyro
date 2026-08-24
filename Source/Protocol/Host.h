@@ -8,7 +8,9 @@
 #include "Core/Wake.h"
 #include "Protocol/Compositor.h"
 #include "Protocol/Context.h"
+#include "Protocol/Floor.h"
 #include "Protocol/Server.h"
+#include "Protocol/Shell.h"
 #include "Protocol/Shm.h"
 #include "Scene/Author.h"
 
@@ -36,13 +38,15 @@
 // acting on the callback it never received. `Flush` is therefore public and the root calls it
 // immediately before the wait, which is the one place that knows the thread is about to sleep.
 //
-// **Two globals are advertised, and together they are everything a client needs to have pixels
-// accepted.** `wl_compositor` is where a `wl_surface` and a `wl_region` come from and `wl_shm` is where
-// its pixels do, so a client can now draw a frame, commit it, and have gyro take a copy and hand the
-// buffer straight back. What it still cannot do is make anything appear: a `wl_surface` is not a
-// window until something gives it a role, and `xdg_wm_base` is the step after this one. A toolkit will
-// get as far as its first committed frame and then wait, which is exactly as far as this layer
-// honestly goes.
+// **Three globals are advertised, and together they are a window on screen.** `wl_compositor` is where
+// a `wl_surface` and a `wl_region` come from, `wl_shm` is where its pixels do, and `xdg_wm_base` is
+// what says the surface is a window — so a toolkit can now start, negotiate a size, draw a frame and
+// be placed. The floor it is placed on is authored here, once, because with no session agent there is
+// one session and this object is the whole of it.
+//
+// What a person cannot do yet is *use* the window: there is no seat, so nothing routes a click or a
+// keystroke, and no frame callback answers, so an application draws its first frame and then waits for
+// a signal that never comes. Both are the next step.
 //
 // The global is a member rather than something the root passes in, because its lifetime is the
 // server's: `wl_compositor` exists for as long as there is a socket to reach it through, and unlike a
@@ -105,6 +109,12 @@ private:
 
 	ShmGlobal m_Shm;
 	wl_global* m_ShmGlobal = nullptr;
+
+	ShellGlobal m_Shell{ m_Context };
+	wl_global* m_ShellGlobal = nullptr;
+
+	// gyro's own node, authored before any client can reach the socket and outliving all of them.
+	SessionFloor m_Floor;
 
 	Server m_Server;
 };

@@ -1309,11 +1309,12 @@ private:
 
 			spdlog::info("hosting clients on {}", m_Clients->SocketName());
 
-			// Two globals, and a client that binds them can draw a frame and has no way to say it is a
-			// window. Said out loud because the alternative is somebody concluding the socket is broken
-			// when a toolkit starts up, finds no `xdg_wm_base`, and exits without drawing anything.
+			// Three globals, which is a window and nothing a person can do to it. Said out loud because
+			// the alternative is somebody filing the silence as a bug: an application will open, appear
+			// centred, and then ignore every click and keystroke and never repaint.
 			spdlog::info(
-				"wl_compositor and wl_shm are the globals; a client can draw a frame and has no role to show it under"
+				"wl_compositor, wl_shm and xdg_wm_base are the globals; a window will open and be placed, and there is "
+				"no seat to route input and no frame callback to answer, so it will not respond or redraw"
 			);
 
 			author = std::move(*made);

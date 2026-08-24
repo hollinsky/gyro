@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Core/Handle.h"
+#include "Scene/Store.h"
 #include "Scene/Textures.h"
 
 // What a request handler may reach, and only while a dispatch is running.
@@ -30,19 +32,34 @@ public:
 	HostContext(HostContext&&) = delete;
 	HostContext& operator=(HostContext&&) = delete;
 
+	// The world this step was handed, or null outside one.
+	[[nodiscard]] SceneStore* Store() const noexcept { return m_Store; }
+
 	// The texture space this step was handed, or null outside one.
 	[[nodiscard]] ITextures* Textures() const noexcept { return m_Textures; }
+
+	// What a window is parented into, per [Floor.h](Floor.h). Set once when the host opens, and
+	// unlike the two above it does not come and go — the floor is gyro's own node and outlives every
+	// client that hangs something under it.
+	[[nodiscard]] EntityId Floor() const noexcept { return m_Floor; }
+
+	void SetFloor(EntityId floor) noexcept { m_Floor = floor; }
 
 	// One `Advance`'s worth of reachability.
 	class Dispatching
 	{
 	public:
-		Dispatching(HostContext& context, ITextures& textures) noexcept : m_Context{ &context }
+		Dispatching(HostContext& context, SceneStore& scene, ITextures& textures) noexcept : m_Context{ &context }
 		{
+			m_Context->m_Store = &scene;
 			m_Context->m_Textures = &textures;
 		}
 
-		~Dispatching() { m_Context->m_Textures = nullptr; }
+		~Dispatching()
+		{
+			m_Context->m_Store = nullptr;
+			m_Context->m_Textures = nullptr;
+		}
 
 		Dispatching(const Dispatching&) = delete;
 		Dispatching& operator=(const Dispatching&) = delete;
@@ -54,5 +71,7 @@ public:
 	};
 
 private:
+	SceneStore* m_Store = nullptr;
 	ITextures* m_Textures = nullptr;
+	EntityId m_Floor{};
 };

@@ -100,6 +100,39 @@ struct SurfaceState
 	PixelSize<BufferSpace> ContentSize{};
 };
 
+class ClientSurface;
+
+// What a `wl_surface` becomes when something gives it one.
+//
+// **A surface with no role is not shown, which is Wayland's own rule and the reason this is where the
+// scene is written from rather than in the surface.** A `wl_surface` is a rectangle of pixels with no
+// opinion about whether it is a window, a cursor, a subsurface or a drag icon, and what it means to
+// commit one is entirely the role's — an `xdg_toplevel` maps a window and a cursor surface moves a
+// pointer. So the surface owns the pixels and hands the fact of the commit to whatever claimed it.
+//
+// **One role at a time and never a second**, which the protocol states for every role object there is
+// and which `AdoptRole` enforces in one place rather than in each of them.
+class SurfaceRole
+{
+public:
+	SurfaceRole() = default;
+
+	virtual ~SurfaceRole() = default;
+
+	SurfaceRole(const SurfaceRole&) = delete;
+	SurfaceRole& operator=(const SurfaceRole&) = delete;
+	SurfaceRole(SurfaceRole&&) = delete;
+	SurfaceRole& operator=(SurfaceRole&&) = delete;
+
+	// The surface's pending state has just become current. Everything the role reads — the content, the
+	// extent, the scale — is `Current()` by the time this runs.
+	virtual void OnSurfaceCommitted(ClientSurface& surface) = 0;
+
+	// The `wl_surface` is going away underneath the role, which the protocol calls a client error and
+	// still requires the compositor to survive. The role has whatever it authored to take down.
+	virtual void OnSurfaceGone() = 0;
+};
+
 class ClientSurface final : public Wayland::Server::WlSurfaceHandler
 {
 public:
@@ -120,6 +153,16 @@ public:
 	// can assert on in the meantime, and the list is private because the only legitimate thing to do
 	// with one is send it.
 	[[nodiscard]] std::size_t DueCallbackCount() const noexcept { return m_DueCallbacks.size(); }
+
+	// Claim this surface. False where something already has it, which is every role object's own
+	// `role` error and is raised by the caller because only it knows which one to name.
+	[[nodiscard]] bool AdoptRole(SurfaceRole& role) noexcept;
+
+	// Give the surface back, from a role object that is being destroyed. Ignores a role that is not the
+	// one holding it, so a role tearing down after the surface already went finds nothing to undo.
+	void ForgetRole(const SurfaceRole& role) noexcept;
+
+	[[nodiscard]] bool HasRole() const noexcept { return m_Role != nullptr; }
 
 	void OnGone() override;
 
@@ -201,6 +244,10 @@ private:
 	// The world this surface's requests act on, for the duration of the `Advance` they arrive in. Never
 	// null; what is null outside a dispatch is what it points at.
 	HostContext* m_Context = nullptr;
+
+	// Whatever gave this surface a meaning, or null while it has none. Not owned: a role object is a
+	// protocol object of its own with its own lifetime, and it lets go through `ForgetRole`.
+	SurfaceRole* m_Role = nullptr;
 
 	// True once the client has been ended for overrunning `MaxDamageRects`.
 	bool m_Overrun = false;

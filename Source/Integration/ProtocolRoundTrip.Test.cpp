@@ -7,12 +7,14 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -23,12 +25,16 @@
 #include "Core/Result.h"
 #include "Core/Texture.h"
 #include "Core/Time.h"
+#include "Geometry/Scale.h"
 #include "Geometry/Space.h"
 #include "Protocol/Host.h"
+#include "Scene/Entity.h"
+#include "Scene/Output.h"
 #include "Scene/Store.h"
 #include "Scene/Textures.h"
 #include "Testing/Test.h"
 #include "Wayland/Wayland.h"
+#include "Wayland/XdgShell.h"
 #include "Wire/Connection.h"
 
 // gyro's client talking to gyro's server, over a real socket.
@@ -251,6 +257,8 @@ struct BoundCompositor
 	Wayland::WlCompositor Compositor;
 	ShmFormats ShmEvents;
 	Wayland::WlShm Shm;
+	Wayland::XdgWmBaseIgnoring ShellEvents;
+	Wayland::XdgWmBase Shell;
 };
 
 [[nodiscard]] bool Bind(Session& session, BoundCompositor& bound)
@@ -285,11 +293,20 @@ struct BoundCompositor
 
 	bound.Shm = bound.Listener.Object().Bind<Wayland::WlShm>(shm->Name, shm->Version, bound.ShmEvents);
 
-	return bound.Compositor.IsValid() && bound.Shm.IsValid();
+	const Registry::Global* const shell = bound.Listener.Find(Wayland::XdgWmBase::WireName);
+
+	if (shell == nullptr)
+	{
+		return false;
+	}
+
+	bound.Shell = bound.Listener.Object().Bind<Wayland::XdgWmBase>(shell->Name, shell->Version, bound.ShellEvents);
+
+	return bound.Compositor.IsValid() && bound.Shm.IsValid() && bound.Shell.IsValid();
 }
 } // namespace
 
-GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheCompositorAndTheBufferPool)
+GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheThreeGlobalsAWindowIsBuiltFrom)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
@@ -315,10 +332,18 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheCompositorAndTheBufferPool)
 	// client nothing that is not already implemented.
 	GYRO_CHECK_EQ(shm->Version, std::uint32_t{ 2 });
 
-	// The list is exactly two long, which is the honest state of this layer: a client can draw a frame
-	// and hand it over, and has nowhere to show it. When `xdg_wm_base` lands, this number goes up in
-	// the same commit as the thing it counts.
-	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 2 });
+	const Registry::Global* const shell = bound.Listener.Find(Wayland::XdgWmBase::WireName);
+	GYRO_REQUIRE(shell != nullptr);
+
+	// Version 1 for `wl_compositor`'s reason. 4 owes a `configure_bounds` and 5 a `wm_capabilities`,
+	// and gyro has no shell, no seat and no output model reaching this module — a client told 5 and
+	// sent no capabilities is entitled to assume it has all four, which is a titlebar of buttons that
+	// do nothing.
+	GYRO_CHECK_EQ(shell->Version, std::uint32_t{ 1 });
+
+	// Exactly three, which is the smallest set a window can be built out of. When `wl_seat` lands this
+	// number goes up in the same commit as the thing it counts.
+	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 3 });
 }
 
 GYRO_TEST(ProtocolRoundTrip, BindingWlShmAnnouncesTheFormatsBeforeAnythingIsAsked)
@@ -378,9 +403,9 @@ GYRO_TEST(ProtocolRoundTrip, ASurfaceAndARegionSurviveAWholeCommit)
 	// argument count or a wrong type is a protocol error and the connection would be gone.
 	GYRO_CHECK(!session.Client.Fault().has_value());
 
-	// The world is untouched, which is what a surface with no buffer means and what makes this an
-	// honest waypoint rather than a half-built window.
-	GYRO_CHECK_EQ(session.Store.Count(), std::uint32_t{ 0 });
+	// One node, and it is gyro's own floor rather than anything the client authored — a surface with no
+	// role is not a window, and nothing about the requests above says it is one.
+	GYRO_CHECK_EQ(session.Store.Count(), std::uint32_t{ 1 });
 	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 0 });
 }
 
@@ -655,4 +680,248 @@ GYRO_TEST(ProtocolRoundTrip, AttachingNothingTakesTheContentAway)
 	GYRO_CHECK(!session.Client.Fault().has_value());
 	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 1 });
 	GYRO_CHECK_EQ(session.Textures.Retired, std::uint32_t{ 1 });
+}
+
+namespace
+{
+// What the compositor tells a client about its window. Both configures, kept in the order they
+// arrived — `xdg_surface.configure` is the one that closes the sequence, and a client that acted on
+// the toplevel's numbers before it would be acting on a proposal that was still being assembled.
+class ShellEvents final : public Wayland::XdgSurfaceListener
+{
+public:
+	void OnConfigure(std::uint32_t serial) override
+	{
+		Serial = serial;
+		++Configured;
+	}
+
+	std::uint32_t Serial = 0;
+	std::uint32_t Configured = 0;
+};
+
+class ToplevelEvents final : public Wayland::XdgToplevelIgnoring
+{
+public:
+	void OnConfigure(std::int32_t width, std::int32_t height, std::span<const std::byte> states) override
+	{
+		Width = width;
+		Height = height;
+		States = states.size();
+		++Configured;
+	}
+
+	void OnClose() override { ++Closed; }
+
+	std::int32_t Width = -1;
+	std::int32_t Height = -1;
+	std::size_t States = 0;
+	std::uint32_t Configured = 0;
+	std::uint32_t Closed = 0;
+};
+
+// A client taking a surface all the way to a window, one step at a time so a test can stop anywhere
+// along the sequence.
+struct Toplevel
+{
+	DrawnSurface Drawn;
+	ShellEvents SurfaceEvents;
+	ToplevelEvents WindowEvents;
+	Wayland::XdgSurface XdgSurface;
+	Wayland::XdgToplevel Window;
+};
+
+[[nodiscard]] bool Role(BoundCompositor& bound, Toplevel& toplevel, std::byte fill)
+{
+	if (!Draw(bound, toplevel.Drawn, fill))
+	{
+		return false;
+	}
+
+	toplevel.XdgSurface = bound.Shell.GetXdgSurface(toplevel.Drawn.Surface, toplevel.SurfaceEvents);
+
+	if (!toplevel.XdgSurface.IsValid())
+	{
+		return false;
+	}
+
+	toplevel.Window = toplevel.XdgSurface.GetToplevel(toplevel.WindowEvents);
+
+	return toplevel.Window.IsValid();
+}
+
+// The window gyro authored, found the way anything without an id would find it: the floor is the only
+// root, and a window is a child of it.
+[[nodiscard]] const Entity* WindowNode(const SceneStore& scene)
+{
+	const Entity* const floor = scene.Find(scene.FirstRoot());
+
+	return floor == nullptr ? nullptr : scene.Find(floor->FirstChild);
+}
+} // namespace
+
+GYRO_TEST(ProtocolRoundTrip, AToplevelIsConfiguredBeforeItIsAskedToDrawAnything)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-configure" };
+	GYRO_REQUIRE(session.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x20 }));
+
+	// The empty commit is the client asking *what size should I be*, and it is the protocol's own
+	// handshake rather than a courtesy: a toolkit will not draw a pixel until it has been answered.
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Configured, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(toplevel.SurfaceEvents.Configured, std::uint32_t{ 1 });
+	GYRO_CHECK(toplevel.SurfaceEvents.Serial != 0);
+
+	// **Zero by zero and no states, which is gyro having no opinion.** A number here is one the client
+	// must obey, so inventing one would be the compositor doing layout; an empty state list is a window
+	// that is not maximised, not fullscreen, not being resized and not activated — all four of which
+	// are true.
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Width, 0);
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Height, 0);
+	GYRO_CHECK_EQ(toplevel.WindowEvents.States, std::size_t{ 0 });
+
+	// Nothing is on screen: the client has been told it may draw and has not.
+	GYRO_CHECK_EQ(session.Store.Count(), std::uint32_t{ 1 });
+}
+
+GYRO_TEST(ProtocolRoundTrip, AnAcknowledgedFrameBecomesAWindowCentredOnTheOutput)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-map" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x71 }));
+
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.DamageBuffer(0, 0, Width, Height);
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_CHECK(!session.Client.Fault().has_value());
+
+	// The floor, the window, and the pixels under it. Two nodes per window rather than one, which is a
+	// toplevel as decision 111 describes it: a container holding its own surface and, one day, its
+	// subsurfaces.
+	GYRO_CHECK_EQ(session.Store.Count(), std::uint32_t{ 3 });
+	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 1 });
+
+	const Entity* const window = WindowNode(session.Store);
+	GYRO_REQUIRE(window != nullptr);
+
+	// Centred, which with no shell and no pointer is the whole of gyro's placement policy — and it is
+	// the one placement that takes no parameter, so there is no number here that somebody chose.
+	GYRO_CHECK_EQ(window->Translation.Model().X, (1920.0 - static_cast<double>(Width)) / 2.0);
+	GYRO_CHECK_EQ(window->Translation.Model().Y, (1080.0 - static_cast<double>(Height)) / 2.0);
+
+	const Entity* const content = session.Store.Find(window->FirstChild);
+	GYRO_REQUIRE(content != nullptr);
+	GYRO_CHECK(content->Kind == NodeKind::Image);
+	GYRO_CHECK_EQ(content->Extent.Width, static_cast<float>(Width));
+}
+
+GYRO_TEST(ProtocolRoundTrip, ABufferCommittedBeforeTheConfigureIsAcknowledgedEndsTheClient)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-unconfigured" };
+	GYRO_REQUIRE(session.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x33 }));
+
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	// The ack is deliberately skipped. A compositor that accepted this would be showing a frame drawn
+	// for a size nobody agreed on, which is a window that appears at the wrong shape and then jumps.
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_REQUIRE(session.Client.Fault().has_value());
+	GYRO_CHECK_EQ(
+		session.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::XdgSurfaceError::UnconfiguredBuffer)
+	);
+
+	GYRO_CHECK_EQ(session.Store.Count(), std::uint32_t{ 1 });
+}
+
+GYRO_TEST(ProtocolRoundTrip, DestroyingTheToplevelRetiresTheWindowRatherThanRemovingIt)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-unmap" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x55 }));
+
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_REQUIRE(session.Store.Count() == 3);
+
+	toplevel.Window.Destroy();
+
+	session.Turn();
+
+	GYRO_CHECK(!session.Client.Fault().has_value());
+
+	// **Still three, and still where it was.** A window that is closing is a window a person is still
+	// looking at, so the subtree keeps its links and its position and goes on being drawn until every
+	// channel on it has settled; the store frees it on the serialisation pass that finds it at rest.
+	// Freeing here instead is a window that vanishes rather than one that leaves.
+	GYRO_CHECK_EQ(session.Store.Count(), std::uint32_t{ 3 });
+
+	const Entity* const window = WindowNode(session.Store);
+	GYRO_REQUIRE(window != nullptr);
+	GYRO_CHECK(window->Retiring);
 }
