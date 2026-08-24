@@ -2039,12 +2039,17 @@ panel's pixels is how much of the screen gyro drew twice and divided by the span
 is achieving. None of it touches what the frame loop is fed — the cost is still the first stamp
 against the last — so tracing can be switched on without moving the tier a panel draws at.
 
-**Three things a trace is asked, and what answers each.** *Was the frame late or was it stale* — the
+**Four things a trace is asked, and what answers each.** *Was the frame late or was it stale* — the
 flow arrow from the dispatch thread's publish to the frame thread's acquire, keyed on the snapshot
-sequence. *Which part of the iteration was slow* — the nested spans, since the whole point of drawing
-`evaluate`, `record` and `present` separately is that they fail for unrelated reasons. *Is this
-machine about to start dropping frames* — the slack counter, which trends toward zero over a hundred
-frames and is invisible in any one of them.
+sequence. *Which recorded frame was actually on the glass at a given vblank* — the `presented` mark
+on the output's own row, stamped at the host's presentation instant rather than the one the feedback
+was drained at, with the flow extended to it, and the `shown` counter that steps beside it to the
+published sequence the frame was drawn from: the counter reads as what the panel is showing between
+flips, so a run of steps at the same number is the same scene shown twice and a vblank with no step
+is one the host spent on a frame gyro did not draw. *Which part of the iteration was slow* — the
+nested spans, since the whole point of drawing `evaluate`, `record` and `present` separately is that
+they fail for unrelated reasons. *Is this machine about to start dropping frames* — the slack counter,
+which trends toward zero over a hundred frames and is invisible in any one of them.
 
 See [decision 139](Decisions.md#139-the-trace-ring-is-always-armed-and-the-format-is-somebody-elses)
 and [decision 140](Decisions.md#140-a-composite-is-cut-at-its-barriers-and-counted-by-its-fragments).

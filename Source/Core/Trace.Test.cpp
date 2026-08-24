@@ -298,3 +298,31 @@ GYRO_TEST(Trace, ALateCounterKeepsItsMoment)
 	GYRO_CHECK_EQ(into[0].Scope, TraceGpu(1));
 	GYRO_CHECK(into[0].Stamp == Monotonic::FromNanoseconds(500));
 }
+
+// A late mark goes where the thing it names happened rather than where it was learned about, for
+// the counter's reason one test up: the flip is at the panel's vblank, and the feedback is drained
+// a moment after.
+GYRO_TEST(Trace, ALateMarkKeepsItsMoment)
+{
+	const MonotonicClock clock;
+	Ring ring{ 4, clock };
+
+	EnrollTracing(&ring.Buffer);
+	TraceMark("now");
+	TraceMarkAt("presented", Monotonic::FromNanoseconds(500), TraceOutput(0), 12);
+	EnrollTracing(nullptr);
+
+	std::array<TraceEvent, 4> into{};
+
+	GYRO_REQUIRE_EQ(ring.Buffer.Copy(into), std::size_t{ 2 });
+
+	// Out of order in the ring, for the `EmitAt` reason, and what comes back as the later record is
+	// the one the caller stamped rather than the one the clock happened to read.
+	GYRO_CHECK(into[0].Stamp > into[1].Stamp);
+
+	GYRO_CHECK(into[1].Kind == TraceKind::Mark);
+	GYRO_CHECK_EQ(std::string_view{ into[1].Name }, std::string_view{ "presented" });
+	GYRO_CHECK_EQ(into[1].Payload, std::uint64_t{ 12 });
+	GYRO_CHECK_EQ(into[1].Scope, TraceOutput(0));
+	GYRO_CHECK(into[1].Stamp == Monotonic::FromNanoseconds(500));
+}

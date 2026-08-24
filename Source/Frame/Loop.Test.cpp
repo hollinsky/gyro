@@ -1109,3 +1109,72 @@ GYRO_TEST(FrameLoop, AFrameTheHostAcceptedAndNeverShowedIsNeverReportedPresented
 
 	GYRO_CHECK_EQ(harness.Reported().Presented()[0].Sequence, std::uint64_t{ 0 });
 }
+
+// A flip is marked at the moment the panel scanned out and named for the recorded frame the vblank
+// showed, rather than at the moment its feedback was drained. A mark stamped where it was *learned*
+// would move with every late wake of the loop and read a stutter of the reader as a lateness of the
+// host; and the number on the step is the published sequence, which is the one the dispatch side can
+// turn back into the scene the glass is holding.
+GYRO_TEST(FrameLoop, ThePresentedMarkLandsWhereThePanelScannedOutAndNamesTheScene)
+{
+	Harness harness;
+
+	std::array<TraceRecord, 64> records{};
+	TraceBuffer trace;
+	trace.Arm(records, harness.Clock);
+	EnrollTracing(&trace);
+
+	harness.Anchor();
+	harness.Publish(1, {});
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	// The vblank happened at 1010 and the loop is not told about it until 1020, which is the
+	// arrangement a feedback queue always has: the panel moved on before the reader woke up.
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(At(1020));
+	(void)harness.Loop.Step();
+
+	EnrollTracing(nullptr);
+
+	std::array<TraceEvent, 64> events{};
+	const std::size_t count = trace.Copy(events);
+
+	bool markedAtTheVblank = false;
+	bool namedTheScene = false;
+	bool stampedWhereLearned = false;
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		const TraceEvent& event = events[index];
+
+		if (event.Scope != TraceOutput(0))
+		{
+			continue;
+		}
+
+		if (event.Kind == TraceKind::Mark && std::string_view{ event.Name } == "presented")
+		{
+			if (event.Stamp == At(1010) && event.Payload == 1)
+			{
+				markedAtTheVblank = true;
+			}
+
+			if (event.Stamp == At(1020))
+			{
+				stampedWhereLearned = true;
+			}
+		}
+
+		if (event.Kind == TraceKind::Count && std::string_view{ event.Name } == "shown" && event.Stamp == At(1010) &&
+		    event.Payload == 1)
+		{
+			namedTheScene = true;
+		}
+	}
+
+	GYRO_CHECK(markedAtTheVblank);
+	GYRO_CHECK(namedTheScene);
+	GYRO_CHECK(!stampedWhereLearned);
+}

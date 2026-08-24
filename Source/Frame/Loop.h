@@ -252,22 +252,46 @@ private:
 	// reason: the sequence is monotone, so the newer one's derivation already contains the older's.
 	void OnPresented(const PresentationInfo& info) noexcept
 	{
-		// **On the output's own row and at the host's timestamp, which is the point of tracing it here
-		// rather than counting it.** What a person is looking for is this mark landing at an even
-		// cadence; a frame that reached the glass late shows as a gap nothing in gyro's own slices
-		// explains, and that is the shape that says the answer is below us rather than in here.
-		TraceMark("presented", m_Trace);
-
 		m_Clock.Observe(info);
+
+		// The oldest outstanding commit is the one this flip answers, so it is the recorded frame the
+		// vblank showed, and zero where the host answered a commit this loop never made.
+		const std::uint64_t frame = m_InFlight > 0 ? m_InFlightSnapshots[0] : 0;
+
+		// **On the output's own row and at the host's timestamp, which is the point of tracing it here
+		// rather than counting it.** The stamp is `info.PresentedAt` and not the one the feedback was
+		// drained at, because the flip happened at the panel's vblank and a mark stamped where it was
+		// *learned* moves with every late wake of this loop: a stutter of the reader would read as a
+		// lateness of the host, which is the opposite of what the row is for. What a person is looking
+		// for is this mark landing at an even cadence; a frame that reached the glass late shows as a
+		// gap nothing in gyro's own slices explains, and that is the shape that says the answer is
+		// below us rather than in here.
+		//
+		// **The flow is the published sequence the frame was drawn from, and that extends the arrow
+		// the loop already carries on `acquired` to the glass.** It is the same number dispatch stamped
+		// on the publish, so a reader following it from a vblank lands on the `author` slice that wrote
+		// the scene the panel is showing; a vblank that showed somebody else's frame names nothing, and
+		// a flow of zero is no flow, which is the honest picture of one.
+		TraceMarkAt("presented", info.PresentedAt, m_Trace, frame);
 
 		if (m_InFlight == 0)
 		{
 			return;
 		}
 
-		if (m_InFlightSnapshots[0] >= m_Presented.Sequence)
+		// **The recorded frame the vblank showed, stepped where the vblank is.** A counter keeps the
+		// value it was last given, so between flips it reads as what is on the glass right now, and
+		// each step is a vblank that changed it: a run of steps at the same number is the same scene
+		// shown twice, and a vblank with no step is one the host spent on a frame gyro did not draw.
+		// The value is the published sequence rather than the panel's own counter because it is the
+		// one number dispatch can turn back into a scene — `held` on the compositor's row is what the
+		// loop is rendering from, and an output that is showing what it just recorded is the one where
+		// the two agree.
+		TraceCountAt("shown", info.PresentedAt, static_cast<std::int64_t>(frame), m_Trace);
+
+		if (frame >= m_Presented.Sequence)
 		{
-			m_Presented = { .Sequence = m_InFlightSnapshots[0], .At = info.PresentedAt };
+			m_Presented = { .Sequence = frame, .At = info.PresentedAt };
 		}
 
 		--m_InFlight;

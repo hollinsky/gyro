@@ -363,6 +363,17 @@ inline void TraceCountAt(const char* name, Instant stamp, std::int64_t value, st
 	}
 }
 
+// A mark belonging to a moment that has passed, for the same reason as the two above: a flip
+// happens at the panel's vblank and is only learned about when the feedback is drained, and what
+// is worth reading is the moment it happened rather than the moment it was reported.
+inline void TraceMarkAt(const char* name, Instant stamp, std::uint16_t scope, std::uint64_t flow = 0) noexcept
+{
+	if (TraceBuffer* const buffer = Detail::Tracing)
+	{
+		buffer->EmitAt(stamp, TraceKind::Mark, name, flow, scope);
+	}
+}
+
 // A span of work, opened where it starts and closed by leaving the scope.
 //
 // **An unmatched half is expected rather than exceptional**, and the writer is what absorbs it. A ring
