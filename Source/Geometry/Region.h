@@ -23,18 +23,27 @@
 //
 // **Bounded, because it is frame-side, and the bound has a correct answer rather than a policy.**
 // Decision 36 forbids allocation inside the frame section, so the capacity is fixed and something has
-// to happen when a seventeenth rectangle arrives. Here — unlike Publication/Return.h, where a dropped
+// to happen when a thirty-third rectangle arrives. Here — unlike Publication/Return.h, where a dropped
 // release is a client that never draws again — overflow has an answer that cannot be wrong: **damage
 // is conservative, so a superset is always correct.** A region that has lost track of its detail
 // collapses to its own bounding rectangle and costs bandwidth. A region that lost a rectangle would
 // leave stale pixels on the glass, which is the one thing this type must not do. So the policy is not
 // a tradeoff between two failures; it is the only direction that is not a defect.
 //
-// **Which makes the capacity a tuning number and says so.** Sixteen is enough for the shapes damage
+// **Which makes the capacity a tuning number and says so.** Thirty-two is enough for the shapes damage
 // actually takes — a cursor, a caret, a handful of dirty tiles, a moving window's leading and
-// trailing edges — and past it the collapse costs a larger composite rather than a wrong one. Moving
-// it changes bandwidth and nothing else, which is exactly the kind of constant that should be easy to
-// move.
+// trailing edges — with room for several frames of them at once, and past it the collapse costs a
+// larger composite rather than a wrong one. Moving it changes bandwidth and nothing else, which is
+// exactly the kind of constant that should be easy to move.
+//
+// **Sixteen until 2026-08-23, and what raised it was the buffer-age join.** A frame's own damage is one
+// caret and two window edges; what Frame/Loop.h scissors to is that joined with the target's backlog,
+// which is up to a ring's depth of frames of the same shapes. Same picture, three times the rectangles,
+// so the threshold arrives where it never used to — and it arrives at the worst moment, because a
+// collapsed join repaints the whole screen on precisely the frame the accumulation existed to keep
+// small. Doubling it takes a region from 272 bytes to 528, and a `FrameOutput` — which holds a pending
+// region and one backlog per target — from 8176 to 9456, which is the cheap side of that trade by some
+// margin.
 //
 // **Templated on the space, because damage is not always in one.** A layer's damage is in the
 // coordinates of the buffer being scanned out — that is what `FB_DAMAGE_CLIPS` and
@@ -57,7 +66,7 @@ class Region
 public:
 	// Rectangles before the set collapses to its bounds. See above for why this is a bandwidth number
 	// rather than a correctness one.
-	static constexpr std::size_t Capacity = 16;
+	static constexpr std::size_t Capacity = 32;
 
 	constexpr Region() = default;
 

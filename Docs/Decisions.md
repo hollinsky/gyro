@@ -1791,7 +1791,9 @@ that looks right.)*
 commits, published whole with every snapshot, and cleared against the presented sequence.**
 
 **The region type rather than a rectangle list of its own**, because the collapse rule is already
-written and is already the right one: past sixteen rectangles the set becomes its own bounding box,
+written and is already the right one: past thirty-two rectangles *(sixteen when this was written; see
+[decision 134](#134-damage-is-per-target-as-well-as-per-output-and-the-two-answer-different-questions))*
+the set becomes its own bounding box,
 which costs bandwidth, where a set that dropped a rectangle would leave stale pixels on glass. That
 is the only direction that is not a defect, and it is the same argument whether the producer is a
 client or the frame side.
@@ -1840,7 +1842,8 @@ property of the ring rather than of damage.
 
 **Rejected: the region inline in `ImageContent`.** `Region` is fixed capacity, so it is trivially
 copyable and would cross with no run at all — at sixteen rectangles and a count on *every* image,
-which is a quarter of a kilobyte per window to say that one caret blinked. The run costs an offset
+which is a quarter of a kilobyte per window to say that one caret blinked. *(Half a kilobyte since
+2026-08-23, which only makes the rejection stronger.)* The run costs an offset
 and a count and carries what is used.
 
 **Rejected: damage on the node record.** It is per surface and not per node: a container has none, a
@@ -10078,6 +10081,9 @@ otherwise get this bug back in silence.
 **What to expect and not mistake for a leak.** An output that settles and then wakes on one small change
 redraws more than moved for the first few frames, as each target in turn cashes in what it accumulated
 while the scene was quiet. Bounded by the ring depth, and it is the bill for the frames that were
-skipped. The other one is [Geometry/Region.h](../Source/Geometry/Region.h)'s sixteen rectangles: a join
-reaches the collapse-to-bounds threshold sooner than one frame's damage does, so once per-node damage is
-real that number will want raising. It is a bandwidth dial and the header says so.
+skipped. The other one was [Geometry/Region.h](../Source/Geometry/Region.h)'s sixteen rectangles: a
+join reaches the collapse-to-bounds threshold sooner than one frame's damage does, because a backlog is
+several frames of the same shapes rather than one. Raised to thirty-two with this change rather than
+left for per-node damage to discover, since a collapsed join is a whole-screen repaint on exactly the
+frame the accumulation existed to keep small, and the constant is a bandwidth dial the header says is
+meant to move.
