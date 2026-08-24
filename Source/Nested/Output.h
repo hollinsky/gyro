@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -72,6 +73,10 @@ namespace Nested
 // reason: the host holds one while gyro draws into another, and two makes stalling the only
 // behaviour every time the host is a frame behind. A test that wants the stall says two.
 inline constexpr std::uint32_t DefaultNestedTargets = 3;
+
+// How many commits this backend will have outstanding once the host has asked for a frame. See
+// `NestedOutput::CommitDepth`.
+inline constexpr std::uint32_t NestedCommitDepth = 2;
 
 struct NestedOutputPolicy
 {
@@ -152,6 +157,35 @@ public:
 
 	[[nodiscard]] const OutputConfiguration& Configuration() const noexcept { return m_Configuration; }
 
+	// **Two while the host has asked for a frame, one otherwise — and the condition is the entire
+	// fix.** See decision 135.
+	//
+	// `wp_presentation_feedback` says a frame is *on the glass*, which is a refresh too late to be a
+	// permission to draw the next one: a loop that waits for it starts every frame a period behind and
+	// this window presents on every other vblank — 38 fps on a 60 Hz host, with nothing anywhere
+	// reporting a miss. Answering a flat two instead only moves the failure: the loop then commits the
+	// moment it has rendered, two commits land inside one host refresh, and the host discards the first
+	// — measured at a third of every frame thrown away, each one invalidating the clock and re-damaging
+	// the whole output.
+	//
+	// So the second commit is not gyro's to take by arithmetic. `wl_surface.frame` is the host saying
+	// *now*, and it arrives before the host's next composite rather than after its last one, which is
+	// exactly the moment one more frame can be accepted without superseding anything. Every other
+	// Wayland client paces on it; this one keeps presentation feedback for the clock, where the
+	// timestamp is what is wanted, and takes its pacing from the invitation.
+	//
+	// Clamped by the ring, because an outstanding commit is an image the host is holding: the loop
+	// needs one left to render into or `AcquireTarget` answers nothing and the frame is skipped anyway.
+	[[nodiscard]] std::uint32_t CommitDepth() const noexcept override
+	{
+		if (!m_Invited || m_TargetCount < 2)
+		{
+			return 1;
+		}
+
+		return std::min(NestedCommitDepth, m_TargetCount - 1);
+	}
+
 	// Why the target set is empty, where it is. Success once a set has been built.
 	[[nodiscard]] const Result<void>& Status() const noexcept { return m_Status; }
 
@@ -212,7 +246,7 @@ private:
 	class Feedback final : public Wayland::WpPresentationFeedbackListener
 	{
 	public:
-		explicit Feedback(NestedOutput& output) noexcept : m_Output{ &output } {}
+		Feedback(NestedOutput& output, std::uint32_t target) noexcept : m_Output{ &output }, m_Target{ target } {}
 
 		// Which of the host's outputs the surface is mostly on. Not read: gyro binds no `wl_output`, so
 		// there is nothing to resolve the proxy against, and the presenter is already the answer to
@@ -233,6 +267,27 @@ private:
 
 	private:
 		NestedOutput* m_Output = nullptr;
+
+		// Which image this commit was of. A commit ahead of another is a commit about a *different*
+		// target, so the answer has to name one — releasing every committed image on the first
+		// completion would hand back the one the host has not spoken about yet.
+		std::uint32_t m_Target = 0;
+	};
+
+	// `wl_surface.frame`: the host asking for the next frame. One per commit, for `Feedback`'s reason —
+	// a listener names one object for its life and the host destroys this one when it fires.
+	class FrameCallback final : public Wayland::WlCallbackListener
+	{
+	public:
+		FrameCallback(NestedOutput& output, std::uint32_t target) noexcept : m_Output{ &output }, m_Target{ target } {}
+
+		// The argument is a host timestamp on a base nothing here shares, so it is dropped: what this
+		// event carries that gyro wants is that it happened.
+		void OnDone(std::uint32_t) override { m_Output->OnInvited(m_Target); }
+
+	private:
+		NestedOutput* m_Output = nullptr;
+		std::uint32_t m_Target = 0;
 	};
 
 	// `xdg_surface.configure`: the point at which everything the host has said since the last one
@@ -284,13 +339,32 @@ private:
 		Wayland::WpLinuxDrmSyncobjTimelineV1 Imported;
 		std::uint64_t Point = 0;
 
+		// The one-shot feedback object for the commit this image is in, live only while it is
+		// `Committed`. Per target rather than per output for `Release` and `Timeline`'s reason exactly:
+		// with more than one commit outstanding there is more than one of these in the air at a time,
+		// and a single slot would emplace over a listener the host has still to speak to.
+		std::optional<Feedback> Listener;
+
+		// The invitation for the commit this image is in, live for the same window as `Listener`.
+		std::optional<FrameCallback> Invitation;
+
 		TargetState State = TargetState::Free;
 		ReleaseKind Awaiting = ReleaseKind::None;
 	};
 
-	void OnPresented(const PresentationInfo& info);
+	void OnPresented(const PresentationInfo& info, std::uint32_t target);
 
-	void OnDiscarded();
+	void OnDiscarded(std::uint32_t target);
+
+	// The host has asked for another frame. It is a permission rather than a wake: the frame loop is
+	// already scheduled by its own clock, and what this changes is what it is allowed to do when it
+	// gets there.
+	void OnInvited(std::uint32_t target) noexcept;
+
+	// The commit this image was in has been answered, whichever way. The listener is dropped and the
+	// image moves to `Held`, because either way the host is still holding it and gives it back in its
+	// own time.
+	void Retire(std::uint32_t target) noexcept;
 
 	void OnConfigured(std::uint32_t serial);
 
@@ -340,7 +414,6 @@ private:
 	Wayland::ZxdgToplevelDecorationV1Ignoring m_DecorationEvents;
 	std::optional<Surface> m_SurfaceListener;
 	std::optional<Toplevel> m_ToplevelListener;
-	std::optional<Feedback> m_FeedbackListener;
 
 	std::array<Target, MaxTargets> m_Targets{};
 	std::array<RenderTarget, MaxTargets> m_Descriptions{};
@@ -358,6 +431,10 @@ private:
 
 	// A resize the drain has not acted on yet — the host's, or gyro's own `Reconfigure`.
 	bool m_Resize = false;
+
+	// Whether the host has asked for a frame that has not been given to it. Cleared by the commit that
+	// answers it, so a single invitation buys a single extra commit.
+	bool m_Invited = false;
 
 	bool m_Closed = false;
 	std::uint64_t m_HeldCommits = 0;

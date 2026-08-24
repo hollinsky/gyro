@@ -25,8 +25,8 @@
 #include "Seam/EventSource.h"
 #include "Seam/OutputConfiguration.h"
 #include "Seam/PresentationInfo.h"
-#include "Seam/RenderTarget.h"
 #include "Seam/Presenter.h"
+#include "Seam/RenderTarget.h"
 #include "Seam/Renderer.h"
 // See Docs/Architecture.md#the-frame-loop and decisions 29, 30, 35, 36, 80, 82, 83, and 84.
 
@@ -168,7 +168,18 @@ public:
 	// `Timing::Assess` will not let default, because the permissive reading draws frame eight twice.
 	[[nodiscard]] std::uint64_t Committed() const noexcept { return m_Committed; }
 
-	[[nodiscard]] bool IsFlipPending() const noexcept { return m_FlipPending; }
+	// Whether anything this output committed is still unanswered. The count behind it is what
+	// `IPresenter::CommitDepth` is compared against; this is the question every other caller asks.
+	[[nodiscard]] bool IsFlipPending() const noexcept { return m_InFlight != 0; }
+
+	// How many commits are outstanding, and how many this output is allowed. A presenter that has
+	// vanished allows none, which is the same answer as being full.
+	[[nodiscard]] std::uint32_t InFlight() const noexcept { return m_InFlight; }
+
+	[[nodiscard]] bool IsCommitFull() const noexcept
+	{
+		return m_Presenter == nullptr || m_InFlight >= m_Presenter->CommitDepth();
+	}
 
 	[[nodiscard]] const Region<DeviceSpace>& Damage() const noexcept { return m_Damage; }
 
@@ -207,10 +218,17 @@ public:
 private:
 	friend class FrameLoop;
 
+	// One commit answered, not all of them. Saturating rather than asserting, because a host that
+	// speaks twice about one frame is a host, and an underflow here would leave this output believing
+	// it may never commit again.
 	void OnPresented(const PresentationInfo& info) noexcept
 	{
 		m_Clock.Observe(info);
-		m_FlipPending = false;
+
+		if (m_InFlight != 0)
+		{
+			--m_InFlight;
+		}
 	}
 
 	// The frame was accepted and never shown, which Seam/Presenter.h argues has to be its own signal.
@@ -287,7 +305,7 @@ private:
 	// arrive.
 	void Discard() noexcept
 	{
-		m_FlipPending = false;
+		m_InFlight = 0;
 		m_Committed = FrameClock::NoSequence;
 
 		// An index into a set that no longer exists. `OnTargetsInvalidated` is the case this is here for
@@ -305,7 +323,10 @@ private:
 	Budget m_Cost{};
 
 	std::uint64_t m_Committed = FrameClock::NoSequence;
-	bool m_FlipPending = false;
+
+	// Commits accepted and not yet answered. A count rather than the flag it was, because the rule it
+	// enforces is the presenter's — see `IPresenter::CommitDepth`, and decision 135.
+	std::uint32_t m_InFlight = 0;
 	Region<DeviceSpace> m_Damage{};
 
 	// What each target is stale by *over and above* `m_Damage`, which is what makes the two disjoint
@@ -485,10 +506,13 @@ private:
 
 		output.m_Last = decision;
 
-		// A flip still outstanding is the disqualifier Architecture.md names, and it is separate from
-		// the arithmetic one `Assess` answers: KMS refuses a second nonblocking commit on a CRTC that
-		// has not flipped, so this is the hardware's condition rather than the schedule's.
-		if (output.m_FlipPending || !decision.Renders())
+		// A commit the presenter cannot take yet is the disqualifier Architecture.md names, and it is
+		// separate from the arithmetic one `Assess` answers: it is the backend's condition rather than
+		// the schedule's, and how many it will take is the backend's to say. One is KMS's rule — a
+		// second nonblocking commit on a CRTC that has not flipped is refused — and a nested window
+		// answers two, because its completion arrives from the host a whole refresh after the frame it
+		// is about.
+		if (output.IsCommitFull() || !decision.Renders())
 		{
 			return;
 		}
@@ -621,7 +645,7 @@ private:
 		output.m_Acquired.reset();
 
 		output.m_Committed = decision.Sequence;
-		output.m_FlipPending = true;
+		++output.m_InFlight;
 
 		// The backlogs fold forward, and this is the whole of the buffer-age bookkeeping. Every *other*
 		// target now owes this frame's change on top of what it already owed, and the one just drawn owes
@@ -706,7 +730,7 @@ private:
 
 		// Owed a frame as soon as one can be made: damage that has not reached the glass, a flip whose
 		// completion the clock is still waiting for, or a scene contributor that wants every frame.
-		const bool immediate = !output.m_Damage.IsEmpty() || output.m_FlipPending ||
+		const bool immediate = !output.m_Damage.IsEmpty() || output.IsFlipPending() ||
 		                       (scene.Which == Wake::Kind::Continuous && scene.Interval == Duration::zero());
 
 		if (immediate)

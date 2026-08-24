@@ -127,6 +127,33 @@ public:
 	// exists to prevent.
 	[[nodiscard]] virtual std::optional<std::uint32_t> AcquireTarget() = 0;
 
+	// How many commits may be outstanding at once — accepted by the backend and not yet answered by
+	// `Presented` or `Missed`.
+	//
+	// **One is the answer for hardware and it is the default, because it is the answer that is never
+	// wrong.** KMS refuses a second nonblocking commit on a CRTC that has not flipped, so a backend
+	// that says nothing here is held to the rule the kernel would hold it to anyway. A backend that
+	// wants more has to say so.
+	//
+	// **The reason this is at the seam at all is that the rule is the hardware's and the frame loop is
+	// not on hardware.** A nested output's completion is `wp_presentation_feedback`, which the host
+	// sends once the frame is already on the glass — so a loop that waits for it before starting the
+	// next frame has spent a whole refresh waiting for news, and presents on every *other* vblank. That
+	// is a compositor running at half rate on a machine with the headroom to run at full rate, and
+	// nothing anywhere reports a miss, because nothing missed: every frame gyro drew arrived on time
+	// and it simply drew half as many. Measured on the materials gym nested under a 60 Hz host: 38 fps,
+	// with the loop's own *nothing changed, skip it* path firing once in forty seconds.
+	//
+	// **What it may not be is a queue depth.** A host applies at most one commit per refresh and
+	// discards whatever it superseded, so a backend that answered four here would have three of every
+	// four frames thrown away and would invalidate its clock on each one. The number is *how far ahead
+	// of the last completion this output may work*, which is one frame ahead of hardware wherever the
+	// completion arrives a frame late — never a licence to run open loop.
+	//
+	// Bounded in practice by the target ring, since every outstanding commit is holding one: a
+	// presenter answering more than `Targets().size() - 1` will simply find `AcquireTarget` empty.
+	[[nodiscard]] virtual std::uint32_t CommitDepth() const noexcept { return 1; }
+
 	// Put these layers on the screen, bottom first.
 	//
 	// **May never block.** No device-wide lock, no `ALLOW_MODESET`, no wait on another output's

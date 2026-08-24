@@ -10115,6 +10115,56 @@ left for per-node damage to discover, since a collapsed join is a whole-screen r
 frame the accumulation existed to keep small, and the constant is a bandwidth dial the header says is
 meant to move.
 
+### 135. How far ahead an output may commit is the presenter's answer, and nested's is an invitation
+
+A nested gyro on a 60 Hz host presented **38 frames a second** and reported nothing wrong. Not a miss,
+not a refusal, not a discard: every frame it drew arrived on time with milliseconds of slack, and it
+simply drew half as many. What a person sees is animation that judders at a steady beat on a machine
+with the headroom to run smooth, and every counter in the log says the run was clean — which is the
+shape of bug this project is worst at finding, because there is nothing to bisect.
+
+[Frame/Loop.h](../Source/Frame/Loop.h) would not serve an output while a flip was outstanding, and
+cleared that flag on `Presented`. On KMS both halves are right: the kernel refuses a second nonblocking
+commit on a CRTC that has not flipped, and the flip is what says it may take another. Nested, the flag
+is right and the *clearing* is a refresh too late — `wp_presentation_feedback` says a frame reached the
+host's glass, so waiting for it before starting the next one spends a whole period waiting for news
+about a frame already shown. The measurement: 1434 frames in forty seconds admitted by the schedule,
+wanted by the scene, and dropped on that one condition, with the loop's *nothing changed, skip it* path
+firing exactly **once** in the same run.
+
+**So the question the loop was asking is a backend's to answer, and `IPresenter::CommitDepth` is it.**
+How many commits may be outstanding — accepted and not yet answered by `Presented` or `Missed`. One is
+the default, because it is the answer that is never wrong and it is the rule the kernel would impose
+anyway; a backend that wants more says so.
+
+**Nested answers two while the host has asked for a frame, and one otherwise, and that condition is the
+whole fix.** A flat two was tried first and moves the failure rather than removing it: the loop then
+commits as soon as it has rendered, two commits land inside one host refresh, and a Wayland host applies
+at most one — measured at a third of every frame discarded, each discard invalidating the clock and
+re-damaging the whole output, which is worse than the judder it replaced. Gating it on *this frame's own
+window* was tried second and is better arithmetic against a cadence a discarded frame has just taken
+away: an unanchored clock admits everything, so the first discard starts a run of them that never ends.
+
+`wl_surface.frame` is the host saying *now*. It arrives before the host's next composite rather than
+after its last one, which is precisely the moment one more commit can be accepted without superseding
+anything, and it is what every other Wayland client paces on. So the invitation is the permission and
+presentation feedback stays what it is good at — a timestamp for [Frame/FrameClock.h](../Source/Frame/FrameClock.h).
+One invitation buys one commit. Measured after: **97.7% of the host's refreshes carrying a new frame on
+the materials gym, and no discards at all**, against 47% and 38 fps before.
+
+**Rejected: relaxing the flip-pending rule for nested inside the frame loop.** One `if` and no seam
+change, and it puts *which backend am I* inside the one module that must not know — and the rule is real
+on KMS, so the knowledge cannot be deleted, only moved to the wrong place.
+
+**Rejected: pacing on frame callbacks alone and dropping the depth.** The loop still needs to know what
+is outstanding, because that is what `Discard` drops and what the wake fold reads. A count of commits in
+flight compared against a number the presenter states keeps one rule in one place; the callback is how
+nested computes its side of it, and a KMS backend never grows a `wl_callback`.
+
+**What this does not fix.** [Render/Renderer.cpp](../Source/Render/Renderer.cpp)'s `CollectCosts`
+returns nothing, so the GPU term in every figure above is the plan's assumption rather than a
+measurement. The commit cadence is now honest; the headroom is still unmeasured.
+
 ### 136. The texture minter is dispatch's own, and a retirement is sealed with the sequence that stops naming it
 
 [Decision 131](#131-texture-import-is-a-second-interface-and-a-texture-retires-on-the-watermark) put

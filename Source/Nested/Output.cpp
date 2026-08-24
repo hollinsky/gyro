@@ -102,12 +102,12 @@ void NestedOutput::Feedback::OnPresented(
 		.ZeroCopy = Has(flags, Wayland::WpPresentationFeedbackKind::ZeroCopy),
 	};
 
-	m_Output->OnPresented(info);
+	m_Output->OnPresented(info, m_Target);
 }
 
 void NestedOutput::Feedback::OnDiscarded()
 {
-	m_Output->OnDiscarded();
+	m_Output->OnDiscarded(m_Target);
 }
 
 void NestedOutput::Surface::OnConfigure(std::uint32_t serial)
@@ -446,9 +446,17 @@ Result<void> NestedOutput::Commit()
 
 	// Reconstructed rather than reused: a listener names one object for its life, and the host
 	// destroys a feedback object as soon as it has spoken. Placement-new into the optional, so nothing
-	// on this path allocates — `Present` runs inside Core/FrameSection.h's guard.
-	m_FeedbackListener.emplace(*this);
-	(void)m_Host->Globals().Presentation.Feedback(m_Surface, *m_FeedbackListener);
+	// on this path allocates — `Present` runs inside Core/FrameSection.h's guard. Into the target's own
+	// slot, because the commit ahead of this one is still waiting to be answered about its image.
+	target.Listener.emplace(*this, m_Pending.Target);
+	(void)m_Host->Globals().Presentation.Feedback(m_Surface, *target.Listener);
+
+	// The invitation this commit spends, and the one it asks for. Requested on every commit rather than
+	// only where one is owed, because a host answers `frame` for the surface's next composite and a
+	// commit that asked for nothing is a window that never hears *now* again.
+	m_Invited = false;
+	target.Invitation.emplace(*this, m_Pending.Target);
+	(void)m_Surface.Frame(*target.Invitation);
 
 	m_Surface.Commit();
 
@@ -563,44 +571,74 @@ void NestedOutput::OnClosed()
 	m_Closed = true;
 }
 
-void NestedOutput::OnPresented(const PresentationInfo& info)
+void NestedOutput::Retire(std::uint32_t target) noexcept
 {
-	if (m_FeedbackListener.has_value())
+	if (target >= m_TargetCount)
+	{
+		return;
+	}
+
+	Target& retiring = m_Targets[target];
+
+	if (retiring.Listener.has_value())
 	{
 		// The host destroys the object the moment it has spoken, so the id is already free on its side;
 		// unbinding is what lets Wire/Connection.h recycle it when the `delete_id` lands — and
 		// recycling is what keeps the object table from climbing by one per frame forever.
-		m_Host->Connection().Unbind(m_FeedbackListener->Object().Id());
-		m_FeedbackListener.reset();
+		m_Host->Connection().Unbind(retiring.Listener->Object().Id());
+		retiring.Listener.reset();
 	}
 
-	for (std::uint32_t index = 0; index < m_TargetCount; ++index)
+	if (retiring.Invitation.has_value())
 	{
-		if (m_Targets[index].State == TargetState::Committed)
-		{
-			m_Targets[index].State = TargetState::Held;
-		}
+		m_Host->Connection().Unbind(retiring.Invitation->Object().Id());
+		retiring.Invitation.reset();
 	}
+
+	if (retiring.State == TargetState::Committed)
+	{
+		retiring.State = TargetState::Held;
+	}
+}
+
+void NestedOutput::OnPresented(const PresentationInfo& info, std::uint32_t target)
+{
+	Retire(target);
 
 	Presented.Emit(info);
 }
 
-void NestedOutput::OnDiscarded()
+void NestedOutput::OnInvited(std::uint32_t target) noexcept
 {
-	if (m_FeedbackListener.has_value())
-	{
-		m_Host->Connection().Unbind(m_FeedbackListener->Object().Id());
-		m_FeedbackListener.reset();
-	}
+	m_Invited = true;
 
+	// The object is one-shot and has already spoken, so the binding goes now — the alternative is one
+	// dead id per frame held until the commit it belongs to is answered.
+	if (target < m_TargetCount && m_Targets[target].Invitation.has_value())
+	{
+		m_Host->Connection().Unbind(m_Targets[target].Invitation->Object().Id());
+		m_Targets[target].Invitation.reset();
+	}
+}
+
+void NestedOutput::OnDiscarded(std::uint32_t target)
+{
 	// **The buffer is still the host's**, which is the difference between this and a failed commit: the
 	// frame was never shown and the image is still out on loan, so the target moves to `Held` exactly
-	// as a presented one does and comes back when the host says so.
+	// as a presented one does and comes back when the host says so. That is `Retire`, and it is the
+	// same call either way.
+	Retire(target);
+
+	// **Everything else in flight goes with it, and this is the one place a depth above one costs
+	// something.** `Missed` has the frame loop drop what it committed and start its clock again, and a
+	// second commit still out there would answer afterwards against a prediction that no longer
+	// includes it. A host that discarded one frame is a host that is occluding, moving, or superseding
+	// the window, so the frame after it is very rarely the one to save.
 	for (std::uint32_t index = 0; index < m_TargetCount; ++index)
 	{
-		if (m_Targets[index].State == TargetState::Committed)
+		if (index != target)
 		{
-			m_Targets[index].State = TargetState::Held;
+			Retire(index);
 		}
 	}
 
@@ -816,6 +854,21 @@ void NestedOutput::DropTargets() noexcept
 
 		target.Release.reset();
 
+		// A frame in flight names a target that no longer exists, so its feedback is nothing this output
+		// can act on. Unbound rather than left, because the host will still answer it and an event for an
+		// id nothing is bound to is the end of the connection.
+		if (target.Listener.has_value())
+		{
+			m_Host->Connection().Unbind(target.Listener->Object().Id());
+			target.Listener.reset();
+		}
+
+		if (target.Invitation.has_value())
+		{
+			m_Host->Connection().Unbind(target.Invitation->Object().Id());
+			target.Invitation.reset();
+		}
+
 		if (target.Imported.IsValid())
 		{
 			target.Imported.Destroy();
@@ -833,14 +886,5 @@ void NestedOutput::DropTargets() noexcept
 	m_TargetCount = 0;
 	m_Next = 0;
 	m_Deferred = false;
-
-	// A frame in flight names a target that no longer exists, so its feedback is nothing this output
-	// can act on. Unbound rather than left, because the host will still answer it and an event for an
-	// id nothing is bound to is the end of the connection.
-	if (m_FeedbackListener.has_value())
-	{
-		m_Host->Connection().Unbind(m_FeedbackListener->Object().Id());
-		m_FeedbackListener.reset();
-	}
 }
 } // namespace Nested

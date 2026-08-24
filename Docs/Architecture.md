@@ -1876,6 +1876,16 @@ interval, and a target derived from the anchor would name a frame already drawn 
 allocations on it. It is also the one number [early rendering](#speculative-early-rendering) moves:
 a pipeline `k + 1` deep is `committed = anchor + k`, and nothing else in the check changes.
 
+**How many commits may be outstanding is the presenter's answer, not the loop's.** One is the default
+and it is KMS's rule: the kernel refuses a second nonblocking commit on a CRTC that has not flipped, and
+the flip is what says another may go. Nested it would be the wrong rule read off the wrong event —
+`wp_presentation_feedback` reports a frame that is *already shown*, so a loop waiting for it before
+starting the next one gives up a whole refresh and the window runs at half rate with nothing reporting a
+miss. So `IPresenter::CommitDepth` is a question the backend answers, and a nested output answers two
+while the host has asked for a frame through `wl_surface.frame` and one otherwise — the invitation is
+the pacing, and presentation feedback stays what it is for, which is the clock. See
+[decision 135](Decisions.md#135-how-far-ahead-an-output-may-commit-is-the-presenters-answer-and-nesteds-is-an-invitation).
+
 The one exception is that first `if`, which is the whole of gyro's runtime timing policy:
 
 ```
