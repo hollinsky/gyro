@@ -327,6 +327,41 @@ GYRO_TEST(Timing, TheWakeLeadsTheInstantTheVerdictMeasuresAgainst)
 	GYRO_CHECK_EQ(decision.Slack(), 2ms);
 }
 
+// **A wake is an instant handed to a timer, so the one thing it may never be is already gone.** The
+// `Lead` is what put it there: the alarm is set at `deadline - reserve - lead` while the frame the
+// output is owed is chosen without it, so a loop arriving inside that last lead's width computes a
+// record point up to a whole lead behind itself. `IORING_TIMEOUT_ABS` fires an expired deadline the
+// moment it is submitted, so the iteration woke, found the same conditions, computed the same instant
+// and armed it again — a spin at twelve microseconds a turn on the `SCHED_FIFO` frame thread until
+// whatever was holding the frame up let go. Measured on a nested `--gym=materials` capture as
+// twenty-five of twenty-six iterations inside one six millisecond window, with the loop's own `lead`
+// sample walking from -145us down past -519us and the frames beyond that boundary falling to the floor
+// composite.
+GYRO_TEST(Timing, TheWakeIsNeverAnInstantAlreadyGone)
+{
+	const FrameClock clock = Anchored();
+	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
+	const Timing timing{ TimingPolicy{ .Margin = 1ms, .Lead = 3ms } };
+
+	// Frame 8 is spoken for and awaiting its flip, so frame 9 is owed, its deadline is 1020ms, and with
+	// a nine millisecond arming the loop should have been running by 1011ms. It is 1012ms.
+	GYRO_CHECK_EQ(timing.Arming(budget), 9ms);
+
+	const Wake wake = timing.WakeFor(clock, budget, At(1012), 8);
+
+	GYRO_REQUIRE(wake.Which == Wake::Kind::Timed);
+	GYRO_CHECK(wake.When > At(1012));
+
+	// And the instant is the next record point rather than the next microsecond, which is decision 35's
+	// *target the next deadline* arriving one rung up: a frame gyro is already too late to start is
+	// dropped, and the alarm is set for the one it can still be early for.
+	GYRO_CHECK(wake.When == At(1021));
+
+	// One lead earlier and nothing has gone by, so the answer is unchanged — the floor is a bound rather
+	// than a rounding, and every wake in steady state is decided by the two frame-shaped floors above it.
+	GYRO_CHECK(timing.WakeFor(clock, budget, At(1008), 8) == Wake::At(At(1011)));
+}
+
 // The lead is spent before the check rather than by it: a loop that used its whole lead getting here
 // is on time, and one that overran it by a microsecond takes the floor composite. That boundary is the
 // sample `Frame/Loop.h` records as `lead`.

@@ -484,6 +484,7 @@ public:
 		Instant deviceFreeAt = Instant{}
 	) const noexcept
 	{
+		const Duration arming = Arming(budget);
 		const std::uint64_t reach = clock.SequenceAfter(Project(now, deviceFreeAt, budget, RenderMode::Planned).Finish);
 
 		if (reach == FrameClock::NoSequence)
@@ -491,11 +492,32 @@ public:
 			return Wake::Never();
 		}
 
+		// **A third floor, and it is the only one that is about the alarm rather than about the frame.**
+		// The two above name a frame; this names the earliest frame whose *record point* has not already
+		// gone by, which is the one property an instant handed to a timer has to have. Without it the
+		// loop armed the past — `IORING_TIMEOUT_ABS` fires an expired deadline the moment it is
+		// submitted, so the iteration woke, found whatever it found, computed the same instant again and
+		// armed it again: a spin at twelve microseconds a turn on the `SCHED_FIFO` frame thread, for as
+		// long as the condition holding the frame up lasted.
+		//
+		// **What put the record point in the past is an arming longer than a period**, which is ordinary
+		// rather than exotic: a composite costing most of a refresh plus the margin plus the lead
+		// reaches back past the start of the previous one, and the frame the output is owed is then a
+		// frame whose work should have started before the frame in front of it finished. The honest
+		// answer is the next frame gyro can still be early for, and it is what decision 35's *target the
+		// next deadline* already says one rung down — a deadline that cannot be met is dropped and the
+		// one after it is aimed at, and an alarm is no different.
+		//
+		// `SequenceAfter(now + arming)` is that frame by construction: it is the earliest whose deadline
+		// clears the reserve measured from now, so its record point is at or after now and every earlier
+		// frame's is behind. In steady state it is below both floors above and changes nothing.
+		const std::uint64_t armable = clock.SequenceAfter(Advanced(now, arming));
+
 		// The floor is the whole of what `committed` is for here. A frame recorded and awaiting its
 		// flip is one the clock has not observed, so the reach names it and the wake becomes its own
 		// record point — an instant the loop has already served, and one it would be handed back on
 		// every iteration until the flip lands. One frame past it is the answer.
-		const Instant wakeAt = clock.WakeupAt(std::max(reach, Owed(clock, committed)), Arming(budget));
+		const Instant wakeAt = clock.WakeupAt(std::max({ reach, Owed(clock, committed), armable }), arming);
 
 		return wakeAt == FrameClock::Unscheduled ? Wake::Never() : Wake::At(wakeAt);
 	}
