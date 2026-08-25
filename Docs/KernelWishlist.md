@@ -240,7 +240,7 @@ So the contract to write down, and the one that absorbs every improvement above 
 
 ## The frequency governor cannot see a deadline
 
-### The deadline hint exists and reaches no driver gyro runs on
+### The deadline hint exists and reaches every driver but msm
 
 `dma_fence_set_deadline()` (`dma-fence.c`) is the interface for this and it has been upstream since
 6.5. Its own documentation names gyro's case as the motivating one — the hint carries *"the vblank
@@ -267,8 +267,11 @@ What is missing is entirely the driver end.
 | i915 | **no plumbing at all** | and it does not use `drm_sched` either |
 
 `dma-fence-chain`, `dma-fence-array` and `sw_sync` also implement the op, and all three only
-propagate it. **So on every part gyro runs on, the hint is a no-op.** msm is the sole existence proof
-that the mechanism works end to end, and it is not a part gyro is being built against.
+propagate it. **So on every part gyro runs on but msm, the hint is a no-op.** msm is the one driver
+that wires the hint to frequency — the `msm_fence_set_deadline` timer fires `msm_devfreq_boost` three
+milliseconds before the deadline — and it is the part this tree is now being built against: the
+startup probe measures the response on the machine rather than trusting this table, and the deadline
+gyro states per frame is the msm frequency policy.
 
 **The irony worth recording.** `drm_atomic_helper.c:1815` already calls `dma_fence_set_deadline()` on
 plane in-fences with the next vblank time. The kernel therefore already says *this buffer is needed by

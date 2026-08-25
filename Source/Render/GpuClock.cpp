@@ -18,51 +18,13 @@ namespace
 // apart, and `/sys/dev/char/226:<minor>` is the kobject the driver hangs its attributes off.
 constexpr int DrmMajor = 226;
 
-// msm reports through devfreq under a node whose name is assigned at boot rather than fixed, so the
-// path cannot be a constant the way i915's and xe's are — the one entry under `device/devfreq` is
-// scanned for here. Empty where the directory is absent or holds nothing.
-[[nodiscard]] std::string MsmDevfreqNode(std::int64_t primaryMinor)
+// The last path component of a sysfs symlink — `/sys/.../drivers/msm_dpu` becomes `msm_dpu` — or
+// empty where the link is absent or unreadable. The `device` component is itself a symlink, which
+// `readlink` resolves before reading the final target.
+[[nodiscard]] std::string SymlinkLeaf(const std::string& path)
 {
-	const std::string directory = GpuClock::NodeBase(primaryMinor) + "/device/devfreq";
-	DIR* const handle = opendir(directory.c_str());
-
-	if (handle == nullptr)
-	{
-		return {};
-	}
-
-	std::string node;
-
-	while (const dirent* const entry = readdir(handle))
-	{
-		const std::string_view name{ entry->d_name };
-
-		if (name != "." && name != "..")
-		{
-			node = directory + "/" + std::string{ name } + "/cur_freq";
-
-			break;
-		}
-	}
-
-	closedir(handle);
-
-	return node;
-}
-} // namespace
-
-std::string GpuClock::NodeBase(std::int64_t primaryMinor)
-{
-	return std::format("/sys/dev/char/{}:{}", DrmMajor, primaryMinor);
-}
-
-// The kernel driver bound to this DRM node, read from the `device/driver` symlink and returned as its
-// last path component — `i915`, `xe`, `msm`, `amdgpu`.
-std::string GpuClock::BoundDriver(std::int64_t primaryMinor)
-{
-	const std::string link = NodeBase(primaryMinor) + "/device/driver";
 	std::array<char, 256> target{};
-	const ssize_t length = readlink(link.c_str(), target.data(), target.size() - 1);
+	const ssize_t length = readlink(path.c_str(), target.data(), target.size() - 1);
 
 	if (length <= 0)
 	{
@@ -73,6 +35,68 @@ std::string GpuClock::BoundDriver(std::int64_t primaryMinor)
 	const std::size_t slash = resolved.find_last_of('/');
 
 	return std::string{ slash == std::string_view::npos ? resolved : resolved.substr(slash + 1) };
+}
+} // namespace
+
+std::string GpuClock::NodeBase(std::int64_t primaryMinor)
+{
+	return std::format("/sys/dev/char/{}:{}", DrmMajor, primaryMinor);
+}
+
+// The kernel driver bound to this DRM node, read from the `device/driver` symlink and returned as its
+// last path component — `i915`, `xe`, `msm_dpu` on the split kernel, `msm` before it.
+std::string GpuClock::BoundDriver(std::int64_t primaryMinor)
+{
+	return SymlinkLeaf(NodeBase(primaryMinor) + "/device/driver");
+}
+
+bool GpuClock::IsMsmDriver(std::string_view driver) noexcept
+{
+	// The msm driver split made the DRM device the display controller's — `msm_dpu`, `msm_mdp`,
+	// `msm_mdp4` — where the monolithic `msm` bound it on older kernels. The GPU is a separate
+	// platform device either way, and the family test is what sends both the clock and the floor to
+	// the GPU's devfreq.
+	return driver == "msm" || driver.starts_with("msm_");
+}
+
+std::string GpuClock::MsmDevfreqDirectory()
+{
+	// The GPU's devfreq is a child of the GPU's own platform device (`5000000.gpu`), and the DRM
+	// device is the display controller's — a sibling of the GPU under the SoC, so the DRM node's
+	// subtree cannot reach the node. `/sys/class/devfreq` is the common parent, and the entry whose
+	// backing device's driver is the GPU's (`adreno` on the kernels gyro targets) is the one.
+	constexpr std::string_view GpuDriver = "adreno";
+	const std::string directory = "/sys/class/devfreq";
+	DIR* const handle = opendir(directory.c_str());
+
+	if (handle == nullptr)
+	{
+		return {};
+	}
+
+	std::string found;
+
+	while (const dirent* const entry = readdir(handle))
+	{
+		const std::string_view name{ entry->d_name };
+
+		if (name == "." || name == "..")
+		{
+			continue;
+		}
+
+		const std::string base = directory + "/" + std::string{ name };
+
+		if (SymlinkLeaf(base + "/device/driver") == GpuDriver)
+		{
+			found = base;
+			break;
+		}
+	}
+
+	closedir(handle);
+
+	return found;
 }
 
 GpuClock::Source GpuClock::Resolve(std::string_view driver, std::int64_t primaryMinor)
@@ -96,7 +120,7 @@ GpuClock::Source GpuClock::Resolve(std::string_view driver, std::int64_t primary
 		source.Count = 1;
 		source.Divisor = 1;
 	}
-	else if (driver == "msm")
+	else if (IsMsmDriver(driver))
 	{
 		// devfreq reports Hz, and the node name is dynamic — resolved at `Open`, not here, so this
 		// leaves the candidate empty and only carries the unit.
@@ -127,18 +151,21 @@ GpuClock GpuClock::Open(std::int64_t primaryMinor)
 
 	const std::string driver = BoundDriver(primaryMinor);
 
-	// msm's path is not a fixed candidate — the devfreq node is scanned for.
-	if (driver == "msm")
+	// msm's path is not a fixed candidate — the GPU's devfreq node is scanned for, and the DRM
+	// device's driver is the display's (`msm_dpu` on the split kernel) rather than the GPU's.
+	if (IsMsmDriver(driver))
 	{
-		if (const std::string node = MsmDevfreqNode(primaryMinor); !node.empty())
+		if (const std::string directory = MsmDevfreqDirectory(); !directory.empty())
 		{
-			if (GpuClock clock = OpenPath(node.c_str(), 1'000'000); clock.IsValid())
+			if (GpuClock clock = OpenPath((directory + "/cur_freq").c_str(), 1'000'000); clock.IsValid())
 			{
 				return clock;
 			}
 		}
 
-		spdlog::warn("no GPU clock: msm has no readable devfreq node under DRM {}", primaryMinor);
+		spdlog::warn(
+			"no GPU clock: msm has no readable devfreq node (driver '{}' behind DRM {})", driver, primaryMinor
+		);
 
 		return {};
 	}

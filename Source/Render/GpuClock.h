@@ -93,6 +93,19 @@ public:
 	// as an unrecognised driver rather than distinguishing.
 	[[nodiscard]] static std::string BoundDriver(std::int64_t primaryMinor);
 
+	// Whether a DRM device driver name is an msm-family one. The msm driver split made the device
+	// behind a DRM minor the display controller's — `msm_dpu`, `msm_mdp`, `msm_mdp4` — where the
+	// monolithic `msm` used to bind it; the GPU is a separate platform device either way, and the
+	// family test is what sends both the clock and the floor to the GPU's devfreq.
+	[[nodiscard]] static bool IsMsmDriver(std::string_view driver) noexcept;
+
+	// The sysfs directory of the GPU's devfreq — `/sys/class/devfreq/<name>` — or empty where none is
+	// found. The GPU's devfreq is hung off the GPU's own platform device rather than the DRM device's
+	// subtree, so this scans `/sys/class/devfreq` for the entry whose backing device is bound to the
+	// GPU driver (`adreno` on the kernels gyro targets). Public because Render/GpuFloor.h resolves its
+	// pair of nodes off the same directory.
+	[[nodiscard]] static std::string MsmDevfreqDirectory();
+
 	// How stale a reading is allowed to be before the next `Sample` re-enters the kernel. Ten
 	// milliseconds is well under a refresh and well over how fast the governor moves the clock, so a
 	// sample is at most a frame or two old and the frame thread pays a syscall at most once per handful

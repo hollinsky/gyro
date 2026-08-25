@@ -57,13 +57,29 @@ GYRO_TEST(GpuClock, XeResolvesOneNodeUnderItsMinor)
 }
 
 // msm reports Hz through devfreq, so it carries the divisor but no fixed candidate — the node name is
-// dynamic and resolved at `Open`.
+// dynamic and resolved at `Open`. The split kernel names the DRM device after the display driver
+// (`msm_dpu`), so the family test covers both it and the monolithic `msm`.
 GYRO_TEST(GpuClock, MsmCarriesTheHzDivisorAndNoFixedNode)
 {
-	const GpuClock::Source source = GpuClock::Resolve("msm", 0);
+	GYRO_CHECK(GpuClock::Resolve("msm", 0).Count == 0);
+	GYRO_CHECK(GpuClock::Resolve("msm", 0).Divisor == 1'000'000);
+	GYRO_CHECK(GpuClock::Resolve("msm_dpu", 0).Count == 0);
+	GYRO_CHECK(GpuClock::Resolve("msm_dpu", 0).Divisor == 1'000'000);
+}
 
-	GYRO_CHECK(source.Count == 0);
-	GYRO_CHECK(source.Divisor == 1'000'000);
+// The msm driver split: the device behind a DRM minor is the display controller's, bound as
+// `msm_dpu`/`msm_mdp`, and the GPU is a separate platform device — the family test is what sends both
+// the clock and the floor to the GPU's devfreq rather than to the DRM device's own subtree.
+GYRO_TEST(GpuClock, TheSplitDisplayDriversAreStillMsm)
+{
+	GYRO_CHECK(GpuClock::IsMsmDriver("msm"));
+	GYRO_CHECK(GpuClock::IsMsmDriver("msm_dpu"));
+	GYRO_CHECK(GpuClock::IsMsmDriver("msm_mdp"));
+	GYRO_CHECK(GpuClock::IsMsmDriver("msm_mdp4"));
+	GYRO_CHECK(!GpuClock::IsMsmDriver("i915"));
+	GYRO_CHECK(!GpuClock::IsMsmDriver("xe"));
+	GYRO_CHECK(!GpuClock::IsMsmDriver("amdgpu"));
+	GYRO_CHECK(!GpuClock::IsMsmDriver(""));
 }
 
 // A driver the reader does not cover resolves to nothing, which is what makes `Open` warn and file a

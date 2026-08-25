@@ -42,7 +42,8 @@ namespace
 
 GpuFloor::GpuFloor(GpuFloor&& other) noexcept
 	: m_Floor{ std::move(other.m_Floor) }, m_Ceiling{ std::exchange(other.m_Ceiling, 0) },
-	  m_Original{ std::exchange(other.m_Original, 0) }, m_Commanded{ std::exchange(other.m_Commanded, 0) }
+	  m_Original{ std::exchange(other.m_Original, 0) }, m_Commanded{ std::exchange(other.m_Commanded, 0) },
+	  m_Divisor{ std::exchange(other.m_Divisor, 1) }
 {
 	// The path is what `IsValid` and `Release` both read, so emptying it is what makes the husk inert
 	// rather than a second owner that will restore the same node twice.
@@ -58,6 +59,7 @@ GpuFloor& GpuFloor::operator=(GpuFloor&& other) noexcept
 		m_Ceiling = std::exchange(other.m_Ceiling, 0);
 		m_Original = std::exchange(other.m_Original, 0);
 		m_Commanded = std::exchange(other.m_Commanded, 0);
+		m_Divisor = std::exchange(other.m_Divisor, 1);
 		other.m_Floor.clear();
 	}
 
@@ -90,7 +92,7 @@ GpuFloor::Nodes GpuFloor::Resolve(std::string_view driver, std::int64_t primaryM
 	return nodes;
 }
 
-GpuFloor GpuFloor::OpenPaths(const std::string& floor, const std::string& ceiling)
+GpuFloor GpuFloor::OpenPaths(const std::string& floor, const std::string& ceiling, std::uint32_t divisor)
 {
 	GpuFloor commanded;
 
@@ -103,9 +105,10 @@ GpuFloor GpuFloor::OpenPaths(const std::string& floor, const std::string& ceilin
 		return commanded;
 	}
 
+	commanded.m_Divisor = divisor == 0 ? 1 : divisor;
 	commanded.m_Floor = floor;
-	commanded.m_Original = original;
-	commanded.m_Ceiling = Read(ceiling);
+	commanded.m_Original = original / commanded.m_Divisor;
+	commanded.m_Ceiling = Read(ceiling) / commanded.m_Divisor;
 
 	return commanded;
 }
@@ -118,13 +121,39 @@ GpuFloor GpuFloor::Open(std::int64_t primaryMinor)
 	}
 
 	const std::string driver = GpuClock::BoundDriver(primaryMinor);
+
+	// msm's floor and ceiling are devfreq's `min_freq` and `max_freq` — a real pair of numbers, in Hz
+	// rather than MHz, on a node discovered by scanning `/sys/class/devfreq` because the DRM device is
+	// the display controller's on the split kernel and the GPU is a sibling of it. The probe decides
+	// whether this floor is ever commanded: msm honours the deadline, so the floor normally stays
+	// untouched, but an "ignored" reading needs somewhere to go.
+	if (GpuClock::IsMsmDriver(driver))
+	{
+		if (const std::string directory = GpuClock::MsmDevfreqDirectory(); !directory.empty())
+		{
+			if (GpuFloor floor = OpenPaths(directory + "/min_freq", directory + "/max_freq", 1'000'000);
+			    floor.IsValid())
+			{
+				return floor;
+			}
+		}
+
+		spdlog::info(
+			"no GPU frequency floor: driver '{}' behind DRM {} has no readable devfreq min_freq/max_freq",
+			driver,
+			primaryMinor
+		);
+
+		return {};
+	}
+
 	const Nodes nodes = Resolve(driver, primaryMinor);
 
 	if (nodes.Count == 0)
 	{
-		// Named rather than silent, because the two omissions are different things: amdgpu's equivalent
-		// is a *word* in `power_dpm_force_performance_level` rather than a number, and msm is the one
-		// driver that honours the deadline and would never be asked for a floor.
+		// Named rather than silent, because the omission is amdgpu: its equivalent is a *word* in
+		// `power_dpm_force_performance_level` rather than a number, and a coarser instrument than this
+		// wants.
 		spdlog::info(
 			"no GPU frequency floor: driver '{}' behind DRM {} exposes no minimum-clock node gyro writes",
 			driver.empty() ? "unknown" : driver,
@@ -166,7 +195,9 @@ bool GpuFloor::Write(std::uint32_t mhz) const
 		return false;
 	}
 
-	const std::string value = std::format("{}", mhz);
+	// The write is the mirror of the read: msm's devfreq speaks Hz, so the MHz a caller commanded is
+	// scaled back up by the same divisor that brought the reading down.
+	const std::string value = std::format("{}", std::uint64_t{ mhz } * m_Divisor);
 
 	return pwrite(file.Get(), value.data(), value.size(), 0) == static_cast<ssize_t>(value.size());
 }

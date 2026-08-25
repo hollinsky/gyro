@@ -10729,11 +10729,14 @@ one frame and the animation stays exact, and it does not justify taking a policy
 whole machine.
 
 **Where it does not reach the hardware, gyro commands the frequency floor.**
-[KernelWishlist.md](KernelWishlist.md#the-deadline-hint-exists-and-reaches-no-driver-gyro-runs-on)
+[KernelWishlist.md](KernelWishlist.md#the-deadline-hint-exists-and-reaches-every-driver-but-msm)
 carries the reading: `->set_deadline` is implemented by msm and by `drm_sched`, and `drm_sched` only
 forwards it to the hardware fence, where amdgpu and xe both drop it. i915 has no plumbing at all. So
-on every part gyro runs on today the hint is a no-op and the floor is the only lever that moves the
-clock.
+on i915 and xe the hint is a no-op and the floor is the only lever that moves the clock. *(Revised
+2026-08-24, from building against msm: the hint reaches that part's frequency control, and the floor
+is the lever for the probe that measures the hint going nowhere — msm's devfreq `min_freq`/`max_freq`
+are a real pair for it, in Hz rather than MHz, and the probe normally selects the deadline arm and
+never commands them.)*
 
 **The floor costs less than it looks like it costs.** `intel_rps_park` sets `idle_freq`, and
 `idle_freq` is the *hardware* minimum rather than the sysfs softlimit — two different fields

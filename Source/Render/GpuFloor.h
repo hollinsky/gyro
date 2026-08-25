@@ -5,16 +5,14 @@
 #include <string>
 #include <string_view>
 
-// The GPU's minimum clock, commanded — decision 142's governing half where the deadline does not
-// reach the hardware.
-//
 // **This is the lever gyro takes only because the honest one does nothing.** Render/Deadline.h states
 // what gyro knows, and a driver holding that deadline *and* its own utilization history has both terms
 // of the problem and sits closer to the part than gyro does. But msm is the only driver that wires the
 // hint to frequency; `drm_sched` forwards it to hardware fences that amdgpu and xe do not implement,
-// and i915 has no plumbing at all. So on every part gyro runs on today the hint is a no-op, and this
-// is the only thing that moves the clock — which it does by setting a power policy on the whole
-// machine's behalf, and that cost is the reason a probe decides rather than a table.
+// and i915 has no plumbing at all. So on the parts this floor exists for — i915 and xe — the hint is
+// a no-op and this is the only thing that moves the clock, while on msm the deadline reaches the GPU
+// and the probe is expected to say so. Either way it sets a power policy on the whole machine's
+// behalf, and that cost is the reason a probe decides rather than a table.
 //
 // **What it costs is much less than it looks like.** `intel_rps_park` sets `idle_freq`, and
 // `idle_freq` is the hardware minimum rather than the sysfs softlimit — two different fields, so a
@@ -35,11 +33,16 @@
 // it. That is decision 142's recoverable direction with the sign it deserves here: a floor gyro cannot
 // set is the state gyro was already in.
 //
-// **Two drivers, and the omissions are named rather than silent.** i915 and xe expose a minimum
-// frequency as a number in a file, which is what this writes. amdgpu's equivalent is
+// **Three drivers, and the omission is named rather than silent.** i915 and xe expose a minimum
+// frequency as a number in a file, which is what this writes. msm's devfreq exposes `min_freq` and
+// `max_freq` — the same pair in Hz rather than MHz, which is what the divisor on `OpenPaths` is for,
+// on a node discovered by scanning `/sys/class/devfreq`, because the DRM device is the display
+// controller's on the split kernel and the GPU is a sibling of it. msm honours the deadline, so the
+// probe normally selects the deadline arm and this floor is opened and never commanded — but a probe
+// that reads "ignored" needs somewhere to go, and decision 142's recoverable direction is a real
+// lever here rather than a name-based assumption. amdgpu's equivalent is
 // `power_dpm_force_performance_level`, a *word* rather than a number and a coarser instrument than
-// this wants, so it comes up invalid and logs. msm is the one driver that honours the deadline, so a
-// probe on it would never select the floor anyway.
+// this wants, so it comes up invalid and logs.
 class GpuFloor
 {
 public:
@@ -62,13 +65,16 @@ public:
 	[[nodiscard]] static GpuFloor Open(std::int64_t primaryMinor);
 
 	// Open a pair of nodes directly. The seam `Open` resolves onto, and the one a test drives against
-	// files it wrote.
-	[[nodiscard]] static GpuFloor OpenPaths(const std::string& floor, const std::string& ceiling);
+	// files it wrote. `divisor` scales raw reads down to MHz and the commanded write back up — 1 for
+	// the MHz nodes i915 and xe expose, 1'000'000 for msm's Hz devfreq pair.
+	[[nodiscard]] static GpuFloor
+	OpenPaths(const std::string& floor, const std::string& ceiling, std::uint32_t divisor = 1);
 
 	[[nodiscard]] bool IsValid() const noexcept { return !m_Floor.empty(); }
 
-	// The top of the part's range in MHz — RP0 on i915, `rp0_freq` on xe — or zero where it could not
-	// be read. What a caller asking for "as fast as it goes" passes to `Command`, and the number that
+	// The top of the part's range in MHz — RP0 on i915, `rp0_freq` on xe, devfreq's `max_freq` on msm —
+	// or zero where it could not be read. What a caller asking for "as fast as it goes" passes to
+	// `Command`, and the number that
 	// makes decision 142's complaint legible in a log line: 350 of 1250.
 	[[nodiscard]] std::uint32_t Ceiling() const noexcept { return m_Ceiling; }
 
@@ -114,4 +120,8 @@ private:
 	std::uint32_t m_Ceiling = 0;
 	std::uint32_t m_Original = 0;
 	std::uint32_t m_Commanded = 0;
+
+	// The divisor that turns the node's raw values into MHz and the commanded MHz back into the node's
+	// unit — 1 for i915 and xe, 1'000'000 for msm, whose devfreq reports Hz.
+	std::uint32_t m_Divisor = 1;
 };

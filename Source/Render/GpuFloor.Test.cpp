@@ -67,13 +67,41 @@ GYRO_TEST(GpuFloor, XeResolvesOnePairUnderItsMinor)
 }
 
 // amdgpu's minimum is a word in `power_dpm_force_performance_level` rather than a number in a file,
-// and msm is the driver that honours the deadline and would never be asked for a floor. Both come back
-// empty, and `Open` says which by name.
+// and msm's pair is dynamic — devfreq's `min_freq`/`max_freq`, resolved by scanning at `Open` rather
+// than named as a constant here. Both come back empty from the pure mapping, and `Open` says which by
+// name.
 GYRO_TEST(GpuFloor, ADriverWithNoNumericMinimumResolvesToNothing)
 {
 	GYRO_CHECK(GpuFloor::Resolve("amdgpu", 0).Count == 0);
 	GYRO_CHECK(GpuFloor::Resolve("msm", 0).Count == 0);
 	GYRO_CHECK(GpuFloor::Resolve("", 0).Count == 0);
+}
+
+// msm's floor and ceiling are devfreq's `min_freq` and `max_freq`, which devfreq reports in Hz — the
+// divisor scales the reading down and the commanded write back up, so the same pair of nodes serves
+// the MHz-based caller.
+GYRO_TEST(GpuFloor, ADivisorScalesTheReadAndTheWrite)
+{
+	const std::filesystem::path floor = Scratch("GyroFloorHzMin");
+	const std::filesystem::path ceiling = Scratch("GyroFloorHzMax");
+	Put(floor, "180000000\n");
+	Put(ceiling, "800000000\n");
+
+	{
+		GpuFloor commanded = GpuFloor::OpenPaths(floor.string(), ceiling.string(), 1'000'000);
+		GYRO_REQUIRE(commanded.IsValid());
+		GYRO_CHECK_EQ(commanded.Original(), 180U);
+		GYRO_CHECK_EQ(commanded.Ceiling(), 800U);
+
+		GYRO_CHECK(commanded.Command(commanded.Ceiling()));
+		GYRO_CHECK_EQ(commanded.Commanded(), 800U);
+		GYRO_CHECK_EQ(Get(floor), std::string{ "800000000" });
+	}
+
+	GYRO_CHECK_EQ(Get(floor), std::string{ "180000000" });
+
+	std::filesystem::remove(floor);
+	std::filesystem::remove(ceiling);
 }
 
 GYRO_TEST(GpuFloor, TheFloorIsRaisedToTheCeilingAndPutBackOnRelease)
