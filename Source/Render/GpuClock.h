@@ -61,6 +61,16 @@ public:
 	// spurious zero the cost window would have to filter back out.
 	[[nodiscard]] std::uint32_t Sample(Instant now);
 
+	// The clock now, with no rate limit and therefore a syscall every call.
+	//
+	// **For a caller that is off the frame thread and is watching the number move.** `Sample` above
+	// exists because the frame thread reads a value that changes far more slowly than a frame, and a
+	// startup probe wants the opposite: it submits one batch of work and polls until the queue drains,
+	// asking what the clock reached while it did. Ten milliseconds of staleness there is most of the
+	// measurement. Nothing on the frame path may call this, which is why the rate limit stayed on
+	// `Sample` rather than being lifted to a policy the caller states.
+	[[nodiscard]] std::uint32_t Read() noexcept;
+
 	// One driver's frequency node, resolved from its name and the DRM minor. Pure and public for the
 	// mapping to be tested without a `/sys` to read: `Count` candidates in preference order — i915
 	// carries a legacy node and a newer one, everything else a single path — and the divisor that turns

@@ -543,7 +543,14 @@ nothing only proves the grep.
   gyro wants it at all before the rule is bent to admit it.
 - **The capability probe.** What it renders, at what sizes, how long it may take at startup, and how
   its result maps onto tiers. It runs on every boot of a system-layer process, so it has a latency
-  budget. **The floor composite belongs in what it renders**, at output resolution, because `C_min`
+  budget. **Half of it now exists and has already spent that budget**:
+  [Render/Governor.h](../Source/Render/Governor.h) is
+  [decision 142](Decisions.md#142-gyro-states-the-deadline-and-commands-the-clock-only-where-the-deadline-does-not-reach-it)'s
+  frequency probe, it runs the real pass chain off the frame path exactly as this entry wants, and it
+  costs about half a second. So the open question is no longer only what a capability probe renders but
+  whether the two are one probe — the frequency arms already produce a per-machine cost figure at a
+  known clock, which is most of what seeding `BudgetPolicy` wants — and, separately, whether a boot
+  service may remember either answer rather than re-measuring it every boot. **The floor composite belongs in what it renders**, at output resolution, because `C_min`
   is a target rather than a measurement and this is the one place a per-machine figure to check it
   against can be obtained for free — the probe is already running the real pass chain off the frame
   path, and the alternative is rendering a floor composite nothing asked for on a machine where

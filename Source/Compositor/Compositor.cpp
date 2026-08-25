@@ -56,6 +56,7 @@
 #include "Publication/Ring.h"
 #include "Render/Allocator.h"
 #include "Render/Device.h"
+#include "Render/Governor.h"
 #include "Render/Renderer.h"
 #include "Render/Textures.h"
 #include "Scene/Output.h"
@@ -571,7 +572,7 @@ private:
 class NestedBackend final : public IBackend
 {
 public:
-	explicit NestedBackend(const IClock& clock) noexcept : m_Clock{ &clock } {}
+	NestedBackend(const IClock& clock, bool governor) noexcept : m_Clock{ &clock }, m_Governs{ governor } {}
 
 	// Open the connection and the device, in that order.
 	//
@@ -622,6 +623,16 @@ public:
 		}
 
 		spdlog::info("rendering on {} ({})", m_Device.Description().DeviceName(), m_Device.Description().DriverName());
+
+		if (m_Governs)
+		{
+			// Decision 142, and the composition root is where it belongs for the reason every other
+			// machine-wide policy in this file is here: the frequency floor is one number for the whole
+			// system, and this is the only party that owns something whose lifetime is the session. It
+			// runs before any output is built, so the probe's own submissions are the only work on the
+			// device and the clock it reads is a measurement rather than a mixture.
+			m_Governor = GpuGovernor::Take(*m_Clock, m_Device, *m_Textures);
+		}
 
 		if (!m_Device.Description().ExportsTimeline)
 		{
@@ -747,6 +758,12 @@ private:
 	// registered with it and before the device that owns its handles. Every renderer detaches in its
 	// own destructor, which is what makes this ordering a statement rather than a hope.
 	std::optional<VulkanTextures> m_Textures;
+
+	// The frequency policy, held for the length of the session because its destructor is what puts the
+	// machine's minimum clock back. It owns no Vulkan handle — the renderer its probe drew through was
+	// built and destroyed inside `Take` — so it sits here for readability rather than for ordering.
+	bool m_Governs = true;
+	GpuGovernor m_Governor;
 
 	// `unique_ptr` because a presenter is neither copyable nor movable and the array has to be built
 	// one at a time, which is `BoundOutput::Renderer`'s reason exactly.
@@ -1201,7 +1218,7 @@ private:
 
 			case BackendKind::Nested:
 			{
-				auto nested = std::make_unique<NestedBackend>(m_Clock);
+				auto nested = std::make_unique<NestedBackend>(m_Clock, m_Options.Governor);
 
 				if (const Result<void> opened = nested->Open(); !opened)
 				{

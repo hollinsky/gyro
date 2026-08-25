@@ -10750,9 +10750,34 @@ deadline and once without, reading the clock both times, answers the question th
 It has to be a question of *how much* rather than whether, because msm's response is `get_freq() * 2`
 fired by a timer three milliseconds before the deadline — a rescue heuristic, not a solver.
 
+**The probe has to be frame-shaped, and the first one written was not.** *(Added 2026-08-24, from
+building it.)* [Render/Governor.h](../Source/Render/Governor.h) submits a calibrated composite, states
+a deadline on half of them, and reads the clock while the queue drains. Its first version ran the
+batches back to back and read **1250 MHz on both arms** of the Tiger Lake that sits at 300 MHz while
+compositing — which is not a driver answering, it is a driver serving a workload that is
+*occupancy-bound*. A probe in that regime is at the ceiling with no headroom to detect a response in,
+and would report the same number on a driver that honours the hint and one that drops it. So the arm
+sleeps out the rest of a refresh between submissions, which is what puts the part through
+`intel_rps_park` once per frame and is the whole condition this entry is about. The same argument
+applies to the *calibration*: a layer count solved for at the ceiling is four times too big at the
+parked clock, and the arms would have had no idle left in the period. It iterates twice instead.
+
+**What that costs is about half a second of boot**, and it is spent only where the answer could change
+something — the floor node is opened first, and a machine that cannot be commanded is never probed.
+That number is the one to argue with first, and the cheaper answer is a remembered measurement keyed
+by the part and the kernel rather than the table this entry rejects.
+
 **An unclear probe takes the floor.** The recoverable direction, on the reasoning `BudgetPolicy`
 already seeds its costs by: a false negative spends power gyro did not need, a false positive drops
 frames, and only one of those is visible.
+
+**The floor commanded is the ceiling, for want of anything that could name a better number.**
+*(Added 2026-08-24.)* Nothing yet turns a composite's measured cost into the frequency it wanted, so
+the alternative to the top of the range is a figure invented at the call site that would be wrong on
+every part but the one it was tuned on. What makes the ceiling defensible meanwhile is the paragraph
+above: `intel_rps_park` writes the hardware minimum rather than this softlimit, so the part still falls
+to RPn between frames whatever the floor says, and a five-millisecond composite run at full clock
+finishes sooner and parks sooner. Race to idle is the cheaper shape here, not the more expensive one.
 
 **A clock reader is needed on both arms, so the platform object exists either way.** Attaching the
 operating point to `GpuCost` stands whatever is decided about governing — `gt_act_freq_mhz` on i915,

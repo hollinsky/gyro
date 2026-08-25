@@ -706,6 +706,7 @@ gyro_add_module(Render
 		Backdrop.cpp
 		Deadline.cpp
 		Device.cpp
+		Governor.cpp
 		GpuClock.cpp
 		GpuFloor.cpp
 		Pipeline.cpp
@@ -716,6 +717,7 @@ gyro_add_module(Render
 		Backdrop.Test.cpp
 		Deadline.Test.cpp
 		Device.Test.cpp
+		Governor.Test.cpp
 		GpuClock.Test.cpp
 		GpuFloor.Test.cpp
 		Pipeline.Test.cpp

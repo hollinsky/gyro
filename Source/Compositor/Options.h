@@ -119,6 +119,19 @@ struct Options
 	// default, which is where a userspace real-time thread belongs.
 	int Priority = 50;
 
+	// Whether gyro probes the GPU's response to a stated deadline and takes the frequency floor where
+	// there is none — decision 142, and Render/Governor.h is the whole of it.
+	//
+	// **On by default and worth a flag anyway, because it is the one thing gyro does that outlives
+	// gyro.** The floor is a sysfs value that stays where it was put if the process is killed rather
+	// than shut down, so a person debugging a crash loop wants a way to run without it. It also costs a
+	// tenth of a second of startup on a machine that turns out to need the floor, which is a thing to be
+	// able to take back out when measuring something else.
+	//
+	// It says nothing about the *deadline*: that is one ioctl per submission, it is always right to
+	// send, and there is no configuration under which gyro declines to tell the driver what it knows.
+	bool Governor = true;
+
 	// What the simulated renderer charges per frame under the headless backend. This is decision 29's
 	// `C` supplied by hand, which is the only way it can be supplied before there is a renderer that
 	// measures one — and it is what makes the binary useful for pointing at a rate combination to see
@@ -582,6 +595,13 @@ namespace Detail
 		{
 			options.RealTime = false;
 			options.RealTimeForced = false;
+
+			continue;
+		}
+
+		if (argument == "--no-governor")
+		{
+			options.Governor = false;
 
 			continue;
 		}

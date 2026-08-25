@@ -172,22 +172,12 @@ GpuClock GpuClock::Open(std::int64_t primaryMinor)
 	return {};
 }
 
-std::uint32_t GpuClock::Sample(Instant now)
+std::uint32_t GpuClock::Read() noexcept
 {
 	if (!IsValid())
 	{
 		return 0;
 	}
-
-	// The rate limit, and the reason the frame thread can call this every frame: a read that is younger
-	// than a governor evaluation interval cannot have moved, so it is answered from the last value with
-	// no syscall. The epoch sentinel forces the first call to read.
-	if (m_Sampled != Instant{} && Elapsed(m_Sampled, now) < RefreshInterval)
-	{
-		return m_LastMhz;
-	}
-
-	m_Sampled = now;
 
 	// sysfs regenerates the attribute on a read from offset zero, so a `pread` at zero is a fresh value
 	// every time without an `lseek`. A small stack buffer — the value is a handful of digits and a
@@ -211,4 +201,24 @@ std::uint32_t GpuClock::Sample(Instant now)
 	}
 
 	return m_LastMhz;
+}
+
+std::uint32_t GpuClock::Sample(Instant now)
+{
+	if (!IsValid())
+	{
+		return 0;
+	}
+
+	// The rate limit, and the reason the frame thread can call this every frame: a read that is younger
+	// than a governor evaluation interval cannot have moved, so it is answered from the last value with
+	// no syscall. The epoch sentinel forces the first call to read.
+	if (m_Sampled != Instant{} && Elapsed(m_Sampled, now) < RefreshInterval)
+	{
+		return m_LastMhz;
+	}
+
+	m_Sampled = now;
+
+	return Read();
 }

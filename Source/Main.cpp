@@ -54,6 +54,8 @@ static void PrintUsage()
 			  << "  --realtime          Ask for SCHED_FIFO even under a hosted backend\n"
 			  << "  --no-realtime       Do not ask for SCHED_FIFO\n"
 			  << "  --priority=N        SCHED_FIFO priority, 1 to 99\n"
+			  << "  --no-governor       Do not probe the GPU's response to a stated frame deadline,\n"
+			  << "                      and do not command its minimum clock where there is none\n"
 			  << "\n";
 
 	// From the vocabulary rather than from a list written here, which is the whole reason `--gym`'s own
