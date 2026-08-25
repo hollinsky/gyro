@@ -2046,10 +2046,19 @@ Each row had been drawn in the units of whatever produced it — the frame threa
 of which there are three per refresh and one is the frame; the GPU's in passes, seven flat siblings
 with three called `composite` — and the thing joining them was eight flow arrows per frame, three
 thousand in the capture, each saying only *these slices are the same frame*. So a label is spelled
-into the name instead. `frame 142` on the refresh ruler, on the frame thread's row, on the GPU row
-and in the flight lane is four drawings of one object, joined by reading, or by searching the words
-and having every row light up at once. It costs no line, it survives the two ends being scrolled
-apart, and it does not degrade as the capture gets longer.
+into the name instead. `frame 142` on the frame thread's row, on the GPU row, in the flight lane and
+on the glass is four drawings of one object, joined by reading, or by searching the words and having
+every row light up at once. It costs no line, it survives the two ends being scrolled apart, and it
+does not degrade as the capture gets longer. The refresh ruler is deliberately *not* among them: it
+is a prediction, and it says `refresh 142` so that a reader never joins a forecast to four
+observations.
+
+**A number a slice has to carry but must not be named by is an attribute.** The glass row is what
+this exists for — a slice there is a frame, and it also has a publication behind it and a vblank
+underneath it, which are two other counts on two other clocks. Printed into the name, three
+identities read as one and a search for any of them lights up the wrong rows; given rows of their
+own, they are counters stepping at flips, which is the two-spellings-of-one-fact habit these rows
+were rewritten to lose. An attribute is on the slice, costs a click, and joins nothing.
 
 **One arrow is left, and it joins the two things that count differently.** A publication is numbered
 by the dispatch thread and a frame by the panel it is shown on, so no name on either side can find
@@ -2064,7 +2073,10 @@ and not an event.
 reading the life of a frame; a stutter is a step that is wide or a step that is missing.
 
 *The refresh ruler* is the top row and it tiles: one slice per refresh interval, ending at the
-deadline the frame was admitted against, so every other row is read against it. Each tile begins
+deadline the frame was admitted against, so every other row is read against it. It is named for the
+refresh rather than for the frame aimed at it, because the tile ends where that frame's commit is
+*due* rather than where its pixels appear — on a nested host, which latches a commit into its own
+frame, the pixels land a whole refresh further right than that. Each tile begins
 where the last one ended, which is remembered rather than recomputed — the clock re-anchors on every
 flip, so its answer for the previous deadline drifts by microseconds, and Perfetto has no *slightly
 overlapping*: a tile starting a microsecond early becomes a child of its neighbour. A tile wider than
@@ -2085,17 +2097,26 @@ rather than under the iteration that read it back two frames later. `gpu cost` i
 so what a frame cost sits on the same axis as the `gpu mark` admission was fed.
 
 *The flight lanes* are the wait between the present that hands a frame over and the vblank that shows
-it — on a sixty hertz panel a whole refresh in which the frame appears in no other row. There are
+it — on a sixty hertz panel a whole refresh in which the frame appears in no other row. A lane opens
+where the present returns rather than at the iteration's clock read: stamped at the wake it opened
+before the frame slice above it did, which drew a frame waiting in a queue before it had been drawn
+and made *lanes occupied is queue depth* false. The end-to-end latency that stamp was reaching for is
+still readable, as the frame slice opening against the lane closing. There are
 several because commits complete in the order they were made, so frame N opens before N+1 and closes
 before it, which is the one shape a track refuses; a lane per commit slot is the honest drawing
 anyway, since how many lanes are occupied at an instant is the queue depth read without a counter.
 
-*The glass row* is what a person saw. One slice per scene rather than per vblank, opened at the
-host's presentation instant rather than where the feedback was drained — a slice placed where the
-loop *learned* of a flip moves with every late wake, and would read a stutter of the reader as a
-lateness of the host — and running until the scene changes, so its width is how long somebody was
-looking at one picture. It is the only row in the trace about what happened rather than about what
-gyro did.
+*The glass row* is what a person saw. One slice per frame shown, opened at the host's presentation
+instant rather than where the feedback was drained — a slice placed where the loop *learned* of a
+flip moves with every late wake, and would read a stutter of the reader as a lateness of the host —
+and running until the frame on the panel changes, so its width is how long somebody was looking at
+one picture and a repeat is the stutter drawn without measuring anything. It carries the publication
+it drew and the vblank it landed on as attributes. Keyed on the *scene* instead, which is what it was
+first built as, the row stated the opposite of the truth: a snapshot is coefficient runs rather than
+pixels and the evaluator solves them at each frame's own presentation instant, so a dozen refreshes
+from one publication are a dozen different pictures — and merging them drew a smoothly animating gym
+as thirty-three frozen blocks. It is the only row in the trace about what happened rather than about
+what gyro did.
 
 **And two counters that trend.** *Is this machine about to start dropping frames* — the slack
 counter, which walks toward zero over a hundred frames and is invisible in any one of them. *Was a

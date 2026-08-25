@@ -56,6 +56,10 @@ enum class TraceKind : std::uint8_t
 	Mark = 2,
 	Count = 3,
 	Elapsed = 4,
+
+	// A number belonging to the slice already open on this row rather than to a row of its own. See
+	// `TraceAttribute`.
+	Attribute = 5,
 };
 
 // How many outputs a trace can name rows for. Frame/Admission.h's `MaxOutputs` is the number this
@@ -95,7 +99,9 @@ inline constexpr std::uint16_t TraceLanesPerOutput = static_cast<std::uint16_t>(
 // The ruler. One slice per refresh interval, ending at the deadline the frame was admitted against, so
 // the row tiles the timeline and every other row can be read against it. It is a row of its own rather
 // than a slice the work nests inside because the case worth seeing is the child outliving the parent,
-// which nesting cannot draw.
+// which nesting cannot draw. **It is named for the refresh and not for the frame aimed at it**: every
+// other `frame N` in the picture is an extent that happened, and this one ends where a commit is due
+// rather than where its pixels appear.
 [[nodiscard]] constexpr std::uint16_t TraceGrid(std::size_t output) noexcept
 {
 	return TraceLane(output, 0);
@@ -126,8 +132,11 @@ inline constexpr std::uint16_t TraceLanesPerOutput = static_cast<std::uint16_t>(
 	return TraceLane(output, static_cast<std::uint16_t>(3 + (slot < TracedFlights ? slot : 0)));
 }
 
-// What is on the glass. One slice per vblank, tiling, named for the scene it showed — so a scene shown
-// twice is one wide slice rather than two marks a reader has to notice are the same number.
+// What is on the glass. One slice per vblank, tiling, named for the *frame* it showed and carrying the
+// publication behind it as an attribute — so a frame scanned out twice is one wide slice rather than
+// two marks a reader has to notice are the same number, and that is the only thing this row merges.
+// Keyed on the scene, which is what it was first built as, it merged a dozen refreshes that were a
+// dozen different pictures and drew an animation as a freeze.
 [[nodiscard]] constexpr std::uint16_t TraceGlass(std::size_t output) noexcept
 {
 	return TraceLane(output, static_cast<std::uint16_t>(3 + TracedFlights));
@@ -215,9 +224,10 @@ struct TraceRecord
 	std::atomic<Instant> Stamp{};
 	std::atomic<const char*> Name{ nullptr };
 
-	// A label's value on `Begin` and `Mark`, the counter's value on `Count` and `Elapsed`, and unread on
-	// `End`. A label is the number the slice is about — the frame, the scene — which the writer prints
-	// into the name, and which on the one join that needs it also draws an arrow. See `TraceLabel`.
+	// A label's value on `Begin` and `Mark`, the counter's value on `Count` and `Elapsed`, the
+	// attribute's value on `Attribute`, and unread on `End`. A label is the number the slice is about —
+	// the frame, the scene — which the writer prints into the name, and which on the one join that needs
+	// it also draws an arrow. See `TraceLabel`.
 	std::atomic<std::uint64_t> Payload{ 0 };
 
 	// Kind in the low byte, row in the next two, and whether the payload draws an arrow in the byte
@@ -490,11 +500,24 @@ TraceSpanAt(const char* name, Instant began, Instant ended, std::uint16_t scope,
 	}
 }
 
-// One end of a span whose other end is somewhere else entirely — the flight lanes, where a frame is
-// opened by the submission and closed by a vblank several milliseconds and one row of bookkeeping
-// later, and the glass row, where each slice is closed by the vblank that opens the next one. A
-// `TraceSpan` cannot express it: there is no scope either end lives in, and the two are separated by a
-// sleep. Balancing is the writer's, exactly as it is for the ring's own truncated ends.
+// One end of a span opened where control is, whose other end is somewhere else entirely. The flight
+// lanes are the caller: a frame enters the queue when the present returns, and the instant that
+// happened is the instant this runs — asking the iteration for the `now` it read before it decided to
+// draw would open the wait a frame is *waiting* at a point before the frame existed, which is what the
+// row did and is a slice that begins before the work it is waiting on.
+inline void TraceOpen(const char* name, std::uint16_t scope = TraceThread, TraceLabel label = {}) noexcept
+{
+	if (TraceBuffer* const buffer = Detail::Tracing)
+	{
+		buffer->Emit(TraceKind::Begin, name, label.Value(), scope, label.IsArrow());
+	}
+}
+
+// The same at a remembered instant, for a span whose opening is learned about after the fact: the
+// glass row, where a slice begins at a vblank the loop is told about milliseconds later and is closed
+// by the vblank that opens the next one. A `TraceSpan` cannot express either shape — there is no scope
+// the two ends live in, and they are separated by a sleep — so balancing is the writer's, exactly as it
+// is for the ring's own truncated ends.
 inline void TraceOpenAt(const char* name, Instant began, std::uint16_t scope, TraceLabel label = {}) noexcept
 {
 	if (TraceBuffer* const buffer = Detail::Tracing)
@@ -520,6 +543,43 @@ inline void TraceClose(std::uint16_t scope) noexcept
 	if (TraceBuffer* const buffer = Detail::Tracing)
 	{
 		buffer->Emit(TraceKind::End, nullptr, 0, scope);
+	}
+}
+
+// A number that belongs to the slice already open on this row, printed in Perfetto's argument panel
+// when a person clicks it.
+//
+// **It is for the number a slice has to carry and must not be joined by.** The glass row is what this
+// exists for: a slice there is named for the frame a person is looking at, because that is the identity
+// every other row of that frame agrees on — and it also has a scene behind it, which is a different
+// count on a different thread. Printed into the name, the two numbers would read as one identity and a
+// search for either would light up the wrong rows. Given a row of its own, the scene would be a counter
+// stepping at flips, which is the *two spellings of one fact* habit these rows were rewritten to lose.
+// An attribute is neither: it is on the slice, it is only seen when asked for, and it joins nothing.
+//
+// **It binds to the slice open on this row and nowhere else**, so it is emitted immediately after the
+// `Begin` it belongs to and with that `Begin`'s instant. Trace/Recorder.h sorts stably, so two records
+// sharing a stamp keep the order they were written in; one that arrives with no slice open on its row —
+// the ring having lapped the `Begin` — is dropped rather than attached to whatever comes next.
+//
+// A name and a number rather than a formatted string, for the reason the rest of this header gives: a
+// call site hands over a literal and a word, never something it built.
+inline void TraceAttribute(const char* name, std::uint64_t value, std::uint16_t scope = TraceThread) noexcept
+{
+	if (TraceBuffer* const buffer = Detail::Tracing)
+	{
+		buffer->Emit(TraceKind::Attribute, name, value, scope);
+	}
+}
+
+// The same for a slice opened at a remembered instant, which is every slice that has an attribute
+// today: the stamp must be the one the `Begin` carried, or the sort puts the attribute somewhere else
+// on the row and it binds to a slice it is not about.
+inline void TraceAttributeAt(const char* name, Instant stamp, std::uint64_t value, std::uint16_t scope) noexcept
+{
+	if (TraceBuffer* const buffer = Detail::Tracing)
+	{
+		buffer->EmitAt(stamp, TraceKind::Attribute, name, value, scope);
 	}
 }
 

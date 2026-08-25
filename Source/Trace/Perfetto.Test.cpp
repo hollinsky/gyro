@@ -181,6 +181,9 @@ constexpr std::uint32_t FlowField = 47;
 constexpr std::uint32_t InlineNameField = 23;
 constexpr std::uint32_t CounterValueField = 30;
 constexpr std::uint32_t DescriptorNameField = 2;
+constexpr std::uint32_t AnnotationField = 4;
+constexpr std::uint32_t AnnotationValueField = 3;
+constexpr std::uint32_t AnnotationNameField = 10;
 
 [[nodiscard]] std::size_t CountEvents(std::span<const std::byte> trace, std::uint64_t type)
 {
@@ -574,4 +577,122 @@ GYRO_TEST(Perfetto, AnOutputsRowsAreDeclaredInTheOrderAFrameHappens)
 	GYRO_CHECK_EQ(rows[1], std::string{ "output 0 frame" });
 	GYRO_CHECK_EQ(rows[2], std::string{ "output 0 gpu" });
 	GYRO_CHECK_EQ(rows[3], std::string{ "output 0 glass" });
+}
+
+namespace
+{
+
+// Every `debug_annotation` hanging off every track event, in the order the file has them, as the pairs
+// a person reads in Perfetto's argument panel.
+[[nodiscard]] std::vector<std::pair<std::string, std::uint64_t>> Annotations(std::span<const std::byte> trace)
+{
+	std::vector<std::pair<std::string, std::uint64_t>> arguments;
+
+	for (const Field& packet : Packets(trace))
+	{
+		const std::optional<Field> event = Find(packet.Bytes, TrackEventField);
+
+		if (!event)
+		{
+			continue;
+		}
+
+		Reader reader{ event->Bytes };
+
+		while (!reader.Done())
+		{
+			const std::optional<Field> field = reader.Next();
+
+			if (!field)
+			{
+				break;
+			}
+
+			if (field->Number != AnnotationField)
+			{
+				continue;
+			}
+
+			const std::optional<Field> name = Find(field->Bytes, AnnotationNameField);
+			const std::optional<Field> value = Find(field->Bytes, AnnotationValueField);
+
+			if (!name || !value)
+			{
+				continue;
+			}
+
+			arguments.emplace_back(
+				std::string{ reinterpret_cast<const char*>(name->Bytes.data()), name->Bytes.size() }, value->Value
+			);
+		}
+	}
+
+	return arguments;
+}
+
+} // namespace
+
+// An attribute is a field of the slice it decorates rather than an event of its own, which is what the
+// format requires: annotations are read off the `Begin` packet, so a record arriving afterwards has to
+// be folded back into it.
+GYRO_TEST(Perfetto, AnAttributeIsWrittenOntoTheSliceItFollows)
+{
+	const std::vector<TraceEvent> events{ At(1'000, TraceKind::Begin, "frame", 142, TraceGlass(0)),
+		                                  At(1'000, TraceKind::Attribute, "scene", 6, TraceGlass(0)),
+		                                  At(1'000, TraceKind::Attribute, "refresh", 99, TraceGlass(0)),
+		                                  At(2'000, TraceKind::End, nullptr, 0, TraceGlass(0)) };
+	const std::array sources{ TraceSource{ .Name = "frame", .Events = events } };
+
+	const std::vector<std::byte> trace = EncodeTrace(TraceIdentity{ .Pid = 7 }, sources);
+
+	// Two records that are not two events: the slice is one begin and one end, exactly as it would be
+	// without them.
+	GYRO_CHECK_EQ(CountEvents(trace, SliceBegin), std::size_t{ 1 });
+	GYRO_CHECK_EQ(CountEvents(trace, SliceEnd), std::size_t{ 1 });
+
+	const std::vector<std::pair<std::string, std::uint64_t>> arguments = Annotations(trace);
+
+	GYRO_REQUIRE_EQ(arguments.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(arguments[0].first, std::string{ "scene" });
+	GYRO_CHECK_EQ(arguments[0].second, std::uint64_t{ 6 });
+	GYRO_CHECK_EQ(arguments[1].first, std::string{ "refresh" });
+	GYRO_CHECK_EQ(arguments[1].second, std::uint64_t{ 99 });
+}
+
+// The ring holds a window, so its oldest records are the middle of whatever was running — an attribute
+// whose slice was lapped has nothing to hang on. Attached to the first slice of the window instead, it
+// would put one frame's scene onto a different frame, which is worse than saying nothing.
+GYRO_TEST(Perfetto, AnAttributeWithNoSliceOpenOnItsRowIsDropped)
+{
+	const std::vector<TraceEvent> events{ At(1'000, TraceKind::Attribute, "scene", 6, TraceGlass(0)),
+		                                  At(1'100, TraceKind::Begin, "frame", 142, TraceGlass(0)),
+		                                  At(2'000, TraceKind::End, nullptr, 0, TraceGlass(0)) };
+	const std::array sources{ TraceSource{ .Name = "frame", .Events = events } };
+
+	const std::vector<std::byte> trace = EncodeTrace(TraceIdentity{ .Pid = 7 }, sources);
+
+	GYRO_CHECK_EQ(CountEvents(trace, SliceBegin), std::size_t{ 1 });
+	GYRO_CHECK(Annotations(trace).empty());
+}
+
+// It binds to the slice it follows and not to whichever one is open, which is the difference between
+// an argument and a guess: the row below has a closed slice and an open one, and the attribute belongs
+// to neither.
+GYRO_TEST(Perfetto, AnAttributeBindsToTheSliceItImmediatelyFollows)
+{
+	const std::vector<TraceEvent> events{ At(1'000, TraceKind::Begin, "outer", 0, TraceGlass(0)),
+		                                  At(1'100, TraceKind::Begin, "inner", 0, TraceGlass(0)),
+		                                  At(1'100, TraceKind::Attribute, "scene", 6, TraceGlass(0)),
+		                                  At(1'200, TraceKind::End, nullptr, 0, TraceGlass(0)),
+		                                  At(1'300, TraceKind::Attribute, "scene", 7, TraceGlass(0)),
+		                                  At(2'000, TraceKind::End, nullptr, 0, TraceGlass(0)) };
+	const std::array sources{ TraceSource{ .Name = "frame", .Events = events } };
+
+	const std::vector<std::byte> trace = EncodeTrace(TraceIdentity{ .Pid = 7 }, sources);
+	const std::vector<std::pair<std::string, std::uint64_t>> arguments = Annotations(trace);
+
+	// The inner slice takes the one that follows it; the one after the end takes nothing, rather than
+	// reattaching to the outer slice that is still open.
+	GYRO_REQUIRE_EQ(arguments.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(arguments[0].second, std::uint64_t{ 6 });
 }

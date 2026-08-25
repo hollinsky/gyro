@@ -255,9 +255,10 @@ private:
 	{
 		m_Clock.Observe(info);
 
-		// The oldest outstanding commit is the one this flip answers, so it is the recorded frame the
-		// vblank showed, and zero where the host answered a commit this loop never made.
-		const std::uint64_t frame = m_InFlight > 0 ? m_InFlightSnapshots[0] : 0;
+		// The oldest outstanding commit is the one this flip answers, so these are the scene it drew and
+		// the frame it was, and both are zero where the host answered a commit this loop never made.
+		const std::uint64_t scene = m_InFlight > 0 ? m_InFlightSnapshots[0] : 0;
+		const std::uint64_t frame = m_InFlight > 0 ? m_InFlightFrames[0] : 0;
 
 		// **The glass row, at the host's timestamp, and it is a slice rather than a mark.** The stamp is
 		// `info.PresentedAt` and not the one the feedback was drained at, because the flip happened at
@@ -267,24 +268,48 @@ private:
 		//
 		// **It is an extent and it merges, which is the difference between this and the mark it
 		// replaces.** A mark said *a flip happened* and left a reader counting ticks to decide whether
-		// the cadence was even. A slice that runs until the scene *changes* says how long a person was
-		// looking at one picture — so every slice is one refresh wide on a compositor that is keeping
-		// up, and a stutter is a wide block seen without measuring anything. That is the row
+		// the cadence was even. A slice that runs until the picture *changes* says how long a person was
+		// looking at one thing — so every slice is one refresh wide on a compositor that is keeping up,
+		// and a stutter is a wide block seen without measuring anything. That is the row
 		// Docs/Experience.md's promise is read off, and it is the only row in the trace that is about
 		// what happened rather than about what gyro did.
 		//
-		// **A vblank that showed the same scene again therefore draws nothing**, and the cadence it
-		// would have shown is on the refresh row, where it belongs: the ruler is the ruler, and two
-		// rows spelling one fact is the habit that made these charts hard to read. What is lost is a
-		// repeat flip's own instant, which no question asked of this row wants.
+		// **The name is the frame the flip showed, and keying it on the scene instead made this row
+		// state the opposite of the truth.** A snapshot carries coefficient runs rather than pixels and
+		// the evaluator solves them at each frame's own presentation instant, so a dozen refreshes from
+		// one publication are a dozen *different pictures* — an animation running exactly as it should.
+		// Merged on the scene, the row drew them as one block and claimed the screen had been frozen for
+		// a fifth of a second: a seven-second capture of a smoothly animating gym came out as
+		// thirty-three still frames. Keyed on the frame it merges only where the same frame was scanned
+		// out twice, which is a repeat — and a repeat is exactly the stutter this row exists to show.
 		//
-		// **The name is the published sequence the flip showed**, so searching for `scene 12` lights up
-		// the publish that wrote it, the acquire that took it, and every millisecond it was on the
-		// glass. A vblank that showed a frame gyro did not draw names nothing and says so.
+		// **It is also the number every other row of that frame is named for**, so a search for
+		// `frame 142` now reaches the pixels as well as the work, and the question *when was this on the
+		// screen* is answered by one slice rather than by the far edge of a flight lane. A vblank that
+		// showed a frame gyro did not draw names nothing and says so.
 		if (frame != m_Glass)
 		{
 			TraceCloseAt(info.PresentedAt, m_TraceGlass);
-			TraceOpenAt("scene", info.PresentedAt, m_TraceGlass, frame != 0 ? TraceTag(frame) : TraceLabel{});
+			TraceOpenAt("frame", info.PresentedAt, m_TraceGlass, frame != 0 ? TraceTag(frame) : TraceLabel{});
+
+			// **The two numbers that belong to this slice and must not be joined to it by name.** The
+			// scene is dispatch's count and the refresh is the panel's, and printing either into the
+			// name would put three identities in one string and make a search for any of them light up
+			// the wrong rows; giving either a row of its own would be a counter stepping at flips, which
+			// is the *two spellings of one fact* habit these rows were rewritten to lose. As arguments
+			// they cost a click and answer two questions nothing else in the picture can: which
+			// publication a person is actually looking at, and whether the frame landed on the refresh
+			// it was aimed at — which is a subtraction against the name, done by the reader, on numbers
+			// the loop had all along and used to discard.
+			if (scene != 0)
+			{
+				TraceAttributeAt("scene", info.PresentedAt, scene, m_TraceGlass);
+			}
+
+			if (info.Sequence != 0)
+			{
+				TraceAttributeAt("refresh", info.PresentedAt, info.Sequence, m_TraceGlass);
+			}
 
 			m_Glass = frame;
 		}
@@ -304,9 +329,9 @@ private:
 		// *the scene on the glass is 12*, held between samples and stepped at each flip — which is
 		// exactly what the slice above draws, with the number in the name and the duration as its
 		// width. Two spellings of one fact is the thing that made these charts hard to read.
-		if (frame >= m_Presented.Sequence)
+		if (scene >= m_Presented.Sequence)
 		{
-			m_Presented = { .Sequence = frame, .At = info.PresentedAt };
+			m_Presented = { .Sequence = scene, .At = info.PresentedAt };
 		}
 
 		--m_InFlight;
@@ -314,10 +339,12 @@ private:
 		for (std::uint32_t index = 0; index < m_InFlight; ++index)
 		{
 			m_InFlightSnapshots[index] = m_InFlightSnapshots[index + 1];
+			m_InFlightFrames[index] = m_InFlightFrames[index + 1];
 			m_InFlightRows[index] = m_InFlightRows[index + 1];
 		}
 
 		m_InFlightSnapshots[m_InFlight] = 0;
+		m_InFlightFrames[m_InFlight] = FrameClock::NoSequence;
 		m_InFlightRows[m_InFlight] = TraceThread;
 	}
 
@@ -417,6 +444,7 @@ private:
 		// happened and is still owed to dispatch, and dropping it here would lose a frame callback on
 		// the iteration a mode set landed in.
 		m_InFlightSnapshots = {};
+		m_InFlightFrames = {};
 		m_InFlightRows = {};
 
 		// The ruler restarts rather than bridging the discontinuity. See `m_Tiled`.
@@ -475,6 +503,12 @@ private:
 	// the dispatch side turns back into surfaces.
 	std::array<std::uint64_t, MaxCommitsInFlight> m_InFlightSnapshots{};
 
+	// And which frame each of them *is*, shifted with them. The two counts are not interchangeable and
+	// keeping only the first is what left the glass row unable to say what it was showing: this is the
+	// frame clock's sequence, which every row of that frame is named for, and the one above is the
+	// dispatch thread's, which is what a client is owed a callback against.
+	std::array<std::uint64_t, MaxCommitsInFlight> m_InFlightFrames{};
+
 	// The flight lane each of those commits was drawn on, shifted with them. Kept beside the queue
 	// rather than derived from a position in it for the reason `m_TraceFlight` gives.
 	std::array<std::uint16_t, MaxCommitsInFlight> m_InFlightRows{};
@@ -483,9 +517,9 @@ private:
 	// that carries it.
 	PresentedFrame m_Presented{};
 
-	// What the glass row is currently showing, so that a flip repeating it extends the slice instead of
-	// starting another. It survives a `Discard` deliberately: a mode set does not change what is on the
-	// panel, and closing the slice there would draw a gap where a person saw a picture.
+	// Which frame the glass row is currently showing, so that a flip repeating it extends the slice
+	// instead of starting another. It survives a `Discard` deliberately: a mode set does not change what
+	// is on the panel, and closing the slice there would draw a gap where a person saw a picture.
 	std::uint64_t m_Glass = 0;
 
 	Region<DeviceSpace> m_Damage{};
@@ -842,8 +876,14 @@ private:
 			// reading and the one worth seeing.
 			const bool chained = output.m_Tiled != Instant{} && output.m_Tiled < decision.Deadline;
 
+			// **Named for the refresh it is rather than for the frame aimed at it**, which is the
+			// distinction the row was quietly losing. Every other `frame N` in the picture is an extent
+			// that happened; this one is a prediction, and it ends where the commit for that refresh is
+			// due rather than where its pixels appear. Sharing the word made a reader join a forecast to
+			// four observations and read the ruler as the screen — the tile that says `refresh 99` sits
+			// two tiles left of the pixels frame 99 put on the glass.
 			TraceSpanAt(
-				"frame",
+				"refresh",
 				chained ? output.m_Tiled : std::min(now, decision.Deadline),
 				decision.Deadline,
 				output.m_TraceGrid,
@@ -1026,23 +1066,32 @@ private:
 		// from the same scene.
 		output.m_InFlightSnapshots[output.m_InFlight] = m_Held;
 
+		// And the frame it is, which the queue used to drop. Two counts ride out with one commit and
+		// the return leg needs both: the scene is what dispatch turns back into surfaces, and this is
+		// the number every row of this frame is named for — so it is what the glass row has to say when
+		// the vblank arrives, and what tells a reader whether the frame landed on the refresh it was
+		// aimed at.
+		output.m_InFlightFrames[output.m_InFlight] = decision.Sequence;
+
 		// **The lane the frame flies in, opened here and closed by the vblank that shows it.** Rotation
 		// rather than queue position, because `OnPresented` pops from the front and shuffles everything
 		// behind it down — a slice has to close on the row it opened on, and a row derived from a
 		// position would move under it. The rotation cannot collide: at most `MaxCommitsInFlight` are
 		// outstanding and there are exactly that many lanes.
 		//
-		// **Stamped at the iteration's clock read rather than at this line**, and the difference is
-		// deliberate. What the lane draws is the latency a person waits: from the loop deciding to make
-		// this frame to the pixels arriving, evaluate and record included. Decision 57 also has nothing
-		// to say to it, since there is no second clock read here to have.
+		// **Stamped here rather than at the iteration's clock read**, which is the correction the row
+		// needed. Stamped at the wake, the lane opened before the frame slice on the row above it did —
+		// a frame waiting in a queue microseconds before it began being drawn, on every frame of a
+		// capture — and *how many lanes are occupied is the queue depth* stopped being true, since a
+		// lane was also occupied while its frame was still being recorded. The end-to-end latency the
+		// old stamp drew is not lost: it is this output's frame slice opening against this lane closing.
 		const std::uint16_t lane =
 			static_cast<std::uint16_t>(output.m_TraceFlight + output.m_FlightLane % TracedFlights);
 
 		++output.m_FlightLane;
 		output.m_InFlightRows[output.m_InFlight] = lane;
 
-		TraceOpenAt("frame", now, lane, TraceTag(decision.Sequence));
+		TraceOpen("frame", lane, TraceTag(decision.Sequence));
 
 		++output.m_InFlight;
 

@@ -1109,12 +1109,13 @@ GYRO_TEST(FrameLoop, AFrameTheHostAcceptedAndNeverShowedIsNeverReportedPresented
 
 	GYRO_CHECK_EQ(harness.Reported().Presented()[0].Sequence, std::uint64_t{ 0 });
 }
-// A flip opens a slice on the glass row at the moment the panel scanned out, named for the recorded
-// frame the vblank showed. Stamped where it *happened* rather than where it was drained, because a
-// slice placed where the loop learned of it moves with every late wake and reads a stutter of the
-// reader as a lateness of the host. And it is a slice rather than a mark because what a person wants
-// from this row is how long a scene was on the screen, which a mark cannot say.
-GYRO_TEST(FrameLoop, TheGlassRowOpensWhereThePanelScannedOutAndNamesTheScene)
+// A flip opens a slice on the glass row at the moment the panel scanned out, named for the frame the
+// vblank showed and carrying the scene and the refresh as arguments. Stamped where it *happened*
+// rather than where it was drained, because a slice placed where the loop learned of it moves with
+// every late wake and reads a stutter of the reader as a lateness of the host. And it is a slice rather
+// than a mark because what a person wants from this row is how long a picture was on the screen, which
+// a mark cannot say.
+GYRO_TEST(FrameLoop, TheGlassRowOpensWhereThePanelScannedOutAndNamesTheFrame)
 {
 	Harness harness;
 
@@ -1147,25 +1148,50 @@ GYRO_TEST(FrameLoop, TheGlassRowOpensWhereThePanelScannedOutAndNamesTheScene)
 
 	std::size_t opened = 0;
 	bool stampedWhereLearned = false;
+	std::uint64_t shown = 0;
+	std::uint64_t drawn = 0;
+	std::vector<std::pair<std::string_view, std::uint64_t>> arguments;
 
 	for (std::size_t index = 0; index < count; ++index)
 	{
 		const TraceEvent& event = events[index];
 
-		if (event.Scope != TraceGlass(0) || event.Kind != TraceKind::Begin)
+		// What the work rows called this frame, which is the number the glass row has to agree with.
+		if (event.Scope == TraceOutput(0) && event.Kind == TraceKind::Begin &&
+		    std::string_view{ event.Name } == "frame")
+		{
+			drawn = event.Payload;
+		}
+
+		if (event.Scope != TraceGlass(0))
+		{
+			continue;
+		}
+
+		if (event.Kind == TraceKind::Attribute)
+		{
+			arguments.emplace_back(std::string_view{ event.Name }, event.Payload);
+
+			// The same instant as the slice it hangs on, or the stable sort puts it elsewhere on the row
+			// and the writer binds it to a slice it is not about.
+			GYRO_CHECK(event.Stamp == At(1010));
+
+			continue;
+		}
+
+		if (event.Kind != TraceKind::Begin)
 		{
 			continue;
 		}
 
 		++opened;
+		shown = event.Payload;
 
-		GYRO_CHECK_EQ(std::string_view{ event.Name }, std::string_view{ "scene" });
+		GYRO_CHECK_EQ(std::string_view{ event.Name }, std::string_view{ "frame" });
 		GYRO_CHECK(event.Stamp == At(1010));
 
-		// The label is the published sequence, printed into the name by the writer. It is a tag rather
-		// than a flow: the scene it names is already the far end of the one arrow this picture has, and
-		// a second link from every vblank that showed it would fan forty lines out of one publish.
-		GYRO_CHECK_EQ(event.Payload, std::uint64_t{ 1 });
+		// A tag rather than a flow: this frame is drawn on five rows and the words are what join them,
+		// which is what let three thousand arrows out of a seven-second capture.
 		GYRO_CHECK(!event.Arrow);
 
 		stampedWhereLearned = stampedWhereLearned || event.Stamp == At(1020);
@@ -1173,6 +1199,90 @@ GYRO_TEST(FrameLoop, TheGlassRowOpensWhereThePanelScannedOutAndNamesTheScene)
 
 	GYRO_CHECK_EQ(opened, std::size_t{ 1 });
 	GYRO_CHECK(!stampedWhereLearned);
+
+	// **The row says which frame, not which publication**, which is the whole of the correction: a
+	// snapshot is coefficients rather than pixels, so a dozen refreshes from one publication are a dozen
+	// different pictures and a row keyed on the scene drew them as one still block.
+	GYRO_CHECK(drawn != 0);
+	GYRO_CHECK_EQ(shown, drawn);
+
+	// And the two counts that belong to the slice without being its identity: the publication it drew
+	// from, and the vblank it actually landed on.
+	GYRO_REQUIRE_EQ(arguments.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(arguments[0].first, std::string_view{ "scene" });
+	GYRO_CHECK_EQ(arguments[0].second, std::uint64_t{ 1 });
+	GYRO_CHECK_EQ(arguments[1].first, std::string_view{ "refresh" });
+	GYRO_CHECK_EQ(arguments[1].second, std::uint64_t{ 8 });
+}
+
+// A second flip from the same publication is a different picture and has to be drawn as one. The row
+// used to merge on the scene, so an animation running from one snapshot came out as a single wide
+// block claiming the screen had been frozen — which is exactly the shape a stutter has, reported on a
+// compositor that was not stuttering.
+GYRO_TEST(FrameLoop, TwoFramesFromOnePublicationAreTwoSlicesOnTheGlass)
+{
+	Harness harness;
+
+	std::array<TraceRecord, 256> records{};
+	TraceBuffer trace;
+	trace.Arm(records, harness.Clock);
+
+	harness.Anchor();
+
+	EnrollTracing(&trace);
+
+	harness.Publish(1, {});
+
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(At(1011));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	harness.Presenter.Flip(At(1026), 9);
+	harness.Clock.Set(At(1027));
+	(void)harness.Loop.Step();
+
+	EnrollTracing(nullptr);
+
+	std::array<TraceEvent, 256> events{};
+	const std::size_t count = trace.Copy(events);
+
+	std::vector<std::uint64_t> shown;
+	std::vector<std::uint64_t> scenes;
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		const TraceEvent& event = events[index];
+
+		if (event.Scope != TraceGlass(0))
+		{
+			continue;
+		}
+
+		if (event.Kind == TraceKind::Begin)
+		{
+			shown.push_back(event.Payload);
+		}
+
+		if (event.Kind == TraceKind::Attribute && std::string_view{ event.Name } == "scene")
+		{
+			scenes.push_back(event.Payload);
+		}
+	}
+
+	// Two frames, two slices, and consecutive: the second flip closed the first slice rather than
+	// extending it.
+	GYRO_REQUIRE_EQ(shown.size(), std::size_t{ 2 });
+	GYRO_CHECK(shown[0] != shown[1]);
+
+	// Both drew the same publication, which is the fact the old keying mistook for the same picture.
+	GYRO_REQUIRE_EQ(scenes.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(scenes[0], std::uint64_t{ 1 });
+	GYRO_CHECK_EQ(scenes[1], std::uint64_t{ 1 });
 }
 
 // The scene the loop is drawing from is a state and not an event, so the arrow that names it is drawn
@@ -1285,10 +1395,11 @@ GYRO_TEST(FrameLoop, TheRefreshRulerTilesSoConsecutiveFramesAbut)
 		{
 			opened.emplace_back(event.Stamp, event.Payload);
 
-			GYRO_CHECK_EQ(std::string_view{ event.Name }, std::string_view{ "frame" });
-
-			// A tag rather than a flow: the frame it names is drawn on four rows and the words are what
-			// join them, which is what let three thousand arrows out of a seven-second capture.
+			// **Named for the refresh rather than for the frame aimed at it.** Every other `frame N` in
+			// the picture is an extent that happened and this one is a forecast — it ends where the
+			// commit is due rather than where the pixels appear — so sharing the word had a reader join
+			// a prediction to four observations and read the ruler as the screen.
+			GYRO_CHECK_EQ(std::string_view{ event.Name }, std::string_view{ "refresh" });
 			GYRO_CHECK(!event.Arrow);
 		}
 
@@ -1351,10 +1462,27 @@ GYRO_TEST(FrameLoop, AFrameOccupiesAFlightLaneFromItsCommitToTheVblankThatShowsI
 	std::size_t closed = 0;
 	Instant began{};
 	Instant ended{};
+	std::size_t laneOpened = count;
+	std::size_t frameOpened = count;
+	std::size_t framePresented = count;
 
 	for (std::size_t index = 0; index < count; ++index)
 	{
 		const TraceEvent& event = events[index];
+
+		// Where the frame this lane is for started being made, and where it was handed over.
+		if (event.Scope == TraceOutput(0) && event.Kind == TraceKind::Begin)
+		{
+			if (std::string_view{ event.Name } == "frame" && frameOpened == count)
+			{
+				frameOpened = index;
+			}
+
+			if (std::string_view{ event.Name } == "present")
+			{
+				framePresented = index;
+			}
+		}
 
 		if (event.Scope != TraceFlight(0, 0))
 		{
@@ -1365,6 +1493,7 @@ GYRO_TEST(FrameLoop, AFrameOccupiesAFlightLaneFromItsCommitToTheVblankThatShowsI
 		{
 			++opened;
 			began = event.Stamp;
+			laneOpened = index;
 
 			GYRO_CHECK_EQ(std::string_view{ event.Name }, std::string_view{ "frame" });
 			GYRO_CHECK(!event.Arrow);
@@ -1381,6 +1510,17 @@ GYRO_TEST(FrameLoop, AFrameOccupiesAFlightLaneFromItsCommitToTheVblankThatShowsI
 	GYRO_CHECK_EQ(closed, std::size_t{ 1 });
 	GYRO_CHECK(began == At(1002));
 	GYRO_CHECK(ended == At(1010));
+
+	// **The lane opens after the frame was made and after it was handed over**, which the two stamps
+	// cannot show on a clock a test sets by hand and the ring's own order can. Opened at the iteration's
+	// clock read, this record came *first* — a frame waiting in a queue before it had been drawn, on
+	// every frame of every capture — and it made *how many lanes are occupied is the queue depth* false,
+	// since a lane was also occupied while its frame was still being recorded.
+	GYRO_REQUIRE(frameOpened != count);
+	GYRO_REQUIRE(framePresented != count);
+	GYRO_REQUIRE(laneOpened != count);
+	GYRO_CHECK(laneOpened > frameOpened);
+	GYRO_CHECK(laneOpened > framePresented);
 }
 
 // A wake that draws nothing says why it drew nothing. Two thirds of this loop's iterations are the

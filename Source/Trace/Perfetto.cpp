@@ -63,12 +63,23 @@ struct CounterDescriptor
 
 struct Event
 {
+	static constexpr std::uint32_t DebugAnnotations = 4;
 	static constexpr std::uint32_t Type = 9;
 	static constexpr std::uint32_t NameId = 10;
 	static constexpr std::uint32_t TrackUuid = 11;
 	static constexpr std::uint32_t Name = 23;
 	static constexpr std::uint32_t CounterValue = 30;
 	static constexpr std::uint32_t FlowIds = 47;
+};
+
+// What a slice carries beside its name, shown in Perfetto's argument panel when a person clicks it.
+// The name goes out in full rather than through the interning table: the table is `EventName`s, an
+// annotation name is a different id space, and there are a handful of these in a trace that has
+// thousands of slices.
+struct Annotation
+{
+	static constexpr std::uint32_t UintValue = 3;
+	static constexpr std::uint32_t Name = 10;
 };
 
 struct Snapshot
@@ -289,6 +300,54 @@ void NoteCounter(Inventory& inventory, const TraceEvent& event, std::uint64_t& n
 	++next;
 }
 
+// Which attribute records belong to which slice, resolved once so that the writing pass can stay a
+// single forward walk.
+//
+// **An attribute binds to the slice open on its own row and to nothing else.** Core/Trace.h emits one
+// immediately after the `Begin` it decorates and with that `Begin`'s stamp, and Trace/Recorder.h's sort
+// is stable, so *the last `Begin` seen on this row* is exact rather than a heuristic. Anything else on
+// the row ends the eligibility, which is what keeps an attribute off a slice that merely happens to be
+// open later — and what makes an attribute whose `Begin` the ring lapped get dropped rather than
+// attached to the first slice of the window.
+[[nodiscard]] std::unordered_map<std::size_t, std::vector<std::size_t>> BindAttributes(const TraceSource& source)
+{
+	std::unordered_map<std::size_t, std::vector<std::size_t>> bound;
+
+	// The index after the eligible `Begin` on each row, so that zero is *nothing open*.
+	std::array<std::size_t, TraceScopes> eligible{};
+
+	for (std::size_t index = 0; index < source.Events.size(); ++index)
+	{
+		const TraceEvent& record = source.Events[index];
+
+		if (record.Scope >= TraceScopes)
+		{
+			continue;
+		}
+
+		if (record.Kind == TraceKind::Begin)
+		{
+			eligible[record.Scope] = index + 1;
+
+			continue;
+		}
+
+		if (record.Kind != TraceKind::Attribute)
+		{
+			eligible[record.Scope] = 0;
+
+			continue;
+		}
+
+		if (eligible[record.Scope] != 0)
+		{
+			bound[eligible[record.Scope] - 1].push_back(index);
+		}
+	}
+
+	return bound;
+}
+
 [[nodiscard]] Inventory TakeInventory(const TraceSource& source, std::uint64_t& nextCounter)
 {
 	Inventory inventory;
@@ -309,7 +368,10 @@ void NoteCounter(Inventory& inventory, const TraceEvent& event, std::uint64_t& n
 				NoteCounter(inventory, event, nextCounter);
 				break;
 
+			// Neither names a row nor a counter: an end is the slice it closes and an attribute is the
+			// slice it hangs on, and both were accounted for by the `Begin` this pass already saw.
 			case TraceKind::End:
+			case TraceKind::Attribute:
 				break;
 		}
 	}
@@ -498,10 +560,37 @@ std::vector<std::byte> EncodeTrace(const TraceIdentity& identity, std::span<cons
 			AppendPacket(bytes, packet);
 		};
 
+		const std::unordered_map<std::size_t, std::vector<std::size_t>> bound = BindAttributes(source);
+
+		// What hangs off the slice this record opens. Written into the `Begin`'s own event because that
+		// is where Perfetto reads them: an annotation is a field of the track event, not a packet of its
+		// own that could arrive afterwards.
+		const auto annotate = [&](ProtoWriter& event, std::size_t position) {
+			const auto found = bound.find(position);
+
+			if (found == bound.end())
+			{
+				return;
+			}
+
+			for (const std::size_t attribute : found->second)
+			{
+				const TraceEvent& record = source.Events[attribute];
+
+				ProtoWriter note;
+				note.Text(Annotation::Name, record.Name != nullptr ? record.Name : "?");
+				note.Varint(Annotation::UintValue, record.Payload);
+
+				event.Nested(Event::DebugAnnotations, note);
+			}
+		};
+
 		std::uint64_t last = 0;
 
-		for (const TraceEvent& record : source.Events)
+		for (std::size_t position = 0; position < source.Events.size(); ++position)
 		{
+			const TraceEvent& record = source.Events[position];
+
 			// A track the vocabulary does not have is a record whose scope was never a scope, which can
 			// only be a caller bug. Dropped rather than folded onto track zero, where it would read as
 			// the compositor having done something it did not.
@@ -523,6 +612,7 @@ std::vector<std::byte> EncodeTrace(const TraceIdentity& identity, std::span<cons
 					event.Varint(Event::Type, SliceBegin);
 					event.Varint(Event::TrackUuid, track(record.Scope));
 					Label(event, inventory, record);
+					annotate(event, position);
 
 					++depth[record.Scope];
 					break;
@@ -559,6 +649,12 @@ std::vector<std::byte> EncodeTrace(const TraceIdentity& identity, std::span<cons
 					event.Signed(Event::CounterValue, static_cast<std::int64_t>(record.Payload));
 					break;
 				}
+
+				// Already written, onto the slice it belongs to. It is not an event of its own, and
+				// emitted as one it would be a track event with no type — which a reader takes as a
+				// slice end and which would close somebody else's slice.
+				case TraceKind::Attribute:
+					continue;
 			}
 
 			emit(stamp, event);

@@ -10914,10 +10914,9 @@ saying where one frame's device work stopped. The output row carried a `serve` s
 median length was four microseconds. And the thing joining them was eight flow arrows per frame,
 three thousand in the capture, every one of them saying only *these slices are the same frame*.
 
-**The change is that a frame has a number and the number is in the name.** `frame 142` on the
-refresh ruler, on the frame thread's row, on the GPU row and in the flight lane is four drawings of
-one object that a reader joins by reading, or by searching the words and having every row light up
-at once. That is strictly better than an arrow: it costs no line, it survives the two ends being
+**The change is that a frame has a number and the number is in the name.** `frame 142` on the frame
+thread's row, on the GPU row, in the flight lane and on the glass is four drawings of one object that
+a reader joins by reading, or by searching the words and having every row light up at once. That is strictly better than an arrow: it costs no line, it survives the two ends being
 scrolled apart, and it does not degrade as the trace gets longer. `Core/Trace.h`'s `TraceLabel` is
 the mechanism — one payload, printed into the name by the writer thread, which draws an arrow only
 where it was asked to.
@@ -10957,6 +10956,36 @@ host's presentation instant and running until the scene *changes*, so its width 
 was looking at one picture and a stutter is a wide block seen without measuring anything. It replaces
 the `presented` mark and the `shown` counter together — two spellings of one fact, which is the habit
 that made these charts hard to read.
+
+*Revised 2026-08-24: keyed on the scene, this row states the opposite of the truth, and the paragraph
+above is the mistake rather than the rule.* A snapshot carries coefficient runs rather than pixels and
+the evaluator solves them at each frame's own presentation instant, so a dozen refreshes from one
+publication are a dozen **different pictures** — an animation running exactly as it should. Merged on
+the scene, the row drew them as one block and claimed the screen had been frozen for a fifth of a
+second: a capture of a smoothly animating gym came out as thirty-three still frames, which is the
+shape of a stutter reported on a compositor that was not stuttering. The row is keyed on the *frame*
+now, so it merges only where the same frame was scanned out twice — which is a repeat, and a repeat is
+exactly what it was built to show. It is also the number every other row of that frame is named for,
+so *when was this on the screen* is answered by one slice rather than by the far edge of a flight lane.
+
+**The scene did not go away; it stopped being an identity and became an attribute.** A slice can carry
+a number in Perfetto's argument panel, and the glass row carries two: the publication it drew from, and
+the vblank it actually landed on. Not printed into the name — three identities in one string make a
+search for any of them light up the wrong rows. Not a row of its own — that is a counter stepping at
+flips, which is the *two spellings of one fact* habit this entry was written to break. `TraceAttribute`
+is the mechanism, and it is one more record in the ring rather than a field on every record: an
+attribute binds to the slice already open on its row, so the ring stays thirty-two bytes and a slice
+that wants nothing pays nothing.
+
+**Two smaller corrections came with it, and both were the same failure as the ruler's.** The flight
+lane was stamped at the iteration's clock read, so it opened *before* the frame slice on the row above
+it — a frame waiting in a queue microseconds before it began being drawn, on all 443 frames of a
+capture, and *how many lanes are occupied is the queue depth* was false for as long as a lane was also
+occupied while its frame was still being recorded. It opens where the present returns now; the
+end-to-end latency the old stamp was reaching for is the frame slice opening against the lane closing.
+And the refresh ruler said `frame 99` for a tile that ends where frame 99's commit is *due*: a
+prediction wearing the name four observations use, two tiles to the left of the pixels it was read as.
+It says `refresh 99`.
 
 **Every way out of `Serve` now says something.** Five exits, two of which used to emit a mark and
 three of which returned in silence. A wake that declines costs one mark naming the reason — `queue
