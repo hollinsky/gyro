@@ -12,178 +12,41 @@
 #include "Core/Time.h"
 #include "Core/Trace.h"
 #include "Testing/Test.h"
+#include "Trace/Protobuf.h"
+#include "Trace/Schema.h"
 
 namespace
 {
 
-// Just enough protobuf to read back what Trace/Protobuf.h wrote, because the alternative is asserting
-// on a hex string that says nothing about which field moved when it changes. It is a walker rather
-// than a decoder: it knows wire types and nothing about the schema, and every question below is
-// phrased as *find this field number inside that message*.
-struct Field
-{
-	std::uint32_t Number = 0;
-	std::uint32_t Wire = 0;
-	std::uint64_t Value = 0;
-	std::span<const std::byte> Bytes;
-};
-
-class Reader
-{
-public:
-	explicit Reader(std::span<const std::byte> bytes) noexcept : m_Bytes{ bytes } {}
-
-	[[nodiscard]] bool Done() const noexcept { return m_At >= m_Bytes.size(); }
-
-	[[nodiscard]] std::optional<Field> Next() noexcept
-	{
-		const std::optional<std::uint64_t> tag = Varint();
-
-		if (!tag)
-		{
-			return std::nullopt;
-		}
-
-		Field field{ .Number = static_cast<std::uint32_t>(*tag >> 3),
-			         .Wire = static_cast<std::uint32_t>(*tag & 7U),
-			         .Value = 0,
-			         .Bytes = {} };
-
-		if (field.Wire == 0)
-		{
-			const std::optional<std::uint64_t> value = Varint();
-
-			if (!value)
-			{
-				return std::nullopt;
-			}
-
-			field.Value = *value;
-
-			return field;
-		}
-
-		if (field.Wire == 1)
-		{
-			if (m_At + 8 > m_Bytes.size())
-			{
-				return std::nullopt;
-			}
-
-			for (int shift = 0; shift < 64; shift += 8)
-			{
-				field.Value |= static_cast<std::uint64_t>(m_Bytes[m_At++]) << shift;
-			}
-
-			return field;
-		}
-
-		if (field.Wire != 2)
-		{
-			return std::nullopt;
-		}
-
-		const std::optional<std::uint64_t> length = Varint();
-
-		if (!length || m_At + *length > m_Bytes.size())
-		{
-			return std::nullopt;
-		}
-
-		field.Bytes = m_Bytes.subspan(m_At, static_cast<std::size_t>(*length));
-		m_At += static_cast<std::size_t>(*length);
-
-		return field;
-	}
-
-private:
-	[[nodiscard]] std::optional<std::uint64_t> Varint() noexcept
-	{
-		std::uint64_t value = 0;
-
-		for (int shift = 0; shift < 64; shift += 7)
-		{
-			if (m_At >= m_Bytes.size())
-			{
-				return std::nullopt;
-			}
-
-			const std::uint64_t byte = static_cast<std::uint64_t>(m_Bytes[m_At++]);
-
-			value |= (byte & 0x7FU) << shift;
-
-			if ((byte & 0x80U) == 0)
-			{
-				return value;
-			}
-		}
-
-		return std::nullopt;
-	}
-
-	std::span<const std::byte> m_Bytes;
-	std::size_t m_At = 0;
-};
+// The reader is Trace/Protobuf.h's and the field numbers are Trace/Schema.h's, because a test that
+// spelled either out again would be asserting that the encoder agrees with the test rather than that
+// it agrees with Perfetto. What is left here is the shorthand the assertions are phrased in.
+using Field = ProtoField;
 
 [[nodiscard]] std::optional<Field> Find(std::span<const std::byte> message, std::uint32_t number)
 {
-	Reader reader{ message };
-
-	while (!reader.Done())
-	{
-		const std::optional<Field> field = reader.Next();
-
-		if (!field)
-		{
-			return std::nullopt;
-		}
-
-		if (field->Number == number)
-		{
-			return field;
-		}
-	}
-
-	return std::nullopt;
+	return ProtoFind(message, number);
 }
 
 // Every top-level `Trace.packet`, which is the only thing a trace file contains.
 [[nodiscard]] std::vector<Field> Packets(std::span<const std::byte> trace)
 {
-	std::vector<Field> packets;
-	Reader reader{ trace };
-
-	while (!reader.Done())
-	{
-		const std::optional<Field> field = reader.Next();
-
-		if (!field)
-		{
-			break;
-		}
-
-		if (field->Number == 1)
-		{
-			packets.push_back(*field);
-		}
-	}
-
-	return packets;
+	return ProtoFindAll(trace, Perfetto::TracePacket);
 }
 
-constexpr std::uint32_t TimestampField = 8;
-constexpr std::uint32_t TrackEventField = 11;
-constexpr std::uint32_t TrackDescriptorField = 60;
-constexpr std::uint32_t TypeField = 9;
-constexpr std::uint32_t TrackUuidField = 11;
-constexpr std::uint32_t NameIdField = 10;
-constexpr std::uint32_t FlowField = 47;
-constexpr std::uint32_t InlineNameField = 23;
-constexpr std::uint32_t CounterValueField = 30;
-constexpr std::uint32_t DescriptorNameField = 2;
-constexpr std::uint32_t AnnotationField = 4;
-constexpr std::uint32_t AnnotationValueField = 3;
-constexpr std::uint32_t AnnotationNameField = 10;
+constexpr std::uint32_t TimestampField = Perfetto::Packet::Timestamp;
+constexpr std::uint32_t TrackEventField = Perfetto::Packet::TrackEvent;
+constexpr std::uint32_t TrackDescriptorField = Perfetto::Packet::TrackDescriptor;
+constexpr std::uint32_t TypeField = Perfetto::Event::Type;
+constexpr std::uint32_t TrackUuidField = Perfetto::Event::TrackUuid;
+constexpr std::uint32_t NameIdField = Perfetto::Event::NameId;
+constexpr std::uint32_t FlowField = Perfetto::Event::FlowIds;
+constexpr std::uint32_t InlineNameField = Perfetto::Event::Name;
+constexpr std::uint32_t CounterValueField = Perfetto::Event::CounterValue;
+constexpr std::uint32_t DescriptorNameField = Perfetto::Descriptor::Name;
+constexpr std::uint32_t AnnotationField = Perfetto::Event::DebugAnnotations;
+constexpr std::uint32_t AnnotationValueField = Perfetto::Annotation::UintValue;
+constexpr std::uint32_t AnnotationNameField = Perfetto::Annotation::Name;
 
 [[nodiscard]] std::size_t CountEvents(std::span<const std::byte> trace, std::uint64_t type)
 {
@@ -260,10 +123,10 @@ At(std::int64_t nanoseconds,
 		               .Arrow = arrow };
 }
 
-constexpr std::uint64_t SliceBegin = 1;
-constexpr std::uint64_t SliceEnd = 2;
-constexpr std::uint64_t InstantEvent = 3;
-constexpr std::uint64_t CounterEvent = 4;
+constexpr std::uint64_t SliceBegin = Perfetto::SliceBegin;
+constexpr std::uint64_t SliceEnd = Perfetto::SliceEnd;
+constexpr std::uint64_t InstantEvent = Perfetto::InstantEvent;
+constexpr std::uint64_t CounterEvent = Perfetto::CounterEvent;
 
 } // namespace
 
@@ -597,7 +460,7 @@ namespace
 			continue;
 		}
 
-		Reader reader{ event->Bytes };
+		ProtoReader reader{ event->Bytes };
 
 		while (!reader.Done())
 		{

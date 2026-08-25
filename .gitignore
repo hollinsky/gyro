@@ -4,3 +4,13 @@
 .DS_Store
 .cpm-cache/
 .claude/
+
+# Trace snapshots. SIGUSR1 drops one wherever gyro was started from, so they land here by default and
+# they are a recording of one run rather than anything the tree should carry.
+*.pftrace
+*.pftrace.*.json
+
+# Perfetto's `trace_processor_shell` behind its Python wrapper, which is the SQL half of reading one
+# of the above and downloads a binary on first use. Not a build dependency: nothing in the tree needs
+# it, and Tools/TraceDump.cpp is what runs where this is absent.
+/.venv/

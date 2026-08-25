@@ -987,6 +987,22 @@ target_link_libraries(VulkanProbe
 		${CMAKE_DL_LIBS}
 )
 
+# The third, and the one whose subject is a file rather than the machine: it reads a `.pftrace` back
+# and says what is in it, or refuses it.
+#
+# It links Trace for two headers and no code — the protobuf walker and the field-number table — and
+# that sharing is the whole point of the target. gyro writes this format by hand, so a reader that
+# spelled the numbers out again would agree on the day it was written and disagree silently the first
+# time one moved. Sharing them makes the drift a build failure instead of a wrong answer about the
+# frame loop, which is what a throwaway parser gives you.
+add_executable(TraceDump
+	Tools/TraceDump.cpp
+)
+target_link_libraries(TraceDump
+	PRIVATE
+		Trace
+)
+
 # The tests that stand on both sides of the publication waist: they publish real spring coefficients
 # through Publication and reconstitute them through Animation/Solve, which no single module may do —
 # Publication does not depend on Animation, by the graph. So this is a bespoke executable rather than
