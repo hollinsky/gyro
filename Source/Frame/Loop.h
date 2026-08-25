@@ -629,6 +629,27 @@ public:
 		}
 
 		const Instant now = m_Clock->Now();
+
+		// **How much of the lead survived, which is the only figure that sizes the lead.**
+		// `TimingPolicy::Lead` is what the previous iteration held back from the deadline so that this
+		// one would be running before the work had to start; this is what is left of it now that the
+		// kernel has dispatched the thread and the drain above has finished. Positive is the lead doing
+		// its job and negative is the loop already late, which is the sample that says the figure is too
+		// small — and because the record-time check is measured from this instant, a negative one here
+		// is a frame at the floor composite a few lines below.
+		//
+		// **It is the loop's own request rather than the ring's timeout**, which is the honest end to
+		// measure: the composition root reduces this against the backend's next event and may sleep for
+		// less, so the ring's number would answer *did the timer fire on time* where this answers *was I
+		// running when I said I had to be*. Only the second one is what the policy is a promise about.
+		//
+		// Nothing is emitted when nothing was armed. A settled world names no instant, so there is no
+		// lead to have spent, and a zero there would be a sample of a promise nobody made.
+		if (m_Armed.Which == Wake::Kind::Timed)
+		{
+			TraceElapsed("lead", Elapsed(now, m_Armed.When));
+		}
+
 		std::array<Instant, MaxDevices> deviceFree{};
 
 		{
@@ -666,7 +687,9 @@ public:
 			(void)m_Returns->Post(m_Held, {}, Presentations());
 		}
 
-		return Fold(now, deviceFree);
+		m_Armed = Fold(now, deviceFree);
+
+		return m_Armed;
 	}
 
 	[[nodiscard]] std::uint64_t Held() const noexcept { return m_Held; }
@@ -1207,7 +1230,7 @@ private:
 			return Wake::At(scene.When);
 		}
 
-		const Instant at = output.m_Clock.WakeupAt(sequence, m_Timing.Reserve(output.m_Cost, RenderMode::Planned));
+		const Instant at = output.m_Clock.WakeupAt(sequence, m_Timing.Arming(output.m_Cost));
 
 		return at == FrameClock::Unscheduled ? Wake::Never() : Wake::At(at);
 	}
@@ -1233,4 +1256,9 @@ private:
 	// Scratch for the run `Presentations` hands the return channel, a member rather than a local so that
 	// the span it returns outlives the call. Nothing reads it between iterations.
 	std::array<PresentedFrame, MaxOutputs> m_Presentations{};
+
+	// What the previous iteration answered, kept only so that the next one can say how much of its lead
+	// it still had. It is not read by anything that decides: the loop recomputes the fold from scratch
+	// every iteration, and a wake remembered and acted upon would be a schedule with two authors.
+	Wake m_Armed = Wake::Never();
 };

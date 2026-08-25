@@ -273,11 +273,11 @@ GYRO_TEST(Timing, AnUnsetFloorTargetAdmitsRatherThanSkips)
 	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 8 });
 }
 
-GYRO_TEST(Timing, TheSafetyMarginIsHeldOnceOverTheWholeFrame)
+GYRO_TEST(Timing, TheCompletionMarginIsHeldOnceOverTheWholeFrame)
 {
 	const FrameClock clock = Anchored();
 	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
-	const Timing timing{ TimingPolicy{ .Safety = 1ms } };
+	const Timing timing{ TimingPolicy{ .Margin = 1ms } };
 
 	GYRO_CHECK_EQ(timing.Reserve(budget, RenderMode::Planned), 6ms);
 	GYRO_CHECK_EQ(timing.Reserve(budget, RenderMode::Floor), 3ms);
@@ -299,6 +299,45 @@ GYRO_TEST(Timing, TheWakeIsTheDeadlineLessTheReserve)
 
 	// Woken late, the same call names the later frame it can still make rather than one already gone.
 	GYRO_CHECK(timing.WakeFor(clock, budget, At(1009), FrameClock::NoSequence) == Wake::At(At(1015)));
+}
+
+// The failure that split `TimingPolicy` in two, written as the arithmetic that produced it. One figure
+// served both ends, so the alarm was set for `deadline - reserve` and the verdict then asked whether
+// `now + reserve` cleared that same deadline — which is `now <= armedAt`, an inequality a wake cannot
+// satisfy once it has travelled through the kernel and drained a socket. Every frame the loop woke
+// itself for took the floor composite, and what a person saw was the blur behind a window switching
+// off for single frames on a machine doing nothing.
+GYRO_TEST(Timing, TheWakeLeadsTheInstantTheVerdictMeasuresAgainst)
+{
+	const FrameClock clock = Anchored();
+	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
+	const Timing timing{ TimingPolicy{ .Margin = 1ms, .Lead = 2ms } };
+
+	// Frame 8's deadline is 1010ms and the reserve is 6ms, so the work has to start by 1004ms and the
+	// loop has to be *running* by 1002ms.
+	GYRO_CHECK_EQ(timing.Reserve(budget, RenderMode::Planned), 6ms);
+	GYRO_CHECK_EQ(timing.Arming(budget), 8ms);
+	GYRO_CHECK(timing.WakeFor(clock, budget, At(1000), FrameClock::NoSequence) == Wake::At(At(1002)));
+
+	// And the point of the lead: woken at the instant it armed for, the loop still clears the check with
+	// the whole lead to spend on the kernel and the drain. Under one figure this was exactly zero.
+	const FrameDecision decision = timing.Assess(clock, budget, At(1002), FrameClock::NoSequence);
+
+	GYRO_CHECK(decision.Verdict == Admission::Planned);
+	GYRO_CHECK_EQ(decision.Slack(), 2ms);
+}
+
+// The lead is spent before the check rather than by it: a loop that used its whole lead getting here
+// is on time, and one that overran it by a microsecond takes the floor composite. That boundary is the
+// sample `Frame/Loop.h` records as `lead`.
+GYRO_TEST(Timing, ALoopThatOverrunsItsLeadFallsToTheFloor)
+{
+	const FrameClock clock = Anchored();
+	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
+	const Timing timing{ TimingPolicy{ .Margin = 1ms, .Lead = 2ms } };
+
+	GYRO_CHECK(timing.Assess(clock, budget, At(1004), FrameClock::NoSequence).Verdict == Admission::Planned);
+	GYRO_CHECK(timing.Assess(clock, budget, At(1004) + 1ns, FrameClock::NoSequence).Verdict == Admission::Floor);
 }
 
 GYRO_TEST(Timing, ACommittedFrameArmsTheNextRecordPointRatherThanItsOwn)

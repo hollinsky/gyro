@@ -160,9 +160,11 @@
 // evaluation instant, which is why the two fields are populated from different sources in that case
 // and from the same clock in every other.
 //
-// **The safety margin lives here.** `Budget` declined it on the grounds that it is a margin on gyro's
-// own wakeups rather than a measurement of gyro's work, and named this object as the holder; a copy in
-// the record would be a number written by the schedule sitting in the object the backend writes.
+// **Both margins live here.** `Budget` declined them on the grounds that they are margins on gyro's
+// own scheduling rather than measurements of gyro's work, and named this object as the holder; a copy
+// in the record would be a number written by the schedule sitting in the object the backend writes.
+// The pair is `TimingPolicy::Margin` and `TimingPolicy::Lead`, and which of `Reserve` and `Arming`
+// carries which is the whole of what that type's header is about.
 //
 // What is deliberately not here: admission control's allocation, which is a cap on what an output may
 // spend rather than a record of what it did; the quality tier step decision 35 requires of a
@@ -172,17 +174,66 @@
 
 // The numbers this policy needs and nobody has measured, `// SPEC:` for the reason `FrameClockPolicy`
 // and `BudgetPolicy` are. See Open.md, *scheduling policy constants*.
+//
+// **Two figures rather than one, because a single one cancels.** Both were `Safety` until a capture
+// showed what that costs. The wake was armed at `deadline - Reserve` and the record-time check then
+// asked whether `now + Reserve` cleared the same deadline, so the margin appeared on both sides of one
+// comparison and subtracted out: the verdict reduced to `now <= armedAt`, and a loop woken by its own
+// timer — which arrives at the armed instant and *then* drains its sources — could not pass it. What a
+// person saw was the blur behind a window switching off for single frames while nothing was under
+// load, because the frame that could not clear the check fell to the floor composite. The two figures
+// below are the two ends of one frame, and they are held apart so that the arming end can be moved
+// without making the check harder.
 struct TimingPolicy
 {
-	// What is held above the measured cost, covering everything between the timer expiring and the
-	// first instruction of the record: the composition root's wakeup latency, the drain, and the
-	// snapshot acquisition. It is a margin on gyro's own scheduling rather than on the work, which is
-	// why it is added once to a composed reserve and not once per device.
+	// What is held above the measured cost between the predicted finish and the deadline.
 	//
-	// Zero is the permissive reading and is the recoverable direction: an unset margin admits a frame
-	// that may miss by the wakeup latency, which decision 35 prices at one frame, where an overstated
-	// one holds an output at the floor tier for as long as it is wrong.
-	Duration Safety{};
+	// It covers the error in the cost model and nothing else: the marks in `Budget` are already a
+	// maximum over their window, so this is the tail beyond that window — a composite that costs more
+	// than the most expensive one recently seen. It is added once to a composed reserve and not once
+	// per device, because it is one margin on one frame.
+	//
+	// **The failure it prevents is the one that cannot be taken back.** A frame whose composite
+	// overruns after the loop committed to it has already been recorded and presented; the flip misses
+	// its vblank and the frame lands a refresh late, which is a visible hitch and which no tier can
+	// undo. That asymmetry is why this one is sized at a high quantile of the residual and `Lead` below
+	// is not.
+	//
+	// This is the figure admission control is given, because a set admitted against a smaller margin
+	// than the record-time check holds is a set that passes the test and misses the frame. `Lead` is
+	// not: it is a fact about when gyro wakes up rather than about whether a set of outputs fits in a
+	// period, and an allocator holding it would refuse configurations gyro can serve.
+	Duration Margin{};
+
+	// What is held *ahead* of the armed instant, so that the loop is already running when the work has
+	// to start.
+	//
+	// It covers everything between the ring's timeout expiring and the first instruction of the record:
+	// the kernel's wakeup latency for a `SCHED_FIFO` thread on an absolute `hrtimer`, the drain of every
+	// event source, and the snapshot acquisition. It appears in the arming alone — `Reserve` does not
+	// carry it — which is the whole of the split described above.
+	//
+	// **It is also what decides whether gyro's own schedule is what wakes gyro.** The frame thread
+	// sleeps on `min(timeout, descriptors)`, so a lead shorter than the host's event cadence leaves the
+	// instant a frame starts at set by the other end of the socket rather than by this policy. Sized to
+	// beat that, the timer wins the race and the start time becomes gyro's own.
+	//
+	// **It does not delay the frame it leads, which is the thing to get right before sizing it.** The
+	// work moves to the start of the refresh window rather than the end, and the frame reaches the same
+	// vblank from either place — so a lead costs nothing on the way to the glass and *saves* a refresh
+	// wherever the window's end left a composite finishing with no room for the flip in front of it.
+	// Animation is unaffected in both cases, being evaluated at the predicted presentation whatever
+	// instant the work began at.
+	//
+	// **What bounds it from above is the period.** A lead longer than one refresh arms before the
+	// previous frame's window and asks the loop to render against a scene it has not been handed, which
+	// is a frame of latency paid for nothing. Below that the figure is free, so it wants to be the
+	// smallest that covers the wakeup rather than the smallest that fits.
+	//
+	// Zero is the permissive reading and is the recoverable direction: an unset lead arms at the last
+	// instant the planned composite still fits and takes the floor composite whenever it is not early,
+	// where an overstated one pays latency on every frame forever.
+	Duration Lead{};
 };
 
 namespace Detail
@@ -299,7 +350,7 @@ struct FrameDecision
 	// because it is the *next* output's input: decision 29 has GPU work from two outputs serialise on
 	// one queue however it was recorded, so a loop admitting outputs in deadline order threads this
 	// forward and hands it to the following `Assess` as its `deviceFreeAt`. Recovering it by subtracting
-	// `Policy().Safety` back off `Finish` would be the same number reached by arithmetic beside the call
+	// `Policy().Margin` back off `Finish` would be the same number reached by arithmetic beside the call
 	// that already had it, and it would silently stop being the same number the moment the composition
 	// below stops being addition. The margin is not subtracted because it was never the device's: it is
 	// a margin on gyro's own wakeups, so a second output that inherited it would pay it twice.
@@ -339,7 +390,8 @@ public:
 
 	constexpr explicit Timing(TimingPolicy policy) noexcept : m_Policy{ policy }
 	{
-		m_Policy.Safety = std::max(m_Policy.Safety, Duration::zero());
+		m_Policy.Margin = std::max(m_Policy.Margin, Duration::zero());
+		m_Policy.Lead = std::max(m_Policy.Lead, Duration::zero());
 	}
 
 	// Decision 35's record-time check, for one output at its record point.
@@ -443,8 +495,7 @@ public:
 		// flip is one the clock has not observed, so the reach names it and the wake becomes its own
 		// record point — an instant the loop has already served, and one it would be handed back on
 		// every iteration until the flip lands. One frame past it is the answer.
-		const Instant wakeAt =
-			clock.WakeupAt(std::max(reach, Owed(clock, committed)), Reserve(budget, RenderMode::Planned));
+		const Instant wakeAt = clock.WakeupAt(std::max(reach, Owed(clock, committed)), Arming(budget));
 
 		return wakeAt == FrameClock::Unscheduled ? Wake::Never() : Wake::At(wakeAt);
 	}
@@ -455,7 +506,26 @@ public:
 	// pipelining term has nothing to bite on there.
 	[[nodiscard]] constexpr Duration Reserve(const Budget& budget, RenderMode mode) const noexcept
 	{
-		return Detail::Sum(Detail::Sum(Cpu(budget, mode), Gpu(budget, mode)), m_Policy.Safety);
+		return Detail::Sum(Detail::Sum(Cpu(budget, mode), Gpu(budget, mode)), m_Policy.Margin);
+	}
+
+	// The same reserve with `TimingPolicy::Lead` on top, which is what an arming subtracts from a
+	// deadline and the only place the lead appears.
+	//
+	// **`Reserve` is what the verdict measures against and this is what the alarm is set by, and the
+	// two must differ or the alarm is set for the instant that is already too late.** Handing
+	// `FrameClock::WakeupAt` the plain reserve arms at `deadline - Reserve`, and `Assess` then asks
+	// whether `now + Reserve` clears the same deadline — an inequality that reduces to `now <=
+	// armedAt`, which no wake that has to travel through the kernel and drain a socket can satisfy.
+	// The lead is the difference between *when the work must start* and *when this thread must be
+	// running*, and only the second is something the loop can ask a timer for.
+	//
+	// Planned rather than a parameter: the floor composite exists to be reachable from wherever the
+	// loop happens to be, and arming for it would schedule gyro to arrive too late for the tier it
+	// wants and exactly on time for the tier it settles for.
+	[[nodiscard]] constexpr Duration Arming(const Budget& budget) const noexcept
+	{
+		return Detail::Sum(Reserve(budget, RenderMode::Planned), m_Policy.Lead);
 	}
 
 	// When work started now would be done: record on the frame thread while the device finishes what it
@@ -475,7 +545,7 @@ public:
 		const Instant recorded = Advanced(now, Cpu(budget, mode));
 		const Instant executed = Advanced(std::max(recorded, deviceFreeAt), Gpu(budget, mode));
 
-		return { .DeviceFreeAt = executed, .Finish = Advanced(executed, m_Policy.Safety) };
+		return { .DeviceFreeAt = executed, .Finish = Advanced(executed, m_Policy.Margin) };
 	}
 
 	[[nodiscard]] constexpr const TimingPolicy& Policy() const noexcept { return m_Policy; }
@@ -558,7 +628,7 @@ static_assert(
 	[] {
 		Budget budget{ BudgetPolicy{ .InitialCpu = std::chrono::milliseconds{ 2 },
 		                             .InitialGpu = std::chrono::milliseconds{ 5 } } };
-		const Timing timing{ TimingPolicy{ .Safety = std::chrono::milliseconds{ 1 } } };
+		const Timing timing{ TimingPolicy{ .Margin = std::chrono::milliseconds{ 1 } } };
 		const Instant now = Monotonic::FromNanoseconds(1'000'000'000);
 
 		return timing.Reserve(budget, RenderMode::Planned) == std::chrono::milliseconds{ 8 } &&
@@ -568,6 +638,25 @@ static_assert(
 	"The reserve is the pipeline with an idle device"
 );
 
+// **The alarm is set earlier than the instant the verdict measures against, and that gap is the lead.**
+// The two were one figure, which made this an equality — and an equality here is a loop that arms for
+// the instant it has already run out of time at, so every frame it woke itself for fell to the floor
+// composite. Asserted rather than swept because the failure is silent: both spellings compile, both
+// produce frames, and the difference is only visible as a blur that switches off for one frame at a
+// time on a machine doing nothing in particular.
+static_assert(
+	[] {
+		Budget budget{ BudgetPolicy{ .InitialCpu = std::chrono::milliseconds{ 2 },
+		                             .InitialGpu = std::chrono::milliseconds{ 5 } } };
+		const Timing timing{ TimingPolicy{ .Margin = std::chrono::milliseconds{ 1 },
+		                                   .Lead = std::chrono::milliseconds{ 3 } } };
+
+		return timing.Arming(budget) == std::chrono::milliseconds{ 11 } &&
+	           timing.Arming(budget) > timing.Reserve(budget, RenderMode::Planned);
+	}(),
+	"An arming leads the reserve it is derived from"
+);
+
 // A busy device delays execution and not recording, which is the whole of what the two figures buy
 // over one. Recording ends at 1002ms, the device is busy until 1006ms, so execution runs 1006 to 1011
 // and the margin lands the finish at 1012 rather than the 1008 a summed figure would have predicted.
@@ -575,7 +664,7 @@ static_assert(
 	[] {
 		Budget budget{ BudgetPolicy{ .InitialCpu = std::chrono::milliseconds{ 2 },
 		                             .InitialGpu = std::chrono::milliseconds{ 5 } } };
-		const Timing timing{ TimingPolicy{ .Safety = std::chrono::milliseconds{ 1 } } };
+		const Timing timing{ TimingPolicy{ .Margin = std::chrono::milliseconds{ 1 } } };
 
 		return timing.Finish(
 				   Monotonic::FromNanoseconds(1'000'000'000),

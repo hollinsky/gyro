@@ -1040,3 +1040,37 @@ nothing only proves the grep.
   [Clock.h](../Source/Core/Clock.h)'s own estimate of "roughly a tenth". Resolving the clock to a
   concrete type when a buffer is armed would buy nothing, and the interface is what lets the headless
   sweep place time at arbitrary phase.
+
+- **The idle state the frame thread wakes from, which costs more than everything gyro does before the
+  composite.** `TimingPolicy::Lead` is five hundred microseconds because that is what a capture
+  measured: two hundred and eighty of them are the kernel getting the `SCHED_FIFO` frame thread onto a
+  core after the ring's absolute timeout expires, and a hundred and fifty-four are the drain and the
+  snapshot acquisition once it is there. The large half is not the scheduler. A thread that sleeps a
+  whole refresh lets its core fall into a deep idle state, and a bare `clock_nanosleep` with no
+  compositor near it reproduces the whole figure on this machine — 3.6 µs late after a 50 µs sleep,
+  14 µs after 500 µs, 127 µs after 2 ms, 146 µs after 13 ms — which is the shape of `cpuidle` choosing
+  a deeper state as the predicted sleep grows. This part is on the ACPI idle driver rather than
+  `intel_idle`, whose `C2_ACPI` is documented at 152 µs to leave and whose `C3_ACPI` is documented at
+  1034 µs, and `C3_ACPI` is the most-entered state on the machine by a factor of two.
+
+  So what is open is whether gyro should hold a latency request against the idle governor, and at what
+  value. The mechanism is PM QoS: `/dev/cpu_dma_latency` held open with a microsecond bound caps the
+  state the governor will choose for the whole machine, and
+  `/sys/devices/system/cpu/cpuN/power/pm_qos_resume_latency_us` does it for one core, which is the
+  right shape for a thread that could be pinned. Either would take the wakeup from ~146 µs to the ~4 µs
+  a shallow state costs, which would let the lead fall to the drain alone and give the rest back as
+  latency. It fits gyro's existing model — the descriptor would come from a udev rule like every other
+  device gyro is given — and it fits gyro's position, since a compositor that is the whole system layer
+  is the party entitled to make a machine-wide latency claim rather than one process among many asking
+  for a favour.
+
+  Against holding it unconditionally: it is a power decision made in a scheduling file, and on a laptop
+  a core that never idles deeply is a battery figure a user will notice long before they notice a
+  composite tier. The shape that resolves both is holding it *while the world is animating* and
+  releasing it when the world settles, which is
+  [Architecture.md](Architecture.md#doing-nothing-must-cost-nothing) applied one level below where it
+  currently reaches — gyro already knows the difference, since the fold answers `Wake::Never()` for
+  exactly that state. What is unmeasured is the cost of the transition: a governor told mid-run that
+  the bound has changed does not retroactively wake a core that is already deep, so the first frame out
+  of idle pays the exit latency anyway, and whether that first frame is worth a tier is the question
+  the entry actually turns on.

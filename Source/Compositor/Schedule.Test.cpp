@@ -46,9 +46,17 @@ GYRO_TEST(Schedule, WhatIsAdmittedIsWhatTimingReserves)
 	const CostSplit split{ .Cpu = 1ms, .Gpu = 3ms };
 
 	Budget budget{ BudgetPolicy{ .InitialCpu = split.Cpu, .InitialGpu = split.Gpu } };
-	const Timing timing{ TimingPolicy{ .Safety = Margin } };
+	const Timing timing{ TimingPolicy{ .Margin = Margin } };
 
 	GYRO_CHECK_EQ(Schedule::Composed(split, Margin), timing.Reserve(budget, RenderMode::Planned));
+
+	// **And the arming lead is not part of it.** `TimingPolicy` holds two figures and only this one is
+	// about whether the work fits in the period; the other is about when this thread has to be awake to
+	// start it. An allocator given both would subtract the lead from every output's period and refuse
+	// sets gyro can serve — a monitor that reports as unsupported because of the kernel's wakeup latency.
+	const Timing led{ TimingPolicy{ .Margin = Margin, .Lead = 5ms } };
+
+	GYRO_CHECK_EQ(Schedule::Composed(split, Margin), led.Reserve(budget, RenderMode::Planned));
 }
 
 GYRO_TEST(Schedule, AFeasibleSetIsHandedBackUntouched)

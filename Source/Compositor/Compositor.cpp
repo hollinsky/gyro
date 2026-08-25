@@ -75,12 +75,47 @@
 namespace
 {
 
-// SPEC: gyro's own wakeup latency — everything between the ring's timeout expiring and the first
-// instruction of the record. It is `TimingPolicy::Safety`, and it is the same figure admission control
-// is given, because a set admitted against a smaller margin than the record-time check holds is a set
-// that passes the test and misses the frame. A number rather than a measurement until there is a real
-// thread on a real kernel to measure it from, which is among the first things the sweep will supply.
-constexpr Duration WakeupMargin = std::chrono::microseconds{ 250 };
+// SPEC: what is held between the predicted finish and the deadline, covering the error in the cost
+// model. It is `TimingPolicy::Margin`, and it is the figure admission control is given, because a set
+// admitted against a smaller margin than the record-time check holds is a set that passes the test and
+// misses the frame.
+//
+// A hundred microseconds because that is what a capture says the model is worth: `Budget`'s marks are
+// already a maximum over their window, so this covers only a composite costing more than the most
+// expensive one recently seen, and over twelve hundred frames of the materials gym the measured cost
+// exceeded its mark twice, by at most thirty-two microseconds. The rest is headroom for a cold window
+// and for the marks still climbing after a mode change.
+constexpr Duration CompletionMargin = std::chrono::microseconds{ 100 };
+
+// What is held *ahead* of the armed instant, so that this thread is already running when the work has
+// to start. It is `TimingPolicy::Lead`, and admission control is deliberately **not** given it: it is a
+// fact about when gyro wakes up rather than about whether a set of outputs fits in a period, and an
+// allocator holding it would refuse configurations gyro can serve.
+//
+// **Measured rather than specified, and the measurement is mostly not gyro's.** Two hundred and eighty
+// microseconds of it is the kernel getting this thread onto a core after the ring's timeout expires,
+// and a hundred and fifty-four is the drain and the snapshot acquisition once it is there — three
+// hundred and forty-one together at the worst of twelve hundred iterations. Five hundred is that with
+// room, and `Frame/Loop.h`'s `lead` row is where the next capture says whether it is still enough.
+//
+// **The large half is the processor waking up, not the scheduler.** A `SCHED_FIFO` thread that sleeps a
+// whole refresh lets its core fall into a deep idle state, and this machine's costs a hundred and
+// fifty-two microseconds to leave — which a bare `clock_nanosleep` reproduces with no compositor
+// anywhere near it: three microseconds late after a fifty microsecond sleep, a hundred and forty-six
+// after a thirteen millisecond one. So this figure is a *power management* number wearing a schedule's
+// clothes, and the way to make it small is to tell the kernel gyro cannot afford the deep state rather
+// than to keep enlarging the lead. See Open.md, *the idle state the frame thread wakes from*.
+//
+// **It buys latency rather than spending it, which is the opposite of what a margin usually does.** A
+// lead does not delay the composite — it moves it to the *start* of the refresh window instead of the
+// end, and the frame reaches the same vblank either way. What the window's end costs is a frame that
+// is finished with no room left, so the next flip is the one that shows it. Measured across twelve
+// hundred iterations of the materials gym: sixteen point six milliseconds from the composite to the
+// glass against twenty at a lead of zero, no floor composites against fifty, and sixty frames a second
+// with nothing repeated in both. The bound from above is a refresh — a lead longer than the period
+// arms before the previous frame's window and would render against a scene the loop has not been
+// handed yet — and that is far above anything the wakeup costs.
+constexpr Duration ArmingLead = std::chrono::microseconds{ 500 };
 
 // SPEC: how the one `--cost` figure is split across the two devices `Timing` composes as a pipeline.
 // A composite is GPU-dominated — Docs/Architecture.md#precision-and-why-the-blur-chain-is-affordable
@@ -834,7 +869,11 @@ public:
 		m_Sources[2] = &m_Publication;
 
 		m_Loop = std::make_unique<FrameLoop>(
-			m_Clock, m_Snapshots, m_Returns, m_Evaluator, Timing{ TimingPolicy{ .Safety = WakeupMargin } }
+			m_Clock,
+			m_Snapshots,
+			m_Returns,
+			m_Evaluator,
+			Timing{ TimingPolicy{ .Margin = CompletionMargin, .Lead = ArmingLead } }
 		);
 		m_Loop->Bind({ m_Outputs.data(), m_Count });
 		m_Loop->Listen({ m_Sources.data(), m_Sources.size() });
@@ -1257,7 +1296,7 @@ private:
 				                           .Focused = index == 0 };
 		}
 
-		m_Schedule = Schedule::Build({ demands.data(), count }, WakeupMargin);
+		m_Schedule = Schedule::Build({ demands.data(), count }, CompletionMargin);
 
 		for (std::size_t index = 0; index < count; ++index)
 		{
