@@ -423,6 +423,10 @@ declared in `Publication`, which `Protocol` may not name. Nothing caught it beca
 producer has no call sites to deny — `CheckLayering` reads includes, and an id nothing mints is
 included by nobody who would fail. The moment to re-read a placement is when the first party that
 *produces* the type appears.
+`KeyEvent` is the third and moved for the same reason *(2026-08-25)*: `Seam/Input.h` declares the
+interface that emits one and `Protocol` is what turns it into a `wl_keyboard.key`, and `Protocol` may
+not name `Seam`. The interface stayed at the waist and only the record came down, which is the line
+this rule draws — the data crossing between two parties is not the interface between them.
 See [decision 87](Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam).
 
 ### Geometry is not part of Core

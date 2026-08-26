@@ -22,6 +22,7 @@
 
 #include "Core/Clock.h"
 #include "Core/Fd.h"
+#include "Core/Input.h"
 #include "Core/Result.h"
 #include "Core/Texture.h"
 #include "Core/Time.h"
@@ -374,19 +375,26 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 	// selection or a drag through. See Protocol/Data.h.
 	GYRO_CHECK_EQ(data->Version, std::uint32_t{ 3 });
 
-	// Exactly four: three a window is built out of, and one a toolkit demands before it will look for
-	// them. When `wl_seat` lands this number goes up in the same commit as the thing it counts.
-	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 4 });
+	const Registry::Global* const seat = bound.Listener.Find(Wayland::WlSeat::WireName);
+	GYRO_REQUIRE(seat != nullptr);
+
+	// Version 4 is `wl_seat.name` and `wl_keyboard.repeat_info`. Everything above it is a pointer
+	// event, and gyro advertises no pointer capability — so 5 would be a promise about an object no
+	// client can obtain from this seat. See Protocol/Seat.h.
+	GYRO_CHECK_EQ(seat->Version, std::uint32_t{ 4 });
+
+	// Exactly five: three a window is built out of, one a toolkit demands before it will look for them,
+	// and the seat that makes the window typeable.
+	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 5 });
 }
 
 // What a GTK client actually does with the clipboard global before it has a seat, which is bind it,
 // find it answers, and — for a client that owns something copyable — make a source nobody will ever
 // ask for. Both have to work for an application to start; neither transfers anything.
 //
-// The seat is the reason `get_data_device` is not exercised here: it takes one as an argument, gyro
-// advertises none, and a client cannot name an object it was never offered. That request has no
-// caller until there is input, and this test says so rather than reaching around the protocol to
-// pretend otherwise.
+// `get_data_device` is not exercised here: it resolves now that there is a seat, and what is behind
+// it is inert — a device with no selection to read and no drag to start, because both need a pointer.
+// The test that belongs here is the one that transfers something, and it lands with the selection.
 GYRO_TEST(ProtocolRoundTrip, ADataSourceIsCreatedAndOffersMimeTypesNobodyWillAskFor)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
@@ -856,6 +864,149 @@ struct Toplevel
 
 	return floor == nullptr ? nullptr : scene.Find(floor->FirstChild);
 }
+
+// A client's keyboard, recording what the seat told it. Everything here is what a toolkit would act
+// on: the layout it maps, the focus it draws a caret for, and the keys it turns into characters.
+class KeyboardEvents final : public Wayland::WlKeyboardListener
+{
+public:
+	void OnKeymap(Wayland::WlKeyboardKeymapFormat format, Fd fd, std::uint32_t size) override
+	{
+		++Keymaps;
+
+		Format = format;
+		KeymapSize = size;
+		KeymapFd = std::move(fd);
+	}
+
+	void OnEnter(std::uint32_t serial, Wayland::WlSurface surface, std::span<const std::byte> keys) override
+	{
+		++Entered;
+
+		EnterSerial = serial;
+		Focused = surface;
+		HeldOnEnter = keys.size() / sizeof(std::uint32_t);
+	}
+
+	void OnLeave(std::uint32_t serial, Wayland::WlSurface surface) override
+	{
+		(void)serial;
+		(void)surface;
+
+		++Left;
+	}
+
+	void OnKey(std::uint32_t serial, std::uint32_t time, std::uint32_t key, Wayland::WlKeyboardKeyState state) override
+	{
+		(void)serial;
+
+		++Keys;
+
+		LastKey = key;
+		LastState = state;
+		LastTime = time;
+	}
+
+	void OnModifiers(
+		std::uint32_t serial,
+		std::uint32_t depressed,
+		std::uint32_t latched,
+		std::uint32_t locked,
+		std::uint32_t group
+	) override
+	{
+		(void)serial;
+		(void)latched;
+		(void)locked;
+		(void)group;
+
+		++Modifiers;
+
+		Depressed = depressed;
+	}
+
+	void OnRepeatInfo(std::int32_t rate, std::int32_t delay) override
+	{
+		++Repeats;
+
+		Rate = rate;
+		Delay = delay;
+	}
+
+	std::uint32_t Keymaps = 0;
+	std::uint32_t Entered = 0;
+	std::uint32_t Left = 0;
+	std::uint32_t Keys = 0;
+	std::uint32_t Modifiers = 0;
+	std::uint32_t Repeats = 0;
+
+	Wayland::WlKeyboardKeymapFormat Format = Wayland::WlKeyboardKeymapFormat::NoKeymap;
+	std::uint32_t KeymapSize = 0;
+	Fd KeymapFd;
+
+	std::uint32_t EnterSerial = 0;
+	Wayland::WlSurface Focused;
+	std::size_t HeldOnEnter = 0;
+
+	std::uint32_t LastKey = 0;
+	Wayland::WlKeyboardKeyState LastState = Wayland::WlKeyboardKeyState::Released;
+	std::uint32_t LastTime = 0;
+	std::uint32_t Depressed = 0;
+
+	std::int32_t Rate = -1;
+	std::int32_t Delay = -1;
+};
+
+class SeatEvents final : public Wayland::WlSeatListener
+{
+public:
+	void OnCapabilities(Wayland::WlSeatCapability capabilities) override { Capabilities = capabilities; }
+
+	void OnName(std::string_view name) override { Name = name; }
+
+	Wayland::WlSeatCapability Capabilities{};
+	std::string Name;
+};
+
+// A client with a keyboard, which is `wl_seat` and then `get_keyboard` — the two steps every toolkit
+// takes and the only way to reach the interface at all.
+struct Keyboard
+{
+	SeatEvents SeatListener;
+	KeyboardEvents Listener;
+	Wayland::WlSeat Seat;
+	Wayland::WlKeyboard Device;
+};
+
+[[nodiscard]] bool Listen(Session& session, BoundCompositor& bound, Keyboard& keyboard)
+{
+	const Registry::Global* const seat = bound.Listener.Find(Wayland::WlSeat::WireName);
+
+	if (seat == nullptr)
+	{
+		return false;
+	}
+
+	keyboard.Seat = bound.Listener.Object().Bind<Wayland::WlSeat>(seat->Name, seat->Version, keyboard.SeatListener);
+
+	if (!keyboard.Seat.IsValid())
+	{
+		return false;
+	}
+
+	keyboard.Device = keyboard.Seat.GetKeyboard(keyboard.Listener);
+
+	session.Turn();
+
+	return keyboard.Device.IsValid();
+}
+
+// One key, as the composition root hands it over: past the escape chord, with the device's own
+// instant on it.
+[[nodiscard]] KeyEvent Press(std::uint32_t code, bool pressed, Instant when)
+{
+	return KeyEvent{ .Code = code, .Pressed = pressed, .When = when };
+}
 } // namespace
 
 GYRO_TEST(ProtocolRoundTrip, AToplevelIsConfiguredBeforeItIsAskedToDrawAnything)
@@ -1157,4 +1308,309 @@ GYRO_TEST(ProtocolRoundTrip, DestroyingTheToplevelRetiresTheWindowRatherThanRemo
 	const Entity* const window = WindowNode(session.Store);
 	GYRO_REQUIRE(window != nullptr);
 	GYRO_CHECK(window->Retiring);
+}
+
+// The whole of what a person does with a keyboard, in the order it happens: bind a seat, be told
+// there is one keyboard on it, receive the layout, open a window, and type into it.
+GYRO_TEST(ProtocolRoundTrip, ASeatOffersOneKeyboardAndHandsOverALayoutBeforeAnythingIsTyped)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-seat" };
+	GYRO_REQUIRE(session.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(session, bound, keyboard));
+
+	// The keyboard and nothing else. A client told there is a pointer would draw a cursor and wait for
+	// an `enter` that cannot come, so the capability set is the honest half of what is built.
+	GYRO_CHECK(keyboard.SeatListener.Capabilities == Wayland::WlSeatCapability::Keyboard);
+	GYRO_CHECK(keyboard.SeatListener.Name == "seat0");
+
+	// **The layout arrives without being asked for and before any key does**, which is the contract:
+	// a client that has not mapped the keymap cannot turn a keycode into a character, so a `key` ahead
+	// of it would be one it has to drop.
+	GYRO_CHECK_EQ(keyboard.Listener.Keymaps, std::uint32_t{ 1 });
+	GYRO_CHECK(keyboard.Listener.Format == Wayland::WlKeyboardKeymapFormat::XkbV1);
+	GYRO_CHECK(keyboard.Listener.KeymapSize > 0);
+	GYRO_CHECK(keyboard.Listener.KeymapFd.IsValid());
+	GYRO_CHECK_EQ(keyboard.Listener.Keys, std::uint32_t{ 0 });
+
+	// Repeat is the client's, and these two numbers are the whole of gyro's part in it.
+	GYRO_CHECK_EQ(keyboard.Listener.Repeats, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(keyboard.Listener.Rate, 25);
+	GYRO_CHECK_EQ(keyboard.Listener.Delay, 400);
+}
+
+// The descriptor is the layout, and it is one nothing can edit. A client maps it read-only and hands
+// the bytes to xkbcommon; a client that maps it writable and scribbles would otherwise be rewriting
+// the keyboard of every other application on the machine.
+GYRO_TEST(ProtocolRoundTrip, TheKeymapDescriptorIsATextKeymapAndCannotBeWritten)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-keymap" };
+	GYRO_REQUIRE(session.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(session, bound, keyboard));
+	GYRO_REQUIRE(keyboard.Listener.KeymapFd.IsValid());
+
+	void* const mapped = ::mmap(
+		nullptr, keyboard.Listener.KeymapSize, PROT_READ, MAP_PRIVATE, keyboard.Listener.KeymapFd.Borrow().Value, 0
+	);
+	GYRO_REQUIRE(mapped != MAP_FAILED);
+
+	// What xkbcommon parses, recognisable from its first line without linking it.
+	const std::string_view text{ static_cast<const char*>(mapped), keyboard.Listener.KeymapSize };
+	GYRO_CHECK(text.find("xkb_keymap") != std::string_view::npos);
+
+	// Null-terminated, and the size includes the terminator: the client is handed a C string rather
+	// than a length to trust.
+	GYRO_CHECK_EQ(text.back(), '\0');
+
+	static_cast<void>(::munmap(mapped, keyboard.Listener.KeymapSize));
+
+	// Sealed, so the descriptor that left this process cannot grow, shrink or be written through.
+	GYRO_CHECK(::ftruncate(keyboard.Listener.KeymapFd.Borrow().Value, 0) != 0);
+}
+
+GYRO_TEST(ProtocolRoundTrip, AWindowThatOpensTakesFocusAndTheKeysFollowIt)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-typing" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(session, bound, keyboard));
+
+	// Nothing is focused before there is a window, and a key typed at that moment reaches nobody
+	// rather than the last thing that happened to be there.
+	(*session.Host)->OnKey(Press(30, true, session.Clock.Now()), false);
+	(*session.Host)->OnKey(Press(30, false, session.Clock.Now()), false);
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(keyboard.Listener.Keys, std::uint32_t{ 0 });
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x40 }));
+
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	// **Focus in the wakeup the window opened in**, which is what the seat comparing after the
+	// dispatch buys: the commit that mapped it and the event that says so are one turn, so a person
+	// who starts typing the instant a window appears is typing into it.
+	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 1 });
+	GYRO_CHECK(keyboard.Listener.Focused.Id() == toplevel.Drawn.Surface.Id());
+	GYRO_CHECK_EQ(keyboard.Listener.HeldOnEnter, std::size_t{ 0 });
+
+	(*session.Host)->OnKey(Press(30, true, session.Clock.Now()), false);
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(keyboard.Listener.Keys, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(keyboard.Listener.LastKey, std::uint32_t{ 30 });
+	GYRO_CHECK(keyboard.Listener.LastState == Wayland::WlKeyboardKeyState::Pressed);
+
+	// The kernel's numbering all the way to the client, which is what makes the eight XKB adds the
+	// client's own business.
+	(*session.Host)->OnKey(Press(30, false, session.Clock.Now()), false);
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(keyboard.Listener.Keys, std::uint32_t{ 2 });
+	GYRO_CHECK(keyboard.Listener.LastState == Wayland::WlKeyboardKeyState::Released);
+	GYRO_CHECK(!session.Client.Fault().has_value());
+}
+
+// A key the compositor took for itself, which is the escape chord: the client hears nothing, and the
+// modifier state is still the truth about what a person is holding.
+GYRO_TEST(ProtocolRoundTrip, AKeyTheCompositorTookNeverReachesTheWindow)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-chord" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(session, bound, keyboard));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x41 }));
+
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_REQUIRE(keyboard.Listener.Entered == 1);
+
+	// Left Ctrl held: never consumed, because a person is holding it before anything knows a chord is
+	// coming, and a client told the Escape vanished but not the Ctrl can reconcile that state.
+	(*session.Host)->OnKey(Press(29, true, session.Clock.Now()), false);
+
+	// And the verb, which gyro takes.
+	(*session.Host)->OnKey(Press(1, true, session.Clock.Now()), true);
+	(*session.Host)->OnKey(Press(1, false, session.Clock.Now()), true);
+
+	session.Turn();
+
+	// The modifier and nothing else.
+	GYRO_CHECK_EQ(keyboard.Listener.Keys, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(keyboard.Listener.LastKey, std::uint32_t{ 29 });
+
+	// And the state says the modifier is down, which is what the next window to take focus is told.
+	GYRO_CHECK(keyboard.Listener.Depressed != 0);
+}
+
+// A person holding a key while a window opens under it. The keys travel with the `enter`, because the
+// release is the client's to see and it has no way to know about a press it was never told about.
+GYRO_TEST(ProtocolRoundTrip, AWindowThatTakesFocusIsToldWhatIsAlreadyHeldDown)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-held" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(session, bound, keyboard));
+
+	(*session.Host)->OnKey(Press(42, true, session.Clock.Now()), false);
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x42 }));
+
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(keyboard.Listener.HeldOnEnter, std::size_t{ 1 });
+}
+
+// Closing a window takes focus off it. The entity is still in the tree — decision 114 keeps it there
+// while its exit runs — so this is the one assertion that says the keystrokes stop before the pixels
+// do.
+GYRO_TEST(ProtocolRoundTrip, AWindowThatClosedStopsReceivingKeys)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-closed" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(session, bound, keyboard));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x43 }));
+
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	GYRO_REQUIRE(keyboard.Listener.Entered == 1);
+
+	toplevel.Window.Destroy();
+
+	session.Turn();
+
+	const Entity* const window = WindowNode(session.Store);
+	GYRO_REQUIRE(window != nullptr);
+	GYRO_CHECK(window->Retiring);
+
+	(*session.Host)->OnKey(Press(30, true, session.Clock.Now()), false);
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(keyboard.Listener.Keys, std::uint32_t{ 0 });
+	GYRO_CHECK(!session.Client.Fault().has_value());
+}
+
+// Asking a keyboard-only seat for a pointer. The protocol has a name for it, and a client that is
+// told which one can fix itself where one handed an inert object waits for an `enter` forever.
+GYRO_TEST(ProtocolRoundTrip, AskingAKeyboardOnlySeatForAPointerEndsTheClient)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-pointer" };
+	GYRO_REQUIRE(session.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(session, bound, keyboard));
+
+	Wayland::WlPointerIgnoring events;
+	static_cast<void>(keyboard.Seat.GetPointer(events));
+
+	session.Turn();
+
+	GYRO_REQUIRE(session.Client.Fault().has_value());
+
+	// `missing_capability` and not `no_memory`, which is what the bindings send for a request nothing
+	// answers — the difference is a client's log naming an allocation failure that did not happen.
+	GYRO_CHECK_EQ(session.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::WlSeatError::MissingCapability));
 }

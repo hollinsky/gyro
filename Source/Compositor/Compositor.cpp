@@ -1315,7 +1315,9 @@ private:
 	//
 	// **The compositor looks first and clients get what is left**, which is the ordering the escape
 	// hatch depends on: a full-screen client that grabbed the keyboard cannot be what decides whether
-	// the chord is seen. There is no seat yet, so *what is left* currently goes nowhere.
+	// the chord is seen. What is left goes to the seat, which routes it to whatever has focus — and a
+	// key the chord took goes there too, marked as taken, because the modifier state a client is told
+	// about is what a person is holding down rather than what gyro passed on.
 	void OnKey(const KeyEvent& event)
 	{
 		const Input::ChordVerdict verdict = m_Chord.Feed(event);
@@ -1349,6 +1351,13 @@ private:
 
 			case Input::ChordAction::None:
 				break;
+		}
+
+		// Only where there is one: `--gym` runs the same loop with no clients behind it, and a scene gyro
+		// authored for itself has nothing to route a keystroke to.
+		if (m_Clients)
+		{
+			m_Clients->OnKey(event, verdict.Consumed);
 		}
 	}
 
@@ -2056,8 +2065,8 @@ private:
 
 	// The client host, when this run has one, borrowed from the author the dispatch loop owns. Non-null
 	// exactly when the author is a `ClientHost`, which is the one fact `ISceneAuthor` deliberately does
-	// not carry — a gym would have to answer for a socket it does not have. Two jobs: the flush before
-	// each sleep, and the descriptor the wait was given.
+	// not carry — a gym would have to answer for a socket it does not have. Three jobs: the flush before
+	// each sleep, the descriptor the wait was given, and the keys the chord did not take.
 	ClientHost* m_Clients = nullptr;
 
 	// The device set, the compositor's own keys, and the connection between them. Declared beside the

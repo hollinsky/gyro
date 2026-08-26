@@ -11303,3 +11303,83 @@ not be spent on debugging.
 **Rejected: a recovery console and a gym cycle as further verbs.** Both name things that do not
 exist. A key bound to a stub is worse than a key that says nothing, because the first time it is
 pressed is the time somebody needed it.
+
+### 149. Focus is state the world holds, and the seat compares against it rather than being told
+
+*(Decided 2026-08-25, on asking what it takes to route a keystroke to a window.)*
+
+**Who owns focus was the question underneath the question, and the answer is already written down
+twice.** [Architecture.md](Architecture.md#the-shell) splits input between gyro and a shell — gyro
+does routing, hit-testing, grabs and the cursor; the shell declares the focus *model* in advance —
+and [decision 96](#96-the-frame-is-the-compositors-and-the-header-is-the-apps) reaches the same place
+from the other side, putting the focus outline on gyro because focus is state the compositor already
+owns. So the state is gyro's and the policy is the shell's, and there is no third position.
+
+**It goes in `Scene` rather than in `Protocol`, because a focused window is a fact about the world.**
+The focus ring, [the catalog's](Animation.md#the-motion-catalog) `FocusChange`, and the exit that has
+to hand focus on to something else are all authored in that module. A `wl_keyboard.enter` is one
+consumer of the fact, and on a machine showing a splash or a recovery console it is not even the only
+kind of window there is — a focus that lived in `Protocol` would be one the console could not have.
+
+**The seat notices a change by comparing, once per `Advance`, rather than through a signal.** That
+inverts [decision 115](#115-scene-drains-the-return-channel-and-protocol-observes-what-it-derives),
+and the difference is what the two facts are made of. A presented frame arrives on the frame thread's
+schedule and has to be *pushed* to reach the dispatch thread at all; focus changes on the dispatch
+thread, inside a call that already hands `Protocol` the store. Comparing costs one `EntityId` per
+iteration, buys no latency over a link — the keystroke that moved focus and the step that notices it
+are the same wakeup of the same thread — and avoids emitting from inside `SceneStore::Retire`, which
+walks a subtree and would be re-entered by any observer that authored anything.
+
+**Focus leaves at retirement, not at the free.** [Decision 114](#114-retirement-is-not-destruction)
+keeps a closing window in the tree, being drawn, for as long as its exit runs. If focus left when the
+slot came back, a person would go on typing into a window they are watching collapse. So the store
+withdraws from `Retire`, over the whole subtree, and no author has to remember.
+
+**Rejected: focus as a flag on the entity.** One `bool` beside `Retiring` reads naturally, and it
+makes *who is focused* a scan of the world — the axis decision 115 rejects a pull on, in a second
+place. Worse, two flags set at once is a representable state, and what it produces is two focus rings
+and a keyboard talking to the wrong window.
+
+**Rejected: focus in `Protocol`, moved to `Scene` when there is chrome to draw.** Cheap now and
+expensive later, which is exactly the trigger this log uses for writing the decision early — decision
+69 changed a type while it had one caller.
+
+#### The stack is the whole policy, and it takes no parameter
+
+**Newest on top, falling back to what was underneath.** It is
+[decision 141](#141-gyro-authors-the-container-and-the-floorplanner-places-a-window-in-it)'s
+Floorplanner applied to focus rather than to placement, and it is chosen for the same reason: centring
+on an output and focusing the window that just opened are the two placements that need nothing
+configured. Click-to-focus and follows-mouse both need a pointer, and both are the shell's model
+rather than gyro's — so the stack is what the mechanism does while nobody has declared anything.
+
+#### The first seat is a keyboard and says so
+
+**Advertised at version 4 with the keyboard capability alone.** `wl_compositor`'s rule again: the
+number promises the events gyro sends, and everything above 4 on this interface is a pointer event.
+`get_pointer` is answered with `missing_capability` rather than with an inert object, because a
+toolkit handed a pointer waits for an `enter` that cannot come — where the error is a thing the
+protocol has a name for and the client already handles.
+
+**xkbcommon is linked, and there is no version of a seat that avoids it.** `wl_keyboard.key` carries
+the kernel's keycode, so the whole of how a client learns that a key is `q` is `wl_keyboard.keymap` —
+a descriptor holding an XKB text keymap. It is linked by `Protocol` and not by `Input`, which is what
+[decision 148](#148-input-is-a-source-the-dispatch-thread-drains-and-the-way-out-of-gyro-is-a-leader-chord)
+already implies: gyro's escape chord is matched on keycodes so that the way out of a compositor
+holding DRM master cannot depend on a layout having compiled, and translation belongs beside the party
+that has somebody to translate for.
+
+**The layout is whatever `XKB_DEFAULT_*` names**, which is a stand-in for a preference gyro has
+nowhere to keep until there is a session. The descriptor is reopened read-only and sealed before it
+goes out: the same file is mapped by every client on the machine, and one of them editing it is every
+other one's keyboard.
+
+**A key gyro took is one the client never hears about, and the modifier state is folded either way.**
+The chord's whole point is that a mistyped verb does not arrive as a stray letter in whatever has
+focus. But what is held down is a fact about a person's hands rather than about who is listening, so a
+consumed `Ctrl` still reaches the state machine — otherwise the next window to take focus is told a
+modifier is up while a finger is on it.
+
+**Repeat is the client's.** `repeat_info` carries the two numbers and nothing else: a compositor that
+repeated keys itself would hold a timer per held key and wake the `SCHED_FIFO` process's dispatch
+thread on it, to produce events a toolkit already produces from those numbers.

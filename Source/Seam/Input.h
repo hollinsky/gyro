@@ -1,9 +1,7 @@
 #pragma once
 
-#include <cstdint>
-
+#include "Core/Input.h"
 #include "Core/Signal.h"
-#include "Core/Time.h"
 #include "Seam/EventSource.h"
 
 // Where gyro's input comes from: one device set, drained on the dispatch thread, reporting keys.
@@ -23,27 +21,6 @@
 // keycode, and putting a layout in the path here would mean the compositor's own escape chord moved
 // when somebody selected Dvorak. Nothing below cares which letter is painted on the key it is being
 // told about.
-
-// One key transition, which is the whole of what the first input path carries.
-//
-// **The instant is the device's own**, converted at ingest by whichever implementation read it —
-// libinput reports `CLOCK_MONOTONIC` microseconds, which Core/Time.h's `Monotonic::FromMicroseconds`
-// is the named door for. It is carried rather than left for the reader to stamp with `now` because it
-// is the `t₀` decision 26 promises an animation starts from: a keystroke that spent four milliseconds
-// behind a scene walk should begin its motion four milliseconds in, not begin it late.
-struct KeyEvent
-{
-	// evdev's numbering, `linux/input-event-codes.h`. Reproduced as a number rather than included, for
-	// the reason Seam/Pixel.h reproduces a fourcc: it is stable kernel ABI, and naming the header here
-	// would put a Linux include at the portable waist.
-	std::uint32_t Code = 0;
-
-	bool Pressed = false;
-
-	Instant When{};
-
-	friend constexpr bool operator==(const KeyEvent&, const KeyEvent&) noexcept = default;
-};
 
 // A device set and the keys it produces.
 class IInput : public IEventSource

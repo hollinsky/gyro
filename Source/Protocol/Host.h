@@ -3,6 +3,7 @@
 #include <memory>
 #include <string_view>
 
+#include "Core/Input.h"
 #include "Core/Result.h"
 #include "Core/Signal.h"
 #include "Core/Time.h"
@@ -11,6 +12,7 @@
 #include "Protocol/Context.h"
 #include "Protocol/Data.h"
 #include "Protocol/Floor.h"
+#include "Protocol/Seat.h"
 #include "Protocol/Server.h"
 #include "Protocol/Shell.h"
 #include "Protocol/Shm.h"
@@ -56,8 +58,11 @@
 // connection is the composition root's to make for decision 115's reason: `Scene` may not name
 // `Protocol`, so the signal carries an entity and this module is what knows which surface that is.
 //
-// What a person cannot do yet is *use* the window: there is no seat, so nothing routes a click or a
-// keystroke. That is the next step.
+// **A window can now be typed into.** `wl_seat` carries a keyboard and nothing else: focus is
+// `Scene`'s (`Scene/Focus.h`), the layout is xkbcommon's, and this object is what turns the two into a
+// `wl_keyboard.enter` and the keys after it. What a person still cannot do is point at anything —
+// there is no `wl_pointer`, so nothing routes a click, a drag or a paste, and the seat says so by
+// advertising the keyboard capability alone.
 //
 // The global is a member rather than something the root passes in, because its lifetime is the
 // server's: `wl_compositor` exists for as long as there is a socket to reach it through, and unlike a
@@ -77,6 +82,12 @@ public:
 
 	// Push everything owed back out to the clients. The root's to call, immediately before it sleeps.
 	void Flush() noexcept { m_Server.Flush(); }
+
+	// One key, already past the compositor's own chord, on its way to whatever has focus. The root's to
+	// call, because it is what holds both the devices and this host — and it calls it for a consumed key
+	// too, because the modifier state is a fact about a person's hands rather than about who is
+	// listening. [Seat.h](Seat.h) carries the routing.
+	void OnKey(const KeyEvent& event, bool consumed);
 
 	// Answer frame callbacks against what reached the glass. The root's to call once, before the first
 	// step, because it is the only party that holds both this host and the loop's return leg.
@@ -145,6 +156,9 @@ private:
 
 	DataDeviceManagerGlobal m_Data;
 	wl_global* m_DataGlobal = nullptr;
+
+	SeatGlobal m_Seat{ m_Context };
+	wl_global* m_SeatGlobal = nullptr;
 
 	// gyro's own node, authored before any client can reach the socket and outliving all of them.
 	SessionFloor m_Floor;

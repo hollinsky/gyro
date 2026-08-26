@@ -15,19 +15,20 @@
 // saying that it is the *only* one: a person still cannot copy or paste, because there is nothing to
 // copy with.
 //
-// **The reason it can be inert is structural rather than an excuse.** Every flow this interface
-// describes begins at a `wl_seat`: a selection is set with a serial from a keyboard focus, a drag
-// starts from an implicit pointer grab, and `get_data_device` takes the seat as an argument. gyro
-// advertises no seat, so a client cannot obtain a `wl_data_device` at all — which leaves
-// `create_data_source` as the one request here a client can actually reach, and a source nobody can
-// ever select is a list of MIME types with no other side. So the requests are accepted and the list
-// is dropped, rather than stored against a selection that cannot exist.
+// **What it still cannot do is transfer anything, and the reason is now the pointer rather than the
+// seat.** Every flow this interface describes begins at a `wl_seat`, and there is one — so
+// `get_data_device` resolves and a client holds a real object. What it does not hold is a way to use
+// it: a drag begins at an implicit pointer grab and gyro advertises no pointer capability, and a
+// selection is set with a serial the client has to have received, which today means a keyboard serial
+// against a source nothing on the other side can ask for. So the requests are accepted and the MIME
+// list is dropped, rather than stored against a selection nobody can read.
 //
-// **Not a refusal to advertise, and not the real clipboard either.** Leaving the global out is what
-// the tree does today and it costs every GTK application; writing the selection machinery now would
-// mean writing the half that validates a serial against a focus that has no source, and it would be
-// rewritten by the seat that gives it one. What is here is the registry entry and the object graph
-// under it, so the day a seat lands the missing part is the transfer rather than the plumbing.
+// The half that lands next is the selection, because the serial it validates against now exists. See
+// [decision 149](../../Docs/Decisions.md#149).
+//
+// **Not a refusal to advertise, and not the real clipboard either.** Leaving the global out costs
+// every GTK application; what is here is the registry entry and the object graph under it, so the day
+// the selection lands the missing part is the transfer rather than the plumbing.
 //
 // **It is advertised to everyone because there is nothing yet that could advertise it to fewer.**
 // [Architecture.md](../../Docs/Architecture.md#filtered-globals) puts the data device in the
@@ -37,7 +38,7 @@
 //
 // **Advertised at version 3.** `wl_compositor`'s rule is that the number promises the *events* gyro
 // sends, and here every event above version 1 — the drag-and-drop action negotiation on a source and
-// an offer — is in a flow that starts at a seat, so no version of this interface is more honest than
+// an offer — is in a flow that ends at a pointer, so no version of this interface is more honest than
 // another while there is none. What decides it instead is the requests: 3 is where every toolkit
 // stops asking, and 4 adds only a destructor for a singleton a client holds for its own lifetime.
 inline constexpr std::uint32_t DataDeviceManagerVersion = 3;

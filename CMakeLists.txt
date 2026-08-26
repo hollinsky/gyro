@@ -126,6 +126,27 @@ if(NOT libudev_FOUND)
 	)
 endif()
 
+# libxkbcommon, for the one thing a keyboard cannot be handed to a client without.
+#
+# **A keymap is not optional and there is no way to skip it.** `wl_keyboard.key` carries the kernel's
+# keycode, so the whole of how a client learns that a key is `q` is `wl_keyboard.keymap` — a descriptor
+# holding an XKB text keymap, which is this library's format and, in practice, this library's output.
+# Writing one by hand would mean shipping a keyboard-layout database, which is xkeyboard-config, which
+# is what this parses.
+#
+# It is linked by `Protocol` and not by `Input`: gyro's own escape chord is matched on keycodes so that
+# the way out of a compositor holding DRM master does not depend on a layout having compiled (148), and
+# translation belongs beside the party that has somebody to translate for.
+pkg_check_modules(xkbcommon IMPORTED_TARGET xkbcommon)
+
+if(NOT xkbcommon_FOUND)
+	message(FATAL_ERROR
+		"libxkbcommon was not found. gyro compiles the keymap it hands its clients through it; a "
+		"Wayland seat cannot send a keyboard without one. Install libxkbcommon-devel (Fedora) or "
+		"libxkbcommon-dev (Debian)."
+	)
+endif()
+
 # The frame thread is a thread, and the composition root is what starts it. Declared here with the rest
 # of the platform stack rather than beside the one target that used to want it, because it is now two:
 # Compositor spawns the frame thread and drives its ring from a second one under test, and Integration
@@ -869,7 +890,9 @@ gyro_add_module(Protocol DISPATCH
 		Data.cpp
 		Floor.cpp
 		Host.cpp
+		Keymap.cpp
 		Region.cpp
+		Seat.cpp
 		Server.cpp
 		Shell.cpp
 		Shm.cpp
@@ -890,6 +913,7 @@ gyro_add_module(Protocol DISPATCH
 target_link_libraries(Protocol
 	PUBLIC
 		PkgConfig::WAYLAND_SERVER
+		PkgConfig::xkbcommon
 		WaylandServerProtocols
 )
 

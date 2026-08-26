@@ -69,7 +69,32 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		return Failure(ENOMEM, "advertising wl_data_device_manager");
 	}
 
+	// **The seat is opened before it is advertised, and a failure to compile the layout is fatal.** A
+	// seat that hands a client a keymap descriptor it cannot map is worse than no seat at all: the
+	// client believes it has a keyboard, and the compositor's own log is the only place the reason
+	// exists. [Keymap.h](Keymap.h) has what makes this fail — XKB data missing from the machine, or an
+	// environment naming a layout that does not exist.
+	if (const Result<void> seat = m_Seat.Open(*display); !seat)
+	{
+		return seat;
+	}
+
+	m_SeatGlobal = Wayland::Server::WlSeat::Advertise(*display, SeatVersion, m_Seat);
+
+	if (m_SeatGlobal == nullptr)
+	{
+		// Fatal, though less obviously than the others: a client that finds no seat starts and draws.
+		// What it cannot do is be used, and a window a person can see and cannot type into is the state
+		// this compositor exists to avoid rather than one to run in.
+		return Failure(ENOMEM, "advertising wl_seat");
+	}
+
 	return {};
+}
+
+void ClientHost::OnKey(const KeyEvent& event, bool consumed)
+{
+	m_Seat.Key(event, consumed);
 }
 
 void ClientHost::OnReached(EntityId entity, Instant at)
@@ -97,6 +122,12 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// here — so the reachable case is a broken descriptor, and the answer to that is the same as the
 	// answer to no clients at all: author nothing and wait.
 	[[maybe_unused]] const Result<void> polled = m_Server.Poll();
+
+	// **After the requests rather than before them**, which is the ordering that makes a window
+	// typeable in the wakeup it opened in: the commit that maps it is what offers it focus, so the
+	// comparison has to run downstream of the dispatch that performed it. See [Seat.h](Seat.h) for why
+	// the change is noticed by comparing rather than by a signal out of `Scene`.
+	m_Seat.SyncFocus(scene.Focus().Focused());
 
 	return Wake::Never();
 }

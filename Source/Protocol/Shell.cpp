@@ -324,6 +324,16 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		// image entity is registered against the surface that draws into it, here, at the one moment both
 		// identities exist and are known to be each other's.
 		m_Context->Bind(*content, surface);
+
+		// **And the window itself, which is the entity focus names.** The return leg arrives as the
+		// image whose pixels reached the glass; focus is on the container, because that is decision
+		// 111's toplevel and the thing a focus ring is drawn around. Both resolve to the same surface,
+		// so the seat and the frame callback each ask about the entity their own half deals in.
+		m_Context->Bind(*window, surface);
+
+		// The window a person just opened is the one they are typing into, which is the Floorplanner's
+		// rule applied to focus (`Scene/Focus.h`): newest on top, and no parameter to pick.
+		scene->Focus().Offer(*window);
 	}
 
 	{
@@ -360,6 +370,7 @@ void ClientXdgSurface::Unmap()
 	// route from it back to a client, because the client has taken its window down and is not waiting to
 	// hear about the frames it spends leaving.
 	m_Context->Unbind(m_Content);
+	m_Context->Unbind(m_Window);
 
 	SceneStore* const scene = m_Context->Store();
 
@@ -369,6 +380,8 @@ void ClientXdgSurface::Unmap()
 
 		// The subtree keeps its links and its place, which is what lets a closing window go on being
 		// drawn while it is still closing. The store frees it when everything on it has settled.
+		// Focus goes with it, and the store does that from `Retire` rather than from here: a window is
+		// unmapped by its client and retired by anything, and focus has to leave in both cases.
 		static_cast<void>(commit.Retire(m_Window));
 	}
 
