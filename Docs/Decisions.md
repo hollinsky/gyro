@@ -11500,3 +11500,131 @@ is in the startup line and why Docs/Open.md carries what it costs.
 0x0`, targets from the kms dumb buffer, four hundred and twenty-five commits in eight seconds on a
 60Hz panel. What the kernel cannot do — hand back a buffer satisfying a set of devices, rather than
 being asked one at a time until something works — is [KernelWishlist.md](KernelWishlist.md#there-is-no-way-to-ask-for-a-buffer-several-devices-can-all-use).
+
+### 152. Promotion is a partition of the draw list computed every frame, and a node is promotable when its resample is a no-op and it carries no dressing on itself
+
+*(Decided 2026-08-25, on asking whether the cursor needs a commit path that is not a frame.)*
+
+**It does not, and the question was the wrong shape.** The claim underneath
+[decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)'s exemption
+is that the cursor plane updates independently of the composite, and the reading that produced this
+entry is that gyro is the one compositor for which that buys almost nothing. A plane's *geometry* is
+evaluated on the frame thread once per refresh, because that is what
+[decision 86](#86-the-published-scene-is-a-preorder-tree-model-values-inline-coefficients-by-reference)'s boundary is for; a client's *content*
+arrives whenever the client publishes. Two rates, already built, already reconciled. A promoted plane
+that animates while the window on it publishes at 24 fps is those two rates pointed at hardware
+instead of at the GPU, and `IPresenter::Present` expresses it today with no verb added. What remains
+cursor-specific is one latency optimization — committing a pointer move *after* the composite
+deadline and still catching that vblank — which is an optimization with an unmeasured value rather
+than a mechanism anything is waiting on, and it stays in [Open.md](Open.md).
+
+**So promotion is a partition of the evaluated draw list, recomputed every frame, and never state a
+surface is in.** This is the substance of the entry.
+[Decision 78](#78-present-takes-a-layer-list-and-the-composite-is-one-member-of-it) already made the
+composite one member of a list rather than a privileged concept, precisely so that promotion would be
+a partition; what it did not say is that the partition has no memory. It does not. A node is on a
+plane this frame and in the composite the next, and the two frames are the same picture.
+
+**What that buys is the absence of the bug every other compositor ships.** Treating *scanout
+candidate* as sticky per-surface state means entry and exit transitions, and a transition between two
+paths that are supposed to be indistinguishable is a place where they are observably not: a video
+going fullscreen hitches, and dragging it a pixel off the edge hitches again. Those are frames where
+the compositor changed how it was drawing and the person saw it happen, which is the fourth promise
+in [Experience.md](Experience.md#the-picture-is-correct) failing in the one case the machinery exists
+to serve. A partition with no state cannot have a transition to get wrong.
+
+#### The predicate is *no resample* and *no dressing*, and both halves come from the hardware
+
+**A display engine has no corner radius, no shadow, and no blur.** It has a fixed-function scaler
+with a vendor's quality and a ratio limit, rotation in ninety-degree steps, and a blend mode. So the
+set of nodes a plane can carry is not a policy gyro picks — it is what
+[Seam/Dressing.h](../Source/Seam/Dressing.h) can express that a plane cannot, which is nearly all of
+it. A node with a radius, a material, or a tint is composited, and there is no version of the
+assigner that is cleverer about it.
+
+**A node that is moving is not thereby disqualified, and the first draft of this entry had that
+wrong.** *Settled* is the obvious predicate and it is neither necessary nor sufficient. A plane can
+be repositioned every frame for nothing — `CRTC_X` and `CRTC_Y` are two integers in a commit that is
+happening anyway — so a window sliding under a spring is promotable for the whole of its slide. A
+node that has come to rest at a non-integer scale still resamples, and promoting it hands the picture
+to the vendor's scaler. What separates the two is not motion; it is whether the source texels land on
+device pixels one for one.
+
+**The draw list already carries that, exactly, and derived on the only side that can derive it.**
+[Seam/Renderer.h](../Source/Seam/Renderer.h)'s `DrawItem::Sampling` is the surface adapter and the
+node chain composed and classified, and it exists because
+[decision 56](#56-clients-render-at-the-ceiling-and-gyro-downscales)'s sharpness path has to know
+whether a resample is a no-op without comparing floats for equality. The assigner asks the same
+question for a different reason and gets the same answer. So the predicate is read off an item that
+was already being built, with no new field anywhere and no bit plumbed down from the walk.
+
+**Settledness is why the predicate is usually true rather than being the predicate.**
+[Decision 67](#67-the-settled-snap-is-unconditional) lands settled geometry on the device
+grid unconditionally, so a window sitting still is resample-free by construction and a still desktop
+is the case that promotes wholesale. The relationship is one of cause, and stating it as the
+predicate would have cost the case that matters most for latency — a pointer translating at input
+rate is the purest no-op resample there is, which is the second reason the cursor turns out not to be
+special.
+
+**This is also most of what the minification worry was about.** Open.md's
+[promotion quality for a minified surface](Open.md) asks what it costs to hand a downscaled window to
+a fixed-function scaler; under this predicate the question cannot arise, because a minified node
+resamples and is composited. What remains open is the bill: decision 56 makes minification ordinary
+on a scaled output, so the predicate gives up the offload on precisely those outputs, and whether
+that is worth reopening for a plane whose scaler is good enough needs a panel to answer. The entry
+takes the conservative side and names the cost rather than defaulting to it silently.
+
+**Dressing that lies behind a node does not block it; dressing that lies on the node does.** A shadow
+is a separate draw item under an opaque quad, so a window can be promoted onto a plane while its
+shadow stays in the composited layer beneath — the plane covers exactly where the shadow is not. A
+corner radius cannot be separated that way, because cutting the corner is what *reveals* the shadow
+through it, and a plane will scan out the whole rectangle. The rule is about separability rather than
+about the dressing vocabulary, and it is the one place the assigner has to look at what is underneath
+rather than only at the node.
+
+#### What it costs, which is two things and neither is free
+
+**The atomic test is on the frame thread, inside decision 29's `B(L)`.** Deciding a partition means
+`DRM_MODE_ATOMIC_TEST_ONLY` over it, and a partition recomputed every frame is a test every frame —
+which is a driver's `atomic_check` on the one thread that may not have unbounded work on it, and
+[decision 73](#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it) is the entry
+about exactly that hazard. What makes it affordable is that the *candidate set* changes far less
+often than the frame does: the test is run when an item crosses the
+predicate in either direction, when the draw list's membership changes, and not otherwise — a
+promoted node translating frame to frame changes two integers in a partition that was already
+tested. That is a cache, and a cache needs its
+invalidation written down rather than assumed, which is why it is stated here as a cost rather than
+buried as an optimization.
+
+**The decision is per-frame; the plumbing underneath it is not.** A client buffer laid out for GPU
+sampling may carry a modifier no plane on the device scans out, and correcting that is a
+`zwp_linux_dmabuf_v1` feedback tranche and a client round trip — slow, and with hysteresis, since a
+client told to reallocate for scanout and then immediately told otherwise reallocates twice for
+nothing. So there are two loops at two rates: a per-frame partition over buffers that are *already*
+scanout-capable, and a much slower negotiation that decides which buffers those are. Conflating them
+would put a round trip on the frame path and is the failure this paragraph exists to forbid.
+
+#### Rejected alternatives
+
+**Rejected: promotion as per-surface state with entry and exit transitions.** It is what everyone
+ships, and every glitch it produces is a transition it got wrong. It is also the shape that makes the
+assigner need a policy — when to enter, when to leave, how much hysteresis — where a stateless
+partition needs only a predicate.
+
+**Rejected: the cursor plane as the first thing built.** It was the starting proposal and it inverts
+the dependency. There is no `wl_pointer` at all, so the pointer's glyph, hotspot and placement are
+owed regardless; and every promotion needs a composited fallback, because an atomic test can refuse
+one. Building the fallback first and the offload second means the cursor is not a special case at
+all — it is the first node the assigner happens to promote. The cost of that ordering is one release
+in which the pointer moves at the output's rate rather than the input device's, which is what every
+compositor did before the legacy cursor ioctl and is a regression measured in milliseconds against
+building two unbuilt mechanisms at once.
+
+**Rejected: *settled* as the predicate.** It was this entry's own first draft and reading
+`DrawItem` refuted it. It bans the promotion that is worth the most — a pointer or a window
+translating, which a plane serves for two integers — and permits the one that costs the picture, a
+node at rest under a fractional scale.
+
+**Rejected: letting the plane scaler serve a resampling node.** It reads as free — the scaler is
+sitting there — and it makes the sharpness of a window change on the frame it was handed over, which
+is the minification argument arriving at the worst possible moment.
