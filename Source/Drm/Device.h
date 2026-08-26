@@ -148,6 +148,20 @@ public:
 	// What the driver calls itself, for the line that says what gyro is driving.
 	[[nodiscard]] const std::string& Driver() const noexcept { return m_Driver; }
 
+	// This node's device minor, or -1 where it could not be read.
+	//
+	// **The only handle gyro has on *which piece of silicon is driving the panel*, and it exists to be
+	// handed to `VulkanDevice::Open`.** A laptop with two GPUs enumerates two Vulkan devices, and the
+	// one Vulkan ranks first is the discrete part while the panel is very often on the integrated one
+	// — so a compositor that picks by rank alone composites on a device whose memory the display
+	// engine cannot scan out, and every frame becomes a cross-device import or an allocation that
+	// fails at startup. `VK_EXT_physical_device_drm` reports the same number from the other side, which
+	// is what makes the comparison exact rather than a driver-name heuristic.
+	//
+	// Read off the open file rather than parsed out of the path, because the path is a name a udev
+	// rule chose and the minor is what the kernel and Vulkan both mean.
+	[[nodiscard]] std::int64_t Minor() const noexcept { return m_Minor; }
+
 	// Whether page-flip timestamps are on `CLOCK_MONOTONIC`. This is `PresentationInfo::HardwareClock`
 	// and it is read rather than assumed: `simpledrm` registers no vblank at all and its completion is
 	// `drm_atomic_helper_fake_vblank`'s, which arrives at commit time rather than at a boundary. A
@@ -197,6 +211,7 @@ private:
 	Fd m_Device;
 	std::string m_Path;
 	std::string m_Driver;
+	std::int64_t m_Minor = -1;
 	bool m_Monotonic = false;
 
 	std::vector<Pipeline> m_Pipelines;

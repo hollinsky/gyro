@@ -8,6 +8,7 @@
 #include <ranges>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "Core/Result.h"
@@ -399,7 +400,7 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 	}
 
 	VkPhysicalDevice chosen = VK_NULL_HANDLE;
-	int best = 0;
+	std::pair<int, int> best{};
 
 	for (std::uint32_t index = 0; index < count; ++index)
 	{
@@ -416,12 +417,18 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 			continue;
 		}
 
-		const int rank = Rank(properties.deviceType);
+		// Scanout first, rank second, and the pair is what says they are not comparable quantities: no
+		// amount of being a faster part makes a device the one the display engine can read from. The
+		// minors are queried per candidate rather than taken off `Describe`, because `Describe` runs
+		// once on the device that has already been chosen and this is the choosing.
+		const bool scansOut =
+			policy.ScanoutMinor >= 0 && QueryDrmMinors(candidates[index]).Primary == policy.ScanoutMinor;
+		const std::pair<int, int> score{ scansOut ? 0 : 1, Rank(properties.deviceType) };
 
-		if (chosen == VK_NULL_HANDLE || rank < best)
+		if (chosen == VK_NULL_HANDLE || score < best)
 		{
 			chosen = candidates[index];
-			best = rank;
+			best = score;
 		}
 	}
 

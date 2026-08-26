@@ -7,6 +7,8 @@
 
 #include <drm/drm.h>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 #include <xf86drm.h>
 
@@ -436,6 +438,14 @@ Result<std::unique_ptr<DrmDevice>> DrmDevice::OpenNode(const std::string& path, 
 
 	auto built = std::make_unique<DrmDevice>();
 	built->m_Path = path;
+
+	// The minor the render device is paired against. A failure here is not a reason to refuse the
+	// card: it costs the pairing and nothing else, and the composition root says so in one line.
+	if (struct stat node{}; ::fstat(device.Get(), &node) == 0)
+	{
+		built->m_Minor = static_cast<std::int64_t>(::minor(node.st_rdev));
+	}
+
 	built->m_Pipelines = ScanPipelines(device.Borrow());
 
 	if (requireConnector && built->m_Pipelines.empty())

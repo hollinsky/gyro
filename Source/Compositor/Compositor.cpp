@@ -888,7 +888,9 @@ public:
 			);
 		}
 
-		Result<VulkanDevice> rendering = VulkanDevice::Open();
+		// The card's minor, so that on a machine with two GPUs gyro composites on the one the panel is
+		// actually attached to rather than on whichever part Vulkan ranks highest.
+		Result<VulkanDevice> rendering = VulkanDevice::Open(VulkanDevicePolicy{ .ScanoutMinor = m_Card->Minor() });
 
 		if (!rendering)
 		{
@@ -906,6 +908,31 @@ public:
 		}
 
 		spdlog::info("rendering on {} ({})", m_Device.Description().DeviceName(), m_Device.Description().DriverName());
+
+		// **Said out loud because the symptom is otherwise unattributable.** Compositing on a device the
+		// display engine cannot read from does not fail — it produces linear targets, a composite that
+		// takes most of a refresh, and materials that vanish as Frame/Timing.h correctly drops to the
+		// floor tier. That is three layers away from the cause, and this line is the cause. It is a
+		// warning rather than a refusal because on a split display engine — a phone or a tablet, where
+		// the DPU is its own device and never appears to Vulkan at all — the minors *cannot* match and
+		// the arrangement is the normal one.
+		//
+		// **A renderer with no minor at all is excluded, because it is a different fact.** lavapipe
+		// reports -1: it is not on some *other* card, it is on no card, and the sentence below would be
+		// telling a person their targets cross a bus that does not exist. Where the renderer cannot
+		// export, decision 151's chain has the panel allocate its own targets, so nothing crosses
+		// anything — and the log line naming the rung is what says so.
+		if (m_Card->Minor() >= 0 && m_Device.Description().PrimaryMinor >= 0 &&
+		    m_Device.Description().PrimaryMinor != m_Card->Minor())
+		{
+			spdlog::warn(
+				"compositing on a device that is not driving {}: the panel is on DRM minor {} and the "
+				"renderer is on {}, so every target crosses between them",
+				m_Card->Path(),
+				m_Card->Minor(),
+				m_Device.Description().PrimaryMinor
+			);
+		}
 
 		if (m_Governs)
 		{

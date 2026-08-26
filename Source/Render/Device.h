@@ -54,6 +54,23 @@ struct VulkanDevicePolicy
 	// What shows up in the driver's own logs and in a GPU vendor's crash reports. Not the version,
 	// which travels separately.
 	std::string_view Application = "gyro";
+
+	// The primary DRM minor of the device that is driving the panel, or -1 where nothing is — a nested
+	// session, a virtual output, a test.
+	//
+	// **A preference rather than a requirement, and the asymmetry is deliberate.** Where a candidate
+	// reports this minor it wins outright regardless of rank, because compositing on the part that
+	// scans out is worth more than compositing on the faster part: the alternative is every target
+	// allocated on one device and read by another across PRIME, which in the good case costs a copy
+	// per frame and in the ordinary case leaves the two with no modifier in common but linear — the
+	// regime Seam/Allocator.h measured at 7.4ms against 2.8ms for the same composite.
+	//
+	// Where no candidate reports it — an old driver with no `VK_EXT_physical_device_drm`, or a split
+	// display engine whose scanout device is not a Vulkan device at all, which is the common shape on
+	// a SoC — selection falls back to rank and the composition root says which device it ended up on.
+	// That is the honest answer there: on a split part the two minors *never* match, and refusing to
+	// come up would be refusing to run on the hardware this arrangement is most normal on.
+	std::int64_t ScanoutMinor = -1;
 };
 
 // What the device turned out to be, for a log line and for the two branches that read it.
