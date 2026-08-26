@@ -395,6 +395,7 @@ gyro_add_module(Scene PORTABLE DISPATCH
 		Entity.Test.cpp
 		Focus.Test.cpp
 		Output.Test.cpp
+		Pointer.Test.cpp
 		Reach.Test.cpp
 		Return.Test.cpp
 		Serializer.Test.cpp

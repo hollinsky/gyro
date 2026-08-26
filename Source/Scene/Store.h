@@ -14,6 +14,7 @@
 #include "Scene/Entity.h"
 #include "Scene/Focus.h"
 #include "Scene/Output.h"
+#include "Scene/Pointer.h"
 #include "World/Content.h"
 #include "World/Node.h"
 
@@ -166,6 +167,13 @@ public:
 	[[nodiscard]] SceneFocus& Focus() noexcept { return m_Focus; }
 	[[nodiscard]] const SceneFocus& Focus() const noexcept { return m_Focus; }
 
+	// Where the pointer is, per [Pointer.h](Pointer.h). Beside focus for focus's reason, and plural at
+	// exactly the same seam: decision 21 defers multi-seat and keeps seats plural in the interfaces, so
+	// the second pointer on a machine is a second store or a second session holding one of these rather
+	// than anything here learning to count.
+	[[nodiscard]] ScenePointer& Pointer() noexcept { return m_Pointer; }
+	[[nodiscard]] const ScenePointer& Pointer() const noexcept { return m_Pointer; }
+
 	[[nodiscard]] bool IsLive(EntityId id) const noexcept { return m_Ids.IsValid(id); }
 
 	// The top of the tree, as the first of a sibling chain. Decision 55 makes the list order the z
@@ -191,6 +199,12 @@ public:
 	{
 		m_Outputs.assign(outputs.begin(), outputs.end());
 		++m_OutputGeneration;
+
+		// Done here rather than left to the caller for `Retire`'s reason: a pointer stranded where a
+		// display used to be is one no motion can rescue, since every displacement from out there
+		// slides along a union it is not touching. Whoever unplugs a monitor should not have to
+		// remember that.
+		m_Pointer.Reconfine(m_Outputs);
 	}
 
 	[[nodiscard]] std::span<const SceneOutput> Outputs() const noexcept { return m_Outputs; }
@@ -664,6 +678,10 @@ private:
 
 	// Who the keyboard is on. Withdrawn from by `Retire`, offered to by whoever maps a window.
 	SceneFocus m_Focus;
+
+	// Where the pointer is. Reconfined by `SetOutputs`, moved by whoever drains a device that has a
+	// cursor.
+	ScenePointer m_Pointer;
 
 	MotionTable m_Motions{};
 	MotionModifiers m_Modifiers{};
