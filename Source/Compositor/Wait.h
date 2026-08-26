@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <optional>
 
 #include "Core/Fd.h"
@@ -23,6 +25,12 @@
 // the descriptor, and the root is the only party that can put it in the set the thread actually sleeps
 // on. Decision 126's threshold was a second *kind* of thing to wait on — evdev, a control socket — and
 // two descriptors is not it.
+//
+// **Input is that second kind, and it is still one more `pollfd`.** libinput hands over one descriptor
+// for the whole seat, so a run driving a panel with clients on it waits on three files rather than
+// one-per-device, and what a ring would multiplex is a set small enough to name. What would actually
+// change the answer is a set whose *size* is not known when the thread starts — a control socket per
+// connected agent — because that is where an array stops being a wait and starts being a registry.
 //
 // **The timeout is relative, which is the opposite of what Compositor/Uring.h argues for, and the
 // difference between the two threads is the argument.** The frame ring uses `IORING_TIMEOUT_ABS`
@@ -57,15 +65,26 @@ public:
 	[[nodiscard]] Result<void> Open() noexcept;
 
 	// Also wake when this descriptor is readable. The root's, borrowed and never closed here — it
-	// belongs to whatever produced it, which today is the Wayland event loop inside the client host.
-	// Called once, before the dispatch thread starts; `-1` is the ordinary case of a run with no
-	// clients, and leaves the wait exactly what it was.
+	// belongs to whatever produced it, which today is the Wayland event loop inside the client host or
+	// the libinput context beside it. Called once per descriptor, before the dispatch thread starts;
+	// `-1` is the ordinary case of a run with neither, and leaves the wait exactly what it was.
+	//
+	// **Bounded at two, which is what the run with everything in it needs**, and stated as a capacity
+	// rather than grown to a vector because the next descriptor after these is the one that reopens
+	// decision 126's question rather than one more entry in an array.
 	//
 	// **Level-triggered and deliberately not drained here**, unlike the stop. What makes it readable is
 	// a client with a request pending, and what makes it unreadable again is the author reading that
 	// request inside its own `Advance` — so the descriptor is the author's to quiet, and a wait that
 	// tried to consume it would be reading a client's traffic on behalf of nobody.
-	void Watch(int descriptor) noexcept { m_Watched = descriptor; }
+	void Watch(int descriptor) noexcept
+	{
+		if (descriptor >= 0 && m_Watching < m_Watched.size())
+		{
+			m_Watched[m_Watching] = descriptor;
+			++m_Watching;
+		}
+	}
 
 	// Dispatch thread. Blocks until the deadline falls due or the wait is stopped, whichever is first;
 	// `std::nullopt` is *the world has stopped changing*, and blocks until stopped. `now` is passed in
@@ -102,8 +121,9 @@ public:
 private:
 	Fd m_Fd;
 
-	// Borrowed rather than owned, which is why it is a plain `int` beside an `Fd`.
-	int m_Watched = -1;
+	// Borrowed rather than owned, which is why they are plain `int`s beside an `Fd`.
+	std::array<int, 2> m_Watched{ -1, -1 };
+	std::size_t m_Watching = 0;
 
 	std::atomic<bool> m_Stopping{ false };
 };

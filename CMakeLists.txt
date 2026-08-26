@@ -96,6 +96,36 @@ if(NOT libdrm_FOUND)
 	)
 endif()
 
+# libinput and libudev, for the input path and nothing else.
+#
+# **The udev backend is what makes a keyboard plugged in after boot work**, and it is why libudev is
+# named here at all: libinput links it either way, so the choice is between using the enumeration it
+# already carries and hand-rolling a `/dev/input/event*` scan with no hotplug behind it. gyro starts
+# before the login prompt, so a device that appears later is the ordinary case rather than an edge.
+#
+# There is no seat manager under either of them. `open_restricted` is an `open`, and what grants it is
+# a udev rule — decision 145's answer for DRM master applied to the second device class.
+#
+# Named with a sentence for liburing's reason: the machine that hits this is one somebody is setting
+# up and the fix is one package away.
+pkg_check_modules(libinput IMPORTED_TARGET libinput)
+
+if(NOT libinput_FOUND)
+	message(FATAL_ERROR
+		"libinput was not found. gyro reads keyboards, mice and touchpads through it; there is no "
+		"evdev fallback. Install libinput-devel (Fedora) or libinput-dev (Debian)."
+	)
+endif()
+
+pkg_check_modules(libudev IMPORTED_TARGET libudev)
+
+if(NOT libudev_FOUND)
+	message(FATAL_ERROR
+		"libudev was not found. gyro enumerates input devices through libinput's udev backend, which "
+		"is what makes hotplug work. Install systemd-devel (Fedora) or libudev-dev (Debian)."
+	)
+endif()
+
 # The frame thread is a thread, and the composition root is what starts it. Declared here with the rest
 # of the platform stack rather than beside the one target that used to want it, because it is now two:
 # Compositor spawns the frame thread and drives its ring from a second one under test, and Integration
@@ -449,7 +479,7 @@ gyro_add_module(Trace PORTABLE
 
 # The control waist: every interface with more than one implementation, and the plain data that
 # crosses them. This is the presentation half — IPresenter and what its two verbs take and report.
-# IRenderer, ISession and IInput join it where they are written.
+# IRenderer and IInput are here; ISession joins them where it is written.
 #
 # Portable, and it is worth saying why an interface to KMS can be. Nothing here names a Linux header:
 # a format is a four-character code and a modifier is a number, both reproduced from stable kernel ABI
@@ -476,6 +506,7 @@ gyro_add_module(Seam PORTABLE
 		Dressing.Test.cpp
 		EventSource.Test.cpp
 		Importer.Test.cpp
+		Input.Test.cpp
 		OutputConfiguration.Test.cpp
 		Pixel.Test.cpp
 		PresentationInfo.Test.cpp
@@ -905,6 +936,37 @@ target_link_libraries(Drm
 		spdlog::spdlog
 )
 
+# The input path: libinput's device set behind Seam/Input.h, and the compositor's own keys in front of
+# whatever has focus.
+#
+# DISPATCH, entire. Docs/Architecture.md#threads puts input on the dispatch thread and requires the
+# chain from a key to the commit it causes to be one causal sequence on one thread, so there is no
+# frame half to name and a frame-side include of anything here is a build failure.
+#
+# Not PORTABLE: a keycode is `linux/input-event-codes.h`'s, and the device set is libinput's. The
+# seam above it is portable, which is what a scripted input will be written against.
+gyro_add_module(Input DISPATCH
+	DEPENDS
+		Core
+		Seam
+	SOURCES
+		Devices.cpp
+	TESTS
+		Chord.Test.cpp
+)
+
+# libinput for the devices, libudev for the enumeration behind them, and spdlog for the line naming
+# each device gyro opened — which is the only way to tell a machine with no keyboard rule applied from
+# one with no keyboard. PRIVATE: the module's headers forward-declare `libinput` and name nothing else
+# of either library, deliberately, so that including Seam/Input.h does not drag libinput's headers
+# into the composition root.
+target_link_libraries(Input
+	PRIVATE
+		PkgConfig::libinput
+		PkgConfig::libudev
+		spdlog::spdlog
+)
+
 gyro_add_module(Compositor
 	DEPENDS
 		Core
@@ -921,6 +983,7 @@ gyro_add_module(Compositor
 		Drm
 		Gym
 		Protocol
+		Input
 		Dispatch
 		Trace
 	SOURCES

@@ -177,6 +177,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Frame` | portable | frame | `Core`, `Geometry`, `World`, `Animation`, `Publication`, `Seam` |
 | `Render` | platform | **both** | `Core`, `Geometry`, `Publication`, `Seam` |
 | `Protocol` | platform | dispatch | `Core`, `Geometry`, `Scene` |
+| `Input` | platform | dispatch | `Core`, `Seam` |
 | `Session` | platform | dispatch | `Core`, `Protocol`, `Scene`, `Seam` |
 | `Headless` | **portable** | split | `Core`, `Geometry`, `Seam` |
 | `Virtual` | platform | frame, own | `Core`, `Geometry`, `Seam`, `Headless` |

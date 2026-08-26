@@ -11189,3 +11189,96 @@ unchanged: settle it once the deferral path has been seen to happen at all.
 and it is the wrong one to follow here. Four milliseconds of latency on a retry lands on a frame that
 was already four publishes behind; four milliseconds on a frame callback lands on every frame of every
 animation a toolkit runs, as jitter a person sees.
+
+### 148. Input is a source the dispatch thread drains, and the way out of gyro is a leader chord
+
+*(Decided 2026-08-25.)*
+
+The first input path, keyboard only, on the DRM backend only. Two things it had to settle before a
+key could reach anything: which thread reads the devices, and what happens to a person sitting in
+front of a compositor that owns the screen and has no exit.
+
+**`IInput` is an `IEventSource`, and the difference between input and presentation is who pumps it
+rather than what it is.** The drain contract at
+[Seam/EventSource.h](../Source/Seam/EventSource.h) is wanted here word for word — one descriptor for
+a whole device set, read to empty rather than once, an invalid descriptor an ordinary answer for an
+implementation whose events do not come from a file. libinput hands over exactly one descriptor for
+the seat, which is the same *one file, N producers* granularity a DRM device has. So the type is
+reused and the composition root registers this source with the dispatch thread's wait instead of the
+frame ring, which is [decision 81](#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread)'s
+rule stated per source rather than per interface.
+
+**The devices are opened with an `open`, which is
+[decision 145](#145-the-drm-backend-takes-master-by-opening-the-node-and-libdrm-stops-at-the-frame-section)
+applied to the second device class.** `open_restricted` reaches the node a udev rule already made
+reachable; there is no seat manager, so there is no pause, resume or revoke. libinput's *udev*
+backend rather than its path backend, for hotplug: libinput links libudev either way, so what the
+choice actually costs is a `pkg-config` line, and a keyboard plugged in after boot is the ordinary
+case for something that starts before the login prompt.
+
+**A key carries the kernel's keycode and the device's own timestamp, with no keymap in front of
+it.** Translation is xkbcommon's and belongs beside the seat that sends a keymap to clients. Putting
+a layout in the path here would move the compositor's own escape chord when somebody selected Dvorak
+— and worse, would make the way out depend on a keymap having compiled. The instant is libinput's
+`CLOCK_MONOTONIC` microseconds converted at ingest, because it is the `t₀`
+[decision 26](#26-remote-presentation-is-a-virtual-output-with-client-supplied-targets) promises an
+animation begins from: a keystroke that waited behind a scene walk starts its motion already in
+progress rather than late.
+
+**Only a run that drives a panel takes the machine's input.** libinput's udev backend claims every
+device on the seat, so a nested gyro doing this would be reading the host session's keyboard behind
+its back — every keystroke, whatever has focus. The condition is therefore the panel rather than a
+flag somebody has to remember to leave off.
+
+#### The chord
+
+**`Ctrl+Alt+Esc` arms a leader, and the next key is a verb: `q` quits, `t` writes a trace.**
+
+gyro is a boot service holding DRM master from first-open with no VT to switch to, so a run that
+reaches the panel owns the screen until the process ends. Until now there was no way to end it from
+the machine it is running on. On the hardware this is developed on there is no sysrq route either:
+the kernel's handler is bound to the keyboard, Fedora ships `kernel.sysrq = 16`, and no key on the
+board produces `KEY_SYSRQ` — read off `evtest` rather than assumed, which is what turned a sentence
+elsewhere in this log about sysrq being the floor into something that is only true with a rule
+applied and a key that exists.
+
+**A leader rather than one chord per verb.** Every additional reserved combination is another
+argument about which physical keys exist on which keyboard; one is spent once and everything after it
+is a letter. `Ctrl`, `Alt` and `Esc` are present and in the same places on every keyboard gyro is
+expected to meet, including a Chromebook with no F-row and no `Delete`, and the combination avoids
+both ranges the kernel's console handler claims — `Ctrl+Alt+F1`…`F12` and `Ctrl+Alt+Del`. The only
+binding it collides with anywhere is KDE's force-kill cursor, which gyro can meet only as a nested
+client, where the host swallows the chord before gyro sees it.
+
+**Matched on keycodes rather than keysyms, and read before anything routes to a client.** Both are
+the same rule: the escape hatch must not depend on a layer above it working. A keymap that failed to
+compile, a layout somebody selected, a client that grabbed the keyboard — none of them may take the
+way out away.
+
+**Everything typed while armed is swallowed, and the modifiers never are.** A mistyped chord must not
+reach a text field as a stray letter. The modifiers are held before anything knows a chord is coming,
+and a client that saw `Ctrl` go down without the `Esc` after it is in a state it can already
+reconcile. Releasing them does not disarm, because releasing them is what a hand does on the way to
+the letter.
+
+**It expires after two seconds, measured against the event's timestamp rather than a clock.** A
+leader pressed and forgotten must not turn a `q` typed into an editor an hour later into the end of
+the session. The event's own time is the only instant this state machine has, and it means the right
+thing: two seconds of somebody thinking, not two seconds of a compositor being busy. What it costs is
+that an arming with nothing after it stays armed until the next key — invisible today, and the badge
+the armed state eventually needs is what will carry a real deadline.
+
+**What this is not is a rescue, and saying so is most of its value.** These keys are read on the
+dispatch thread, so a wedged dispatch thread never sees them; a spinning frame thread is
+`RLIMIT_RTTIME`'s to kill; a machine below both is still the network's problem. What the chord buys
+is leaving a *working* compositor, and a place to hang debug verbs that is not a signal.
+
+**Rejected: `Ctrl+Alt+Backspace` straight to quit.** The X11 zap is one keystroke from ending a
+session, and it spends the only reserved combination on the least interesting verb.
+
+**Rejected: `Super` as the leader.** That is the shell's namespace for window management and should
+not be spent on debugging.
+
+**Rejected: a recovery console and a gym cycle as further verbs.** Both name things that do not
+exist. A key bound to a stub is worse than a key that says nothing, because the first time it is
+pressed is the time somebody needed it.

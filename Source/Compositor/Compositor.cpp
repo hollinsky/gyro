@@ -51,6 +51,8 @@
 #include "Headless/Device.h"
 #include "Headless/Output.h"
 #include "Headless/Renderer.h"
+#include "Input/Chord.h"
+#include "Input/Devices.h"
 #include "Nested/Host.h"
 #include "Nested/Output.h"
 #include "Protocol/Host.h"
@@ -1271,6 +1273,85 @@ private:
 		return {};
 	}
 
+	// The machine's keyboards, and the way back out of a compositor that owns the screen.
+	//
+	// **Not fatal, and the two failures it distinguishes are worth the sentence each.** A machine with
+	// no seat at all — a kiosk, a board with a panel and nothing plugged into it — must still boot to a
+	// splash, so an absent device set is a run that shows pictures and takes no input. A machine whose
+	// udev rules have not been applied is the same code path and a completely different situation, and
+	// the log line is what tells them apart before somebody spends an afternoon on it.
+	[[nodiscard]] Result<void> OpenInput()
+	{
+		if (!m_Panel)
+		{
+			return {};
+		}
+
+		Result<std::unique_ptr<Input::Devices>> devices = Input::Devices::Open();
+
+		if (!devices)
+		{
+			spdlog::warn(
+				"no input: {}. gyro holds the panel and there is no way to reach it from this keyboard; "
+				"check the udev rules for /dev/input",
+				devices.error()
+			);
+
+			return {};
+		}
+
+		m_Input = std::move(*devices);
+		m_Key.ConnectTo<&Compositor::OnKey>(m_Input->Key, *this);
+		m_DispatchWait.Watch(m_Input->Descriptor().Value);
+
+		// Said out loud on every run that has a keyboard, because a chord nobody knows about is a chord
+		// nobody uses, and this one is the only exit.
+		spdlog::info("ctrl+alt+esc then q quits, t writes a trace");
+
+		return {};
+	}
+
+	// One key, on the dispatch thread that drained it.
+	//
+	// **The compositor looks first and clients get what is left**, which is the ordering the escape
+	// hatch depends on: a full-screen client that grabbed the keyboard cannot be what decides whether
+	// the chord is seen. There is no seat yet, so *what is left* currently goes nowhere.
+	void OnKey(const KeyEvent& event)
+	{
+		const Input::ChordVerdict verdict = m_Chord.Feed(event);
+
+		switch (verdict.Action)
+		{
+			case Input::ChordAction::Quit:
+				spdlog::info("stopping: ctrl+alt+esc q");
+
+				// Both halves, because either one alone leaves a thread parked: the frame thread is
+				// waiting on a vblank and this one on its own descriptor.
+				m_Interrupt.Raise();
+				m_DispatchWait.Stop();
+
+				break;
+
+			case Input::ChordAction::Trace:
+				// The same request `SIGUSR1` makes, and it is deliberately the same call rather than a
+				// second path: one relaxed store, picked up by the writer thread, with nothing done here
+				// that a signal handler could not do.
+				if (m_Recorder)
+				{
+					m_Recorder->Request();
+				}
+				else
+				{
+					spdlog::info("nothing is being recorded; start gyro with --trace");
+				}
+
+				break;
+
+			case Input::ChordAction::None:
+				break;
+		}
+	}
+
 	// Everything the dispatch thread does, and it is decision 80's shape again with the threads
 	// swapped: step, and wait for the wake the step returned.
 	//
@@ -1286,6 +1367,23 @@ private:
 			// after this load and before the sleep below is one the drain cannot have seen, and comparing
 			// against a value taken afterwards would be comparing the count with itself.
 			const std::uint64_t shown = m_Shown.load();
+
+			// **Input first, before the step it may cause.** A key that arrives here becomes a retarget
+			// inside the author's `Advance` below, in the same iteration, which is what keeps the chain
+			// from a keystroke to the frame it changes one causal sequence rather than two — the same
+			// ordering Frame/Loop.h drains its sources under, one thread over.
+			if (m_Input && !m_InputFailed)
+			{
+				if (const Result<void> drained = m_Input->Drain(); !drained)
+				{
+					// Reported once and then left alone. A device set that has stopped working is not a
+					// reason to stop compositing — the screen is the thing gyro exists to keep showing — and
+					// a line per iteration is how a log stops being readable.
+					m_InputFailed = true;
+
+					spdlog::error("input stopped: {}", drained.error());
+				}
+			}
 
 			const std::uint64_t before = m_Dispatch->Publications();
 			const Wake wake = m_Dispatch->Step();
@@ -1474,6 +1572,12 @@ private:
 
 				m_Backend = std::move(drm);
 
+				// **Only a run that owns a panel reads the machine's keyboards.** libinput's udev backend
+				// takes every device on the seat, which under the nested backend would be gyro reading the
+				// host compositor's keyboard behind its back — every keystroke in the session, whatever has
+				// focus. So the flag is the panel rather than a switch somebody has to remember.
+				m_Panel = true;
+
 				return {};
 			}
 
@@ -1601,6 +1705,11 @@ private:
 		if (m_Clients != nullptr)
 		{
 			m_DispatchWait.Watch(m_Clients->PollFd());
+		}
+
+		if (const Result<void> opened = OpenInput(); !opened)
+		{
+			return opened;
 		}
 
 		std::array<SceneOutput, MaxOutputs> outputs{};
@@ -1950,6 +2059,18 @@ private:
 	// not carry — a gym would have to answer for a socket it does not have. Two jobs: the flush before
 	// each sleep, and the descriptor the wait was given.
 	ClientHost* m_Clients = nullptr;
+
+	// The device set, the compositor's own keys, and the connection between them. Declared beside the
+	// host rather than with the backend because both are the dispatch thread's, and destroyed before
+	// the wait that borrows the descriptor.
+	std::unique_ptr<Input::Devices> m_Input;
+	Input::Chord m_Chord;
+	Connection<const KeyEvent&> m_Key;
+	bool m_InputFailed = false;
+
+	// Whether this run drives a panel, which is the one condition under which gyro takes the machine's
+	// input devices for itself. Set where the DRM backend is built.
+	bool m_Panel = false;
 
 	std::unique_ptr<DispatchLoop> m_Dispatch;
 
