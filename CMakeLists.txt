@@ -25,6 +25,7 @@ include(CMake/BuildFlags.cmake)
 include(CMake/Module.cmake)
 include(CMake/Shaders.cmake)
 include(CMake/Bindings.cmake)
+include(CMake/Fonts.cmake)
 
 enable_testing()
 
@@ -285,6 +286,37 @@ gyro_add_module(Geometry PORTABLE
 		Scale.Test.cpp
 		Space.Test.cpp
 )
+
+# Text, and it is a producer of pixels rather than a verb on a renderer. Every verb on Seam/Renderer.h
+# has to be answered by Blit, by Render, and by Headless — which draws nothing — so a DrawText there
+# would put a font and a glyph cache behind each of them, one per output. A face produces coverage
+# instead: the recovery console masks a fill with it, and a debug label turns it into texels and mints
+# a texture id the way Gym/Card.h already does.
+#
+# Below both waists for World's reason — the console draws on the frame thread and a gym label is
+# authored on the dispatch thread, and neither half may name the other. PORTABLE because a glyph is an
+# array and a composite into a byte span names no platform header, which is what keeps text testable on
+# a machine with no GPU. Geometry alone, for the cell size a face reports.
+#
+# SpleenFaces is the baked ladder and is linked rather than depended on: it is a file the build wrote,
+# so it lives outside Source/ where CheckLayering and CheckPortability do not walk. CMake/Fonts.cmake
+# has the argument for vendoring the font and for baking it here rather than checking in a blob.
+gyro_add_module(Text PORTABLE
+	DEPENDS
+		Core
+		Geometry
+	SOURCES
+		Font.cpp
+		Label.cpp
+		Raster.cpp
+	TESTS
+		Font.Test.cpp
+		Label.Test.cpp
+		Raster.Test.cpp
+		Utf8.Test.cpp
+)
+
+target_link_libraries(Text PUBLIC SpleenFaces)
 
 # The world's own vocabulary: what a node is. It exists because Scene writes the published node
 # record and Frame walks it, and Frame may not depend on Scene — so the record belongs below both

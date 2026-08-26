@@ -11853,3 +11853,72 @@ one of those draws a window sheared across the screen with nothing in any log.
 an untiled buffer and pay for it on every read. `VulkanDevice::SamplingModifiers` is the plural of a
 predicate that already existed, and what it buys is that the advertisement is the driver's own answer
 rather than the two tilings gyro happened to think of.
+
+### 155. Text is a producer of pixels rather than a verb on a renderer, and the font is Spleen because it is a ladder
+
+*(Decided 2026-08-25. `Text` is the module; `Vendor/Spleen` is the font; `Tools/Fonts` bakes one into
+the other. It answers the *where does a glyph come from* absence that
+[decision 38](#38-the-pre-vulkan-console-is-a-permanent-subsystem-not-a-bootstrap) named as "an
+embedded bitmap font" and left unbuilt.)*
+
+**A face produces coverage, and nothing that draws knows what a letter is.** Every verb on
+[`Seam/Renderer.h`](../Source/Seam/Renderer.h) has to be answered by `Blit`, by `Render`, and by
+`Headless` — which draws nothing and charges a simulated cost — so a `DrawText` at the waist would
+put a font and a glyph cache behind each of them, one instance per output, and oblige the fake
+backend to fake typography. `Text` instead turns a string into a byte per texel, and the two consumers
+diverge below it: the recovery console masks a fill with that coverage in `Blit`'s band, and a debug
+label turns it into `ARGB8888` words and mints a texture id exactly the way
+[`Gym/Card.h`](../Source/Gym/Card.h) already does. What follows is the property worth having — anything
+that can draw an image can draw text, so the Vulkan sampler picks labels up on the day it lands with
+nothing added for them, and `Headless` never learns the word *font*.
+
+It sits beside `World` rather than in either half of the publication boundary, for `World`'s reason
+([86](#86-the-published-scene-is-a-preorder-tree-model-values-inline-coefficients-by-reference),
+[91](#91-the-worlds-vocabulary-is-a-module-of-its-own-below-both-waists)): the console
+draws on the frame thread and a gym label is authored on the dispatch thread, and neither half may
+name the other. It is `PORTABLE` for `Blit`'s reason — a glyph is an array and a composite into a byte
+span names no platform header — which is what keeps the text that appears *when there is no GPU*
+testable on a machine that has none.
+
+**Spleen, and the argument is the size ladder rather than the letterforms.** A bitmap glyph is texels;
+enlarging one is a blur or a staircase, so the only way a recovery console is legible on a 4K panel
+*and* on a 1366x768 laptop is to have a glyph already drawn at that size. Spleen ships six —
+5x8, 6x12, 8x16, 12x24, 16x32, 32x64 — under BSD 2-Clause, with box drawing, and
+[`Text/Font.h`](../Source/Text/Font.h)'s `Nearest` is then the whole of the sizing policy. The tie
+breaks downwards, because a label that asked for ten texels and got twelve is a label overlapping its
+neighbour.
+
+**Rejected: Terminus, and Cozette.** Terminus is the obvious console font and stops well short of
+32x64, which is precisely the rung that matters — the failure display on the machine most likely to
+have a high-density panel. Cozette has more character and exists at one size, which disqualifies it
+for the console outright; it stays available as a second face if the gym labels ever want one, since
+the ladder is a table and holds however many faces are baked into it.
+
+**Rejected: an outline font rasterised at build time.** It buys arbitrary sizes and costs a rasteriser
+in the build tool plus hinting decisions nobody here wants to make. The ladder is what a fixed grid
+needs, and a compositor that draws its own console at a size not on it is a compositor doing layout,
+which decision 38 refuses.
+
+**Rejected: a glyph atlas and a run of quads.** The efficient shape, and it is a packer, an
+invalidation rule and a second draw path in exchange for nothing yet: a debug label and a window title
+change when their text changes, which is rarely. One texture per string is a `std::vector` and a memcpy.
+A scrolling console readout at frame rate is the caller that forces an atlas, and it does not exist.
+
+**Rejected: fetching the font through CPM.** Every one of decision 38's four callers — the boot
+splash, verbose boot output, the recovery console, the failure display — is a path that has to work
+on a machine with no network, and [decision 39](#39-running-from-the-initramfs-is-deferred-and-deliberately-not-foreclosed)
+leaves the initramfs open. It is 1.4 MB of text, vendored once, with its licence beside it.
+
+**Rejected: checking in the baked tables.** The generated file is 846 KB of hex, and a blob in the
+tree beside a script nobody runs again is how a font upgrade silently does not happen. It is baked by
+a host tool for [decision 2](#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)'s
+reason applied to a second file format — no scripting-language dependency, no generated code in
+`Source/` — and the parser refuses a font whose advance is not its cell, which is what stops a
+proportional face from arriving where a fixed grid is assumed. The 969 glyphs Spleen carries are cut
+to the four blocks a console and a label need: baking the Braille patterns would have put a quarter of
+a megabyte of dot patterns into a compositor that will never ask for one.
+
+**What is not built.** Nothing consumes this yet — `Console` does not exist, and a gym that labels its
+lanes is the obvious first caller. Shaping, kerning, bidirectional reordering and line breaking are all
+absent and stay absent: decision 38's grid is what a recovery console *should* be, and each of those is
+a table or a state machine between the person at the keyboard and the message they need to read.

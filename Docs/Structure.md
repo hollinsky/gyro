@@ -165,6 +165,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Core` | portable | either | — |
 | `Geometry` | portable | either | `Core` |
 | `Wire` | portable | either | `Core`, `Seam` |
+| `Text` | portable | **both** | `Core`, `Geometry` |
 | `World` | portable | **both** | `Core`, `Geometry` |
 | `Animation` | portable | **both** | `Core`, `Geometry` |
 | `Publication` | portable | **both** | `Core`, `Geometry` |
@@ -203,7 +204,13 @@ by the time `Blit` is what is drawing, there is nothing else left to draw with.
 
 It is not inside `Console` because the console is a text grid with its own thread and its own input,
 and the blitter is an `IRenderer` on the frame thread that the boot splash reaches before any console
-exists. `Console` depends on it; the reverse would put a glyph cache below the seam.
+exists. `Console` depends on it; the reverse would put the console's grid, its cursor and its input
+below the seam.
+
+*(Clarified 2026-08-25 by [decision 155](Decisions.md#155-text-is-a-producer-of-pixels-rather-than-a-verb-on-a-renderer-and-the-font-is-spleen-because-it-is-a-ladder),
+which does put the glyph tables in the portable tier — in `Text`, which is a peer of `World` rather
+than anything `Blit` depends on. The distinction the sentence above was reaching for holds: `Blit`
+still names no font, and what a console hands it is coverage.)*
 
 ### Frame is portable
 
