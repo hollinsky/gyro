@@ -2374,6 +2374,11 @@ void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uin
 
 	if (!m_Calibration.IsValid())
 	{
+		// **A mark per frame rather than silence, because the GPU row opens as a missing track on a
+		// device that cannot read its clock and the host's together.** The absence was the answer to
+		// *where did the GPU timings go* — a question the row itself can now answer.
+		TraceMark("uncalibrated", pending.Trace);
+
 		return;
 	}
 

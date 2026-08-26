@@ -1,5 +1,7 @@
 #include "Render/Device.h"
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -452,6 +454,23 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 	// rather than of the device, and it is the half of the timestamp pair that decides whether this
 	// renderer reports a GPU cost at all.
 	Describe(chosen, device.m_QueueFamily, device.m_Description);
+
+	// What the capability queries answered, printed once at open so a machine that cannot measure
+	// or calibrate its GPU is explained without reading the driver.
+	spdlog::info(
+		"device: {} ({}), {} timestamp bits at {} ns/tick, calibrates {}, counts fragments {}, exports "
+		"timeline {}, copies from host {}, DRM primary {} render {}",
+		device.m_Description.Name.data(),
+		device.m_Description.Driver.data(),
+		device.m_Description.TimestampValidBits,
+		device.m_Description.TimestampPeriod,
+		device.m_Description.CalibratesTimestamps,
+		device.m_Description.CountsPipelineStatistics,
+		device.m_Description.ExportsTimeline,
+		device.m_Description.CopiesFromHost,
+		device.m_Description.PrimaryMinor,
+		device.m_Description.RenderMinor
+	);
 
 	const float priority = 1.0F;
 	const VkDeviceQueueCreateInfo queueInfo{ .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,

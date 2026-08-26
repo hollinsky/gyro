@@ -312,6 +312,17 @@ private:
 				TraceAttributeAt("refresh", info.PresentedAt, info.Sequence, m_TraceGlass);
 			}
 
+			// The interval the host reported on this flip — the number the clock schedules the next
+			// deadline from, and the one field of the observation the trace otherwise discards. A value
+			// far from the panel's real cadence explains a stall, and nothing else in the picture can
+			// say the host promised one.
+			if (info.Period > Duration::zero())
+			{
+				TraceAttributeAt(
+					"host period", info.PresentedAt, static_cast<std::uint64_t>(info.Period.count()), m_TraceGlass
+				);
+			}
+
 			m_Glass = frame;
 		}
 

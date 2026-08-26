@@ -1237,13 +1237,16 @@ GYRO_TEST(FrameLoop, TheGlassRowOpensWhereThePanelScannedOutAndNamesTheFrame)
 	GYRO_CHECK(drawn != 0);
 	GYRO_CHECK_EQ(shown, drawn);
 
-	// And the two counts that belong to the slice without being its identity: the publication it drew
-	// from, and the vblank it actually landed on.
-	GYRO_REQUIRE_EQ(arguments.size(), std::size_t{ 2 });
+	// And the three counts that belong to the slice without being its identity: the publication it
+	// drew from, the vblank it actually landed on, and the interval the host said its next refresh
+	// would be — the number the clock schedules the next deadline from.
+	GYRO_REQUIRE_EQ(arguments.size(), std::size_t{ 3 });
 	GYRO_CHECK_EQ(arguments[0].first, std::string_view{ "scene" });
 	GYRO_CHECK_EQ(arguments[0].second, std::uint64_t{ 1 });
 	GYRO_CHECK_EQ(arguments[1].first, std::string_view{ "refresh" });
 	GYRO_CHECK_EQ(arguments[1].second, std::uint64_t{ 8 });
+	GYRO_CHECK_EQ(arguments[2].first, std::string_view{ "host period" });
+	GYRO_CHECK_EQ(arguments[2].second, std::uint64_t{ 10'000'000 });
 }
 
 // A second flip from the same publication is a different picture and has to be drawn as one. The row
