@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cerrno>
 #include <cstring>
 #include <format>
@@ -296,6 +297,58 @@ PlaneFormats(RawFd device, const drmModePlane& plane, const Properties& properti
 	return inventory;
 }
 
+// The card's whole plane inventory, counted by kind, with no regard for who ends up holding one.
+//
+// Read in its own pass rather than accumulated out of `ScanPlanes`, because that function only ever
+// sees the planes a pipeline could still be given: a plane on a CRTC no connector is using, or one an
+// earlier output already took, never reaches it. The census is the denominator those per-output counts
+// are a fraction of, so it has to count what the kernel lists.
+[[nodiscard]] PlaneCensus ScanPlaneCensus(RawFd device)
+{
+	PlaneCensus census{};
+
+	OwnedPlaneResources planes{ drmModeGetPlaneResources(device.Value) };
+
+	if (!planes)
+	{
+		return census;
+	}
+
+	for (std::uint32_t index = 0; index < planes->count_planes; ++index)
+	{
+		OwnedPlane plane{ drmModeGetPlane(device.Value, planes->planes[index]) };
+
+		if (!plane)
+		{
+			continue;
+		}
+
+		const Properties properties{ device, planes->planes[index], DRM_MODE_OBJECT_PLANE };
+
+		++census.Total;
+
+		switch (KindOf(properties.Value("type")))
+		{
+			case PlaneKind::Primary:
+				++census.Primary;
+				break;
+			case PlaneKind::Cursor:
+				++census.Cursor;
+				break;
+			case PlaneKind::Overlay:
+				++census.Overlay;
+				break;
+		}
+
+		if (std::popcount(plane->possible_crtcs) > 1)
+		{
+			++census.Shared;
+		}
+	}
+
+	return census;
+}
+
 // The CRTC that already drives this connector, or the first free one that can. Preferring the current
 // one is what makes an adoption possible: the firmware left a mode on a CRTC and gyro is about to
 // commit the same one back, which the kernel then does not treat as a modeset at all.
@@ -482,6 +535,7 @@ Result<std::unique_ptr<DrmDevice>> DrmDevice::OpenNode(const std::string& path, 
 		built->m_Minor = static_cast<std::int64_t>(::minor(node.st_rdev));
 	}
 
+	built->m_Planes = ScanPlaneCensus(device.Borrow());
 	built->m_Pipelines = ScanPipelines(device.Borrow());
 
 	if (requireConnector && built->m_Pipelines.empty())

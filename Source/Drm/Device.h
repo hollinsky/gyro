@@ -155,6 +155,27 @@ struct Pipeline
 	std::uint32_t HeightMm = 0;
 };
 
+// What the card has, before any of it is handed out.
+//
+// **A per-output plane count is not a fact about the panel, so the card's own total has to be said
+// beside it.** `possible_crtcs` is permission rather than exclusivity and gyro claims greedily, so the
+// second monitor's inventory is a consequence of the first monitor's — and a promotion refused on
+// HDMI-A-1 for want of an overlay reads as a hardware limit unless the log shows the overlays were
+// reachable from both and eDP-1 went first.
+struct PlaneCensus
+{
+	std::uint32_t Total = 0;
+	std::uint32_t Primary = 0;
+	std::uint32_t Overlay = 0;
+	std::uint32_t Cursor = 0;
+
+	// Planes whose `possible_crtcs` names more than one CRTC — the ones the claim order decided. Zero
+	// means the hardware itself partitions, which is what a chip with two display engines looks like
+	// from here: there is no way to ask which engine a plane belongs to, and disjoint masks are the
+	// only evidence of the boundary.
+	std::uint32_t Shared = 0;
+};
+
 class DrmDevice final : public IEventSource
 {
 public:
@@ -216,6 +237,9 @@ public:
 	// with two GPUs has one of these for each.
 	[[nodiscard]] std::span<const Pipeline> Pipelines() const noexcept { return m_Pipelines; }
 
+	// Every plane on the card, whatever a pipeline was given. See `PlaneCensus`.
+	[[nodiscard]] const PlaneCensus& Planes() const noexcept { return m_Planes; }
+
 	// Route this CRTC's completions to that output, for as long as the output lives.
 	//
 	// A flat array rather than a map: there are as many CRTCs as a card has, which is single digits,
@@ -265,6 +289,7 @@ private:
 	std::string m_Path;
 	std::string m_Driver;
 	std::int64_t m_Minor = -1;
+	PlaneCensus m_Planes{};
 	bool m_Monotonic = false;
 
 	// Constructed with the device's descriptor, and destroyed with it — after every output, which the

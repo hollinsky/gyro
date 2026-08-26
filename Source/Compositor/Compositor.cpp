@@ -875,6 +875,20 @@ public:
 			"driving {} ({}) with {} connected output(s)", m_Card->Path(), m_Card->Driver(), m_Card->Pipelines().size()
 		);
 
+		// The denominator for the per-output counts below. `shared` is how many of these planes more
+		// than one CRTC could have driven, which is what makes the split below a consequence of
+		// connector order rather than of the hardware: zero means the card partitions its planes itself.
+		const Drm::PlaneCensus& census = m_Card->Planes();
+
+		spdlog::info(
+			"  {} plane(s): {} primary, {} overlay, {} cursor, {} drivable by more than one CRTC",
+			census.Total,
+			census.Primary,
+			census.Overlay,
+			census.Cursor,
+			census.Shared
+		);
+
 		if (!m_Card->HasMonotonicTimestamps())
 		{
 			// The clock's error bar depends on this and nothing else can tell it. `simpledrm` is the case
@@ -989,6 +1003,37 @@ public:
 			panel->Configuration(),
 			panel->IsExplicitlySynchronized() ? "an in-fence" : "a held commit",
 			allocator.Name()
+		);
+
+		// What this output was *given*, which is not what it could have had: planes are claimed in
+		// connector order, so a second monitor with no overlays is a first monitor that took them.
+		// Without this line a refused promotion looks like a hardware limit.
+		std::uint32_t primaries = 0;
+		std::uint32_t overlays = 0;
+		std::uint32_t cursors = 0;
+
+		for (const Drm::Plane& plane : m_Card->Pipelines()[index].Planes)
+		{
+			switch (plane.Kind)
+			{
+				case Drm::PlaneKind::Primary:
+					++primaries;
+					break;
+				case Drm::PlaneKind::Overlay:
+					++overlays;
+					break;
+				case Drm::PlaneKind::Cursor:
+					++cursors;
+					break;
+			}
+		}
+
+		spdlog::info(
+			"    holds {} plane(s): {} primary, {} overlay, {} cursor",
+			m_Card->Pipelines()[index].Planes.size(),
+			primaries,
+			overlays,
+			cursors
 		);
 
 		into.Presenter = panel.get();
