@@ -196,14 +196,31 @@ nothing only proves the grep.
   [Decision 32](Decisions.md#32-a-surfaces-frame-cadence-follows-its-fastest-output) says a surface
   follows the fastest output it touches, *with hysteresis, and never switched mid-animation*. What is
   built answers on the first output to present the sequence, which is the same thing in the steady
-  state and switches freely while a window is dragged across a seam — a client's pacing changing
-  mid-gesture, which is the artefact that decision says is worse than either rate. Closing it wants a
-  nominal refresh period on `SceneOutput`, which cuts against
+  state and is re-decided from nothing on every commit.
+
+  **What it costs is a client's own animation, at the moment somebody is watching that window.** Take
+  a 60 Hz panel beside a 144 Hz one. A window straddling the seam is paced at 144 the instant one
+  pixel crosses and at 60 the instant that pixel leaves, and a slow drag puts its edge over the
+  boundary for long enough that the cadence flips every few frames. A toolkit paces its own animation
+  off the interval between frame callbacks, so what a person sees is the *content* — a scrolling
+  list, a caret, a spinner — stuttering inside a window that is gliding smoothly. gyro's animation is
+  right and the client's is visibly wrong, which is the failure that decision says is worse than
+  either rate. The cheaper half of it is the same crossing read as work: one pixel over the seam buys
+  full 144 Hz pacing for a window almost entirely on the 60 Hz panel, so the client draws 2.4x the
+  frames and two in three are composited into a panel that never shows them.
+
+  **It costs nothing today.** There is no seat, so nothing drags a window; the Floorplanner centres a
+  window on one output and it stays there, the reach mask is computed once and never changes, and
+  every ledger entry clears against a single panel. The gap opens the day a window can move.
+
+  Closing it wants a nominal refresh period on `SceneOutput`, which cuts against
   [decision 97](Decisions.md#97-a-view-is-split-in-half-the-world-places-an-output-and-the-frame-side-carries-its-extent)
   giving the mode's extent to the frame side — the case for it being that a period used to *choose
   between* outputs is a policy input rather than a timing authority, and dispatch already holds worse
-  ones. What decides it is whether the switch is visible on a real drag across two panels at
-  different rates, which wants the hardware rather than an argument.
+  ones. Not latching to the panel holding the window's centre instead: it carries no rate either, and
+  a centre crossing a seam is a step function, so it moves the flip rather than removing it. What
+  decides the shape is whether the switch is visible on a real drag across two panels at different
+  rates, which wants the hardware rather than an argument.
 - **Client damage is stored and never cleared.**
   [Decision 113](Decisions.md#113-client-damage-is-a-region-on-the-entity-in-buffer-space-and-it-is-cumulative)
   clears a surface's rectangles once *every* output showing it has presented the sequence that carried
