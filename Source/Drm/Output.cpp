@@ -782,16 +782,27 @@ void DrmOutput::Settle()
 		const std::uint32_t count = m_Pending.Count;
 		m_Pending = Pending{};
 
-		// A commit that fails here has nowhere to report to — the frame loop has already been told the
-		// present was accepted — so the images go back to the ring and the output stays flip-idle, which
-		// the loop's next iteration serves as an ordinary frame.
-		if (const Result<void> flipped = Flip({ layers.data(), count }, {}); !flipped)
+		const std::span<const PresentLayer> held{ layers.data(), count };
+
+		// **Re-tested rather than trusted, because the hold outlives the answer.** `Present` established
+		// that every layer resolves, and then the partition sat here for as long as the pixels took. A
+		// ring dropped and rebuilt in that window — the mode set, once it is built — leaves an index this
+		// output no longer owns, and a promoted layer's framebuffer can be removed by the same wait. The
+		// whole partition is abandoned in that case: the images it named went with the ring, so there is
+		// nothing to hand back, and the loop's next iteration draws the frame again.
+		if (const Result<void> expressible = Expressible(held); expressible)
 		{
-			for (std::uint32_t index = 0; index < count; ++index)
+			// A commit that fails here has nowhere to report to — the frame loop has already been told the
+			// present was accepted — so the images go back to the ring and the output stays flip-idle, which
+			// the loop's next iteration serves as an ordinary frame.
+			if (const Result<void> flipped = Flip(held, {}); !flipped)
 			{
-				if (!layers[index].Target.IsTexture())
+				for (std::uint32_t index = 0; index < count; ++index)
 				{
-					m_Targets[layers[index].Target.Index].State = TargetState::Free;
+					if (!layers[index].Target.IsTexture())
+					{
+						m_Targets[layers[index].Target.Index].State = TargetState::Free;
+					}
 				}
 			}
 		}
