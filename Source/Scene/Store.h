@@ -167,10 +167,10 @@ public:
 	[[nodiscard]] SceneFocus& Focus() noexcept { return m_Focus; }
 	[[nodiscard]] const SceneFocus& Focus() const noexcept { return m_Focus; }
 
-	// Where the pointer is, per [Pointer.h](Pointer.h). Beside focus for focus's reason, and plural at
-	// exactly the same seam: decision 21 defers multi-seat and keeps seats plural in the interfaces, so
-	// the second pointer on a machine is a second store or a second session holding one of these rather
-	// than anything here learning to count.
+	// Where the pointer is, per [Pointer.h](Pointer.h). Beside focus and *not* for focus's reason: focus
+	// is one person's and this is the desk's, so a store that splits per session leaves this behind with
+	// the seat. They are together here because there is one of each, and the header says which way each
+	// goes when there is not.
 	[[nodiscard]] ScenePointer& Pointer() noexcept { return m_Pointer; }
 	[[nodiscard]] const ScenePointer& Pointer() const noexcept { return m_Pointer; }
 

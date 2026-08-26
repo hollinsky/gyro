@@ -41,10 +41,33 @@
 // header can only forbid rather than prevent: it would make the cursor jump to wherever a finger
 // landed, which is the behaviour every touchscreen laptop that gets this wrong exhibits.
 //
-// **Multiplicity, when it comes, is per seat and lands where focus's does.** Decision 21 defers
-// multi-seat and keeps seats plural in the interfaces; this is a value with no static state and no
-// identity in it, so a second pointer is a second `SceneStore` holding one — the same widening
-// `SceneFocus` takes, and a member rather than a rewrite.
+// **This belongs to the seat, and the seat outlives the sessions on it — which is where it parts
+// company with focus.** They sit side by side in the store today and that is not the same claim about
+// either. Focus is a fact about one person's windows and means nothing in somebody else's world, so it
+// is per session. Where the pointer is is a fact about the desk: a hand on a mouse in front of a
+// panel, stated in `GlobalSpace`, which is the *machine's* output layout and reads the same to every
+// session presented on it.
+//
+// So switching users must not move the cursor, and neither must locking. Decision 43 makes locking an
+// output reassignment — the panel goes to the greeter's session and the locked one keeps running —
+// and a pointer held per session would teleport on the way there and teleport back on unlock, with
+// the same mouse untouched on the same desk throughout. It is the same argument at login: the splash
+// draws no cursor, the greeter draws one, and a person's session inherits where they left it rather
+// than being handed somewhere gyro picked.
+//
+// A remote session is not a counterexample and is the reason the axis is the seat rather than the
+// machine: it arrives with its own input and its own virtual output, which is a second seat with a
+// second pointer on it — not a second pointer on this one.
+//
+// **What is per session is the tuning and the glyph, not the position.** An acceleration profile, a
+// left-handed button map and a cursor size are a person's, and none of them is a coordinate: the
+// curve is applied at ingest against a device's own configuration, and decision 152 has gyro drawing
+// the glyph itself. Reconfiguring a device when a session comes to the front is an operation rather
+// than a second copy of where the pointer is.
+//
+// **So the widening is a seat and not a second store.** This is a value with no static state and no
+// identity in it, which is what keeps that a move rather than a rewrite — but when a store becomes
+// per session, this does not go with it and `SceneFocus` does.
 //
 // **Acceleration is not here.** The curve is nonlinear in velocity, so accumulating raw displacements
 // and accelerating the total is not the same pointer as accelerating each — it feels right when it is
