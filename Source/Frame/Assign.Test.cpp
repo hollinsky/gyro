@@ -176,3 +176,53 @@ GYRO_TEST(FrameAssign, RefusesAResample)
 
 	GYRO_CHECK(!IsPromotable(spun));
 }
+
+// The clause that stopped the walk comes back with the partition, because a plane count of zero is the
+// same number whatever refused it and the trace row is where somebody looks first.
+GYRO_TEST(FrameAssign, SaysWhichClauseStoppedTheWalk)
+{
+	DrawItem lifted = Promotable();
+	lifted.Lift.Opacity = 0.4F;
+
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ lifted }, 4).Stopped == PromotionRefusal::Shadow);
+
+	DrawItem rounded = Promotable();
+	rounded.Radius = 8.0F;
+
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ rounded }, 4).Stopped == PromotionRefusal::Dressing);
+
+	DrawItem scaled = Promotable();
+	scaled.Sampling.UnitScale = false;
+
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ scaled }, 4).Stopped == PromotionRefusal::Sampling);
+
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ Composited() }, 4).Stopped == PromotionRefusal::Content);
+
+	// The walk stops at the *top* of the list, so what is named is the highest item that refused rather
+	// than the first one that would have been promoted from the bottom.
+	const std::vector<DrawItem> stack{ Promotable(), rounded };
+
+	GYRO_CHECK(Assign(stack, 4).Stopped == PromotionRefusal::Dressing);
+
+	// Running out of list, and running out of planes, are both a walk nothing refused.
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ Promotable() }, 4).Stopped == PromotionRefusal::None);
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ Promotable(), Promotable() }, 1).Stopped == PromotionRefusal::None);
+}
+
+// The reason is not part of what makes two frames the same partition, and the loop depends on that: it
+// repaints a whole panel where the partition changed, and a window one layer down growing a shadow did
+// not change which items the GPU drew.
+GYRO_TEST(FrameAssign, TheReasonIsNotPartOfTheAnswer)
+{
+	DrawItem rounded = Promotable();
+	rounded.Radius = 8.0F;
+
+	DrawItem lifted = Promotable();
+	lifted.Lift.Opacity = 0.4F;
+
+	const Partition one = Assign(std::vector<DrawItem>{ rounded }, 4);
+	const Partition other = Assign(std::vector<DrawItem>{ lifted }, 4);
+
+	GYRO_CHECK(one.Stopped != other.Stopped);
+	GYRO_CHECK(one == other);
+}

@@ -1045,6 +1045,15 @@ private:
 		// does.** Recomputed from this frame's list alone, with nothing carried over — see Frame/Assign.h.
 		Partition partition = Assign(list.Items, output.m_Presenter->LayerCeiling());
 
+		// **What the count below cannot say.** A frame that promoted nothing and a frame whose top window
+		// grew a shadow read the same on a counter, and the second is the one somebody is looking for.
+		// Recorded from the assigner's own walk rather than re-derived, so the row names the clause that
+		// actually stopped it.
+		if (partition.Stopped != PromotionRefusal::None)
+		{
+			TraceMark(Reason(partition.Stopped), output.m_Trace);
+		}
+
 		// **A composite always happens, and that is this loop's limitation rather than the assigner's.**
 		// A partition that promoted everything wants no render pass and no target at all, which is the
 		// arrangement the whole mechanism exists for — but the target was acquired above, before there was
@@ -1094,6 +1103,12 @@ private:
 		// frame composites — which is decision 35's one frame and is why the fallback is silent.
 		if (partition.Count != 0 && !output.m_Presenter->TestLayers({ layers.data(), count }))
 		{
+			// **Silent until now, and that was the gap worth closing.** A driver refusing every proposal —
+			// a format the plane will not take, bandwidth it does not have, a scaler shared with another
+			// pipe — reads exactly like a compositor that never tried, because both leave the count at
+			// zero. The fallback stays silent to the *user*; it must not be silent to the instrument.
+			TraceMark("planes refused", output.m_Trace);
+
 			partition = Partition{ .Composited = static_cast<std::uint32_t>(list.Items.size()) };
 			count = 1;
 
@@ -1101,6 +1116,11 @@ private:
 		}
 
 		output.m_Partition = partition;
+
+		// The shape this frame actually commits, recorded after the driver has been asked so that the
+		// number is what reached the screen rather than what was proposed. It counts the composite too:
+		// one is a screen the GPU drew whole, and the interesting frame is the one where it climbs.
+		TraceCount("planes", static_cast<std::int64_t>(partition.Layers()), output.m_Trace);
 
 		// The buffer-age join, and it is built after the evaluator has contributed so that this frame's
 		// own damage is in it. A copy rather than a reference because `RecordRequest` takes the region by

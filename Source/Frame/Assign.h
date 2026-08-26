@@ -33,6 +33,54 @@
 // pass over the list from the top, and no ioctl — asking the hardware is `IPresenter::TestLayers` and
 // is the caller's business, because it is the expensive half and the one worth caching.
 
+// Why an item stayed in the composite, which is the half of the partition a plane count cannot report.
+//
+// **A trace opens because nothing promoted, and a zero says only that.** Every clause below is one the
+// walk already evaluates, so naming which one stopped it costs a byte on the stack and turns *the panel
+// is compositing* into *the panel is compositing because this window has a shadow under it*. Carried on
+// the partition rather than logged here, because the frame thread is in a `Core/FrameSection.h` guard
+// and the party that records is the one that has a trace row in hand.
+enum class PromotionRefusal : std::uint8_t
+{
+	// Nothing refused it.
+	None,
+
+	// Not a texture: a solid, a group's offscreen, or a dressing that draws only decoration.
+	Content,
+
+	// A shadow, which is drawn around the quad and would be left behind by a plane.
+	Shadow,
+
+	// A corner radius, a material, or an opacity — the things a plane has no way to express.
+	Dressing,
+
+	// A scale, a fractional offset, or a turn: the display engine would have to resample, and where it
+	// can it changes how sharp the window looks on the frame it takes over.
+	Sampling,
+};
+
+// The name this refusal is recorded under. A string rather than a number, because `Core/Trace.h` interns
+// a record's name and carries its label as a bare integer — so a distinct name is a row a reader can
+// read, and a tag would be a digit they have to come back here to decode.
+[[nodiscard]] constexpr const char* Reason(PromotionRefusal refusal) noexcept
+{
+	switch (refusal)
+	{
+		case PromotionRefusal::Content:
+			return "unpromotable: content";
+		case PromotionRefusal::Shadow:
+			return "unpromotable: shadow";
+		case PromotionRefusal::Dressing:
+			return "unpromotable: dressing";
+		case PromotionRefusal::Sampling:
+			return "unpromotable: sampling";
+		case PromotionRefusal::None:
+			break;
+	}
+
+	return "unpromotable";
+}
+
 // What one frame's draw list was split into.
 struct Partition
 {
@@ -56,7 +104,20 @@ struct Partition
 	// The layers a presenter is handed: the composite where there is one, then the promoted items.
 	[[nodiscard]] constexpr std::uint32_t Layers() const noexcept { return Count + (NeedsComposite() ? 1U : 0U); }
 
-	friend constexpr bool operator==(const Partition&, const Partition&) noexcept = default;
+	// Why the walk stopped, where it stopped short of the whole list. `None` means it ran out of list or
+	// out of planes rather than out of promotable items.
+	//
+	// **Deliberately outside this type's equality, which is what the `= default` above could not say.**
+	// The loop compares two frames' partitions to decide whether the composite owes the screen a full
+	// repaint, and that question is about which items the GPU drew — a frame that promoted the same set
+	// for a different reason painted the same picture. Folding this into the comparison would repaint a
+	// whole panel because a window one layer down grew a shadow.
+	PromotionRefusal Stopped = PromotionRefusal::None;
+
+	friend constexpr bool operator==(const Partition& left, const Partition& right) noexcept
+	{
+		return left.Items == right.Items && left.Count == right.Count && left.Composited == right.Composited;
+	}
 };
 
 // Whether this item could be handed to a plane at all, before any hardware is asked.
@@ -73,14 +134,14 @@ struct Partition
 // visible sharpness change on the frame a window is handed over — so the geometric question and the
 // sharpness question are asked separately here rather than folded into one predicate. When there is a
 // panel to measure the scaler against, this is the one line that moves.
-[[nodiscard]] constexpr bool IsPromotable(const DrawItem& item) noexcept
+[[nodiscard]] constexpr PromotionRefusal WhyNotPromoted(const DrawItem& item) noexcept
 {
 	// Only a texture has anything a plane could scan out. A solid could be a plane's background colour
 	// on hardware that has one, a group is an offscreen the GPU has to produce, and a dressing draws
 	// nothing but its own decoration.
 	if (!std::holds_alternative<DrawTexture>(item.Content))
 	{
-		return false;
+		return PromotionRefusal::Content;
 	}
 
 	// A shadow is separable in principle — it is drawn around an opaque quad, so it could stay in the
@@ -89,21 +150,32 @@ struct Partition
 	// refused here and the door is named rather than left implicit.
 	if (item.Lift.Draws())
 	{
-		return false;
+		return PromotionRefusal::Shadow;
 	}
 
 	// A radius is not separable, and it is the reason why: cutting the corner is what reveals what is
 	// underneath, and a plane scans out its whole rectangle.
 	if (item.Radius != 0.0F || item.Dress != Material::None || item.Opacity != 1.0F)
 	{
-		return false;
+		return PromotionRefusal::Dressing;
 	}
 
 	// **`Upright` as well, which the two readings below deliberately leave out.** `IsResampleFree`
 	// admits a quarter turn because a turn permutes texels and filters nothing — true of a sampler and
 	// not of a plane, which needs a `rotation` property to do it and mostly has none. Nothing reads one
 	// yet, so a turned window is composited; when a plane's rotation is read, this clause is what moves.
-	return item.Sampling.Upright && item.Sampling.IsPlaneExpressible() && item.Sampling.IsResampleFree();
+	if (!item.Sampling.Upright || !item.Sampling.IsPlaneExpressible() || !item.Sampling.IsResampleFree())
+	{
+		return PromotionRefusal::Sampling;
+	}
+
+	return PromotionRefusal::None;
+}
+
+// The same question asked as a predicate, which is what the walk below and every test of it wants.
+[[nodiscard]] constexpr bool IsPromotable(const DrawItem& item) noexcept
+{
+	return WhyNotPromoted(item) == PromotionRefusal::None;
 }
 
 // One promoted item as the layer a presenter is handed.
@@ -176,8 +248,11 @@ struct Partition
 	{
 		const std::uint32_t index = static_cast<std::uint32_t>(items.size()) - 1 - taken;
 
-		if (!IsPromotable(items[index]))
+		const PromotionRefusal refusal = WhyNotPromoted(items[index]);
+
+		if (refusal != PromotionRefusal::None)
 		{
+			partition.Stopped = refusal;
 			break;
 		}
 
