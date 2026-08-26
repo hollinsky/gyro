@@ -80,7 +80,30 @@ Result<void> DispatchWait::WaitUntil(std::optional<Instant> deadline, Instant no
 		return Failure(errno, "waiting for the dispatch thread's next iteration");
 	}
 
+	// Drained whatever woke this, because `Nudge` writes here once per presented frame and an eventfd
+	// left readable would make every subsequent wait return at once. `EAGAIN` is the ordinary case of a
+	// wait that ended on the timeout or on the author's descriptor, and a stop consumed here is still a
+	// stop, because the flag beside it is what the caller reads.
+	std::uint64_t drained = 0;
+
+	[[maybe_unused]] const ssize_t taken = ::read(m_Fd.Get(), &drained, sizeof(drained));
+
 	return {};
+}
+
+void DispatchWait::Nudge() noexcept
+{
+	if (!m_Fd.IsValid())
+	{
+		return;
+	}
+
+	const std::uint64_t one = 1;
+
+	// Unchecked for `Stop`'s reason, with the reachable failure the other way round: `EAGAIN` here means
+	// the counter is saturated because the dispatch thread has not woken yet, and a wakeup it has not
+	// consumed is the one this call wanted.
+	[[maybe_unused]] const ssize_t rung = ::write(m_Fd.Get(), &one, sizeof(one));
 }
 
 void DispatchWait::Stop() noexcept

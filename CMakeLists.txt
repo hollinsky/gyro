@@ -343,6 +343,7 @@ gyro_add_module(Scene PORTABLE DISPATCH
 		Commit.Test.cpp
 		Entity.Test.cpp
 		Output.Test.cpp
+		Reach.Test.cpp
 		Return.Test.cpp
 		Serializer.Test.cpp
 		Settle.Test.cpp

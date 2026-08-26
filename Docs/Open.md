@@ -164,7 +164,13 @@ nothing only proves the grep.
   there is no window to lose a wakeup in, while the saving proposed here reads the frame thread's state
   and races it. What still wants measuring is the waste on a busy system, where every publication is
   accepted and every one of them wakes a frame thread that was already running.
-- **The return channel has no doorbell, so a deferred publish is retried on a timer.**
+- **The return channel has no doorbell, so a deferred publish is retried on a timer.** *(Narrowed
+  2026-08-25 by
+  [decision 147](Decisions.md#147-the-return-channels-doorbell-is-the-frame-threads-and-it-rings-only-where-a-client-is-waiting),
+  which wakes dispatch when a presented frame is owed to a client — the composition root's write on a
+  condition dispatch publishes, rather than a descriptor on the channel. The deferred publish this
+  entry is about is untouched: a refused publish is unblocked by the watermark moving, which the
+  ledger that condition reads knows nothing about, so the poll stays.)*
   [Decision 74](Decisions.md#74-the-forward-ring-recycles-only-below-the-watermark-and-a-full-ring-defers)'s refused publish is retained
   and retried, and what unblocks it is the frame thread posting a `FrameReport` — but
   [Publication/Return.h](../Source/Publication/Return.h) carries no descriptor, so nothing wakes
@@ -184,6 +190,29 @@ nothing only proves the grep.
   anything renders from — and the lost wakeup that opens is the double-check decision 83 already
   wrote down for the forward nudge. What is left as the argument for the poll is not its cost but its
   reach: settle this once the deferral path has been seen to happen at all, since it may never.
+- **Decision 32's hysteresis has no input on the dispatch side.** *(Raised 2026-08-25 by
+  [decision 146](Decisions.md#146-a-commit-is-owed-a-frame-and-a-ledger-of-entities-is-what-turns-a-presented-sequence-into-a-callback),
+  which built the cadence and not the smoothing.)*
+  [Decision 32](Decisions.md#32-a-surfaces-frame-cadence-follows-its-fastest-output) says a surface
+  follows the fastest output it touches, *with hysteresis, and never switched mid-animation*. What is
+  built answers on the first output to present the sequence, which is the same thing in the steady
+  state and switches freely while a window is dragged across a seam — a client's pacing changing
+  mid-gesture, which is the artefact that decision says is worse than either rate. Closing it wants a
+  nominal refresh period on `SceneOutput`, which cuts against
+  [decision 97](Decisions.md#97-a-view-is-split-in-half-the-world-places-an-output-and-the-frame-side-carries-its-extent)
+  giving the mode's extent to the frame side — the case for it being that a period used to *choose
+  between* outputs is a policy input rather than a timing authority, and dispatch already holds worse
+  ones. What decides it is whether the switch is visible on a real drag across two panels at
+  different rates, which wants the hardware rather than an argument.
+- **Client damage is stored and never cleared.**
+  [Decision 113](Decisions.md#113-client-damage-is-a-region-on-the-entity-in-buffer-space-and-it-is-cumulative)
+  clears a surface's rectangles once *every* output showing it has presented the sequence that carried
+  them, and
+  [decision 146](Decisions.md#146-a-commit-is-owed-a-frame-and-a-ledger-of-entities-is-what-turns-a-presented-sequence-into-a-callback)'s
+  ledger is exactly the fold it needs — the entry goes on clearing output bits after the frame
+  callback has gone out for that reason. What is missing is the other end: `Protocol` mints no
+  rectangles into the entity yet, so there is nothing to clear and no second signal. It lands with the
+  damage run, and the ledger is not to grow a second mechanism when it does.
 - **The shell's scene vocabulary.** *(Kinds answered 2026-08-22; the dressings remain.)*
   [Decision 95](Decisions.md#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind)
   settles the node kinds — container, image, solid, reference — and finds decision 51's sketch wrong

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -192,6 +193,24 @@ public:
 	// half of decision 84.
 	[[nodiscard]] std::uint64_t OutputGeneration() const noexcept { return m_OutputGeneration; }
 
+	// The entities whose committed state is owed a presentation report, since the last time somebody
+	// took them.
+	//
+	// **This is the authoring half of decision 115's derivation and the reason it is a list rather than
+	// a flag on the entity.** The return leg says *sequence S reached the glass on output N*, and what
+	// `Protocol` needs from that is *this surface's frame callback is due*. Nothing on the frame side
+	// carries a surface, so the join has to be made here, and it is made out of what a commit already
+	// knows: the entity it wrote. Keeping it as a list is what makes the cost proportional to what a
+	// client did rather than to what the world holds — decision 115 rejects a scan for exactly that,
+	// and a flag on the entity would be one.
+	//
+	// It is taken rather than read: `Dispatch/Loop.h` seals it against the sequence about to be
+	// published, which is the one number that turns *this entity committed* into *this entity is owed a
+	// frame*.
+	[[nodiscard]] std::span<const EntityId> Awaiting() const noexcept { return m_Awaiting; }
+
+	void ClearAwaiting() noexcept { m_Awaiting.clear(); }
+
 private:
 	friend class SceneCommit;
 
@@ -361,6 +380,25 @@ private:
 		std::erase(m_Retiring, id);
 
 		return true;
+	}
+
+	// This entity's committed state is owed a presentation report. `Scene/Commit.h` is the only caller,
+	// because a commit is the only thing that changes what the world shows.
+	//
+	// **One entry per entity, and the newest commit is the one that resolves it.** A client that commits
+	// twice before either frame reaches the glass gets one report rather than two, which is exactly what
+	// `Protocol` does with the callbacks themselves — `ClientSurface::Apply` folds the pending list into
+	// the due list on every commit, so a second entry here would be a second answer to a question that
+	// has one. The scan is linear over a list whose length is the windows that committed since the last
+	// publication, which is one on almost every iteration.
+	void Await(EntityId id)
+	{
+		if (id.IsNull() || std::find(m_Awaiting.begin(), m_Awaiting.end(), id) != m_Awaiting.end())
+		{
+			return;
+		}
+
+		m_Awaiting.push_back(id);
 	}
 
 	// Decision 112's *one is open at a time*, as a refusal. A commit opened inside another is a bug at a
@@ -602,6 +640,11 @@ private:
 
 	EntityId m_FirstRoot{};
 	EntityId m_LastRoot{};
+
+	// What a commit has said is owed a presentation report, taken by the loop at every publication.
+	// Empty on almost every iteration, and never longer than the windows a person touched between two
+	// frames.
+	std::vector<EntityId> m_Awaiting;
 
 	std::vector<SceneOutput> m_Outputs;
 	std::uint64_t m_OutputGeneration = 0;

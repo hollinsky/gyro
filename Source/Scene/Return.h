@@ -1,13 +1,18 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "Core/Buffer.h"
+#include "Core/Handle.h"
 #include "Core/Signal.h"
 #include "Core/Time.h"
 #include "Publication/Return.h"
+#include "Scene/Reach.h"
+#include "Scene/Store.h"
 
 // The return leg's dispatch side: what a presented frame means to the world that authored it.
 //
@@ -31,13 +36,23 @@
 // the observer decide what that is worth. `Session` connects to the same signal rather than a second
 // one.
 //
-// **What is not here yet is the derivation itself.** Decision 115's accepted cost is a run of handles
-// retained beside each in-flight snapshot and freed at the watermark, and that is phase two's — it
-// wants the matching and lifetime work `Scene/Commit.h` still has no code for. Until then a presented
-// sequence crosses as a sequence, which is the number every one of those derivations is a function of,
-// and the signal fires per output rather than per surface. What that costs is that `Protocol` cannot
-// yet be written against it; what it buys is that the channel is exercised end to end before a client
-// exists, which is the only way the boot path above is ever tested.
+// **The derivation is the ledger below**, which is decision 115's accepted cost built rather than
+// deferred: the entities a commit said were owed a frame, stamped with the sequence about to carry
+// them and with the outputs their pixels land on, resolved as reports come back and dropped when every
+// output has shown them. It is one entry per window with a frame in flight — superseded by that
+// window's next commit, so a client committing faster than the panel scans does not accumulate — and
+// the scan on the return path is over that list rather than over the world, which is the axis decision
+// 115 rejects a pull on.
+//
+// **Three consumers want it and only one of them exists today.** The frame callback is the one
+// `Protocol` connects to now. Decision 113's client damage clears against *every* output having shown
+// the sequence rather than the first, which is why `Owed` goes on clearing bits after the signal has
+// gone out. `wl_buffer.release` is the third and needs no ledger yet, because `Protocol/Shm.h` copies
+// at commit and releases in the same step — it lands with the dmabuf path, where the hold is real.
+//
+// **What is still per output rather than per surface is `Presented` itself**, and it stays that way:
+// the boot splash and the recovery console present frames with nothing on the far end of them, so the
+// channel has to be exercised with no author in the ledger at all.
 
 // The presented state one output is in, as the world holds it.
 //
@@ -89,6 +104,22 @@ public:
 	// drawing into pixels gyro is still sampling.
 	Signal<BufferId> Released;
 
+	// What this entity committed has been shown, at this instant. `wl_surface.frame` is `Protocol`'s to
+	// answer and this is the fact it answers on — decision 115's derivation, arriving as an entity
+	// rather than as a sequence because a sequence is a number no client has ever heard of.
+	//
+	// **It fires on the *first* output to show the frame, which is decision 32's cadence.** A surface on
+	// two panels has one buffer and one callback queue, so per-output pacing is not expressible in the
+	// protocol at all; the fastest output it touches is the rate it gets, and the earliest report at or
+	// past its sequence is that rate arriving. The opposite fold — *every* output — is decision 113's
+	// damage clear, which is why the ledger below goes on clearing bits after the signal has gone out
+	// rather than dropping the entry on the first one.
+	//
+	// **The instant is when the frame reached the glass**, not when it was drawn and not now. A client
+	// paces itself off this number, so handing it the moment gyro happened to drain the channel would
+	// put dispatch's own jitter into every animation a toolkit runs.
+	Signal<EntityId, Instant> Reached;
+
 	// Take one report. Called at the top of the dispatch iteration, once per report, until the channel
 	// is empty.
 	//
@@ -127,6 +158,52 @@ public:
 		}
 	}
 
+	// Take what the store's commits declared owed, against the sequence about to carry them.
+	//
+	// **The sequence is the one the snapshot will be published under, read before the publish**, which
+	// `SnapshotOutbox::NextSequence` makes knowable and idempotent: a publish the ring refuses supersedes
+	// the pending slot under the same number, so the stamp stays the sequence that will eventually
+	// carry this scene. `Dispatch/Textures.h` seals a retirement against the same number for the same
+	// reason, and the two rules are one rule seen from either end of a snapshot's life.
+	//
+	// **An entry whose reach is empty is re-armed rather than resolved, and that is the invisible-window
+	// case.** A window on no output — minimised behind a hidden container, placed off every screen, or
+	// mapped before anything shows it — is owed nothing, because nothing is going to present it; the
+	// protocol says as much, and a compositor that answered anyway would have a client repainting into a
+	// screen it is not on. What it must not become is permanent: the entry stays, and every later
+	// publication asks the geometry again, so the frame the window becomes visible on is the frame its
+	// callback goes out on.
+	void Seal(std::uint64_t sequence, SceneStore& store)
+	{
+		// An entity that has gone takes its entry with it. A client disconnecting mid-flight is the
+		// ordinary case, and `Protocol` would ignore the id anyway — dropping it here is what keeps the
+		// ledger the length of the live windows rather than of the session.
+		std::erase_if(m_Owed, [&store](const Owed& entry) noexcept { return !store.IsLive(entry.Entity); });
+
+		for (const EntityId id : store.Awaiting())
+		{
+			// A window whose client went away between the commit and the publish. There is nobody left to
+			// tell, and the entity may already have been swept.
+			if (!store.IsLive(id))
+			{
+				continue;
+			}
+
+			Stamp(id, sequence, Reach(store, id));
+		}
+
+		store.ClearAwaiting();
+
+		for (Owed& entry : m_Owed)
+		{
+			if (entry.Outputs == 0 && !entry.Reported)
+			{
+				entry.Sequence = sequence;
+				entry.Outputs = Reach(store, entry.Entity);
+			}
+		}
+	}
+
 	// The output set the reports are read against, replaced on a hotplug rather than mutated — the same
 	// statement decision 84 makes about the snapshot's runs from the other side, and the reason a report
 	// carries its own count.
@@ -137,9 +214,34 @@ public:
 	{
 		m_Outputs = std::min(outputs, OutputsPerReport);
 		m_Presentations = {};
+
+		// A mask is a set of positions in the old set, so on the new one it names different panels — the
+		// same statement decision 84 makes about a run whose length no longer matches. What has already
+		// been reported is finished with and goes; what has not is re-armed at the next publication,
+		// against the outputs that exist now.
+		std::erase_if(m_Owed, [](const Owed& entry) noexcept { return entry.Reported; });
+
+		for (Owed& entry : m_Owed)
+		{
+			entry.Outputs = 0;
+		}
 	}
 
 	[[nodiscard]] std::size_t Outputs() const noexcept { return m_Outputs; }
+
+	// Whether anything is still waiting on a frame reaching the glass.
+	//
+	// **It is the condition the composition root rings the return leg's doorbell on**, and the reason
+	// the question is asked here rather than counted there: the root cannot see a ledger and the frame
+	// thread must not know one exists. False on a run with no clients — a splash, a console, a gym —
+	// which is what keeps a presented frame from costing a wakeup nobody needed.
+	//
+	// **A window nothing is going to present keeps this true for as long as it stays off screen**, and
+	// what that costs is nothing on a still machine and one re-armed reach per publication on a busy
+	// one. It is true rather than costly because the doorbell is rung by a *presented frame*: a world
+	// where nothing moves presents nothing, so a minimised window waiting forever wakes nobody. Where
+	// something else is animating, dispatch was being woken by that client's commits anyway.
+	[[nodiscard]] bool Owing() const noexcept { return !m_Owed.empty(); }
 
 	// What this output has last shown, and when. Decision 113's damage clear reads it, and so does an
 	// observer that connected after the frame it cares about — a signal is an event and this is the
@@ -168,7 +270,92 @@ private:
 		m_Presentations[index] = { .Sequence = frame.Sequence, .At = frame.At };
 
 		Presented.Emit(index, frame.Sequence, frame.At);
+
+		Resolve(index, frame.Sequence, frame.At);
 	}
+
+	// One entity's entry, superseded rather than appended to.
+	//
+	// **A second commit before the first was shown replaces the first**, which is not a loss: a frame
+	// callback answers *draw again*, and answering it twice for two commits a client made inside one
+	// refresh would ask for a frame the panel has nowhere to put. `ClientSurface::Apply` folds its
+	// pending callbacks into one due list on exactly the same reasoning, so the two sides agree by
+	// construction rather than by a rule somebody has to maintain across the module boundary.
+	struct Owed
+	{
+		EntityId Entity{};
+
+		// The published sequence that first carries what was committed. A report at or past it has shown
+		// it, because the scene crossing the boundary is complete state and not a delta (74).
+		std::uint64_t Sequence = 0;
+
+		// The outputs that have not yet shown it, one bit each. Cleared as reports arrive.
+		OutputReach Outputs = 0;
+
+		// Whether the callback has gone out, which is the first bit clearing. Kept beside the mask
+		// because the two answer decision 32's fold and decision 113's, and those are opposite
+		// directions over one set.
+		bool Reported = false;
+	};
+
+	void Stamp(EntityId id, std::uint64_t sequence, OutputReach outputs)
+	{
+		const auto matches = [id](const Owed& entry) noexcept { return entry.Entity == id; };
+		const auto at = std::find_if(m_Owed.begin(), m_Owed.end(), matches);
+
+		if (at != m_Owed.end())
+		{
+			*at = Owed{ .Entity = id, .Sequence = sequence, .Outputs = outputs, .Reported = false };
+
+			return;
+		}
+
+		m_Owed.push_back(Owed{ .Entity = id, .Sequence = sequence, .Outputs = outputs, .Reported = false });
+	}
+
+	// One output's report, against everything still owed.
+	//
+	// The scan is over the windows with a frame in flight, which is what committed since the last
+	// presentation — a handful on a busy desktop and none at all on a still one. Decision 115 rejects a
+	// derivation whose cost is the size of the world, and this is that rule kept on the return path.
+	void Resolve(std::size_t index, std::uint64_t sequence, Instant at)
+	{
+		const OutputReach bit = index < MaxReachableOutputs ? OutputReach{ 1 } << index : 0;
+
+		if (bit == 0)
+		{
+			return;
+		}
+
+		for (Owed& entry : m_Owed)
+		{
+			if ((entry.Outputs & bit) == 0 || sequence < entry.Sequence)
+			{
+				continue;
+			}
+
+			entry.Outputs &= ~bit;
+
+			if (!entry.Reported)
+			{
+				entry.Reported = true;
+
+				Reached.Emit(entry.Entity, at);
+			}
+		}
+
+		// Erased after the walk rather than inside it, because an observer of `Reached` above may commit
+		// — a shell reacting to a frame having landed is an ordinary thing — and a commit does not touch
+		// this list, but a future one might. Doing the removal here costs nothing and takes the question
+		// away.
+		std::erase_if(m_Owed, [](const Owed& entry) noexcept { return entry.Reported && entry.Outputs == 0; });
+	}
+
+	// Decision 115's run of handles retained beside the snapshots in flight, as one entry per window
+	// waiting on a frame. Bounded by the live entities and in practice by the windows a person is
+	// looking at, because an entry is superseded by the next commit on the same entity and erased when
+	// every output has shown it.
+	std::vector<Owed> m_Owed;
 
 	std::size_t m_Outputs = 0;
 	std::array<OutputPresentation, OutputsPerReport> m_Presentations{};

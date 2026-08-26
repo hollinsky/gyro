@@ -233,6 +233,18 @@ public:
 
 		content->Texture = texture;
 
+		// **The attach is what puts this entity in decision 115's ledger**, and it is the whole of what
+		// `Protocol` needs to answer a `wl_surface.frame`: the client wants to know when these pixels
+		// reached the glass, and until that answer arrives a toolkit does not draw the next frame.
+		//
+		// **A commit that asks for a callback and attaches nothing is covered by this and not missed.**
+		// It is legal and ordinary — a client asking to be paced while showing what it already showed —
+		// and `Protocol/Shell.cpp` reaches this verb on every commit a mapped window makes, because a
+		// surface's content is sticky and the attach it performs is of whatever the surface currently
+		// holds. A commit against a surface with no window at all reaches nothing here, correctly: there
+		// is no node, so there is nothing for a panel to show.
+		m_Scene->Await(id);
+
 		return true;
 	}
 

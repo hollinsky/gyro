@@ -11071,3 +11071,121 @@ than partly honoured. Both are in [Open.md](Open.md).
 First light on a Tiger Lake laptop: 1,123 commits in 19.3 seconds on eDP-1 at 1920x1080, Y-tiled
 under modifier `0x100000000000002` because the plane offered the set and the device chose from it,
 every commit carrying an `IN_FENCE_FD` and none held for a composite.
+
+### 146. A commit is owed a frame, and a ledger of entities is what turns a presented sequence into a callback
+
+*(Decided 2026-08-25, building
+[decision 115](#115-scene-drains-the-return-channel-and-protocol-observes-what-it-derives)'s phase
+two. Until it landed, a window drew one frame and stopped: `wl_surface.frame` was accepted, filed, and
+never answered, because a presented sequence is a number no client has ever heard of and nothing on
+the dispatch side remembered what a sequence contained.)*
+
+**`Scene` keeps one entry per entity with a frame in flight — the sequence that first carries what a
+commit wrote, and the outputs that quad lands on — and answers the client on the first of those
+outputs to show it.** `SceneCommit::Attach` is what files an entry, `SceneReturn::Seal` stamps it
+against `SnapshotOutbox::NextSequence` beside the texture seal, and the drain resolves it into a
+`Signal<EntityId, Instant>` that `Protocol` owns the link to.
+
+**The join has to be made where the commit is, because it cannot be made anywhere else.** The forward
+channel carries a flattened preorder run in which a client's commit is anonymous — bytes among bytes
+— and decision 75 collapsed the return channel to one fixed-size report precisely so that the side
+which *authored* the snapshot does the deriving. So the only moment both facts exist together is the
+moment the commit closes, and the only thing that costs is a handle in a list.
+
+**The sequence is knowable before the publish, and that is `Publication/Ring.h`'s contract rather than
+an arrangement made for this.** A refused publish supersedes the pending slot under the same
+unconsumed number (74), so the stamp taken before the ring answers is the number the scene will
+eventually cross under. `Dispatch/Textures.h` already stamped a retirement the same way; this is the
+mirror of it — that one is the first sequence that does not name a texture, and this is the first that
+does show a commit.
+
+**A report at or *past* the stamp is the frame, not one equal to it.** The ring hands the frame thread
+the newest snapshot and skips what it passed, so the publication a client's pixels went out in is very
+often not the one that reached the glass. Waiting for equality is a callback that never arrives on any
+machine that ever dropped a publication, which is every machine.
+
+**The outputs come from a bound composed on demand, for the entities that committed and no others.**
+`Scene/Reach.h` walks an entity's ancestors, composes the chain, projects its quad into global space,
+and intersects the result with each output's `Bounds` — which is where `Scene/Output.h` already said
+decision 32's cadence question is answered. The cost is proportional to what a client did rather than
+to what the world holds, which is the axis decision 115 rejected a world scan on, and it is
+emphatically *not* the swept per-node bound [Open.md](Open.md) still wants for the wake fold: that one
+has to cover every position a spring will pass through, and this one is where a node is at the instant
+it was sealed.
+
+**The fastest output it touches is the cadence, which is decision 32 arriving as the first bit to
+clear.** The entry goes on clearing bits after the callback has gone out, because decision 113's
+damage clear folds the same set the opposite way — *every* output must have shown the sequence — and
+building the ledger to serve only the first fold would be building it twice.
+
+**A window on no output waits, and is re-armed rather than abandoned.** Nothing is going to present a
+window that is off every screen or under something hidden, so nothing may honestly tell its client to
+draw — which is the protocol's own rule and the reason a minimised application stops spending a core.
+What makes that survivable is that every later publication asks the geometry again, so the frame the
+window comes back into view on is the frame its callback goes out on, with the client having done
+nothing to ask a second time.
+
+**A second commit supersedes the first rather than queueing behind it.** One entry per entity, because
+`ClientSurface::Apply` already folds a surface's pending callbacks into one due list on every commit —
+two entries would be two `done` events for one refresh, which is a client drawing twice as fast as the
+panel and then stalling.
+
+**Rejected: answering on any output that presented a sequence at or past the commit's.** One line
+shorter and wrong on exactly the configuration decision 32 exists for — a window paced by the monitor
+it is *not* on, which on a mixed-rate desk is a client drawing at 144 Hz into a 60 Hz panel.
+
+**Rejected: computing the reach for every node inside the serializer walk.** It is the second transform
+walk per publication that [Open.md](Open.md)'s wake-fold entry declines to pay for pending a
+measurement, and paying it here would settle that entry by accident and in the expensive direction.
+
+**Rejected: a flag on the entity that `Protocol` scans for.** Decision 115 already rejected the pull,
+and the objection is unchanged: its cost is the size of the world rather than the size of what was
+presented.
+
+**What decision 32 still does not have is its hysteresis.** *Never switched mid-animation* wants a
+refresh period on the dispatch side, and decision 97 deliberately gave the mode's extent to the frame
+side — `Scene/Output.h` carries where an output *is*, not when it scans. The first-to-present rule
+agrees with fastest-output in the steady state and switches freely across a seam drag; what it would
+take to close is a nominal period on `SceneOutput` as a policy input, and that is in
+[Open.md](Open.md) rather than assumed here.
+
+### 147. The return channel's doorbell is the frame thread's, and it rings only where a client is waiting
+
+*(Decided 2026-08-25. Settles the reach half of
+[Open.md](Open.md)'s *the return channel has no doorbell*, which asked for the poll to be replaced only
+once the deferral path had been seen to happen. Decision 146 made the question urgent for a different
+reason than the one that entry is about.)*
+
+**The frame thread wakes the dispatch thread when a frame reached the glass and something is waiting to
+hear about it.** `DispatchWait::Nudge` is the write; the condition is an atomic the dispatch thread
+publishes — decision 146's ledger being non-empty — and the pairing is completed on the other side by
+dispatch declining to sleep when the frame thread's presented count has moved since its step began.
+
+**Without it, decision 146 would be a deadlock rather than a delay.** A settled world arms no
+deadline on either thread, the return channel carries no descriptor, and the only thing that would
+wake dispatch to send the callback is the client acting on the callback it has not been sent. That is
+not a corner: it is every still desktop with one application in it.
+
+**Both halves are needed because the two variables are written on one thread and read on the other in
+the opposite order**, which is the one interleaving release and acquire do not cover. So they are
+sequentially consistent, at one fence per presented frame on a path that is already performing a
+syscall — and either half alone loses a wakeup in a window a few instructions wide, which would
+present as an application that freezes once an hour and cannot be reproduced.
+
+**The condition is what keeps *doing nothing costs nothing* true.** A boot splash, a recovery console
+and a gym all present frames with an empty ledger, so they spend no syscall at all; the write happens
+only while a client is genuinely between commit and glass. Ringing unconditionally would run the
+dispatch loop at panel rate for the length of every run, which is the cost decision 83 took care to
+avoid on the forward channel.
+
+**Rejected: an eventfd on the return channel itself**, which is what Open.md's entry proposes. It is
+the better shape for the deferred-publish case that entry is about — a descriptor `Publication` owns,
+rather than a wait the root owns — and it is more than this needs: the write would be unconditional
+and inside decision 36's frame section, and the wakeups it buys back are the ones a client is waiting
+on, which the root can already see. That entry stays open on its own terms, and its own condition is
+unchanged: settle it once the deferral path has been seen to happen at all.
+
+**Rejected: dispatch polling while the ledger is non-empty.** `PublishRetryInterval` is the precedent
+and it is the wrong one to follow here. Four milliseconds of latency on a retry lands on a frame that
+was already four publishes behind; four milliseconds on a frame callback lands on every frame of every
+animation a toolkit runs, as jitter a person sees.

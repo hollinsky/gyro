@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "Core/Texture.h"
+#include "Core/Time.h"
 #include "Geometry/Space.h"
 #include "Protocol/Context.h"
 #include "Protocol/Region.h"
@@ -143,16 +144,26 @@ public:
 	// What the last `commit` made true. The only state anything outside this object may read.
 	[[nodiscard]] const SurfaceState& Current() const noexcept { return m_Current; }
 
-	// How many frame callbacks the last commit made due.
+	// How many frame callbacks are waiting on a frame reaching the glass.
 	//
-	// **They are held rather than answered, and that is this step's one visible gap.** A callback is
-	// answered when the surface's content is about to be shown, which is a fact only the return leg
-	// knows — `Scene/Return.h` drains what reached the glass — and there is nothing on the far end of
-	// it for a surface with no buffer. Until the buffer path lands, a client that asks for one waits;
-	// with no way to map a window, there is nothing for it to be waiting on. The count is what a test
-	// can assert on in the meantime, and the list is private because the only legitimate thing to do
-	// with one is send it.
+	// **They are answered by `Present` below and by nothing else**, because when a client may draw again
+	// is a fact only the return leg holds: `Scene/Return.h` drains what reached the glass and says which
+	// entity's pixels were in it (115). A count rather than the list, because the only legitimate thing
+	// to do with one of these is send it.
 	[[nodiscard]] std::size_t DueCallbackCount() const noexcept { return m_DueCallbacks.size(); }
+
+	// The content this surface committed has been shown, at `at`. Answer everything the last commit made
+	// due.
+	//
+	// **The timestamp is the instant the frame reached the glass**, in milliseconds of the compositor's
+	// own clock — which is what `wl_callback.done` carries for a frame callback and what a toolkit
+	// differences to work out how long a frame took. Decision 57's conversion at the edge: the domain is
+	// an `Instant` everywhere inside gyro and becomes a truncated millisecond count exactly here, where
+	// the protocol demands one.
+	//
+	// **It is safe to call on a surface with nothing due**, which is the ordinary case: a window is
+	// presented on every frame the panel scans and asks to be told about the ones it drew for.
+	void Present(Instant at) noexcept;
 
 	// Claim this surface. False where something already has it, which is every role object's own
 	// `role` error and is raised by the caller because only it knows which one to name.

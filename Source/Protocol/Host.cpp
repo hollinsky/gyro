@@ -3,6 +3,8 @@
 #include <cerrno>
 #include <utility>
 
+#include "Protocol/Surface.h"
+
 Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 {
 	// The texture space is not touched here — nothing is adopted until a client commits, and it arrives
@@ -68,6 +70,14 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 	}
 
 	return {};
+}
+
+void ClientHost::OnReached(EntityId entity, Instant at)
+{
+	if (ClientSurface* const surface = m_Context.SurfaceOf(entity); surface != nullptr)
+	{
+		surface->Present(at);
+	}
 }
 
 Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)

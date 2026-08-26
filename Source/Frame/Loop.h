@@ -694,9 +694,22 @@ public:
 
 	[[nodiscard]] std::uint64_t Held() const noexcept { return m_Held; }
 
+	// How many frames this loop has reported as having reached the glass, over every output.
+	//
+	// **It is the doorbell's condition and nothing else reads it.** The return channel carries no
+	// descriptor — Dispatch/Loop.h's `PublishRetryInterval` is the same hole seen from the other side —
+	// so the composition root is what wakes the dispatch thread when a report has something in it that a
+	// client is waiting on, and this counter moving is how the root knows this iteration was one of
+	// those. A count rather than a flag because the root compares it across a step, exactly as it
+	// already compares dispatch's publication count to decide whether to ring decision 83's doorbell in
+	// the other direction.
+	[[nodiscard]] std::uint64_t Shown() const noexcept { return m_Shown; }
+
 	[[nodiscard]] const SnapshotReader& Snapshot() const noexcept { return m_Snapshot; }
 
 private:
+	std::uint64_t m_Shown = 0;
+
 	// Gather what each output staged in the drain, and clear it as it goes.
 	//
 	// **Clearing here is what makes a report say *no news* rather than repeating itself.** A report goes
@@ -714,6 +727,8 @@ private:
 		{
 			m_Presentations[index] = m_Outputs[index].m_Presented;
 			m_Outputs[index].m_Presented = {};
+
+			m_Shown += m_Presentations[index].Sequence != 0 ? std::uint64_t{ 1 } : std::uint64_t{ 0 };
 		}
 
 		return { m_Presentations.data(), m_Outputs.size() };

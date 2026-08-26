@@ -212,6 +212,17 @@ public:
 
 		serialize.Close();
 
+		// **Beside the texture seal and under the same number**, and the two are mirror images: that one
+		// stamps what the scene stopped naming, this one stamps what it started showing. A commit during
+		// the `Advance` above said an entity is owed a frame, and the scene that just crossed is the
+		// first that carries it — so a report at or past this sequence is that entity reaching the glass,
+		// which is what `Protocol` turns into a `wl_surface.frame` callback.
+		//
+		// **After the serialisation rather than before it**, because the walk sweeps: an entity whose
+		// author went away and whose exit has finished is destroyed in there, and sealing first would put
+		// a handle in the ledger that the same step then freed.
+		m_Return.Seal(sequence, m_Store);
+
 		if (published)
 		{
 			++m_Publications;
@@ -282,6 +293,10 @@ public:
 	// What the reports meant, as signals. `Protocol` owns the links to these — decision 115's shape, and
 	// the reason the drain is `Scene`'s rather than the protocol layer's is that the boot splash and the
 	// recovery console present frames with nothing on the far end of them.
+	// Whether a client is waiting on a frame that has not reached the glass yet, which is the composition
+	// root's condition for waking this thread when one does. `Scene/Return.h` carries the argument.
+	[[nodiscard]] bool Owing() const noexcept { return m_Return.Owing(); }
+
 	[[nodiscard]] SceneReturn& Return() noexcept { return m_Return; }
 
 	[[nodiscard]] const SceneReturn& Return() const noexcept { return m_Return; }

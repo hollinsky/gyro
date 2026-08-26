@@ -40,6 +40,8 @@
 #include "Core/Trace.h"
 #include "Core/Wake.h"
 #include "Dispatch/Loop.h"
+#include "Drm/Device.h"
+#include "Drm/Output.h"
 #include "Frame/Evaluator.h"
 #include "Frame/Loop.h"
 #include "Geometry/AxisTransform.h"
@@ -49,8 +51,6 @@
 #include "Headless/Device.h"
 #include "Headless/Output.h"
 #include "Headless/Renderer.h"
-#include "Drm/Device.h"
-#include "Drm/Output.h"
 #include "Nested/Host.h"
 #include "Nested/Output.h"
 #include "Protocol/Host.h"
@@ -1207,6 +1207,22 @@ private:
 
 			++m_Iterations;
 
+			// **The return leg's doorbell, rung only where somebody is waiting on it.** A report crosses
+			// every iteration and carries a presented frame on the ones an output flipped; what dispatch
+			// does with that is a `wl_surface.frame` callback, and nothing wakes it to do so. So the count
+			// is published for the dispatch thread's own check, and the write to the eventfd happens only
+			// where a client is actually owed a frame — a splash, a console, and an idle desktop present
+			// with nothing in the ledger and spend no syscall at all.
+			if (m_Shown.load() != m_Loop->Shown())
+			{
+				m_Shown.store(m_Loop->Shown());
+
+				if (m_ClientsOwed.load())
+				{
+					m_DispatchWait.Nudge();
+				}
+			}
+
 			// Bounded mode stops at idle rather than at the count, and the count is the guard rather than
 			// the goal. A `Settled` wake *is* Docs/Architecture.md#doing-nothing-must-cost-nothing reached
 			// — nothing owed, nothing outstanding, nothing to arm — so a run that gets there has shown the
@@ -1266,6 +1282,11 @@ private:
 	{
 		while (!m_DispatchWait.IsStopping())
 		{
+			// Read before the step, because the step's drain is what would consume it: a frame presented
+			// after this load and before the sleep below is one the drain cannot have seen, and comparing
+			// against a value taken afterwards would be comparing the count with itself.
+			const std::uint64_t shown = m_Shown.load();
+
 			const std::uint64_t before = m_Dispatch->Publications();
 			const Wake wake = m_Dispatch->Step();
 
@@ -1306,6 +1327,17 @@ private:
 			if (m_Clients != nullptr)
 			{
 				m_Clients->Flush();
+			}
+
+			// **Published before the sleep and paired with the check below**, which is the half of the
+			// handshake that closes the window the doorbell alone leaves: the frame thread may have
+			// presented between this step's drain and this store, in which case it read `false` and rang
+			// nothing, and what catches that is the count having moved since the step began.
+			m_ClientsOwed.store(m_Dispatch->Owing());
+
+			if (m_Dispatch->Owing() && m_Shown.load() != shown)
+			{
+				continue;
 			}
 
 			const Instant now = m_Clock.Now();
@@ -1546,9 +1578,10 @@ private:
 			// named the same way, because a global that is advertised and does nothing is the other kind
 			// of silence somebody would spend an afternoon on.
 			spdlog::info(
-				"wl_compositor, wl_shm, xdg_wm_base and wl_data_device_manager are the globals; a window will open and "
-				"be placed, and there is no seat to route input, no frame callback to answer and nothing behind the "
-				"clipboard, so it will not respond or redraw and cannot copy or paste"
+				"wl_compositor, wl_shm, xdg_wm_base and wl_data_device_manager are the globals; a window will open, be "
+				"placed and redraw against the frames that reach the glass, and there is no seat to route input and "
+				"nothing behind the clipboard, so it will not respond to a click or a keystroke and cannot copy or "
+			    "paste"
 			);
 
 			author = std::move(*made);
@@ -1608,6 +1641,16 @@ private:
 
 		m_Dispatch =
 			std::make_unique<DispatchLoop>(m_Clock, m_Snapshots, m_Returns, std::span{ importers.data(), importing });
+
+		// **Before `Open` and therefore before any client can have committed**, which is the only ordering
+		// that has no window in it: the host reads its clients inside `Advance`, so a connection made
+		// afterwards would be one a first frame could already have been owed against. Decision 115 puts
+		// the drain in `Scene` and has `Protocol` observe what it derives, and this is the one line where
+		// the two meet — the root is the only party that holds both.
+		if (m_Clients != nullptr)
+		{
+			m_Clients->Observe(m_Dispatch->Return());
+		}
 
 		if (const Result<void> opened = m_Dispatch->Open(std::move(author), { outputs.data(), m_Count }); !opened)
 		{
@@ -1915,6 +1958,22 @@ private:
 	// distinguish a world at rest from a world between motions. Not a channel: it carries no state
 	// anything renders from, and losing an update costs an iteration rather than a frame.
 	std::atomic<bool> m_WorldSettled{ false };
+
+	// The return leg's doorbell, as the two halves of one handshake.
+	//
+	// **`m_ClientsOwed` is dispatch saying a client is waiting on a frame that has not reached the glass
+	// yet**, and `m_Shown` is the frame thread's count of the frames that have. The frame thread rings
+	// `DispatchWait::Nudge` when it moves the second and finds the first set; the dispatch thread
+	// declines to sleep when the second has moved since it began its step. Either half alone loses a
+	// wakeup — the two variables are written on one thread and read on the other in the opposite order,
+	// which is the one interleaving release and acquire do not cover — so both are sequentially
+	// consistent, at a cost of one fence per frame on a path that is already doing a syscall.
+	//
+	// **Without them a settled world with a client in it is a deadlock and not a delay.** Dispatch arms
+	// no deadline when nothing is owed, the return channel carries no descriptor, and the only thing
+	// that would wake the thread is the client acting on the frame callback that is sitting undrained.
+	std::atomic<bool> m_ClientsOwed{ false };
+	std::atomic<std::uint64_t> m_Shown{ 0 };
 
 	// One identity per output, minted where hotplug will release them.
 	SlotAllocator<OutputTag> m_OutputIds{ MaxOutputs };

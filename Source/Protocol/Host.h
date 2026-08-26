@@ -4,6 +4,7 @@
 #include <string_view>
 
 #include "Core/Result.h"
+#include "Core/Signal.h"
 #include "Core/Time.h"
 #include "Core/Wake.h"
 #include "Protocol/Compositor.h"
@@ -14,6 +15,7 @@
 #include "Protocol/Shell.h"
 #include "Protocol/Shm.h"
 #include "Scene/Author.h"
+#include "Scene/Return.h"
 
 // The author with clients behind it: gyro's Wayland server standing where a gym stands.
 //
@@ -48,9 +50,14 @@
 // floor a window is placed on is authored here, once, because with no session agent there is one
 // session and this object is the whole of it.
 //
+// **A window redraws now, and what it redraws against is the return leg.** `Observe` connects this
+// host to the fact `Scene/Return.h` derives — *the pixels this entity committed reached the glass, at
+// this instant* — and a `wl_surface.frame` callback is what that fact is worth to a client. The
+// connection is the composition root's to make for decision 115's reason: `Scene` may not name
+// `Protocol`, so the signal carries an entity and this module is what knows which surface that is.
+//
 // What a person cannot do yet is *use* the window: there is no seat, so nothing routes a click or a
-// keystroke, and no frame callback answers, so an application draws its first frame and then waits for
-// a signal that never comes. Both are the next step.
+// keystroke. That is the next step.
 //
 // The global is a member rather than something the root passes in, because its lifetime is the
 // server's: `wl_compositor` exists for as long as there is a socket to reach it through, and unlike a
@@ -70,6 +77,10 @@ public:
 
 	// Push everything owed back out to the clients. The root's to call, immediately before it sleeps.
 	void Flush() noexcept { m_Server.Flush(); }
+
+	// Answer frame callbacks against what reached the glass. The root's to call once, before the first
+	// step, because it is the only party that holds both this host and the loop's return leg.
+	void Observe(SceneReturn& returns) { m_Reached.ConnectTo<&ClientHost::OnReached>(returns.Reached, *this); }
 
 	[[nodiscard]] std::string_view Name() const noexcept override { return "clients"; }
 
@@ -93,6 +104,16 @@ public:
 	[[nodiscard]] Wake Advance(SceneStore& scene, ITextures& textures, Instant now) override;
 
 private:
+	// One entity's pixels reached the glass. Everything a client is owed for that is a surface's, and
+	// the table that turns the id into one is `HostContext`'s.
+	//
+	// **It runs at the top of a dispatch iteration and outside `Advance`**, which is decision 115's
+	// ordering: a callback delivered here gives the client the whole of this iteration to draw into,
+	// where the same callback at the bottom would give it the next one. It needs no store and no texture
+	// space — sending an event is not a change to the world — so the context being unset is correct
+	// rather than a gap.
+	void OnReached(EntityId entity, Instant at);
+
 	// Bind the socket. The factory's alone — a host that reached the dispatch loop unbound would be one
 	// whose descriptor the root already put in its wait, so there is no second moment this could
 	// usefully happen at.
@@ -107,6 +128,11 @@ private:
 	// What a request handler reaches the world through, for the one call it is inside. Declared first
 	// because the bindings below point at it.
 	HostContext m_Context;
+
+	// The return leg's observer. Declared here so it is torn down with the host, which is before the
+	// dispatch loop that owns the signal — a link outliving its signal is what `Core/Signal.h` refuses
+	// to make possible, and the order is what keeps it from being asked.
+	Connection<EntityId, Instant> m_Reached;
 
 	CompositorGlobal m_Compositor{ m_Context };
 	wl_global* m_CompositorGlobal = nullptr;

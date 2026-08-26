@@ -28,8 +28,10 @@
 #include "Geometry/Scale.h"
 #include "Geometry/Space.h"
 #include "Protocol/Host.h"
+#include "Publication/Return.h"
 #include "Scene/Entity.h"
 #include "Scene/Output.h"
+#include "Scene/Return.h"
 #include "Scene/Store.h"
 #include "Scene/Textures.h"
 #include "Testing/Test.h"
@@ -224,6 +226,27 @@ struct Session
 		::setenv("WAYLAND_DISPLAY", std::string{ socket }.c_str(), 1);
 
 		Opened = (*Host)->Open(Store, Textures).has_value() && Client.Open().has_value();
+
+		// The return leg, wired the way the composition root wires it: before anything can have
+		// committed, because a first frame owed against an unobserved drain is a callback nothing would
+		// ever send.
+		Returns.SetOutputs(1);
+		(*Host)->Observe(Returns);
+	}
+
+	// The frame thread's half, with no frame thread: a report saying this sequence reached the glass on
+	// the one output, delivered the way `Dispatch/Loop.h` delivers one. `Seal` first, because the loop
+	// seals what the step's commits declared against the sequence about to carry them.
+	void Present(std::uint64_t sequence, Instant at)
+	{
+		Returns.Seal(sequence, Store);
+
+		FrameReport report{};
+		report.Watermark = sequence;
+		report.OutputCount = 1;
+		report.Presentations[0] = { .Sequence = sequence, .At = at };
+
+		Returns.Drain(report);
 	}
 
 	// One turn of the loop: what the client has written is read and answered, and what the server owes
@@ -246,6 +269,7 @@ struct Session
 	SceneStore Store{ Clock };
 	CountingTextures Textures;
 	Result<std::unique_ptr<ClientHost>> Host;
+	SceneReturn Returns;
 	Wire::Connection Client;
 	bool Opened = false;
 };
@@ -509,12 +533,16 @@ GYRO_TEST(ProtocolRoundTrip, AFrameCallbackIsAcceptedAndNotYetAnswered)
 
 	GYRO_CHECK(!session.Client.Fault().has_value());
 
-	// **Not fired, and that is the state of this step rather than a bug.** A frame callback is
-	// answered when the surface's content is about to reach the glass, which is a fact the return leg
-	// carries and which nothing here has, because a surface with no buffer never reaches it. A client
-	// that drives its animation off callbacks will stop after one frame — and it has nothing to draw
-	// anyway. The assertion is here so that the day it starts firing, the commit that made it fire is
-	// the one that turns this line around.
+	// **Not fired, and it is the surface having no window rather than the callback being unanswered.**
+	// A frame callback is answered when the content this surface committed reaches the glass, and a
+	// surface with no role and no buffer is in nobody's scene — there is no entity for the return leg to
+	// report against, so there is nothing to be waiting on. The mapped case is
+	// `AMappedWindowIsToldWhenItsFrameReachedTheGlass` below.
+	GYRO_CHECK_EQ(callback.Fired, std::uint32_t{ 0 });
+
+	session.Present(1, session.Clock.Now());
+	session.Turn();
+
 	GYRO_CHECK_EQ(callback.Fired, std::uint32_t{ 0 });
 }
 
@@ -916,6 +944,141 @@ GYRO_TEST(ProtocolRoundTrip, AnAcknowledgedFrameBecomesAWindowCentredOnTheOutput
 	GYRO_REQUIRE(content != nullptr);
 	GYRO_CHECK(content->Kind == NodeKind::Image);
 	GYRO_CHECK_EQ(content->Extent.Width, static_cast<float>(Width));
+}
+
+GYRO_TEST(ProtocolRoundTrip, AMappedWindowIsToldWhenItsFrameReachedTheGlass)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-presented" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x44 }));
+
+	toplevel.Drawn.Surface.Commit();
+	session.Turn();
+
+	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
+
+	class Callback final : public Wayland::WlCallbackListener
+	{
+	public:
+		void OnDone(std::uint32_t stamp) override
+		{
+			++Fired;
+			Stamp = stamp;
+		}
+
+		std::uint32_t Fired = 0;
+		std::uint32_t Stamp = 0;
+	} first;
+
+	// The whole of what a toolkit does per frame: ask to be told when this one lands, then hand over the
+	// pixels for it.
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	(void)toplevel.Drawn.Surface.Frame(first);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.DamageBuffer(0, 0, Width, Height);
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	// Nothing yet: the commit has reached the world, and the world has not reached a panel.
+	GYRO_CHECK_EQ(first.Fired, std::uint32_t{ 0 });
+
+	const Instant shown = Advanced(session.Clock.Now(), std::chrono::milliseconds{ 8 });
+
+	session.Present(1, shown);
+	session.Turn();
+
+	GYRO_CHECK(!session.Client.Fault().has_value());
+
+	// **This is the frame the window was waiting for, and it is what makes an application redraw.** The
+	// timestamp is the instant the frame reached the glass rather than the moment gyro got round to
+	// saying so, because a toolkit paces itself by differencing two of these.
+	GYRO_REQUIRE_EQ(first.Fired, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(first.Stamp, static_cast<std::uint32_t>(Monotonic::ToNanoseconds(shown) / 1'000'000));
+
+	// And the next frame is not answered on the strength of the last one. A callback that fired again
+	// unasked would be a client drawing faster than it committed.
+	session.Present(2, Advanced(shown, std::chrono::milliseconds{ 16 }));
+	session.Turn();
+
+	GYRO_CHECK_EQ(first.Fired, std::uint32_t{ 1 });
+
+	// A second frame, asked for the same way, is answered the same way — which is the loop an animating
+	// application actually runs in.
+	Callback second;
+
+	(void)toplevel.Drawn.Surface.Frame(second);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+	session.Present(3, Advanced(shown, std::chrono::milliseconds{ 32 }));
+	session.Turn();
+
+	GYRO_CHECK_EQ(second.Fired, std::uint32_t{ 1 });
+}
+
+GYRO_TEST(ProtocolRoundTrip, AWindowThatUnmappedIsNotToldAboutFramesItIsNotIn)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-unmapped" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x55 }));
+
+	toplevel.Drawn.Surface.Commit();
+	session.Turn();
+
+	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	class Callback final : public Wayland::WlCallbackListener
+	{
+	public:
+		void OnDone(std::uint32_t) override { ++Fired; }
+
+		std::uint32_t Fired = 0;
+	} callback;
+
+	// Attaching nothing takes the window down, and a frame callback asked for in the same commit is one
+	// nothing will ever show. The window's route back to this client is gone with it, which is what
+	// keeps a report against a retiring node — still drawn, because its exit is running (114) — from
+	// reaching a client that has taken its window away.
+	(void)toplevel.Drawn.Surface.Frame(callback);
+	toplevel.Drawn.Surface.Attach(Wayland::WlBuffer{}, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+	session.Present(1, session.Clock.Now());
+	session.Turn();
+
+	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK_EQ(callback.Fired, std::uint32_t{ 0 });
 }
 
 GYRO_TEST(ProtocolRoundTrip, ABufferCommittedBeforeTheConfigureIsAcknowledgedEndsTheClient)

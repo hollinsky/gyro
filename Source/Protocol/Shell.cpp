@@ -318,6 +318,12 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 
 		m_Window = *window;
 		m_Content = *content;
+
+		// **Where the return leg finds its way back to a client.** What `Scene/Return.h` reports is the
+		// entity whose pixels reached the glass, because it may not name a `wl_surface` (115) — so the
+		// image entity is registered against the surface that draws into it, here, at the one moment both
+		// identities exist and are known to be each other's.
+		m_Context->Bind(*content, surface);
 	}
 
 	{
@@ -348,6 +354,12 @@ void ClientXdgSurface::Unmap()
 	{
 		return;
 	}
+
+	// Before the retire rather than after it, so that nothing can report a frame against a window that
+	// is on its way out. The entity itself lives on until its exit settles (114); what stops here is the
+	// route from it back to a client, because the client has taken its window down and is not waiting to
+	// hear about the frames it spends leaving.
+	m_Context->Unbind(m_Content);
 
 	SceneStore* const scene = m_Context->Store();
 

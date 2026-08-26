@@ -105,6 +105,43 @@ ClientSurface::~ClientSurface()
 	}
 }
 
+void ClientSurface::Present(Instant at) noexcept
+{
+	if (m_DueCallbacks.empty())
+	{
+		return;
+	}
+
+	// Milliseconds, truncated, and wrapping at thirty-two bits because that is the width the protocol
+	// gives it. A toolkit differences two of these, and a difference across the wrap is correct in
+	// unsigned arithmetic — which is why it is a truncation rather than a clamp.
+	//
+	// **`Monotonic::ToNanoseconds` is sanctioned here for the reason it names**: the count is handed
+	// straight to something outside the process that takes one, which is a Wayland client rather than
+	// io_uring or a trace file, but is the same statement. Nothing here does arithmetic in the domain —
+	// decision 57 keeps that inside `Core/Time.h` — it converts once, at the edge, exactly where the
+	// protocol demands a unit gyro does not otherwise use.
+	const auto milliseconds =
+		static_cast<std::uint32_t>(static_cast<std::uint64_t>(Monotonic::ToNanoseconds(at) / 1'000'000));
+
+	// Emptied first and sent out of a local, for the destructor's reason exactly: `Destroy` runs the
+	// callback's `OnGone`, which calls `Forget` back into this object and erases from the list being
+	// walked. `Forget` then finds nothing, which is what it is written to do.
+	std::vector<FrameCallback*> due;
+
+	due.swap(m_DueCallbacks);
+
+	for (FrameCallback* const callback : due)
+	{
+		// The event and then the destruction, in that order and both from here. `wl_callback.done` is a
+		// destructor request on the client's side — it releases the object on receiving this — but the
+		// resource is the server's to free, and one left behind would be an object id nothing ever reuses
+		// for as long as the client lives.
+		callback->Object().Done(milliseconds);
+		callback->Object().Destroy();
+	}
+}
+
 void ClientSurface::Forget(const FrameCallback& callback) noexcept
 {
 	const auto matches = [&callback](const FrameCallback* held) noexcept { return held == &callback; };

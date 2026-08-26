@@ -34,11 +34,13 @@
 // stamps a retarget with the instant it fell due rather than with now. So the animation renders already
 // in progress by exactly the lateness, which is what `ISceneAuthor::Advance` is documented to want.
 //
-// **Stopping is a sticky flag and a counter nothing drains**, which is deliberate. `Interrupt` in
-// Compositor/Uring.h drains because the ring polls level-triggered every iteration and an eventfd left
-// readable is a spin; here the only write is the last one this object will ever see, so leaving it
-// readable is what makes every subsequent wait return at once instead of parking a thread the root is
-// waiting to join.
+// **Stopping is a sticky flag, and the counter is drained because a second party now writes to it.**
+// `Nudge` is the frame thread's doorbell — the return channel carries no descriptor, so a report with a
+// presented frame in it reaches a sleeping dispatch thread only if something writes here — and a
+// counter left readable after one of those would spin the thread for the rest of the run. Draining
+// cannot lose a stop: `Stop` releases the flag *before* the write, and every caller re-checks the flag
+// rather than asking which descriptor returned, so a wait that consumed the stop's own write still
+// finds the reason it was woken.
 class DispatchWait
 {
 public:
@@ -77,6 +79,23 @@ public:
 	// descriptor cannot fail to see the reason it was woken — Interrupt::Raise's ordering, for
 	// Interrupt::Raise's reason.
 	void Stop() noexcept;
+
+	// Frame thread. Wake the dispatch thread because a frame reached the glass and somebody is waiting
+	// to hear about it.
+	//
+	// **This is the doorbell the return channel does not have**, and it is the mirror of decision 83's
+	// on the forward one: that one exists because the frame thread had nothing to wake it when a
+	// snapshot arrived, and this exists because the dispatch thread has nothing to wake it when a report
+	// does. Without it a settled world is a deadlock rather than a delay — dispatch arms no deadline, so
+	// the only thing that would wake it is the client acting on a frame callback that is sitting behind
+	// a drain nobody is going to run.
+	//
+	// **The root rings it only when a client is actually owed something**, which is what keeps
+	// Docs/Architecture.md#doing-nothing-must-cost-nothing true: an idle desktop presents nothing and a
+	// desktop presenting for its own sake — a splash, a console — has nothing in the ledger, so the
+	// syscall is not spent at all. Ringing it unconditionally would run the dispatch loop at panel rate
+	// for the length of every run.
+	void Nudge() noexcept;
 
 	[[nodiscard]] bool IsStopping() const noexcept { return m_Stopping.load(std::memory_order_acquire); }
 
