@@ -785,6 +785,17 @@ nothing only proves the grep.
   measured: how much of input-to-photon a coalesced cursor commit actually saves, and whether a
   cursor-plane commit disturbs the refresh timer on a VRR panel, which the presentation-timing entry
   below already wants a panel for.
+
+  **Narrowed to the late commit alone.** *(2026-08-25.)*
+  [Decision 152](Decisions.md#152-promotion-is-a-partition-of-the-draw-list-computed-every-frame-and-a-node-is-promotable-when-its-resample-is-a-no-op-and-it-carries-no-dressing-on-itself)
+  found that most of what this entry treats as missing is not: a plane's geometry is evaluated on the
+  frame thread once per refresh and a client's content arrives when the client publishes, so a
+  promoted plane that animates while its window redraws slowly needs no verb `IPresenter` does not
+  have. The pointer is a node in the published scene like any other, and the dispatch thread wakes on
+  the input event, so the newest position is in the ring before the frame thread reads it. What is
+  still open is only the *late* commit — programming the cursor plane after the composite is
+  recorded, against a position newer than the snapshot the frame was drawn from, which is a third
+  channel across the publication boundary and wants both numbers below before it is worth one.
 - **What a refused promotion costs.** A surface bound for a plane can skip the linearised copy and
   the mip chain entirely, which is most of the win for video. If the atomic test then refuses the
   partition, gyro must composite that surface on the frame it had planned not to — and the import it

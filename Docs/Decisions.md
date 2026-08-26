@@ -11582,6 +11582,51 @@ through it, and a plane will scan out the whole rectangle. The rule is about sep
 about the dressing vocabulary, and it is the one place the assigner has to look at what is underneath
 rather than only at the node.
 
+#### The cursor is a node in the published scene, and gyro draws its own glyph
+
+**The pointer's position is dispatch's, and there is no second copy of it.** Three consumers need it
+and none can move: `wl_pointer.enter` and `leave` are hit-testing against the scene tree,
+[decision 141](#141-a-window-is-parented-into-gyros-floor-and-shown-when-placed-the-floorplanner-stands-in-for-an-absent-shell)'s
+Floorplanner already centres a window on *the output holding the pointer*, and `set_cursor` arrives
+as a wire request. So the cursor is a node like any other, published like any other, and the frame
+thread reads it out of the snapshot it was already reading.
+
+**Holding it frame-side was considered and is not a side.** Since dispatch holds it regardless, a
+frame-side position is a second encoding of one fact — the defect this log rejects in
+[decision 78](#78-present-takes-a-layer-list-and-the-composite-is-one-member-of-it)'s z field and in
+`DrawItem`'s absent blend flag — and the only way to feed the copy is a channel that is not the
+snapshot ring.
+[Decision 50](#50-the-world-is-authored-on-the-dispatch-thread-the-snapshot-carries-coefficients)
+turns on there being exactly two, and `Core/Signal.h` makes a third an abort rather than a
+convention.
+
+**It also reclaims no latency, which is what the argument for it rested on.** The picture it appeals
+to is the frame thread sampling a fresher number at its own deadline; but the dispatch thread wakes
+*on the input event* and the forward ring is newest-wins, so the newest position is already sitting
+in the ring when the frame thread reads. The staleness is one dispatch wakeup — a `SCHED_FIFO`
+thread one priority below the frame thread — rather than one frame. The cost of publishing a snapshot
+per pointer motion is real and is bounded by the same mechanism: a thousand-hertz mouse produces a
+thousand publications a second into a ring where all but the last are overwritten unread.
+
+**What survives is narrower than the position and is deferred rather than answered.** Committing the
+cursor plane *after* the composite is recorded, against a position dispatch wrote after the snapshot
+the frame was drawn from, would buy most of a refresh of input-to-photon on the element people are
+most sensitive to. That genuinely does need something out of band, and the cheapest shape is a small
+newest-wins position ring beside the snapshot one. It is a third channel, so the case for it has to
+be a measurement rather than an intuition — how much a late commit saves, and whether a cursor-plane
+commit disturbs the refresh timer on a variable-refresh panel — and [Open.md](Open.md) keeps it with
+those two numbers attached. If they come back good, reopening the boundary is its own entry and not
+an optimization smuggled into this one.
+
+**The glyph is gyro's own drawing rather than an XCursor theme.** A theme is a dependency and a set
+of files on disk, and this process is also the boot splash and the recovery console — so a pointer
+that depends on a theme having been installed is a pointer the console can be without, on the exact
+machine where being without one is worst. Drawing it is a handful of nodes under the vocabulary
+[Gym](../Source/Gym) already authors with, it is subject to
+[Experience.md](Experience.md#the-picture-is-correct) like everything else gyro draws, and it costs
+what it is worth: a shape somebody has to design, against a theme that would have looked like
+everyone else's.
+
 #### What it costs, which is two things and neither is free
 
 **The atomic test is on the frame thread, inside decision 29's `B(L)`.** Deciding a partition means
