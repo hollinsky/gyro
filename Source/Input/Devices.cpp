@@ -19,7 +19,9 @@
 #include <cstdio>
 #include <cstring>
 #include <format>
+#include <optional>
 #include <string_view>
+#include <utility>
 
 #include "Core/Time.h"
 
@@ -148,6 +150,77 @@ void Log(libinput* /*context*/, libinput_log_priority priority, const char* form
 		spdlog::debug("libinput: {}", text);
 	}
 }
+// libinput reports `CLOCK_MONOTONIC` microseconds, which Core/Time.h's ingest surface is named for.
+// Every event below is stamped through here and nowhere else, so there is one conversion in the input
+// path rather than one per event type.
+[[nodiscard]] Instant At(std::uint64_t microseconds)
+{
+	return Monotonic::FromMicroseconds(static_cast<std::int64_t>(microseconds));
+}
+
+// An axis a tool reports, or nothing where this tool does not have it — which is per tool rather than
+// per tablet, since a puck on the same tablet as a pen reports neither pressure nor tilt.
+[[nodiscard]] std::optional<double> Axis(bool present, double value)
+{
+	return present ? std::optional<double>{ value } : std::nullopt;
+}
+
+[[nodiscard]] ToolKind KindOf(libinput_tablet_tool* tool)
+{
+	switch (::libinput_tablet_tool_get_type(tool))
+	{
+		case LIBINPUT_TABLET_TOOL_TYPE_PEN:
+			return ToolKind::Pen;
+		case LIBINPUT_TABLET_TOOL_TYPE_ERASER:
+			return ToolKind::Eraser;
+		case LIBINPUT_TABLET_TOOL_TYPE_BRUSH:
+			return ToolKind::Brush;
+		case LIBINPUT_TABLET_TOOL_TYPE_PENCIL:
+			return ToolKind::Pencil;
+		case LIBINPUT_TABLET_TOOL_TYPE_AIRBRUSH:
+			return ToolKind::Airbrush;
+		case LIBINPUT_TABLET_TOOL_TYPE_MOUSE:
+			return ToolKind::Mouse;
+		case LIBINPUT_TABLET_TOOL_TYPE_LENS:
+			return ToolKind::Lens;
+		case LIBINPUT_TABLET_TOOL_TYPE_TOTEM:
+			return ToolKind::Totem;
+		default:
+			return ToolKind::Unknown;
+	}
+}
+
+// Everything a tablet event carries except which transition it was.
+//
+// **The axes are read on every event and not only on an axis one.** libinput's tablet events all
+// carry the tool's full state, so a proximity-in already knows where the tip is and a tip-down already
+// knows its pressure — and a consumer that had to remember the last axis event to interpret a tip
+// would be keeping a copy of what it was just handed.
+[[nodiscard]] ToolEvent StateOf(libinput_event_tablet_tool* event, InputDeviceId device)
+{
+	libinput_tablet_tool* const tool = ::libinput_event_tablet_tool_get_tool(event);
+
+	return ToolEvent{
+		.Kind = KindOf(tool),
+		.Serial = ::libinput_tablet_tool_get_serial(tool),
+		.TipDown = ::libinput_event_tablet_tool_get_tip_state(event) == LIBINPUT_TABLET_TOOL_TIP_DOWN,
+		// Normalized by transforming onto a one-unit-wide area, which is the door libinput gives for a
+		// fraction rather than the millimetres `get_x` reports — see Core/Input.h on why a coordinate
+		// here is the device's own and not a place on a screen.
+		.NormalizedX = ::libinput_event_tablet_tool_get_x_transformed(event, 1),
+		.NormalizedY = ::libinput_event_tablet_tool_get_y_transformed(event, 1),
+		.Pressure = Axis(::libinput_tablet_tool_has_pressure(tool), ::libinput_event_tablet_tool_get_pressure(event)),
+		.Distance = Axis(::libinput_tablet_tool_has_distance(tool), ::libinput_event_tablet_tool_get_distance(event)),
+		.TiltXDegrees = Axis(::libinput_tablet_tool_has_tilt(tool), ::libinput_event_tablet_tool_get_tilt_x(event)),
+		.TiltYDegrees = Axis(::libinput_tablet_tool_has_tilt(tool), ::libinput_event_tablet_tool_get_tilt_y(event)),
+		.RotationDegrees =
+			Axis(::libinput_tablet_tool_has_rotation(tool), ::libinput_event_tablet_tool_get_rotation(event)),
+		.Slider =
+			Axis(::libinput_tablet_tool_has_slider(tool), ::libinput_event_tablet_tool_get_slider_position(event)),
+		.When = At(::libinput_event_tablet_tool_get_time_usec(event)),
+		.Device = device,
+	};
+}
 } // namespace
 
 Devices::~Devices()
@@ -196,6 +269,13 @@ Result<std::unique_ptr<Devices>> Devices::Open(std::string seat)
 	return devices;
 }
 
+InputDeviceId Devices::Identify(libinput_event* event) const
+{
+	const auto found = m_Devices.find(::libinput_event_get_device(event));
+
+	return found == m_Devices.end() ? InputDeviceId{} : found->second;
+}
+
 RawFd Devices::Descriptor() const noexcept
 {
 	return m_Context != nullptr ? RawFd{ ::libinput_get_fd(m_Context) } : RawFd{};
@@ -232,7 +312,46 @@ Result<void> Devices::Drain()
 				// taken exclusively, so the line also says which devices gyro is standing in front of.
 				const bool keys = ::libinput_device_has_capability(device, LIBINPUT_DEVICE_CAP_KEYBOARD);
 
-				spdlog::info("input: {} ({})", ::libinput_device_get_name(device), keys ? "keys" : "no keys");
+				// **A refusal is a log line and not a failure**, because the alternative is a machine
+				// with no input at all over a device somebody plugged into the two hundred and
+				// fifty-seventh port. What that device produces is dropped below, where a null id is
+				// what an unidentified event has.
+				const std::optional<InputDeviceId> id = m_Ids.Allocate();
+
+				if (!id.has_value())
+				{
+					spdlog::error("input: no identity left for {}", ::libinput_device_get_name(device));
+
+					break;
+				}
+
+				m_Devices.emplace(device, *id);
+
+				spdlog::info(
+					"input: {} ({}) is {}", ::libinput_device_get_name(device), keys ? "keys" : "no keys", *id
+				);
+
+				break;
+			}
+
+			case LIBINPUT_EVENT_DEVICE_REMOVED:
+			{
+				libinput_device* const device = ::libinput_event_get_device(event);
+				const auto found = m_Devices.find(device);
+
+				if (found == m_Devices.end())
+				{
+					break;
+				}
+
+				// Announced before it is freed, so an observer holding a touch sequence keyed to this
+				// device can still compare the id it is holding against the one being retired.
+				Removed.Emit(found->second);
+
+				m_Ids.Free(found->second);
+				m_Devices.erase(found);
+
+				spdlog::info("input: {} is gone", ::libinput_device_get_name(device));
 
 				break;
 			}
@@ -248,19 +367,219 @@ Result<void> Devices::Drain()
 					KeyEvent{
 						.Code = ::libinput_event_keyboard_get_key(key),
 						.Pressed = ::libinput_event_keyboard_get_key_state(key) == LIBINPUT_KEY_STATE_PRESSED,
-						.When = Monotonic::FromMicroseconds(
-							static_cast<std::int64_t>(::libinput_event_keyboard_get_time_usec(key))
-						),
+						.When = At(::libinput_event_keyboard_get_time_usec(key)),
+						.Device = Identify(event),
 					}
 				);
 
 				break;
 			}
 
+			case LIBINPUT_EVENT_POINTER_MOTION:
+			{
+				libinput_event_pointer* const motion = ::libinput_event_get_pointer_event(event);
+
+				// **Both displacements, and neither derived from the other.** The accelerated one moves
+				// the cursor; the unaccelerated one is what `zwp_relative_pointer_v1` owes a game that
+				// is reading the mouse directly, so that a curve is not applied to it twice.
+				//
+				// **Acceleration has already happened, here, per event.** libinput's curve is nonlinear
+				// in velocity, so this is the last place the numbers can be summed without changing what
+				// they mean — `Scene/Pointer.h` does the summing on the far side and says so.
+				Motion.Emit(
+					PointerMotion{
+						.DeltaX = ::libinput_event_pointer_get_dx(motion),
+						.DeltaY = ::libinput_event_pointer_get_dy(motion),
+						.UnacceleratedX = ::libinput_event_pointer_get_dx_unaccelerated(motion),
+						.UnacceleratedY = ::libinput_event_pointer_get_dy_unaccelerated(motion),
+						.When = At(::libinput_event_pointer_get_time_usec(motion)),
+						.Device = Identify(event),
+					}
+				);
+
+				break;
+			}
+
+			case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE:
+			{
+				libinput_event_pointer* const motion = ::libinput_event_get_pointer_event(event);
+
+				Position.Emit(
+					PointerPosition{
+						// Transformed onto a one-unit-wide area, which is libinput's door for a fraction
+						// of the device rather than the millimetres it otherwise reports.
+						.NormalizedX = ::libinput_event_pointer_get_absolute_x_transformed(motion, 1),
+						.NormalizedY = ::libinput_event_pointer_get_absolute_y_transformed(motion, 1),
+						.When = At(::libinput_event_pointer_get_time_usec(motion)),
+						.Device = Identify(event),
+					}
+				);
+
+				break;
+			}
+
+			case LIBINPUT_EVENT_POINTER_BUTTON:
+			{
+				libinput_event_pointer* const button = ::libinput_event_get_pointer_event(event);
+
+				Button.Emit(
+					PointerButton{
+						.Code = ::libinput_event_pointer_get_button(button),
+						.Pressed = ::libinput_event_pointer_get_button_state(button) == LIBINPUT_BUTTON_STATE_PRESSED,
+						.When = At(::libinput_event_pointer_get_time_usec(button)),
+						.Device = Identify(event),
+					}
+				);
+
+				break;
+			}
+
+			case LIBINPUT_EVENT_POINTER_SCROLL_WHEEL:
+			case LIBINPUT_EVENT_POINTER_SCROLL_FINGER:
+			case LIBINPUT_EVENT_POINTER_SCROLL_CONTINUOUS:
+			{
+				libinput_event_pointer* const scroll = ::libinput_event_get_pointer_event(event);
+				const libinput_event_type kind = ::libinput_event_get_type(event);
+
+				const ScrollSource source = kind == LIBINPUT_EVENT_POINTER_SCROLL_WHEEL  ? ScrollSource::Wheel :
+				                            kind == LIBINPUT_EVENT_POINTER_SCROLL_FINGER ? ScrollSource::Finger :
+				                                                                           ScrollSource::Continuous;
+
+				const Instant when = At(::libinput_event_pointer_get_time_usec(scroll));
+				const InputDeviceId device = Identify(event);
+
+				// **One event per axis, because that is what the wire carries.** A diagonal two-finger
+				// scroll arrives from libinput as one event with two axes on it and leaves here as two,
+				// with the same instant — which is the grouping `wl_pointer.frame` puts back together on
+				// the far side, and is not this module's to make.
+				constexpr std::pair<libinput_pointer_axis, ScrollAxis> Axes[]{
+					{ LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL, ScrollAxis::Vertical },
+					{ LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL, ScrollAxis::Horizontal },
+				};
+
+				for (const auto& [axis, which] : Axes)
+				{
+					if (!::libinput_event_pointer_has_axis(scroll, axis))
+					{
+						continue;
+					}
+
+					const double distance = ::libinput_event_pointer_get_scroll_value(scroll, axis);
+
+					Scroll.Emit(
+						PointerScroll{
+							.Axis = which,
+							.Source = source,
+							.Distance = distance,
+							.Clicks120 = source == ScrollSource::Wheel ?
+					                         ::libinput_event_pointer_get_scroll_value_v120(scroll, axis) :
+					                         0.0,
+							// **A finger event with no distance is the lift**, which is the only way a
+					        // toolkit learns to start decelerating a flick rather than stopping it dead.
+					        // libinput says so by reporting zero, and no other source can say it at all.
+							.Stop = source == ScrollSource::Finger && distance == 0.0,
+							.When = when,
+							.Device = device,
+						}
+					);
+				}
+
+				break;
+			}
+
+			case LIBINPUT_EVENT_TOUCH_DOWN:
+			case LIBINPUT_EVENT_TOUCH_MOTION:
+			case LIBINPUT_EVENT_TOUCH_UP:
+			case LIBINPUT_EVENT_TOUCH_CANCEL:
+			{
+				libinput_event_touch* const touch = ::libinput_event_get_touch_event(event);
+				const libinput_event_type kind = ::libinput_event_get_type(event);
+
+				const bool positioned = kind == LIBINPUT_EVENT_TOUCH_DOWN || kind == LIBINPUT_EVENT_TOUCH_MOTION;
+
+				const TouchPhase phase = kind == LIBINPUT_EVENT_TOUCH_DOWN   ? TouchPhase::Down :
+				                         kind == LIBINPUT_EVENT_TOUCH_MOTION ? TouchPhase::Motion :
+				                         kind == LIBINPUT_EVENT_TOUCH_UP     ? TouchPhase::Up :
+				                                                               TouchPhase::Cancel;
+
+				Touch.Emit(
+					TouchEvent{
+						.Point = ::libinput_event_touch_get_slot(touch),
+						.Phase = phase,
+						// An up and a cancel report no position at all, and asking for one is undefined
+				        // rather than merely stale. Zero rather than the last known point, per
+				        // Core/Input.h: a lift that repeats a coordinate cannot be told from one that
+				        // moved.
+						.NormalizedX = positioned ? ::libinput_event_touch_get_x_transformed(touch, 1) : 0.0,
+						.NormalizedY = positioned ? ::libinput_event_touch_get_y_transformed(touch, 1) : 0.0,
+						.When = At(::libinput_event_touch_get_time_usec(touch)),
+						.Device = Identify(event),
+					}
+				);
+
+				break;
+			}
+
+			case LIBINPUT_EVENT_TABLET_TOOL_PROXIMITY:
+			{
+				libinput_event_tablet_tool* const tablet = ::libinput_event_get_tablet_tool_event(event);
+
+				ToolEvent tool = StateOf(tablet, Identify(event));
+				tool.Phase = ::libinput_event_tablet_tool_get_proximity_state(tablet) ==
+				                     LIBINPUT_TABLET_TOOL_PROXIMITY_STATE_IN ?
+				                 ToolPhase::ProximityIn :
+				                 ToolPhase::ProximityOut;
+
+				Tool.Emit(tool);
+
+				break;
+			}
+
+			case LIBINPUT_EVENT_TABLET_TOOL_TIP:
+			{
+				libinput_event_tablet_tool* const tablet = ::libinput_event_get_tablet_tool_event(event);
+
+				ToolEvent tool = StateOf(tablet, Identify(event));
+				tool.Phase = ToolPhase::Tip;
+
+				Tool.Emit(tool);
+
+				break;
+			}
+
+			case LIBINPUT_EVENT_TABLET_TOOL_BUTTON:
+			{
+				libinput_event_tablet_tool* const tablet = ::libinput_event_get_tablet_tool_event(event);
+
+				ToolEvent tool = StateOf(tablet, Identify(event));
+				tool.Phase = ToolPhase::Button;
+				tool.ButtonCode = ::libinput_event_tablet_tool_get_button(tablet);
+				tool.ButtonPressed =
+					::libinput_event_tablet_tool_get_button_state(tablet) == LIBINPUT_BUTTON_STATE_PRESSED;
+
+				Tool.Emit(tool);
+
+				break;
+			}
+
+			case LIBINPUT_EVENT_TABLET_TOOL_AXIS:
+			{
+				libinput_event_tablet_tool* const tablet = ::libinput_event_get_tablet_tool_event(event);
+
+				ToolEvent tool = StateOf(tablet, Identify(event));
+				tool.Phase = ToolPhase::Motion;
+
+				Tool.Emit(tool);
+
+				break;
+			}
+
 			default:
-				// Everything else is a pointer, a touch or a gesture, and there is nothing on the far end
-				// of any of them yet. Dropped rather than queued: a seat that cannot route a click gains
-				// nothing from remembering the clicks it could not route.
+				// What is left is the pinch and swipe gestures, the tablet pads, the switches and
+				// libinput's own frame markers. Each wants a consumer that does not exist — a recognizer,
+				// a pad protocol, the display lifetime that `SW_LID` belongs to — and dropping them is
+				// what this module does with an event nothing is asking for. `TOUCH_FRAME` is in here on
+				// purpose: the grouping is the far side's, per Seam/Input.h.
 				break;
 		}
 

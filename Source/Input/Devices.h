@@ -2,12 +2,16 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 #include "Core/Fd.h"
 #include "Core/Result.h"
+#include "Core/SlotAllocator.h"
 #include "Seam/Input.h"
 
 struct libinput;
+struct libinput_device;
+struct libinput_event;
 struct udev;
 
 // The keyboards, mice and touchpads on this machine, behind libinput.
@@ -59,6 +63,24 @@ private:
 	// device nodes through the interface below and closes them itself.
 	libinput* m_Context = nullptr;
 	udev* m_Udev = nullptr;
+
+	// Which `InputDeviceId` a libinput device is, and where those ids come from.
+	//
+	// **A map rather than libinput's own user data pointer**, which is what it is for and would hold a
+	// generational id only by being punned into a `void*` — 64 bits of handle through a pointer that
+	// is not one, and a cast this codebase's warning set is right to object to. Plugging a device in is
+	// rare enough that a hash lookup per event is invisible beside the `read` that delivered it.
+	//
+	// SPEC: the capacity is decision 27's order of magnitude above anything real. A machine with more
+	// than 256 input devices on one seat is one gyro would rather refuse than quietly mis-key.
+	SlotAllocator<InputDeviceTag> m_Ids{ 256 };
+	std::unordered_map<libinput_device*, InputDeviceId> m_Devices;
+
+	// The id an event's device carries, or null for a device that arrived before gyro was watching —
+	// which cannot happen through `Drain`, since a device is announced before it reports anything, and
+	// is answered rather than asserted because a null id is a value every consumer already has to
+	// handle.
+	[[nodiscard]] InputDeviceId Identify(libinput_event* event) const;
 
 	std::string m_Seat;
 };
