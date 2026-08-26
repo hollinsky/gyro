@@ -36,6 +36,7 @@
 #include "Scene/Store.h"
 #include "Scene/Textures.h"
 #include "Testing/Test.h"
+#include "Wayland/LinuxDmabufV1.h"
 #include "Wayland/Wayland.h"
 #include "Wayland/XdgShell.h"
 #include "Wire/Connection.h"
@@ -89,6 +90,8 @@ const PrivateRuntimeDir g_RuntimeDir;
 class CountingTextures final : public ITextures
 {
 public:
+	using ITextures::Adopt;
+
 	[[nodiscard]] Result<TextureId> Adopt(
 		PixelSize<BufferSpace> size,
 		std::uint32_t stride,
@@ -107,8 +110,50 @@ public:
 		return TextureId{ Adopted, 1 };
 	}
 
+	[[nodiscard]] Result<TextureId> Adopt(
+		PixelSize<BufferSpace> size,
+		TextureFormat format,
+		std::span<const TexturePlane> planes,
+		ITextureRelease* release
+	) override
+	{
+		++Adopted;
+
+		Size = size;
+		Described = format;
+		Planes = planes.size();
+
+		if (release != nullptr)
+		{
+			Owed.push_back(release);
+		}
+
+		return TextureId{ Adopted, 1 };
+	}
+
+	void Abandon(const ITextureRelease& release) noexcept override { std::erase(Owed, &release); }
+
+	[[nodiscard]] std::span<const TextureFormat> Formats() const noexcept override { return Advertised; }
+
+	// The watermark passed everything, which is what `TextureRegistry::Reclaim` does for real.
+	void ReleaseAll() noexcept
+	{
+		const std::vector<ITextureRelease*> owed = std::move(Owed);
+
+		Owed.clear();
+
+		for (ITextureRelease* const release : owed)
+		{
+			release->OnTextureReleased();
+		}
+	}
+
 	void Retire(TextureId id) noexcept override { Retired += id.IsNull() ? 0U : 1U; }
 
+	std::vector<TextureFormat> Advertised;
+	std::vector<ITextureRelease*> Owed;
+	TextureFormat Described{};
+	std::size_t Planes = 0;
 	std::uint32_t Adopted = 0;
 	std::uint32_t Retired = 0;
 	PixelSize<BufferSpace> Size{};
@@ -383,9 +428,18 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 	// client can obtain from this seat. See Protocol/Seat.h.
 	GYRO_CHECK_EQ(seat->Version, std::uint32_t{ 4 });
 
-	// Exactly five: three a window is built out of, one a toolkit demands before it will look for them,
-	// and the seat that makes the window typeable.
-	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 5 });
+	const Registry::Global* const dmabuf = bound.Listener.Find(Wayland::ZwpLinuxDmabufV1::WireName);
+	GYRO_REQUIRE(dmabuf != nullptr);
+
+	// Version 3 is the last one whose contract is a list of format-modifier pairs. Four obliges
+	// `get_default_feedback` to answer with a main device and tranches, and a client that asks and is
+	// never answered waits on a roundtrip forever. See Protocol/Dmabuf.h.
+	GYRO_CHECK_EQ(dmabuf->Version, std::uint32_t{ 3 });
+
+	// Exactly six: three a window is built out of, one a toolkit demands before it will look for them,
+	// the seat that makes the window typeable, and the one that lets a client hand over a buffer a
+	// panel can scan out instead of pixels gyro has to copy.
+	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 6 });
 }
 
 // What a GTK client actually does with the clipboard global before it has a seat, which is bind it,
@@ -1613,4 +1667,209 @@ GYRO_TEST(ProtocolRoundTrip, AskingAKeyboardOnlySeatForAPointerEndsTheClient)
 	// `missing_capability` and not `no_memory`, which is what the bindings send for a request nothing
 	// answers — the difference is a client's log naming an allocation failure that did not happen.
 	GYRO_CHECK_EQ(session.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::WlSeatError::MissingCapability));
+}
+
+// The dmabuf half: what a client is offered, what it does with a pair it was never offered, and the
+// one thing a descriptor buffer owes that a `wl_shm` buffer does not.
+//
+// **The whole point of the last of these is a release that does *not* arrive.** gyro copies `wl_shm`
+// pixels and hands the buffer straight back; descriptors are borrowed, and a client told it may redraw
+// while a panel is still scanning the buffer out is a window tearing into itself. There is no way to
+// observe that except by committing and then asserting silence, which is what this does.
+
+namespace
+{
+// What the compositor said a client may allocate in, collected the way a toolkit collects it.
+class DmabufFormats final : public Wayland::ZwpLinuxDmabufV1Listener
+{
+public:
+	void OnFormat(std::uint32_t format) override { Codes.push_back(format); }
+
+	void OnModifier(std::uint32_t format, std::uint32_t high, std::uint32_t low) override
+	{
+		Pairs.emplace_back(format, (static_cast<std::uint64_t>(high) << 32U) | low);
+	}
+
+	std::vector<std::uint32_t> Codes;
+	std::vector<std::pair<std::uint32_t, std::uint64_t>> Pairs;
+};
+
+// `DRM_FORMAT_ARGB8888`, spelled here rather than reached for: this file stands where a client stands,
+// and a client has a fourcc because `zwp_linux_buffer_params_v1.create` carries one.
+constexpr std::uint32_t Argb8888 = 0x34325241;
+
+// The answer to `create`, which is exactly one of two events.
+class ParamsEvents final : public Wayland::ZwpLinuxBufferParamsV1Listener
+{
+public:
+	explicit ParamsEvents(Wayland::WlBufferListener& released) noexcept : m_Released{ &released } {}
+
+	Wayland::WlBufferListener* OnCreated(Wayland::WlBuffer buffer) override
+	{
+		Created = buffer;
+
+		return m_Released;
+	}
+
+	void OnFailed() override { ++Failed; }
+
+	Wayland::WlBuffer Created;
+	std::uint32_t Failed = 0;
+
+private:
+	Wayland::WlBufferListener* m_Released = nullptr;
+};
+
+// A descriptor of the right size for the extent below. A `memfd` rather than a real dmabuf, which is
+// all this test needs: nothing here imports it, and what is under test is the protocol and the
+// lifetime rather than the driver.
+[[nodiscard]] Fd MakeDescriptor(std::size_t size)
+{
+	const int descriptor = ::memfd_create("gyro-roundtrip-dmabuf", MFD_CLOEXEC);
+
+	if (descriptor < 0 || ::ftruncate(descriptor, static_cast<off_t>(size)) != 0)
+	{
+		return {};
+	}
+
+	return Fd{ descriptor };
+}
+
+[[nodiscard]] Wayland::ZwpLinuxDmabufV1 BindDmabuf(BoundCompositor& bound, DmabufFormats& formats)
+{
+	const Registry::Global* const global = bound.Listener.Find(Wayland::ZwpLinuxDmabufV1::WireName);
+
+	return global != nullptr ?
+	           bound.Listener.Object().Bind<Wayland::ZwpLinuxDmabufV1>(global->Name, global->Version, formats) :
+	           Wayland::ZwpLinuxDmabufV1{};
+}
+} // namespace
+
+GYRO_TEST(ProtocolRoundTrip, BindingTheDmabufGlobalAnnouncesEveryPairTheDeviceWillSample)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-dmabuf-formats" };
+	GYRO_REQUIRE(session.Opened);
+
+	// Two tilings of one format, which is the shape a real driver's answer has and the shape a
+	// linear-only list would hide: a client picks the tiled one and never allocates an untiled buffer.
+	session.Textures.Advertised = { TextureFormat{ .Code = Argb8888, .Modifier = 0 },
+		                            TextureFormat{ .Code = Argb8888, .Modifier = 0x0100000000000001ULL } };
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	DmabufFormats formats;
+	GYRO_REQUIRE(BindDmabuf(bound, formats).IsValid());
+
+	session.Turn();
+
+	GYRO_CHECK(!session.Client.Fault().has_value());
+
+	// One `format` per distinct fourcc and one `modifier` per pair. A client bound below version 3 has
+	// only the first list and reads it as *this format under whatever we work out*, which is linear.
+	GYRO_CHECK_EQ(formats.Codes.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(formats.Pairs.size(), std::size_t{ 2 });
+	GYRO_CHECK(formats.Pairs[1].second == 0x0100000000000001ULL);
+}
+
+GYRO_TEST(ProtocolRoundTrip, APairTheCompositorNeverOfferedComesBackAsFailedRatherThanADeadConnection)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-dmabuf-refused" };
+	GYRO_REQUIRE(session.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	DmabufFormats formats;
+	const Wayland::ZwpLinuxDmabufV1 dmabuf = BindDmabuf(bound, formats);
+	GYRO_REQUIRE(dmabuf.IsValid());
+
+	BufferEvents released;
+	ParamsEvents events{ released };
+	const Wayland::ZwpLinuxBufferParamsV1 params = dmabuf.CreateParams(events);
+	GYRO_REQUIRE(params.IsValid());
+
+	Fd descriptor = MakeDescriptor(static_cast<std::size_t>(Stride) * static_cast<std::size_t>(Height));
+	GYRO_REQUIRE(descriptor.IsValid());
+
+	params.Add(std::move(descriptor), 0, 0, static_cast<std::uint32_t>(Stride), 0, 0);
+	params.Create(Width, Height, Argb8888, Wayland::ZwpLinuxBufferParamsV1Flags{});
+
+	session.Turn();
+
+	// **`failed` rather than a protocol error**, because a client cannot predict what a compositor's
+	// device will take and the protocol gives it a fallback path for exactly this. Ending the
+	// connection would turn a driver limitation into an application that will not start.
+	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK_EQ(events.Failed, std::uint32_t{ 1 });
+	GYRO_CHECK(!events.Created.IsValid());
+}
+
+GYRO_TEST(ProtocolRoundTrip, ADescriptorBufferIsNotReleasedUntilNobodyIsReadingIt)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-dmabuf-release" };
+	GYRO_REQUIRE(session.Opened);
+
+	session.Textures.Advertised = { TextureFormat{ .Code = Argb8888, .Modifier = 0 } };
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	DmabufFormats formats;
+	const Wayland::ZwpLinuxDmabufV1 dmabuf = BindDmabuf(bound, formats);
+	GYRO_REQUIRE(dmabuf.IsValid());
+
+	BufferEvents released;
+	ParamsEvents events{ released };
+	const Wayland::ZwpLinuxBufferParamsV1 params = dmabuf.CreateParams(events);
+	GYRO_REQUIRE(params.IsValid());
+
+	Fd descriptor = MakeDescriptor(static_cast<std::size_t>(Stride) * static_cast<std::size_t>(Height));
+	GYRO_REQUIRE(descriptor.IsValid());
+
+	params.Add(std::move(descriptor), 0, 0, static_cast<std::uint32_t>(Stride), 0, 0);
+	params.Create(Width, Height, Argb8888, Wayland::ZwpLinuxBufferParamsV1Flags{});
+
+	session.Turn();
+	session.Turn();
+
+	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_REQUIRE(events.Created.IsValid());
+
+	Wayland::WlSurfaceIgnoring surfaceEvents;
+	const Wayland::WlSurface surface = bound.Compositor.CreateSurface(surfaceEvents);
+	GYRO_REQUIRE(surface.IsValid());
+
+	surface.Attach(events.Created, 0, 0);
+	surface.DamageBuffer(0, 0, Width, Height);
+	surface.Commit();
+
+	session.Turn();
+
+	GYRO_CHECK(!session.Client.Fault().has_value());
+
+	// The descriptors reached the texture space as one plane in the layout the client stated.
+	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(session.Textures.Planes, std::size_t{ 1 });
+	GYRO_CHECK(session.Textures.Described == (TextureFormat{ .Code = Argb8888, .Modifier = 0 }));
+
+	// **And no release, which is the assertion.** A frame drawn from this buffer may still be on
+	// screen; telling the client otherwise is what tears a window into itself.
+	session.Turn();
+
+	GYRO_CHECK_EQ(released.Released, std::uint32_t{ 0 });
+
+	// The watermark moves past every snapshot that named the id, which is the only thing that can say
+	// nobody is reading.
+	session.Textures.ReleaseAll();
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(released.Released, std::uint32_t{ 1 });
 }

@@ -11,6 +11,7 @@
 #include "Protocol/Compositor.h"
 #include "Protocol/Context.h"
 #include "Protocol/Data.h"
+#include "Protocol/Dmabuf.h"
 #include "Protocol/Floor.h"
 #include "Protocol/Seat.h"
 #include "Protocol/Server.h"
@@ -150,6 +151,9 @@ private:
 
 	ShmGlobal m_Shm;
 	wl_global* m_ShmGlobal = nullptr;
+
+	DmabufGlobal m_Dmabuf{ m_Context };
+	wl_global* m_DmabufGlobal = nullptr;
 
 	ShellGlobal m_Shell{ m_Context };
 	wl_global* m_ShellGlobal = nullptr;

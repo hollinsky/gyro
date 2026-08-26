@@ -78,6 +78,8 @@ const PrivateRuntimeDir g_RuntimeDir;
 class CountingTextures final : public ITextures
 {
 public:
+	using ITextures::Adopt;
+
 	[[nodiscard]] Result<TextureId>
 	Adopt(PixelSize<BufferSpace>, std::uint32_t, std::span<const std::byte>, TextureAlpha) override
 	{

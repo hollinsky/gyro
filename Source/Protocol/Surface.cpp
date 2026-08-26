@@ -364,9 +364,21 @@ void ClientSurface::TakeContent(ITextures& textures)
 	// surface holding nothing rather than holding a name it has already given up.
 	textures.Retire(replaced);
 
-	// The pixels are gyro's now. The client may draw the next frame into the same memory immediately,
-	// which is the whole reason for copying rather than sampling in place.
-	ReleaseStaged();
+	// **A copied buffer goes back now and a borrowed one does not.** `wl_shm` pixels are gyro's the
+	// moment `Adopt` returns, so the client may draw the next frame into the same memory immediately —
+	// which is the whole reason for copying rather than sampling in place. Descriptors are borrowed
+	// instead, and a client told it may reuse one would be drawing into the buffer a panel is scanning
+	// out; that buffer answers its own release when the watermark says nobody is reading it.
+	//
+	// The staged attach is dropped either way, because it has been consumed whichever it was.
+	if (buffer == nullptr || buffer->ReleasesImmediately())
+	{
+		ReleaseStaged();
+	}
+	else
+	{
+		m_Attached.reset();
+	}
 }
 
 void ClientSurface::Apply()

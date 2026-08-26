@@ -122,6 +122,8 @@ void Walk(const SceneStore& store, EntityId id, const Visit& visit)
 class CountingTextures final : public ITextures
 {
 public:
+	using ITextures::Adopt;
+
 	[[nodiscard]] Result<TextureId>
 	Adopt(PixelSize<BufferSpace>, std::uint32_t, std::span<const std::byte> pixels, TextureAlpha) override
 	{

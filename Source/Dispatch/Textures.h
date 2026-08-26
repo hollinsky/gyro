@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "Core/Fd.h"
 #include "Core/Result.h"
 #include "Core/SlotAllocator.h"
 #include "Core/Texture.h"
@@ -14,6 +15,7 @@
 #include "Scene/Textures.h"
 #include "Seam/Importer.h"
 #include "Seam/RenderTarget.h"
+#include "Seam/Scanout.h"
 
 // Who mints a texture id and who holds what it names.
 //
@@ -63,14 +65,30 @@ public:
 
 	// The renderers to import into. Borrowed and outlived by nothing here — the composition root owns
 	// both the renderers and this, and `Rebind` is how a set that changed arrives.
-	explicit TextureRegistry(std::span<ITextureImporter* const> importers)
-		: m_Importers{ importers.begin(), importers.end() }, m_Ids{ MaxTextures }
+	// The renderers to import into, the layouts an author may advertise, and the scanout importer where
+	// there is one. Borrowed and outlived by nothing here — the composition root owns all four, and
+	// `Rebind` is how a set that changed arrives.
+	//
+	// **The scanout importer is separate from the list and refusals from it are not failures**, which
+	// is decision 153's whole shape said in one signature. A renderer that will not take a buffer is a
+	// window that cannot be drawn; a *display engine* that will not take one is a window that is drawn
+	// by the GPU instead, which is what every window already is. So it is offered to and its answer is
+	// discarded, and what promotion costs when it is refused is a composite gyro was doing anyway.
+	explicit TextureRegistry(
+		std::span<ITextureImporter* const> importers,
+		std::span<const TextureFormat> formats = {},
+		IScanoutImporter* scanout = nullptr
+	)
+		: m_Importers{ importers.begin(), importers.end() }, m_Formats{ formats.begin(), formats.end() },
+		  m_Scanout{ scanout }, m_Ids{ MaxTextures }
 	{}
 
 	TextureRegistry(const TextureRegistry&) = delete;
 	TextureRegistry& operator=(const TextureRegistry&) = delete;
 	TextureRegistry(TextureRegistry&&) = delete;
 	TextureRegistry& operator=(TextureRegistry&&) = delete;
+
+	using ITextures::Adopt;
 
 	[[nodiscard]] Result<TextureId> Adopt(
 		PixelSize<BufferSpace> size,
@@ -103,11 +121,13 @@ public:
 
 		Held& held = m_Held[id->Index];
 
-		held = Held{ .Id = *id,
-			         .Pixels = std::vector<std::byte>{ pixels.begin(), pixels.end() },
-			         .Size = size,
-			         .Stride = stride,
-			         .Alpha = alpha };
+		held = Held{};
+
+		held.Id = *id;
+		held.Pixels = std::vector<std::byte>{ pixels.begin(), pixels.end() };
+		held.Size = size;
+		held.Stride = stride;
+		held.Alpha = alpha;
 
 		if (const Result<void> imported = Import(held); !imported)
 		{
@@ -120,6 +140,110 @@ public:
 
 		return *id;
 	}
+
+	[[nodiscard]] Result<TextureId> Adopt(
+		PixelSize<BufferSpace> size,
+		TextureFormat format,
+		std::span<const TexturePlane> planes,
+		ITextureRelease* release
+	) override
+	{
+		if (size.IsEmpty() || !size.IsValid())
+		{
+			return Failure(EINVAL, "an image with no extent");
+		}
+
+		if (planes.empty() || planes.size() > MaxTexturePlanes)
+		{
+			return Failure(EINVAL, "a plane count no format has");
+		}
+
+		if (format.Code == 0)
+		{
+			return Failure(EINVAL, "a buffer with no format");
+		}
+
+		if (m_Importers.empty())
+		{
+			return Failure(ENODEV, "no renderer to import an image into");
+		}
+
+		// **Duplicated before anything else can fail**, because a descriptor is the one thing here that
+		// the caller gets back either way: a dup that succeeded and is then abandoned closes cleanly on
+		// the way out of this scope, where a dup deferred until after the import would leave the
+		// importer holding a descriptor whose owner is about to return an error over it.
+		std::vector<Fd> descriptors;
+
+		descriptors.reserve(planes.size());
+
+		for (const TexturePlane& plane : planes)
+		{
+			Fd duplicated = Duplicate(plane.Descriptor);
+
+			if (!duplicated.IsValid())
+			{
+				return Failure(EBADF, "a plane descriptor that could not be duplicated");
+			}
+
+			descriptors.push_back(std::move(duplicated));
+		}
+
+		const std::optional<TextureId> id = m_Ids.Allocate();
+
+		if (!id)
+		{
+			return Failure(ENOSPC, "the texture id space is exhausted");
+		}
+
+		if (m_Held.size() <= m_Ids.SlotCount())
+		{
+			m_Held.resize(m_Ids.SlotCount() + 1);
+		}
+
+		Held& held = m_Held[id->Index];
+
+		held = Held{};
+
+		held.Id = *id;
+		held.Descriptors = std::move(descriptors);
+		held.Size = size;
+		held.Release = release;
+		held.Format = PixelFormat{ .Code = format.Code, .Modifier = format.Modifier };
+		held.Image.PlaneCount = static_cast<std::uint32_t>(planes.size());
+
+		for (std::size_t index = 0; index < planes.size(); ++index)
+		{
+			held.Image.Planes[index] = DmabufPlane{ .Descriptor = held.Descriptors[index].Borrow(),
+				                                    .Offset = planes[index].Offset,
+				                                    .Stride = planes[index].Stride };
+		}
+
+		if (const Result<void> imported = Import(held); !imported)
+		{
+			held = Held{};
+
+			static_cast<void>(m_Ids.Free(*id));
+
+			return std::unexpected{ imported.error() };
+		}
+
+		Offer(held);
+
+		return *id;
+	}
+
+	void Abandon(const ITextureRelease& release) noexcept override
+	{
+		for (Held& held : m_Held)
+		{
+			if (held.Release == &release)
+			{
+				held.Release = nullptr;
+			}
+		}
+	}
+
+	[[nodiscard]] std::span<const TextureFormat> Formats() const noexcept override { return m_Formats; }
 
 	// **Retired is not gone.** The id stops being one an author draws and stays exactly where it is
 	// until `Reclaim` says the frame thread has moved past every snapshot that could name it. The slot
@@ -180,11 +304,28 @@ public:
 				importer->Forget(held.Id);
 			}
 
+			// Unconditional, because `IScanoutImporter::Forget` says nothing about an id it never took —
+			// which is the same answer every other `Forget` in the system gives, and it means the offer's
+			// outcome does not have to be remembered per image.
+			if (m_Scanout != nullptr)
+			{
+				m_Scanout->Forget(held.Id);
+			}
+
 			const TextureId id = held.Id;
+			ITextureRelease* const release = held.Release;
 
 			held = Held{};
 
 			static_cast<void>(m_Ids.Free(id));
+
+			// **After the slot is clear, not before.** A client answering its own release by attaching
+			// the same buffer again lands back in `Adopt` from inside this call, and a registry that had
+			// not finished putting the id away would hand the new adoption the slot it is still holding.
+			if (release != nullptr)
+			{
+				release->OnTextureReleased();
+			}
 		}
 	}
 
@@ -242,9 +383,27 @@ private:
 	struct Held
 	{
 		TextureId Id{};
+
+		// One of the two is filled and the other is empty, which is `TextureSource`'s variant kept as two
+		// fields rather than as one: `Rebind` has to say the same thing about the same memory on a new
+		// device, and what distinguishes them is `Descriptors` being non-empty.
 		std::vector<std::byte> Pixels;
+		std::vector<Fd> Descriptors;
+
 		PixelSize<BufferSpace> Size{};
 		std::uint32_t Stride = 0;
+
+		// The planes, pointing into `Descriptors`. Rebuilt nowhere: a `vector<Fd>` that never grows after
+		// `Adopt` keeps the same descriptor numbers for the whole of the image's life.
+		DmabufImage Image{};
+
+		// The client's own fourcc and modifier, for a descriptor. Left invalid for mapped pixels, where
+		// `Alpha` below is what the format is derived from instead.
+		PixelFormat Format{};
+
+		// Who to tell when this is reclaimed, or null where nobody is owed anything. Borrowed, and cleared
+		// by `Abandon` where the party goes away first.
+		ITextureRelease* Release = nullptr;
 
 		// What the author said its top byte means. Held rather than folded into the fourcc at adoption
 		// because `Rebind` imports the same bytes again onto a new renderer and has to say the same
@@ -266,14 +425,50 @@ private:
 	// `xrgb8888` from every toolkit there is, and the alternative to carrying that here was for the
 	// caller to walk the image forcing the byte to full — a second pass over every pixel of every
 	// window, to say what one code already says.
+	[[nodiscard]] static TextureSource Describe(const Held& held) noexcept
+	{
+		TextureSource source{};
+
+		source.Size = held.Size;
+
+		if (held.Descriptors.empty())
+		{
+			source.Format = { .Code = held.Alpha == TextureAlpha::Premultiplied ? FormatArgb8888 : FormatXrgb8888,
+				              .Modifier = ModifierLinear };
+			source.Memory =
+				MappedPixels{ .Pixels = held.Pixels.data(), .Stride = held.Stride, .Length = held.Pixels.size() };
+		}
+		else
+		{
+			source.Format = held.Format;
+			source.Memory = held.Image;
+		}
+
+		return source;
+	}
+
+	// Offer this image to the display engine, and discard what it says.
+	//
+	// **Called once per adoption and never from `Rebind`**, which is the difference between the two
+	// devices decision 153 keeps apart: a Vulkan device is destroyed and rebuilt on migration and every
+	// live image has to exist again on the new one, and the card gyro scans out of is the same card it
+	// was before. Re-offering there would adopt an id the display engine already holds.
+	void Offer(const Held& held) noexcept
+	{
+		if (m_Scanout == nullptr)
+		{
+			return;
+		}
+
+		// A refusal leaves the image exactly where it already is — sampled by the GPU, composited, and on
+		// screen. Frame/Assign.h then finds no framebuffer for the id and composites the item, which is
+		// the same picture at a different cost. That is the whole reason this is not in the loop below.
+		static_cast<void>(m_Scanout->Adopt(held.Id, Describe(held)));
+	}
+
 	[[nodiscard]] Result<void> Import(Held& held)
 	{
-		const TextureSource source{
-			.Size = held.Size,
-			.Format = { .Code = held.Alpha == TextureAlpha::Premultiplied ? FormatArgb8888 : FormatXrgb8888,
-			            .Modifier = ModifierLinear },
-			.Memory = MappedPixels{ .Pixels = held.Pixels.data(), .Stride = held.Stride, .Length = held.Pixels.size() },
-		};
+		const TextureSource source = Describe(held);
 
 		for (std::size_t index = 0; index < m_Importers.size(); ++index)
 		{
@@ -324,9 +519,20 @@ private:
 
 	std::vector<ITextureImporter*> m_Importers;
 
+	// What `Formats` answers. Fixed at construction rather than derived here: the intersection is a
+	// question about devices, and this module holds importers rather than the devices behind them.
+	std::vector<TextureFormat> m_Formats;
+
+	IScanoutImporter* m_Scanout = nullptr;
+
 	SlotAllocator<TextureTag> m_Ids;
 
 	// Indexed by an id's slot, and sized to the high-water mark rather than the live count, which is
 	// `SceneStore`'s arrangement for the same reason.
 	std::vector<Held> m_Held;
 };
+
+static_assert(
+	MaxTexturePlanes == MaxImagePlanes,
+	"An author's plane bound and the waist's are the same bound, and a buffer that fits one must fit the other"
+);

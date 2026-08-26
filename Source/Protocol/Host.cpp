@@ -49,6 +49,18 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		return Failure(ENOMEM, "advertising wl_shm");
 	}
 
+	m_DmabufGlobal = Wayland::Server::ZwpLinuxDmabufV1::Advertise(*display, DmabufVersion, m_Dmabuf);
+
+	if (m_DmabufGlobal == nullptr)
+	{
+		// Fatal for `wl_compositor`'s reason: the only way this fails is an allocation refusing at
+		// startup, and a compositor that came up missing one global is one whose behaviour depends on
+		// which one. The list of formats it advertises may legitimately be empty — that is a machine
+		// with no GPU, where a client reads the empty list and draws into shared memory instead — and
+		// that is a different thing from the global not being there.
+		return Failure(ENOMEM, "advertising zwp_linux_dmabuf_v1");
+	}
+
 	m_ShellGlobal = Wayland::Server::XdgWmBase::Advertise(*display, ShellVersion, m_Shell);
 
 	if (m_ShellGlobal == nullptr)

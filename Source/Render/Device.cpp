@@ -708,6 +708,74 @@ bool VulkanDevice::SupportsSampling(PixelFormat format) const noexcept
 	return Renderable(m_Physical, m_Description.StatesModifiers, format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
 }
 
+std::size_t VulkanDevice::SamplingModifiers(std::uint32_t code, std::span<std::uint64_t> into) const noexcept
+{
+	if (!IsValid() || code == 0 || into.empty())
+	{
+		return 0;
+	}
+
+	const VkFormat vulkan = VulkanFormat(code);
+
+	if (vulkan == VK_FORMAT_UNDEFINED)
+	{
+		return 0;
+	}
+
+	// The device that cannot state a tiling knows exactly one, per `ModifierEntry` above — so the
+	// answer is at most linear, asked through the same predicate rather than through a second reading
+	// of the same properties.
+	if (!m_Description.StatesModifiers)
+	{
+		if (!SupportsSampling(PixelFormat{ .Code = code, .Modifier = ModifierLinear }))
+		{
+			return 0;
+		}
+
+		into[0] = ModifierLinear;
+
+		return 1;
+	}
+
+	std::array<VkDrmFormatModifierPropertiesEXT, MaxModifiers> entries{};
+	VkDrmFormatModifierPropertiesListEXT list{ .sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+		                                       .pNext = nullptr,
+		                                       .drmFormatModifierCount = MaxModifiers,
+		                                       .pDrmFormatModifierProperties = entries.data() };
+	VkFormatProperties2 properties{ .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+		                            .pNext = &list,
+		                            .formatProperties = {} };
+	vkGetPhysicalDeviceFormatProperties2(m_Physical, vulkan, &properties);
+
+	const std::uint32_t written = std::min(list.drmFormatModifierCount, MaxModifiers);
+
+	std::size_t taken = 0;
+
+	for (std::uint32_t index = 0; index < written && taken < into.size(); ++index)
+	{
+		const VkDrmFormatModifierPropertiesEXT& entry = entries[index];
+
+		// One plane, which is what `ImportImage` can describe and therefore the whole of what an import
+		// through this device can honour. Offering a pair gyro would refuse at `attach` is worse than
+		// not offering it: the client has already allocated by then.
+		if (entry.drmFormatModifierPlaneCount != 1 || entry.drmFormatModifier == ModifierInvalid)
+		{
+			continue;
+		}
+
+		if ((entry.drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0)
+		{
+			continue;
+		}
+
+		into[taken] = entry.drmFormatModifier;
+
+		++taken;
+	}
+
+	return taken;
+}
+
 bool VulkanDevice::Supports(PixelFormat format) const noexcept
 {
 	if (!IsValid() || !format.IsValid())

@@ -542,6 +542,25 @@ public:
 	// sampling costs a look rather than a screen.
 	[[nodiscard]] bool SupportsSampling(PixelFormat format) const noexcept;
 
+	// Every DRM modifier this device will sample `code` under, written into `into`, and how many were
+	// written.
+	//
+	// **The plural of `SupportsSampling`, and it exists because somebody has to be *asked* what to
+	// offer.** A client allocating a buffer for a compositor picks a format and a modifier off a list
+	// the compositor advertised, and `zwp_linux_dmabuf_v1` is that list — so a compositor with only a
+	// yes/no predicate can advertise nothing except the pairs it happened to think of, which in
+	// practice means linear, which in practice means every GPU client on the machine allocating an
+	// untiled buffer and paying for it on every read. This is the query that lets the advertisement be
+	// the driver's own answer.
+	//
+	// `ModifierInvalid` is never written, for `Export`'s reason: unknown is not linear, and a pair
+	// gyro offered under it would be one where the client's layout and this device's guess have to
+	// agree by luck.
+	//
+	// Truncated silently at `into.size()`, because a caller that gave a fixed array asked for as many
+	// as fit and a driver listing more than that has already listed the ones anybody uses.
+	[[nodiscard]] std::size_t SamplingModifiers(std::uint32_t code, std::span<std::uint64_t> into) const noexcept;
+
 	// Whether this device will hand out a dmabuf for an image of this format at all.
 	//
 	// **A separate question from `Supports`, and lavapipe is why it had to become one.** That asks

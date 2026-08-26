@@ -1260,8 +1260,36 @@ allocation needs it; what is missing is the assignment — which layers can be p
 overlay, and what it costs to be wrong. [Seam/Presenter.h](../Source/Seam/Presenter.h) has carried
 the multi-layer list from the start for exactly this, so the shape is not the question.
 
-The part that has no home yet is where a *client* buffer becomes a scanout framebuffer. Turning a
-dmabuf into one is a kernel allocation that must not happen inside the frame section, and the
-presenter is frame-side, so the import has nowhere to live until plane assignment says where. That is
-the same item `PresentLayer::Target` names and it is now the thing standing between a tablet's idle
-composite and the GPU never waking for it.
+Where a *client* buffer becomes a scanout framebuffer is settled — decision 153 makes it a second
+importer over the same id space, `Drm/Scanout.h` is that importer, and decision 154 gives a client a
+way to hand over a descriptor in the first place. What is left here is the assignment itself: one
+primary plane is driven and a second layer is refused, so `Frame/Assign.h`'s partition can promote at
+most the top item and only onto the plane the composite would otherwise have used.
+
+What that leaves open, now that a descriptor can arrive:
+
+- **gyro advertises what the *renderer* can sample and not what the *panel* can scan out.** The two
+  lists differ on real hardware — a compressed modifier a shader reads is not always one a display
+  engine reads — and a client that picks a pair from the wrong half is simply composited, which is the
+  behaviour every window already has. So it costs nothing today and it costs the whole mechanism the
+  day promotion is what a tablet's battery depends on. The intersection is a query `Drm/Catalog.h`
+  already has the data for; what has to be decided first is what a *second* panel with a different
+  answer does to a list that is one per machine.
+
+- **No `zwp_linux_dmabuf_v1` feedback, so a client cannot be told which device to allocate against.**
+  Version 3's format and modifier events say what gyro will take and say nothing about *where* — and
+  on a machine that composites on one card and scans out on another, that is the difference between a
+  buffer that can be promoted and one that cannot. It is also the only way to tell a client its
+  allocation stopped being scanout-capable, which is what a window being dragged between two monitors
+  on two cards is. Decision 154 rejected advertising version 4 without honouring it; this is what
+  honouring it means.
+
+- **One plane per buffer.** `SamplingModifiers` filters to single-plane layouts and
+  `VulkanDevice::ImportImage` describes one plane, so a client handing over NV12 — which is every
+  hardware video decoder there is — falls back to whatever its toolkit does with shared memory. That
+  is the case promotion exists for, and it is the one arrangement gyro cannot yet take.
+
+- **No implicit modifier.** `DRM_FORMAT_MOD_INVALID` is refused wherever it appears, per decision
+  150's rule that unknown is not linear. That is right for an allocation gyro makes and it turns away
+  a legacy client whose buffer genuinely has no stated layout — which is what a GBM allocation without
+  modifier support produces, and there are still drivers that do it.

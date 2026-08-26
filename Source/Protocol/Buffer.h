@@ -31,7 +31,17 @@ public:
 	//
 	// Whatever the texture space refused, which the caller answers to the client rather than dropping —
 	// a window that silently never appears is the hardest bug there is to report.
-	[[nodiscard]] virtual Result<TextureId> Adopt(ITextures& textures) const = 0;
+	[[nodiscard]] virtual Result<TextureId> Adopt(ITextures& textures) = 0;
+
+	// Whether the client may draw into this buffer again the instant `Adopt` returns.
+	//
+	// **True is the copying answer and false is the borrowing one**, which is the whole difference
+	// between the two factories. `wl_shm` pixels are copied into gyro's own memory, so the release goes
+	// back in the same step and a toolkit with one buffer never stalls. A `zwp_linux_dmabuf_v1` buffer
+	// is *not* copied — that is the point of it — so the memory stays the client's and stays readable by
+	// a panel, and telling the client otherwise is a window tearing into itself while it animates. The
+	// buffer owes its own release in that case, against the watermark, through `ITextureRelease`.
+	[[nodiscard]] virtual bool ReleasesImmediately() const noexcept { return true; }
 
 	// The extent of the pixels, in the buffer's own space.
 	[[nodiscard]] virtual PixelSize<BufferSpace> Extent() const noexcept = 0;

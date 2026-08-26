@@ -70,6 +70,8 @@ void Fill(const Fd& fd, std::size_t size, std::byte value)
 class RecordingTextures final : public ITextures
 {
 public:
+	using ITextures::Adopt;
+
 	[[nodiscard]] Result<TextureId> Adopt(
 		PixelSize<BufferSpace> size,
 		std::uint32_t stride,

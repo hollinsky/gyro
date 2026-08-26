@@ -134,7 +134,7 @@ std::span<const std::byte> ClientShmBuffer::Pixels() const noexcept
 	return pool.subspan(m_Offset, needed);
 }
 
-Result<TextureId> ClientShmBuffer::Adopt(ITextures& textures) const
+Result<TextureId> ClientShmBuffer::Adopt(ITextures& textures)
 {
 	const std::span<const std::byte> pixels = Pixels();
 

@@ -892,6 +892,7 @@ gyro_add_module(Protocol DISPATCH
 	SOURCES
 		Compositor.cpp
 		Data.cpp
+		Dmabuf.cpp
 		Floor.cpp
 		Host.cpp
 		Keymap.cpp
@@ -902,6 +903,7 @@ gyro_add_module(Protocol DISPATCH
 		Shm.cpp
 		Surface.cpp
 	TESTS
+		Dmabuf.Test.cpp
 		Floor.Test.cpp
 		Host.Test.cpp
 		Region.Test.cpp

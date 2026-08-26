@@ -71,6 +71,7 @@
 #include "Seam/Presenter.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/Renderer.h"
+#include "Seam/Scanout.h"
 #include "Trace/Recorder.h"
 #include "Virtual/Device.h"
 #include "Virtual/Dump.h"
@@ -399,6 +400,25 @@ public:
 
 	// What this backend did, into the log, after `Close`.
 	virtual void Report() const {}
+
+	// The format and modifier pairs a client may hand descriptors over in, or nothing where there is no
+	// device to import one onto.
+	//
+	// **Root-local rather than a seam verb, for `IBackend`'s own reason.** What this is really asking is
+	// *what can the device behind this backend sample*, and the device is not a seam type — a nested
+	// output and a panel are two presenters over one `VulkanDevice`, and a headless sweep has none at
+	// all. The one party that sees the device and the texture registry together is this file.
+	//
+	// An empty answer is an ordinary one and means a client draws into shared memory and still gets a
+	// window, which is what every window on the machine already does.
+	[[nodiscard]] virtual std::span<const TextureFormat> ClientFormats() const noexcept { return {}; }
+
+	// The display engine's own importer, or null where nothing on this backend scans out.
+	//
+	// Decision 153: a promoted layer names a `TextureId`, and a scanout framebuffer is a second importer
+	// over the same id space. Only the KMS backend has one — a nested output's planes are the host's, a
+	// virtual output's consumer is a file, and a headless plane imports nothing.
+	[[nodiscard]] virtual IScanoutImporter* Scanout() noexcept { return nullptr; }
 };
 
 // The sweep's instrument: simulated vblanks and a renderer that charges a cost and draws nothing.
@@ -609,6 +629,40 @@ private:
 // nested drop `SCHED_FIFO` and `mlockall` unless explicitly overridden, and `Run` below is where that
 // happens — a real-time thread inside a normal-priority host is an effective way to hard-lock the
 // desktop somebody is developing on.
+// SPEC: how many modifiers per format gyro will offer a client. Drivers list a handful — amdgpu's
+// longest list for a 32-bit format is under twenty — and a client picks one, so this is a ceiling on
+// the advertisement rather than an estimate of anything.
+inline constexpr std::size_t MaxModifierOffer = 64;
+
+// The pairs a client may allocate in, for a backend that has a Vulkan device behind it.
+//
+// **Two fourccs and every modifier the driver will sample each under.** The formats are the pair
+// `wl_shm` already requires of every compositor and the pair the texture space takes as it stands, so
+// a client's fallback and its fast path describe the same pixels; what the device contributes is the
+// tilings, which is the half that matters — a list of just linear is every GPU client on the machine
+// allocating an untiled buffer and paying for it on every read.
+//
+// Empty on a device that would sample neither, which is a legitimate answer: the global is still
+// advertised, the client reads a list with nothing in it, and it draws into shared memory.
+[[nodiscard]] std::vector<TextureFormat> ClientPairs(const VulkanDevice& device)
+{
+	std::vector<TextureFormat> pairs;
+
+	for (const std::uint32_t code : { FormatArgb8888, FormatXrgb8888 })
+	{
+		std::array<std::uint64_t, MaxModifierOffer> modifiers{};
+
+		const std::size_t taken = device.SamplingModifiers(code, modifiers);
+
+		for (std::size_t index = 0; index < taken; ++index)
+		{
+			pairs.push_back(TextureFormat{ .Code = code, .Modifier = modifiers[index] });
+		}
+	}
+
+	return pairs;
+}
+
 class NestedBackend final : public IBackend
 {
 public:
@@ -653,6 +707,8 @@ public:
 			return built;
 		}
 
+		m_ClientFormats = ClientPairs(m_Device);
+
 		if (!m_Device.Description().CopiesFromHost)
 		{
 			// Said out loud for `ExportsTimeline`'s reason: it decides which clients this session can
@@ -687,6 +743,8 @@ public:
 	}
 
 	[[nodiscard]] IEventSource& Source() noexcept override { return m_Host; }
+
+	[[nodiscard]] std::span<const TextureFormat> ClientFormats() const noexcept override { return m_ClientFormats; }
 
 	[[nodiscard]] Instant NextEvent() const noexcept override { return m_Host.NextEvent(); }
 
@@ -809,6 +867,10 @@ private:
 	// one at a time, which is `BoundOutput::Renderer`'s reason exactly.
 	std::array<std::unique_ptr<Nested::NestedOutput>, MaxOutputs> m_Windows{};
 	std::size_t m_Count = 0;
+
+	// What clients may allocate in, computed once at `Open` because it is a fact about the device and
+	// the device does not change under this backend.
+	std::vector<TextureFormat> m_ClientFormats;
 };
 
 // The panel: a DRM device, one output per connected connector, and a clock that is the hardware's.
@@ -921,6 +983,8 @@ public:
 			return built;
 		}
 
+		m_ClientFormats = ClientPairs(m_Device);
+
 		spdlog::info("rendering on {} ({})", m_Device.Description().DeviceName(), m_Device.Description().DriverName());
 
 		// **Said out loud because the symptom is otherwise unattributable.** Compositing on a device the
@@ -957,6 +1021,15 @@ public:
 	}
 
 	[[nodiscard]] IEventSource& Source() noexcept override { return *m_Card; }
+
+	[[nodiscard]] std::span<const TextureFormat> ClientFormats() const noexcept override { return m_ClientFormats; }
+
+	// The card's own importer, which is what turns a promoted layer's `TextureId` into a framebuffer.
+	// Null before `Open`, because there is no card to make one out of.
+	[[nodiscard]] IScanoutImporter* Scanout() noexcept override
+	{
+		return m_Card != nullptr ? &m_Card->Scanout() : nullptr;
+	}
 
 	// The device's file is what wakes this backend, so the ordinary answer is never. What is not on the
 	// file is a composite a commit is waiting for, which is the held path saying when to look again.
@@ -1088,6 +1161,8 @@ private:
 
 	std::array<std::unique_ptr<Drm::DrmOutput>, MaxOutputs> m_Panels{};
 	std::size_t m_Count = 0;
+
+	std::vector<TextureFormat> m_ClientFormats;
 };
 
 // Everything with a lifetime, in one object, constructed in place.
@@ -1877,8 +1952,14 @@ private:
 			++importing;
 		}
 
-		m_Dispatch =
-			std::make_unique<DispatchLoop>(m_Clock, m_Snapshots, m_Returns, std::span{ importers.data(), importing });
+		m_Dispatch = std::make_unique<DispatchLoop>(
+			m_Clock,
+			m_Snapshots,
+			m_Returns,
+			std::span{ importers.data(), importing },
+			m_Backend->ClientFormats(),
+			m_Backend->Scanout()
+		);
 
 		// **Before `Open` and therefore before any client can have committed**, which is the only ordering
 		// that has no window in it: the host reads its clients inside `Advance`, so a connection made

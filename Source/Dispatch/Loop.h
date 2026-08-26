@@ -86,9 +86,11 @@ public:
 		const IClock& clock,
 		SnapshotRing& ring,
 		ReturnChannel& returns,
-		std::span<ITextureImporter* const> importers = {}
+		std::span<ITextureImporter* const> importers = {},
+		std::span<const TextureFormat> formats = {},
+		IScanoutImporter* scanout = nullptr
 	)
-		: m_Store{ clock }, m_Outbox{ ring, returns }, m_Textures{ importers }
+		: m_Store{ clock }, m_Outbox{ ring, returns }, m_Textures{ importers, formats, scanout }
 	{}
 
 	// Neither copied nor moved, for `SnapshotOutbox`'s reason rather than a weaker one: the outbox is

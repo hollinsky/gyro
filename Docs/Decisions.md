@@ -11788,3 +11788,68 @@ importers, two retirement rules stated where they differ.
 against different devices — `Render` holds the sampler's table and `Drm` would hold the scanner's —
 and a machine composites on one card and scans out on another. A single interface would put both on
 whichever device the renderer happens to be.
+
+### 154. A client hands over descriptors through `zwp_linux_dmabuf_v1` at version 3, and a borrowed buffer's release is owed to the watermark
+
+Decision 152 partitions the draw list and decision 153 turns a promoted layer's texture id into a
+framebuffer, and neither of them can do anything on a machine where every buffer a client sends is
+`wl_shm`. Those pixels are copied into gyro's own memory at commit, and the scanout importer refuses a
+mapped source by design — so a compositor without this protocol composites every window on the screen
+no matter how much of the mechanism above it exists. This entry is the client's side of it.
+
+**A client's own fourcc and modifier cross the author boundary, which breaks decision 87 in one place
+and only one.** That rule keeps a pixel format out of every module that authors a world, on the reading
+that the author says what its bytes mean in prose and the party that can name `Seam` turns that into a
+format. The reading holds exactly as long as the author *chose* the layout — true of a gym's card and
+of the console's grid, false here. `zwp_linux_buffer_params_v1.create` carries a fourcc and a modifier
+as wire arguments, chosen by the client's allocator, and a modifier's whole purpose is that nobody in
+the middle interprets it. So `Scene/Textures.h` grew a `TextureFormat` that is those two numbers and
+nothing else, and the author relays rather than decides. The same two numbers come back through a
+`Formats` query so the global has something honest to advertise, computed by the composition root out
+of what the device will sample.
+
+**Version 3 rather than 4, because 4 is a promise about a device gyro cannot yet name.** From version 4
+the format and modifier events are deprecated and a compositor is expected to answer
+`get_default_feedback` with a main device and format tranches. That is a *slow-loop* negotiation about
+what a client should allocate, and per decision 153 it is deliberately a different question from what
+the per-frame partition decides: offering is not promotion. Advertising 4 without honouring it is a
+toolkit blocked on a roundtrip that never completes — a window that never appears, with nothing in a
+log. Advertising 3 is a client being told the pairs gyro will take, which every toolkit still handles
+because every compositor shipped it for years. The number goes up in the commit that builds feedback.
+
+**The release is owed rather than immediate, and the watermark is what says when.** This is the one
+behavioural difference from `wl_shm` and it is the whole reason the buffer object has a lifetime.
+`wl_shm` pixels are copied, so `wl_buffer.release` goes back in the same step and a toolkit with one
+buffer never stalls. Descriptors are *borrowed*: the memory stays the client's, and a panel may be
+scanning it out. A client told it may redraw is a window tearing into itself, on the frame after it
+started animating, and it reaches a log as nothing at all. So a dmabuf buffer answers
+`ReleasesImmediately` with false, registers as an `ITextureRelease`, and is told when the frame thread
+has moved past every snapshot that could name the id — which is the number the texture registry already
+reclaims against, so this is an observer on an existing step rather than the third channel decision 45
+calls a design error. The count is per adoption rather than per buffer: the same buffer committed twice
+before the first frame left the screen has two ids against it, and releasing on the first is the bug
+this is arranged to prevent.
+
+**Rejected: copying a dmabuf at commit, the way `wl_shm` is copied.** It makes the release immediate
+and every window uniform, and it throws away the entire point — a buffer gyro copied is a buffer no
+plane can scan out, so the copy would defeat decisions 152 and 153 in the act of simplifying them. It
+is also a full-window read back across the bus per frame.
+
+**Rejected: releasing when the surface stops naming the id.** It is one step earlier than the
+watermark and it is wrong by exactly one frame's worth of GPU queue: the scene stops naming a texture
+during an `Advance`, and the frame thread is still composing from the snapshot before it. That is the
+same off-by-one decision 131 corrected for `Forget`, and the symptom here is worse — a client redrawing
+into memory a panel is reading.
+
+**Rejected: a fatal protocol error for a pair gyro cannot import.** The protocol has a `failed` event
+for exactly this and a client's fallback path exists to use it. A client cannot predict what a
+compositor's device will take, and turning a driver limitation into a dead connection is an application
+that will not start. What stays fatal is what the client got *wrong* — a plane index out of bounds, a
+negative extent, planes with differing modifiers — because a compositor that quietly went along with
+one of those draws a window sheared across the screen with nothing in any log.
+
+**Rejected: advertising linear only, and skipping the device's modifier list.** It is a smaller change
+— `SupportsSampling` already answers per pair — and it makes every GPU client on the machine allocate
+an untiled buffer and pay for it on every read. `VulkanDevice::SamplingModifiers` is the plural of a
+predicate that already existed, and what it buys is that the advertisement is the driver's own answer
+rather than the two tilings gyro happened to think of.

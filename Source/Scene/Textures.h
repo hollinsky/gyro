@@ -1,9 +1,11 @@
 #pragma once
 
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 
+#include "Core/Fd.h"
 #include "Core/Result.h"
 #include "Core/Texture.h"
 #include "Geometry/Space.h"
@@ -58,6 +60,82 @@ enum class TextureAlpha : std::uint8_t
 	None,
 };
 
+// A pixel layout named the way whoever allocated it named it: a DRM fourcc and a DRM modifier.
+//
+// **This is the one place decision 87's rule is broken, and it is broken because the client owns the
+// word.** Everywhere else an author says what its bytes mean in prose — `TextureAlpha` above is the
+// whole of it — and the party that can name `Seam` turns that into a format. That division holds
+// exactly as long as the author *chose* the layout, which is true of a gym's card and of the console's
+// grid and is not true here: `zwp_linux_buffer_params_v1.create` carries a fourcc and a modifier as
+// wire arguments, chosen by the client's own allocator, and there is no prose an author could
+// translate them into that does not throw away the thing that makes them work. A modifier is an opaque
+// token whose entire purpose is that nobody in the middle interprets it.
+//
+// So the author relays rather than decides, and the same two numbers come *back* through `Formats`
+// below so it has something honest to advertise. What decision 87 was protecting against — a module
+// that authors a world reasoning about pixel layouts — is still true of every other verb here.
+struct TextureFormat
+{
+	std::uint32_t Code = 0;
+
+	// DRM's own token. Not defaulted to zero-meaning-linear: zero *is* linear, and there is no value
+	// that means *unset*, so a half-filled one is a lie rather than a placeholder. The party that fills
+	// this always has a client's number to put in it.
+	std::uint64_t Modifier = 0;
+
+	friend constexpr bool operator==(TextureFormat, TextureFormat) noexcept = default;
+};
+
+// One plane of a buffer somebody else allocated, in the layout they laid it out in.
+//
+// **Borrowed for the duration of the call, like the pixels above.** The descriptor is duplicated by
+// whoever takes it if it needs to outlive the call, which it does — a dmabuf is not copied, so the
+// memory has to stay reachable for as long as an id names it. What that dup costs is a file
+// descriptor per plane per live buffer, which is the price of not copying a window every frame.
+struct TexturePlane
+{
+	RawFd Descriptor{};
+	std::uint32_t Offset = 0;
+	std::uint32_t Stride = 0;
+};
+
+// SPEC: the most planes one buffer may have. Four is what every DRM format there is uses at most, and
+// it is `Seam/RenderTarget.h`'s `MaxImagePlanes` said again on the side of the waist that may not name
+// it — the two are checked against each other where they meet.
+inline constexpr std::size_t MaxTexturePlanes = 4;
+
+// Who is told when nobody is reading a texture's memory any more.
+//
+// **This exists because a dmabuf is not copied, and that is the whole difference.** A `wl_shm` buffer
+// is copied at `Adopt` and handed straight back, so the client may draw into it again immediately;
+// descriptors are *borrowed*, so a client told the same thing would be drawing into the buffer the
+// panel is scanning out — which reaches a person as a window tearing into itself, on the frame after
+// it started animating, and reaches a log as nothing at all.
+//
+// So the release is owed, and the number that says when is the watermark: the frame thread has moved
+// past every snapshot that could name the id. That is the same number the registry already retires
+// against, which is what makes this an observer on an existing step rather than a mechanism of its
+// own — decision 45's rule that a third channel would be a design error.
+//
+// A caller that goes away first says so with `Abandon`, because the registry holds a bare pointer and
+// a client destroying its `wl_buffer` is ordinary rather than exceptional.
+class ITextureRelease
+{
+public:
+	ITextureRelease() = default;
+
+	virtual ~ITextureRelease() = default;
+
+	ITextureRelease(const ITextureRelease&) = delete;
+	ITextureRelease& operator=(const ITextureRelease&) = delete;
+	ITextureRelease(ITextureRelease&&) = delete;
+	ITextureRelease& operator=(ITextureRelease&&) = delete;
+
+	// One id that named this memory has been reclaimed. Called once per successful `Adopt`, on the
+	// dispatch thread, and never after `Abandon`.
+	virtual void OnTextureReleased() noexcept = 0;
+};
+
 class ITextures
 {
 public:
@@ -95,4 +173,61 @@ public:
 	// Says nothing about an id it does not hold, which is `Forget`'s answer one layer down and for the
 	// same reason: a double retire is not a condition an author can act on.
 	virtual void Retire(TextureId id) noexcept = 0;
+
+	// Give these descriptors an id.
+	//
+	// **The descriptors are borrowed and the memory is not**, which is the inverse of the overload
+	// above and is the reason the two are separate verbs rather than one with a variant in it. Nothing
+	// is copied: the implementation duplicates each plane's descriptor, imports the buffer onto every
+	// device that will take it, and holds the duplicates until the id is reclaimed — at which point
+	// `release` is told, if there is one. The caller's own descriptors are its own again the moment
+	// this returns, whether it succeeded or not.
+	//
+	// **`release` is optional and its absence is not a shortcut.** An author that allocated the buffer
+	// itself owes nobody a release; an author relaying a client's buffer owes exactly one, and passing
+	// null there would be the tearing bug `ITextureRelease` describes. It must outlive the id or say
+	// otherwise through `Abandon`.
+	//
+	// `EINVAL` for an extent, a plane count or a descriptor that does not describe an image; whatever
+	// the importer answered where it refused the format or the modifier; `ENOSPC` where the id space
+	// is full.
+	//
+	// **Answered by refusing where nothing implements it**, unlike the overload above, and the asymmetry
+	// is the point: every texture space there is can take bytes, because bytes are what a CPU renderer
+	// samples and what the console draws with. Descriptors need a device, and a texture space with none
+	// is an ordinary one rather than an incomplete one — so the default is the honest answer rather
+	// than a compiler error every stub would discharge by writing the same refusal.
+	[[nodiscard]] virtual Result<TextureId> Adopt(
+		PixelSize<BufferSpace> size,
+		TextureFormat format,
+		std::span<const TexturePlane> planes,
+		ITextureRelease* release
+	)
+	{
+		static_cast<void>(size);
+		static_cast<void>(format);
+		static_cast<void>(planes);
+		static_cast<void>(release);
+
+		return Failure(ENOTSUP, "this texture space takes no descriptors");
+	}
+
+	// Stop calling this. Every id it was registered against stays live and retires normally; what is
+	// dropped is only the notification, because the party that wanted it is going away.
+	//
+	// Says nothing about one it does not hold, for `Retire`'s reason.
+	virtual void Abandon(const ITextureRelease& release) noexcept { static_cast<void>(release); }
+
+	// The layouts descriptors may be handed over in, in no particular order.
+	//
+	// **What an author advertises rather than what a device can do**, and the two differ by one word:
+	// this is the intersection over every importer, because an image a scene can draw anywhere has to
+	// exist everywhere it might be drawn. A format one panel's device accepts and another's does not is
+	// a window that appears on one monitor and is missing from the other, which is worse than a client
+	// falling back to a format both take.
+	//
+	// Empty is a legitimate answer and means *hand over no descriptors*: a machine with no GPU has a
+	// CPU renderer that has no device to put a descriptor on, and an author that advertises nothing
+	// there is one whose clients draw into shared memory and still get a window.
+	[[nodiscard]] virtual std::span<const TextureFormat> Formats() const noexcept { return {}; }
 };
