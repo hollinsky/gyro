@@ -695,3 +695,38 @@ namespace Detail
 
 	return options;
 }
+
+// What the command line asked for, turned into what is actually going to be constructed.
+//
+// Two rules and an ordering between them, which is the whole reason this is a function rather than
+// four lines at the top of `Run`. `Auto` picks the panel where there is no host to nest in, and a
+// hosted backend gives up `SCHED_FIFO` unless somebody asked for it by name — and the second rule
+// has to read the backend the *first* one settled on. Read the other way round, `Auto` is not `Drm`,
+// so gyro booting on a panel with no arguments at all — which is how it boots — quietly ran the
+// frame thread at normal priority and missed frames nobody could account for.
+//
+// `host` is passed in rather than read from the environment here so that the ordering is testable on
+// any machine; `Run` is where `WAYLAND_DISPLAY` is looked at.
+[[nodiscard]] inline Options ResolveOptions(const Options& options, bool host) noexcept
+{
+	Options resolved = options;
+
+	// Docs/Architecture.md#selection. Auto never picks dump: writing files is something a person asks
+	// for by name.
+	if (resolved.Backend == BackendKind::Auto)
+	{
+		resolved.Backend = host ? BackendKind::Nested : BackendKind::Drm;
+	}
+
+	// Docs/Architecture.md#backends, enforced by the backend rather than by convention: headless and
+	// nested force `SCHED_FIFO` and `mlockall` off unless explicitly overridden, because a real-time
+	// thread inside a normal-priority host is an effective way to hard-lock the desktop somebody is
+	// developing on. `--realtime` is the override that rule names, and it is the only thing that beats
+	// this.
+	if (resolved.Backend != BackendKind::Drm && !resolved.RealTimeForced)
+	{
+		resolved.RealTime = false;
+	}
+
+	return resolved;
+}

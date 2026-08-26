@@ -127,6 +127,37 @@ GYRO_TEST(Options, RealTimeRecordsWhetherItWasAskedForDeliberately)
 	GYRO_CHECK(!declined->RealTime && !declined->RealTimeForced);
 }
 
+// The ordering between the two resolution rules, and the regression that made it a function: the
+// safety rule reads the backend, so it has to run after `Auto` has been settled. Read the other way
+// round, `Auto` is not `Drm`, and gyro booting on a panel with nothing typed — which is how it boots
+// — ran its frame thread at normal priority and dropped frames nobody could account for.
+GYRO_TEST(Options, AutoOnAPanelKeepsRealTime)
+{
+	const Result<Options> silent = Parse({});
+
+	GYRO_REQUIRE(silent.has_value());
+
+	const Options panel = ResolveOptions(*silent, false);
+	const Options nested = ResolveOptions(*silent, true);
+
+	GYRO_CHECK(panel.Backend == BackendKind::Drm && panel.RealTime);
+	GYRO_CHECK(nested.Backend == BackendKind::Nested && !nested.RealTime);
+}
+
+// The safety rule itself, and the one thing that beats it. A hosted backend gives up `SCHED_FIFO`
+// whether it was chosen by name or by `Auto`, because a real-time thread inside a normal-priority
+// host hard-locks the desktop somebody is developing on.
+GYRO_TEST(Options, AHostedBackendGivesUpRealTimeUnlessAskedByName)
+{
+	const Result<Options> silent = Parse({ "--backend=nested" });
+	const Result<Options> asked = Parse({ "--backend=nested", "--realtime" });
+
+	GYRO_REQUIRE(silent.has_value() && asked.has_value());
+
+	GYRO_CHECK(!ResolveOptions(*silent, true).RealTime);
+	GYRO_CHECK(ResolveOptions(*asked, true).RealTime);
+}
+
 GYRO_TEST(Options, MoreOutputsThanTheLoopAdmitsIsRefused)
 {
 	std::array<std::string_view, MaxOutputs + 1> arguments{};

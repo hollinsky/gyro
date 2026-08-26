@@ -1581,7 +1581,7 @@ private:
 				"wl_compositor, wl_shm, xdg_wm_base and wl_data_device_manager are the globals; a window will open, be "
 				"placed and redraw against the frames that reach the glass, and there is no seat to route input and "
 				"nothing behind the clipboard, so it will not respond to a click or a keystroke and cannot copy or "
-			    "paste"
+				"paste"
 			);
 
 			author = std::move(*made);
@@ -2000,33 +2000,19 @@ private:
 
 Result<void> Run(const Options& options)
 {
-	Options resolved = options;
+	// **The panel first, then the priority.** Both rules live in Options.h with the ordering between
+	// them, because reading the backend before `Auto` has been settled makes gyro booting on a panel
+	// with no arguments give up `SCHED_FIFO` — see ResolveOptions.
+	const bool host = ::getenv("WAYLAND_DISPLAY") != nullptr || ::getenv("WAYLAND_SOCKET") != nullptr;
+	const Options resolved = ResolveOptions(options, host);
 
-	// Docs/Architecture.md#backends, enforced by the backend rather than by convention: headless and
-	// nested force `SCHED_FIFO` and `mlockall` off unless explicitly overridden, because a real-time
-	// thread inside a normal-priority host is an effective way to hard-lock the desktop somebody is
-	// developing on. `--realtime` is the override that rule names, and it is the only thing that beats
-	// this.
-	if (resolved.Backend != BackendKind::Drm && !resolved.RealTimeForced)
+	// Said out loud rather than silently, because somebody who typed nothing and got one of the two
+	// should be able to find out why without reading this file. `WAYLAND_SOCKET` counts as well as
+	// `WAYLAND_DISPLAY`, because a client launched by something that already opened the socket inherits
+	// the descriptor rather than the path — which is how a sandboxed client reaches a compositor whose
+	// socket it cannot open, and Wire's own connect path already prefers it.
+	if (options.Backend == BackendKind::Auto)
 	{
-		resolved.RealTime = false;
-	}
-
-	if (resolved.Backend == BackendKind::Auto)
-	{
-		// **A host, or the panel.** Docs/Architecture.md#selection has auto picking nested where there is
-		// a compositor to nest in and DRM otherwise, which is now what it does. `WAYLAND_SOCKET` counts
-		// as well as `WAYLAND_DISPLAY`, because a client launched by something that already opened the
-		// socket inherits the descriptor rather than the path — which is how a sandboxed client reaches a
-		// compositor whose socket it cannot open, and Wire's own connect path already prefers it.
-		//
-		// Auto never picks dump: writing files is something a person asks for by name.
-		const bool host = ::getenv("WAYLAND_DISPLAY") != nullptr || ::getenv("WAYLAND_SOCKET") != nullptr;
-
-		resolved.Backend = host ? BackendKind::Nested : BackendKind::Drm;
-
-		// Said out loud rather than silently, because somebody who typed nothing and got one of the two
-		// should be able to find out why without reading this file.
 		spdlog::info(
 			host ? "no backend selected and WAYLAND_DISPLAY is set; running nested" :
 				   "no backend selected and there is no wayland host; driving the panel"
