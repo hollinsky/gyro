@@ -89,6 +89,12 @@ struct Options
 	// two apart is cheaper than a precedence rule nobody remembers.
 	std::string DumpDirectory;
 
+	// Which card node the DRM backend drives. Empty is *the first one with something connected*, which
+	// is what a boot service with no configuration has to do — a laptop with a discrete GPU has two
+	// card nodes and the panel is on one of them. Named for the case where that guess is wrong and for
+	// the machine with two monitors on two cards, which gyro cannot yet drive at once.
+	std::string Device;
+
 	std::array<OutputRequest, MaxOutputs> Outputs{};
 	std::size_t OutputCount = 0;
 
@@ -465,6 +471,18 @@ namespace Detail
 			continue;
 		}
 
+		if (Detail::Matches(argument, "--device", value))
+		{
+			if (value.empty())
+			{
+				return Failure(EINVAL, "--device wants a DRM card node, such as /dev/dri/card0");
+			}
+
+			options.Device = value;
+
+			continue;
+		}
+
 		if (Detail::Matches(argument, "--trace", value))
 		{
 			// Bare is the default path, because somebody typing the flag wants the file rather than an
@@ -647,6 +665,13 @@ namespace Detail
 	if (!options.DumpDirectory.empty() && options.Backend != BackendKind::Dump)
 	{
 		return Failure(EINVAL, "--dump names where the dump backend writes, so it wants --backend=dump");
+	}
+
+	// `--dump`'s refusal, for the same reason: somebody who named a card and got a nested window has
+	// been ignored quietly. Auto is exempt, because a machine with no wayland host resolves it to drm.
+	if (!options.Device.empty() && options.Backend != BackendKind::Drm && options.Backend != BackendKind::Auto)
+	{
+		return Failure(EINVAL, "--device names the card the drm backend drives, so it wants --backend=drm");
 	}
 
 	if (options.Backend == BackendKind::Dump && options.DumpDirectory.empty())

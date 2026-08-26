@@ -49,6 +49,8 @@
 #include "Headless/Device.h"
 #include "Headless/Output.h"
 #include "Headless/Renderer.h"
+#include "Drm/Device.h"
+#include "Drm/Output.h"
 #include "Nested/Host.h"
 #include "Nested/Output.h"
 #include "Protocol/Host.h"
@@ -806,6 +808,166 @@ private:
 	std::size_t m_Count = 0;
 };
 
+// The panel: a DRM device, one output per connected connector, and a clock that is the hardware's.
+//
+// **It is the same shape as the nested backend with the host replaced by the card**, which is decision
+// 5's claim being paid off rather than a coincidence — the seam was designed from the KMS
+// specification, so the backend that arrives last is the one that fits without moving anything.
+//
+// **Master is first-open and nothing here claims a seat.** Decision 7 deferred choosing a D-Bus
+// client until this backend needed one; it does not. The node comes from a udev rule and the process
+// that opens it first is master for the life of the file description, which on a machine with no VTs
+// nothing can take away.
+class DrmBackend final : public IBackend
+{
+public:
+	DrmBackend(const IClock& clock, bool governor) noexcept : m_Clock{ &clock }, m_Governs{ governor } {}
+
+	// The card first, for `NestedBackend::Open`'s reason exactly: it is what says whether there is a
+	// panel to drive at all, and a machine with nothing connected should answer that rather than spend
+	// a Vulkan instance discovering it.
+	[[nodiscard]] Result<void> Open(std::string_view path)
+	{
+		Result<std::unique_ptr<Drm::DrmDevice>> device = Drm::DrmDevice::Open(path);
+
+		if (!device)
+		{
+			return std::unexpected{ device.error() };
+		}
+
+		m_Card = std::move(*device);
+
+		spdlog::info(
+			"driving {} ({}) with {} connected output(s)", m_Card->Path(), m_Card->Driver(), m_Card->Pipelines().size()
+		);
+
+		if (!m_Card->HasMonotonicTimestamps())
+		{
+			// The clock's error bar depends on this and nothing else can tell it. `simpledrm` is the case
+			// that produces it — no vblank at all, so a completion arrives when the commit is applied
+			// rather than at a boundary — and every deadline this session schedules is then predicted from
+			// a cadence that is gyro's own polling.
+			spdlog::warn(
+				"{} does not report monotonic page-flip timestamps, so this session's pacing figures are "
+				"not a measurement of the panel",
+				m_Card->Path()
+			);
+		}
+
+		Result<VulkanDevice> rendering = VulkanDevice::Open();
+
+		if (!rendering)
+		{
+			return std::unexpected{ rendering.error() };
+		}
+
+		m_Device = std::move(*rendering);
+		m_Allocator.emplace(m_Device);
+		m_Textures.emplace(m_Device);
+
+		if (const Result<void>& built = m_Textures->Status(); !built)
+		{
+			return built;
+		}
+
+		spdlog::info("rendering on {} ({})", m_Device.Description().DeviceName(), m_Device.Description().DriverName());
+
+		if (m_Governs)
+		{
+			m_Governor = GpuGovernor::Take(*m_Clock, m_Device, *m_Textures);
+		}
+
+		return {};
+	}
+
+	[[nodiscard]] IEventSource& Source() noexcept override { return *m_Card; }
+
+	// The device's file is what wakes this backend, so the ordinary answer is never. What is not on the
+	// file is a composite a commit is waiting for, which is the held path saying when to look again.
+	[[nodiscard]] Instant NextEvent() const noexcept override
+	{
+		Instant next{ Duration::max() };
+
+		for (std::size_t index = 0; index < m_Count; ++index)
+		{
+			next = std::min(next, m_Panels[index]->NextEvent());
+		}
+
+		return next;
+	}
+
+	[[nodiscard]] Result<void>
+	Build(std::size_t index, const OutputConfiguration& wanted, const OutputPlan&, BoundOutput& into) override
+	{
+		if (index >= m_Card->Pipelines().size())
+		{
+			return Failure(ENOSPC, "more outputs than this device has connected");
+		}
+
+		auto renderer = std::make_unique<VulkanRenderer>(*m_Clock, m_Device, *m_Textures);
+
+		auto panel =
+			std::make_unique<Drm::DrmOutput>(*m_Card, m_Card->Pipelines()[index], *m_Allocator, renderer.get());
+
+		if (const Result<void> opened = panel->Open(wanted); !opened)
+		{
+			return opened;
+		}
+
+		spdlog::info(
+			"  {}: {} on {}",
+			m_Card->Pipelines()[index].Name,
+			panel->Configuration(),
+			panel->IsExplicitlySynchronized() ? "an in-fence" : "a held commit"
+		);
+
+		into.Presenter = panel.get();
+		into.Configuration = panel->Configuration();
+		into.Renderer = std::move(renderer);
+		into.Importer = &*m_Textures;
+
+		m_Panels[index] = std::move(panel);
+		m_Count = index + 1;
+
+		return {};
+	}
+
+	void Report() const override
+	{
+		for (std::size_t index = 0; index < m_Count; ++index)
+		{
+			const Drm::DrmOutput& panel = *m_Panels[index];
+
+			spdlog::info("  {}: {} commit(s), {} held for a composite", panel.Pipe().Name, panel.Commits, panel.Held());
+
+			if (panel.Held() != 0)
+			{
+				spdlog::warn(
+					"             this output ran without an in-fence, so its presentation timestamps "
+					"include gyro's own polling and are not a measurement of the panel's cadence"
+				);
+			}
+		}
+	}
+
+private:
+	const IClock* m_Clock = nullptr;
+
+	// Declared before the rendering device, so it is destroyed after it: an output holds framebuffers
+	// over descriptors the device exported, and `drmModeRmFB` has to run while both still exist.
+	std::unique_ptr<Drm::DrmDevice> m_Card;
+
+	VulkanDevice m_Device;
+	std::optional<VulkanAllocator> m_Allocator;
+	std::optional<VulkanTextures> m_Textures;
+
+	bool m_Governs = true;
+	GpuGovernor m_Governor;
+
+	std::array<std::unique_ptr<Drm::DrmOutput>, MaxOutputs> m_Panels{};
+	std::size_t m_Count = 0;
+};
+
 // Everything with a lifetime, in one object, constructed in place.
 //
 // Almost none of it is movable — `FrameOutput` holds signal connections, `HeadlessOutput` is a
@@ -1269,8 +1431,21 @@ private:
 				return {};
 			}
 
-			case BackendKind::Auto:
 			case BackendKind::Drm:
+			{
+				auto drm = std::make_unique<DrmBackend>(m_Clock, m_Options.Governor);
+
+				if (const Result<void> opened = drm->Open(m_Options.Device); !opened)
+				{
+					return opened;
+				}
+
+				m_Backend = std::move(drm);
+
+				return {};
+			}
+
+			case BackendKind::Auto:
 				break;
 		}
 
@@ -1780,29 +1955,23 @@ Result<void> Run(const Options& options)
 
 	if (resolved.Backend == BackendKind::Auto)
 	{
-		// **A host, or headless.** Docs/Architecture.md#selection has auto picking nested where there is
-		// a compositor to nest in and DRM otherwise; DRM is not built, so the second half falls to
-		// headless. `WAYLAND_SOCKET` counts as well as `WAYLAND_DISPLAY`, because a client launched by
-		// something that already opened the socket inherits the descriptor rather than the path — which
-		// is how a sandboxed client reaches a compositor whose socket it cannot open, and Wire's own
-		// connect path already prefers it.
+		// **A host, or the panel.** Docs/Architecture.md#selection has auto picking nested where there is
+		// a compositor to nest in and DRM otherwise, which is now what it does. `WAYLAND_SOCKET` counts
+		// as well as `WAYLAND_DISPLAY`, because a client launched by something that already opened the
+		// socket inherits the descriptor rather than the path — which is how a sandboxed client reaches a
+		// compositor whose socket it cannot open, and Wire's own connect path already prefers it.
 		//
 		// Auto never picks dump: writing files is something a person asks for by name.
 		const bool host = ::getenv("WAYLAND_DISPLAY") != nullptr || ::getenv("WAYLAND_SOCKET") != nullptr;
 
-		resolved.Backend = host ? BackendKind::Nested : BackendKind::Headless;
+		resolved.Backend = host ? BackendKind::Nested : BackendKind::Drm;
 
 		// Said out loud rather than silently, because somebody who typed nothing and got one of the two
 		// should be able to find out why without reading this file.
 		spdlog::info(
 			host ? "no backend selected and WAYLAND_DISPLAY is set; running nested" :
-				   "no backend selected and there is no wayland host; running headless"
+				   "no backend selected and there is no wayland host; driving the panel"
 		);
-	}
-
-	if (resolved.Backend == BackendKind::Drm)
-	{
-		return Failure(ENOSYS, "the DRM backend is not built");
 	}
 
 	if (resolved.RealTime)

@@ -77,6 +77,25 @@ if(NOT liburing_FOUND)
 	)
 endif()
 
+# libdrm, for the DRM/KMS backend and nothing else.
+#
+# **What it is used for is everything off the frame path, and the split is a hard rule rather than a
+# preference.** Enumeration, property blobs, `AddFB2` and the mode set are libdrm's; the per-frame
+# atomic commit is a bare ioctl, because `drmModeAtomicCommit` allocates four arrays per call and
+# `IPresenter::Present` runs inside Core/FrameSection.h's guard, where an allocation aborts. Source/Drm
+# carries the argument at the call site.
+#
+# Named with a sentence for liburing's reason: the machine that hits this is one somebody is setting up
+# and the fix is one package away.
+pkg_check_modules(libdrm IMPORTED_TARGET libdrm)
+
+if(NOT libdrm_FOUND)
+	message(FATAL_ERROR
+		"libdrm was not found. gyro's DRM/KMS backend needs it for mode setting and framebuffer "
+		"management. Install libdrm-devel (Fedora) or libdrm-dev (Debian)."
+	)
+endif()
+
 # The frame thread is a thread, and the composition root is what starts it. Declared here with the rest
 # of the platform stack rather than beside the one target that used to want it, because it is now two:
 # Compositor spawns the frame thread and drives its ring from a second one under test, and Integration
@@ -855,6 +874,36 @@ target_link_libraries(Protocol
 # It depends on everything below it and always will, which is why it is the one module whose DEPENDS
 # list is not an argument about layering. No DISPATCH_HALF: the root is what *constructs* both threads
 # and runs on neither, so it belongs to the frame side by the default the halves are written around.
+# The DRM/KMS backend: the panel gyro was written for, and the first backend whose clock is the
+# hardware's own. One device file, one presenter per connected connector, and a page-flip completion
+# that is the sole input to every deadline in the system.
+#
+# Not PORTABLE for the obvious reason and `Catalog` is testable anyway, which is the whole point of
+# splitting it out: choosing a mode from a connector's list and decoding a plane's `IN_FORMATS` blob
+# are arithmetic over bytes, and a test can hand over the same bytes a kernel would.
+gyro_add_module(Drm
+	DEPENDS
+		Core
+		Geometry
+		Seam
+	SOURCES
+		Catalog.cpp
+		Device.cpp
+		Fence.cpp
+		Output.cpp
+	TESTS
+		Catalog.Test.cpp
+)
+
+# libdrm for the mode-setting half, and spdlog for the handful of lines that say what gyro is driving
+# and which sync path a session came up on. PUBLIC because the module's headers name `drmModeModeInfo`:
+# a pipeline holds a connector's mode list.
+target_link_libraries(Drm
+	PUBLIC
+		PkgConfig::libdrm
+		spdlog::spdlog
+)
+
 gyro_add_module(Compositor
 	DEPENDS
 		Core
@@ -868,6 +917,7 @@ gyro_add_module(Compositor
 		Virtual
 		Render
 		Nested
+		Drm
 		Gym
 		Protocol
 		Dispatch

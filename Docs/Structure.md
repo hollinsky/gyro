@@ -181,7 +181,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Headless` | **portable** | split | `Core`, `Geometry`, `Seam` |
 | `Virtual` | platform | frame, own | `Core`, `Geometry`, `Seam`, `Headless` |
 | `Nested` | platform | split | `Core`, `Geometry`, `Seam`, `Wire` |
-| `Drm` | platform | split | `Core`, `Geometry`, `Seam` |
+| `Drm` | platform | frame | `Core`, `Geometry`, `Seam` |
 | `Console` | platform | own | `Core`, `Geometry`, `Seam`, `Blit` |
 | `Compositor` | platform | constructs | everything |
 | `Testing` | portable | — | — |

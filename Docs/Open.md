@@ -1074,3 +1074,36 @@ nothing only proves the grep.
   the bound has changed does not retroactively wake a core that is already deep, so the first frame out
   of idle pays the exit latency anyway, and whether that first frame is worth a tier is the question
   the entry actually turns on.
+
+## The mode set the DRM backend cannot perform yet
+
+`DrmOutput::Reconfigure` accepts a request and answers with the configuration it still has, which
+`OutputConfiguration::SatisfiedBy` reads as *not honoured*. Nothing lies, and nothing changes a mode
+after startup either — so a monitor's refresh rate cannot be changed, an output cannot be turned off
+by the idle ladder, and hotplug is not connected to anything.
+
+What it needs is the shape [decision 73](Decisions.md#73-a-reconfiguration-is-initiated-on-the-frame-thread-and-performed-elsewhere)
+already fixes: a thread that owns the blocking commit, and a completion that arrives back through the
+frame loop's own drain so that `Reconfigured` emits on the thread it is claimed by. The reason it is
+not free is the reason that decision exists — `drm_atomic_nonblocking_commit` runs the driver's
+`atomic_check` synchronously on the caller, and amdgpu uses that latitude to take every modeset lock
+on the device and wait on every CRTC's outstanding commit, so the thread is not an optimisation.
+
+What is genuinely open is whether that thread is per device or per process. Per device is the honest
+granularity of the lock the driver takes; per process is one thread rather than one per card, and on
+the machines gyro will actually run on there is one card. The second is what makes a two-GPU laptop's
+external monitor wait behind the panel's mode set, and neither is measured.
+
+## One plane per output, and what the catalog is already for
+
+The DRM backend drives one primary plane and refuses a layer set with a second layer in it.
+`Drm/Catalog.h` already decodes what every plane on the device accepts, because the target
+allocation needs it; what is missing is the assignment — which layers can be promoted onto which
+overlay, and what it costs to be wrong. [Seam/Presenter.h](../Source/Seam/Presenter.h) has carried
+the multi-layer list from the start for exactly this, so the shape is not the question.
+
+The part that has no home yet is where a *client* buffer becomes a scanout framebuffer. Turning a
+dmabuf into one is a kernel allocation that must not happen inside the frame section, and the
+presenter is frame-side, so the import has nowhere to live until plane assignment says where. That is
+the same item `PresentLayer::Target` names and it is now the thing standing between a tablet's idle
+composite and the GPU never waking for it.

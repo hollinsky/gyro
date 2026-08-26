@@ -11018,3 +11018,56 @@ against a part that reaches roughly 1.3 GHz, which is why a blur chain over an 8
 5.4 ms; and `gpu mark`, the figure admission is fed, sits at 10.6 ms against a measured 5.36 ms and
 takes four distinct values in 1,200 samples. Neither is a new fact — both numbers were in the old
 trace. They were unreadable beside 3,000 arrows, which is the entire argument for this entry.
+
+### 145. The DRM backend takes master by opening the node, and libdrm stops at the frame section
+
+The backend decision 5 designed the seam from, built. It fits without moving anything at the waist,
+which is what that decision was buying; what it did settle is two questions the log left open, and
+one of them is settled by a package the machine already has.
+
+**Session claiming is over, and the answer is that there is nothing to claim.**
+[Decision 7](#7-session-claiming-is-deferred-basu-rejected) deferred choosing a D-Bus client until
+this backend needed one, and named the condition for retiring it: *whether device pause and resume
+needs anything the DRM backend cannot get from first-open master*. It does not. The node arrives from
+a udev rule, the process that opens it first is master for the life of the file description, and on a
+machine with no VTs nothing exists that could take it away — so there is no pause, no resume, and no
+bus. `drmSetMaster` is called anyway and its failure is not fatal, because a device gyro is already
+master of answers `EINVAL` on some kernels and success on others; the only thing that decides the
+question is whether the atomic commit is permitted.
+
+**Rejected: taking a seat from seatd.** It was installed on the development machine and it would have
+worked. What it costs is the thing decisions 24 and 37–43 spent their argument removing: a daemon in
+the startup path of a boot service, and a device pause and resume protocol modelling an event — some
+other client becoming master — that cannot occur. A compositor that is the whole system layer does
+not ask a session broker for the display it is the reason the machine boots for.
+
+**libdrm is used for everything except the commit that happens every frame, and the line is
+`Present`.** `drmModeAtomicCommit` allocates four arrays per call, and `IPresenter::Present` runs
+inside `Core/FrameSection.h`'s guard, where [decision 36](#36-disciplines-are-build-failures)'s
+allocator makes an allocation an abort rather than a jitter figure nobody traces. So the per-frame
+flip is a bare `DRM_IOCTL_MODE_ATOMIC` over property ids and values that were resolved when the
+output was opened, and enumeration, property blobs, `AddFB2` and the mode set — all of which run
+where allocating is ordinary — are libdrm's.
+
+**Rejected: hand-rolling the whole of it**, which is the house style for the probes in `Tools/` and
+for `Nested/Sync.cpp`. Property enumeration and modifier-aware framebuffer creation are a few hundred
+lines of struct packing whose only reference is libdrm's own source, and they run once per output.
+Paying a dependency to not own that, while owning the forty lines that are actually on the frame
+path, is the trade in the right direction.
+
+**Also rejected: `drmHandleEvent` for the drain.** It reports a read of zero bytes and a read that
+failed identically, so the loop `IEventSource::Drain` is obliged to run — *to empty, not once* —
+spins forever the moment the device disappears, on the `SCHED_FIFO` thread, which takes the machine
+with it. Reading `drm_event` records directly is forty lines and the two cases are distinguishable.
+
+**What is not built, said here rather than discovered later.** `Reconfigure` reports the
+configuration the output still has, which `SatisfiedBy` reads as *not honoured*: the mode set at
+`Open` is a blocking commit before the frame thread exists, and performing a later one needs the
+thread and the completion path [decision 73](#73-a-reconfiguration-is-initiated-on-the-frame-thread-and-performed-elsewhere)
+describes, because `atomic_check` runs synchronously on the caller. Plane assignment is not built
+either — one primary plane per output, and a layer set with a second layer in it is refused rather
+than partly honoured. Both are in [Open.md](Open.md).
+
+First light on a Tiger Lake laptop: 1,123 commits in 19.3 seconds on eDP-1 at 1920x1080, Y-tiled
+under modifier `0x100000000000002` because the plane offered the set and the device chose from it,
+every commit carrying an `IN_FENCE_FD` and none held for a composite.
