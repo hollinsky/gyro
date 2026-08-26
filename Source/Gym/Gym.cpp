@@ -19,6 +19,7 @@
 #include "Gym/Card.h"
 #include "Gym/Cards.h"
 #include "Gym/Lanes.h"
+#include "Gym/Pointer.h"
 #include "Scene/Commit.h"
 #include "Scene/Store.h"
 #include "Scene/Textures.h"
@@ -39,6 +40,11 @@ constexpr Duration TurnPeriod = std::chrono::milliseconds{ 1100 };
 // retarget and become invisible inside it.
 constexpr Duration SwapPeriod = std::chrono::milliseconds{ 2300 };
 
+// How often the pointer gym reverses its sliding specimens. Slower than every lane above, because what
+// is being looked at is an edge rather than a motion: a glyph that crawls does it while crossing
+// pixels, and a marker that has already turned round is a glyph nobody had time to look at.
+constexpr Duration GlidePeriod = std::chrono::milliseconds{ 2600 };
+
 // The motion each lane is driven under.
 //
 // **Named motions rather than a catalog transition, and the asymmetry with a shell is deliberate.** A
@@ -56,6 +62,11 @@ constexpr Motion SlideMotion = Motion::Snappy;
 constexpr Motion GrowMotion = Motion::Standard;
 constexpr Motion FadeMotion = Motion::Gentle;
 constexpr Motion TurnMotion = Motion::Standard;
+
+// The pointer specimens glide rather than snap, and the choice is the instrument's: a slow crossing is
+// what puts the staircase at every sub-pixel phase in turn, which is the only way a shimmer that
+// happens at one phase in twenty is seen at all.
+constexpr Motion GlideMotion = Motion::Gentle;
 
 static_assert(SlidePeriod > Duration::zero() && GrowPeriod > Duration::zero());
 static_assert(FadePeriod > Duration::zero() && TurnPeriod > Duration::zero());
@@ -616,6 +627,75 @@ private:
 
 	bool m_Driving = true;
 };
+
+// The pointer glyph, specimened.
+//
+// **It authors a grid and drives one thing, and the asymmetry is the point.** Every other gym here is
+// a motion with a picture attached; this one is a picture with a motion attached, because the question
+// decision 152 left open is what the glyph should be and the only part of that a still frame cannot
+// answer is whether the staircase crawls when it moves. So the grid is authored once and never
+// touched, and one carriage slides across the bottom of it forever.
+class PointerGym final : public ISceneAuthor
+{
+public:
+	[[nodiscard]] std::string_view Name() const noexcept override { return ::Name(GymKind::Pointer); }
+
+	[[nodiscard]] Result<void> Open(SceneStore& scene, ITextures&) override
+	{
+		const Result<PointerScene> pointers = AuthorPointers(scene);
+
+		if (!pointers)
+		{
+			return std::unexpected{ pointers.error() };
+		}
+
+		m_Scene = *pointers;
+
+		// One period out rather than immediately, for `LanesGym`'s reason: the scene as authored is what
+		// the first frame shows, and here that frame is the whole still half of the instrument.
+		m_Glide = Advanced(scene.Now(), GlidePeriod);
+
+		return {};
+	}
+
+	[[nodiscard]] Wake Advance(SceneStore& scene, ITextures&, Instant now) override
+	{
+		if (!m_Driving)
+		{
+			return Wake::Never();
+		}
+
+		if (m_Glide <= now)
+		{
+			m_Far = !m_Far;
+			m_Driving = Tick(scene, m_Glide, [&](SceneCommit& commit) {
+				return commit.Move(
+					m_Scene.MovingArrow, m_Far ? m_Scene.SlideFar : m_Scene.SlideNear, Animate(GlideMotion)
+				);
+			});
+
+			m_Glide = NextEdge(m_Glide, GlidePeriod, now);
+		}
+
+		// A refused write latches the gym off and the freeze is the report, which is `LanesGym`'s rule
+		// for its reason: the write is against an id this gym created, so a refusal is this file being
+		// wrong rather than a state to recover from.
+		if (!m_Driving)
+		{
+			return Wake::Never();
+		}
+
+		return Wake::At(m_Glide);
+	}
+
+private:
+	PointerScene m_Scene{};
+
+	Instant m_Glide{};
+
+	bool m_Far = false;
+	bool m_Driving = true;
+};
 } // namespace
 
 Result<std::unique_ptr<ISceneAuthor>> MakeGym(std::string_view name)
@@ -641,6 +721,8 @@ Result<std::unique_ptr<ISceneAuthor>> MakeGym(std::string_view name)
 			return std::make_unique<MaterialsGym>();
 		case GymKind::Card:
 			return std::make_unique<CardGym>();
+		case GymKind::Pointer:
+			return std::make_unique<PointerGym>();
 	}
 
 	return Failure(EINVAL, "--gym is not one of the scenes --help lists");

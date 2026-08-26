@@ -73,14 +73,19 @@ enum class GymKind : std::uint8_t
 	// that needs a texture to exist, and therefore the only one that can fail for a reason that is not
 	// the store.
 	Card,
+
+	// The pointer glyph, specimened at three step counts and three sizes, with two of them moving.
+	// Decision 152 leaves the shape to somebody; this is what they look at while deciding. Draws under
+	// the CPU renderer by construction rather than by luck — see Gym/Pointer.h.
+	Pointer,
 };
 
-inline constexpr std::size_t GymCount = 5;
+inline constexpr std::size_t GymCount = 6;
 
-static_assert(static_cast<std::size_t>(GymKind::Card) + 1 == GymCount);
+static_assert(static_cast<std::size_t>(GymKind::Pointer) + 1 == GymCount);
 
 inline constexpr std::array<GymKind, GymCount> AllGyms{
-	GymKind::Lanes, GymKind::Settle, GymKind::Turn, GymKind::Materials, GymKind::Card,
+	GymKind::Lanes, GymKind::Settle, GymKind::Turn, GymKind::Materials, GymKind::Card, GymKind::Pointer,
 };
 
 // The list is the enumeration in order, so a sweep over it is a sweep over the enum. The size is fixed
@@ -114,6 +119,8 @@ static_assert([] {
 			return "materials";
 		case GymKind::Card:
 			return "card";
+		case GymKind::Pointer:
+			return "pointer";
 	}
 
 	return "unknown";
@@ -134,6 +141,8 @@ static_assert([] {
 			return "glass and smoke panels over the lanes; no CPU composite draws a material";
 		case GymKind::Card:
 			return "a test card imported and drawn four ways, its buffer swapped forever";
+		case GymKind::Pointer:
+			return "candidate cursor glyphs, three step counts by three sizes, two of them sliding";
 	}
 
 	return "unknown";
@@ -152,6 +161,12 @@ static_assert([] {
 	{
 		case GymKind::Lanes:
 		case GymKind::Settle:
+			return true;
+
+		// The one gym whose whole point is this answer. A pointer that needs a rotated quad is a pointer
+		// the recovery console cannot have, so the glyph is upright rectangles and this is true or the
+		// instrument was pointless.
+		case GymKind::Pointer:
 			return true;
 
 		// The one gym whose CPU answer is the *interesting* one: `Blit` is the only renderer that
@@ -178,7 +193,7 @@ static_assert([] {
 // codebase otherwise refuses — it is here because the fixed interface below answers in names rather
 // than in kinds, and the assertion underneath is what keeps the two from drifting.
 inline constexpr std::array<std::string_view, GymCount> AllGymNames{
-	"lanes", "settle", "turn", "materials", "card",
+	"lanes", "settle", "turn", "materials", "card", "pointer",
 };
 
 static_assert([] {

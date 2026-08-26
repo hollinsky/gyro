@@ -434,11 +434,13 @@ gyro_add_module(Gym PORTABLE DISPATCH
 		Cards.cpp
 		Gym.cpp
 		Lanes.cpp
+		Pointer.cpp
 	TESTS
 		Card.Test.cpp
 		Cards.Test.cpp
 		Gym.Test.cpp
 		Lanes.Test.cpp
+		Pointer.Test.cpp
 )
 
 # The dispatch thread's iteration, with the wait left to the composition root — decision 80's shape,
