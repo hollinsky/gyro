@@ -372,6 +372,7 @@ gyro_add_module(Scene PORTABLE DISPATCH
 	TESTS
 		Commit.Test.cpp
 		Entity.Test.cpp
+		Focus.Test.cpp
 		Output.Test.cpp
 		Reach.Test.cpp
 		Return.Test.cpp

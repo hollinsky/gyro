@@ -12,6 +12,7 @@
 #include "Core/SlotAllocator.h"
 #include "Core/Time.h"
 #include "Scene/Entity.h"
+#include "Scene/Focus.h"
 #include "Scene/Output.h"
 #include "World/Content.h"
 #include "World/Node.h"
@@ -158,6 +159,13 @@ public:
 	[[nodiscard]] const MotionTable& Motions() const noexcept { return m_Motions; }
 	[[nodiscard]] MotionModifiers Modifiers() const noexcept { return m_Modifiers; }
 
+	// Who the keyboard is on, per [Focus.h](Focus.h). Held here rather than beside the store because
+	// `ISceneAuthor::Advance` hands an author the world as one argument, and focus is part of the world
+	// it authors: a client host reads it to decide who its `wl_keyboard.enter` names, and a shell will
+	// write it to declare a model.
+	[[nodiscard]] SceneFocus& Focus() noexcept { return m_Focus; }
+	[[nodiscard]] const SceneFocus& Focus() const noexcept { return m_Focus; }
+
 	[[nodiscard]] bool IsLive(EntityId id) const noexcept { return m_Ids.IsValid(id); }
 
 	// The top of the tree, as the first of a sibling chain. Decision 55 makes the list order the z
@@ -303,6 +311,11 @@ private:
 			}
 
 			entity->Retiring = true;
+
+			// Focus leaves with the author, on the retirement rather than on the free. See Focus.h: the
+			// subtree goes on being drawn for as long as its exit runs, and a keystroke reaching a window
+			// that is collapsing is the bug the two-step lifetime would otherwise introduce.
+			m_Focus.Withdraw(at);
 
 			for (EntityId child = entity->FirstChild; !child.IsNull();)
 			{
@@ -648,6 +661,9 @@ private:
 
 	std::vector<SceneOutput> m_Outputs;
 	std::uint64_t m_OutputGeneration = 0;
+
+	// Who the keyboard is on. Withdrawn from by `Retire`, offered to by whoever maps a window.
+	SceneFocus m_Focus;
 
 	MotionTable m_Motions{};
 	MotionModifiers m_Modifiers{};
