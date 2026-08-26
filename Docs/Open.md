@@ -1121,6 +1121,34 @@ nothing only proves the grep.
   of idle pays the exit latency anyway, and whether that first frame is worth a tier is the question
   the entry actually turns on.
 
+## Keyboard sysrq, which the input grab takes away
+
+[Decision 148](Decisions.md#148-input-is-a-source-the-dispatch-thread-drains-and-the-way-out-of-gyro-is-a-leader-chord)
+takes every device that can type letters exclusively, with `EVIOCGRAB`, because nothing else stops
+the kernel's own keyboard handler from delivering a person's keystrokes into whatever getty is on a
+VT behind the screen. That handler is also where sysrq lives, so the grab shuts sysrq out along with
+the getty — and sysrq is what the deployment requirements count on when gyro is wedged past the
+point where its own chord can be read.
+
+**The other mechanism keeps it, and gyro cannot use it yet.** Every other compositor closes the same
+hole from the far end: logind puts the session's VT into `K_OFF` with `KDSKBMODE`, which silences
+console translation while leaving the handler attached, so sysrq still works. It is not available
+here for two reasons and only one of them is permanent. gyro has no VT to put into a mode — which is
+the boot model rather than an omission — and, more importantly, `K_OFF` is *not* released when the
+process dies: a gyro that crashes would leave a machine whose console keyboard is dead, which is
+strictly worse than the console typing this exists to stop. The grab releases itself when the
+descriptor closes.
+
+**What would change the answer is a VT that gyro owns on purpose.** The moment it opens `/dev/tty0`
+to take the console out of the picture properly, `KDSKBMODE` is available and is the better of the
+two — at which point the grab can be dropped and keyboard sysrq comes back. What has to be settled
+first is restoration on abnormal exit, which is the part logind is actually providing and which no
+`atexit` covers: a `SIGSEGV` on the frame thread has to leave a keyboard behind.
+
+Until then the trade is deliberate and asymmetric by hardware. On a board with no `KEY_SYSRQ` at all
+— the one this is developed on — nothing is lost. On a board that has one, the rescue path is the
+network, and `RLIMIT_RTTIME` remains what saves a spinning frame thread.
+
 ## The mode set the DRM backend cannot perform yet
 
 `DrmOutput::Reconfigure` accepts a request and answers with the configuration it still has, which

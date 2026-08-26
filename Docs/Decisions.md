@@ -11230,6 +11230,27 @@ device on the seat, so a nested gyro doing this would be reading the host sessio
 its back — every keystroke, whatever has focus. The condition is therefore the panel rather than a
 flag somebody has to remember to leave off.
 
+
+**Devices that can type letters are taken exclusively; nothing else is.** *(Added 2026-08-25, after
+running it: the chord worked and every keystroke also reached the getty behind the screen.)* Nothing
+in libinput stops the kernel's own keyboard handler from translating the same events, so a person
+typing at gyro is also typing into whatever VT is behind it — a logged-in shell back there receives
+it, which is a security hole rather than an untidiness. Every other compositor closes this from the
+far end, by having logind put the session's VT into `K_OFF`; gyro has no session and no VT, so the
+step that would do it never happens and the exclusivity has to come from the device. `EVIOCGRAB` is
+released when the descriptor closes, so a gyro that crashes leaves a working keyboard, which
+`KDSKBMODE` would not — that is the half of the trade that decides it. The other half is that the
+grab shuts out the handler sysrq lives in, and [Open.md](Open.md) carries what it would take to get
+it back.
+
+**The test is whether the device produces a letter, not whether libinput calls it a keyboard.** On a
+laptop the lid switch, the power button, the headset jack and the hotkey row all report a keyboard
+capability and outnumber the one real keyboard. libinput is right — they emit key and switch codes,
+and gyro wants them, since `SW_LID` is how the display lifetime learns the machine closed. But
+grabbing them would take the power button away from everything else on the system to serve a
+compositor that does nothing with it yet, and a lid cannot type into a login prompt. `KEY_Q` and
+`KEY_A` in the device's capability bitmap is the whole test.
+
 #### The chord
 
 **`Ctrl+Alt+Esc` arms a leader, and the next key is a verb: `q` quits, `t` writes a trace.**

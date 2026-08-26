@@ -1,4 +1,4 @@
-// open() with O_CLOEXEC, which is POSIX, and libudev, which is Linux's. Named here for
+// open() with O_CLOEXEC, which is POSIX, and libudev and the evdev ioctls, which are Linux's. Named here for
 // Compositor/Compositor.cpp's reason: what is wanted from the platform is stated rather than
 // inherited from a build flag.
 #define _POSIX_C_SOURCE 200809L
@@ -8,13 +8,16 @@
 #include <fcntl.h>
 #include <libinput.h>
 #include <libudev.h>
+#include <linux/input.h>
 #include <spdlog/spdlog.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include <array>
 #include <cerrno>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <format>
 #include <string_view>
 
@@ -24,6 +27,63 @@ namespace Input
 {
 namespace
 {
+// Whether this device is something a person types on, which is a narrower question than *does it
+// produce key codes*.
+//
+// **A lid switch, a power button, a headset jack and a row of hotkeys all report as keyboards**, and
+// on this machine they outnumber the one real keyboard. libinput is not wrong — they emit key and
+// switch codes, and gyro wants them: `SW_LID` is how the display lifetime learns the laptop closed.
+// What separates them is whether the device can produce a *letter*, and that is the only capability
+// that matters for the grab below: a lid cannot type into a login prompt.
+[[nodiscard]] bool TypesLetters(int descriptor)
+{
+	// One bit per key code, which is how the kernel reports the whole capability set in one call.
+	std::array<unsigned long, (KEY_MAX / (8 * sizeof(unsigned long))) + 1> keys{};
+
+	if (::ioctl(descriptor, EVIOCGBIT(EV_KEY, static_cast<int>(keys.size() * sizeof(unsigned long))), keys.data()) < 0)
+	{
+		return false;
+	}
+
+	const auto has = [&keys](std::size_t code) {
+		constexpr std::size_t Bits = 8 * sizeof(unsigned long);
+
+		return (keys[code / Bits] & (1UL << (code % Bits))) != 0;
+	};
+
+	// `q` and `a` rather than the whole alphabet: a device with two letters on it is a keyboard, and a
+	// device with none cannot be typed on whatever else it carries.
+	return has(KEY_Q) && has(KEY_A);
+}
+
+// **Exclusive, and only for the devices that can type.** Without this the kernel's own keyboard
+// handler keeps translating every keystroke — the `kbd` handler bound to the same device — so
+// somebody typing at gyro is also typing into whatever getty is sitting on a VT behind it. That is a
+// security hole rather than an untidiness: a logged-in shell back there receives what a person typed
+// at the screen. Every other compositor closes it from the other end, by having logind put the
+// session's VT into `K_OFF`; gyro has no session and no VT, so the handover step that would do it
+// never happens and the exclusivity has to come from the device.
+//
+// **The grab is released when the descriptor closes, which is what makes it the safe half of the
+// trade.** A gyro that crashes leaves a machine whose keyboard still works. What it costs is keyboard
+// sysrq, which lives in the handler this shuts out — carried in Open.md, along with the `KDSKBMODE`
+// route that keeps it and the reason that route is not free.
+//
+// Failure is not fatal and not silent: a device somebody else already grabbed is one gyro reads
+// alongside them, which is worse than exclusive and much better than no keyboard at all.
+void Claim(const char* path, int descriptor)
+{
+	if (!TypesLetters(descriptor))
+	{
+		return;
+	}
+
+	if (::ioctl(descriptor, EVIOCGRAB, 1) < 0)
+	{
+		spdlog::warn("{} could not be taken exclusively: {}", path, std::strerror(errno));
+	}
+}
+
 // **The whole of the session story, and it is an `open`.** A seat manager's version of this hands
 // back a descriptor over D-Bus and can take it away again; gyro's does not exist, because there is no
 // VT to switch to and nothing to be revoked by. Access is a udev rule on the device node, so a
@@ -35,7 +95,14 @@ int OpenRestricted(const char* path, int flags, void* /*user*/)
 	// exec and there is nothing here to make an exception of.
 	const int descriptor = ::open(path, flags | O_CLOEXEC);
 
-	return descriptor >= 0 ? descriptor : -errno;
+	if (descriptor < 0)
+	{
+		return -errno;
+	}
+
+	Claim(path, descriptor);
+
+	return descriptor;
 }
 
 void CloseRestricted(int descriptor, void* /*user*/)
@@ -159,11 +226,13 @@ Result<void> Devices::Drain()
 				// touchpad and not the keyboard produce a compositor that looks like it has input.
 				libinput_device* const device = ::libinput_event_get_device(event);
 
-				spdlog::info(
-					"input: {} ({})",
-					::libinput_device_get_name(device),
-					::libinput_device_has_capability(device, LIBINPUT_DEVICE_CAP_KEYBOARD) ? "keyboard" : "no keys"
-				);
+				// **Three states rather than two**, because the middle one is most of the list on a
+				// laptop and reads as a bug otherwise: a lid, a power button and a headset jack all
+				// report a keyboard capability, and none of them is a keyboard. Only the last state is
+				// taken exclusively, so the line also says which devices gyro is standing in front of.
+				const bool keys = ::libinput_device_has_capability(device, LIBINPUT_DEVICE_CAP_KEYBOARD);
+
+				spdlog::info("input: {} ({})", ::libinput_device_get_name(device), keys ? "keys" : "no keys");
 
 				break;
 			}
