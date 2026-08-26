@@ -338,7 +338,14 @@ Result<void> NestedOutput::Present(std::span<const PresentLayer> layers)
 
 	const PresentLayer& layer = layers.front();
 
-	if (layer.Target >= m_TargetCount || m_Targets[layer.Target].State != TargetState::Acquired)
+	// A nested output's "planes" are the host compositor's, reached through a subsurface tree gyro does
+	// not build — so there is nothing to scan a client's buffer out on and a promotion is refused.
+	if (layer.Target.IsTexture())
+	{
+		return Failure(EINVAL, "a nested output has no scanout for a promoted texture");
+	}
+
+	if (layer.Target.Index >= m_TargetCount || m_Targets[layer.Target.Index].State != TargetState::Acquired)
 	{
 		return Failure(EINVAL, "layer names a target that was not acquired");
 	}
@@ -419,7 +426,7 @@ bool NestedOutput::EnsureExplicitSync(SyncPoint acquire)
 
 Result<void> NestedOutput::Commit()
 {
-	Target& target = m_Targets[m_Pending.Target];
+	Target& target = m_Targets[m_Pending.Target.Index];
 
 	m_Surface.Attach(target.Handle, 0, 0);
 
@@ -449,14 +456,14 @@ Result<void> NestedOutput::Commit()
 	// destroys a feedback object as soon as it has spoken. Placement-new into the optional, so nothing
 	// on this path allocates — `Present` runs inside Core/FrameSection.h's guard. Into the target's own
 	// slot, because the commit ahead of this one is still waiting to be answered about its image.
-	target.Listener.emplace(*this, m_Pending.Target);
+	target.Listener.emplace(*this, m_Pending.Target.Index);
 	(void)m_Host->Globals().Presentation.Feedback(m_Surface, *target.Listener);
 
 	// The invitation this commit spends, and the one it asks for. Requested on every commit rather than
 	// only where one is owed, because a host answers `frame` for the surface's next composite and a
 	// commit that asked for nothing is a window that never hears *now* again.
 	m_Invited = false;
-	target.Invitation.emplace(*this, m_Pending.Target);
+	target.Invitation.emplace(*this, m_Pending.Target.Index);
 	(void)m_Surface.Frame(*target.Invitation);
 
 	m_Surface.Commit();

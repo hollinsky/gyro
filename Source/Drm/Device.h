@@ -12,6 +12,7 @@
 #include "Core/Result.h"
 #include "Core/Time.h"
 #include "Drm/Catalog.h"
+#include "Drm/Scanout.h"
 #include "Seam/EventSource.h"
 
 // The DRM device: one file, every CRTC on the card, and the events all of them speak through.
@@ -234,6 +235,16 @@ public:
 	// descriptor. Kept so the composition root's backend can answer without a special case.
 	[[nodiscard]] Instant NextEvent() const noexcept { return Instant{ Duration::max() }; }
 
+	// The card's scanout framebuffers: Seam/Scanout.h's dispatch half, over Core/Texture.h's id space.
+	//
+	// **On the device rather than on an output**, for Render/Textures.h's reason: a framebuffer is an
+	// object on a card, so a table hung off a presenter would hold one per monitor for every window on
+	// the machine. Non-const because the composition root drives adoption through it and outputs
+	// register themselves as readers; the frame thread's lookup is the const one.
+	[[nodiscard]] DrmScanout& Scanout() noexcept { return m_Scanout; }
+
+	[[nodiscard]] const DrmScanout& Scanout() const noexcept { return m_Scanout; }
+
 private:
 	// One CRTC's subscriber. Nothing owns the output; the composition root destroys outputs before the
 	// device, and `Detach` is the output's destructor saying so.
@@ -255,6 +266,11 @@ private:
 	std::string m_Driver;
 	std::int64_t m_Minor = -1;
 	bool m_Monotonic = false;
+
+	// Constructed with the device's descriptor, and destroyed with it — after every output, which the
+	// composition root sequences and which is what makes the table's destructor a plain release rather
+	// than a wait on a panel.
+	DrmScanout m_Scanout{ m_Device };
 
 	std::vector<Pipeline> m_Pipelines;
 	std::vector<Subscriber> m_Subscribers;

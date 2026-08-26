@@ -77,6 +77,9 @@ DrmOutput::~DrmOutput()
 	if (m_Device != nullptr)
 	{
 		m_Device->Detach(m_Crtc);
+
+		// This panel has stopped reading, and everything it was the last reader of is free now.
+		m_Device->Scanout().Detach(*this);
 	}
 
 	DropTargets();
@@ -97,6 +100,11 @@ Result<void> DrmOutput::Open(const OutputConfiguration& wanted)
 	}
 
 	m_Mode = *mode;
+
+	// Register as a reader before anything can be promoted onto this panel. An unregistered output is
+	// one the card's scanout table believes has stopped reading, which is a framebuffer removed
+	// underneath a plane rather than freed — see Seam/Scanout.h.
+	m_Device->Scanout().Attach(*this);
 
 	if (::drmModeCreatePropertyBlob(m_Device->Descriptor().Value, &m_Mode, sizeof(m_Mode), &m_ModeBlob) != 0)
 	{
@@ -206,7 +214,7 @@ Result<void> DrmOutput::Open(const OutputConfiguration& wanted)
 	// The composite is layer zero and starts as the whole screen out of target zero.
 	{
 		const PresentLayer initial{
-			.Target = 0,
+			.Target = LayerSource{ 0 },
 			.Blend = BlendMode::Opaque,
 			.Acquire = SyncPoint{},
 			.Source = {},
@@ -458,6 +466,70 @@ Result<void> DrmOutput::Present(std::span<const PresentLayer> layers)
 	return Flip(layers, fences);
 }
 
+std::uint32_t DrmOutput::Framebuffer(const PresentLayer& layer) const noexcept
+{
+	if (layer.Target.IsTexture())
+	{
+		const DrmScanout* const scanout = m_Device != nullptr ? &m_Device->Scanout() : nullptr;
+
+		return scanout != nullptr ? scanout->Find(layer.Target.Texture) : 0;
+	}
+
+	return layer.Target.Index < m_TargetCount ? m_Targets[layer.Target.Index].Framebuffer : 0;
+}
+
+PixelSize<DeviceSpace> DrmOutput::Extent(const PresentLayer& layer) const noexcept
+{
+	if (!layer.Target.IsTexture())
+	{
+		return layer.Target.Index < m_TargetCount ? m_Descriptions[layer.Target.Index].Size : PixelSize<DeviceSpace>{};
+	}
+
+	// A promoted layer's image is a client's buffer and this output has no description of it. Decision
+	// 152's predicate is that the promotion resamples not at all, so the destination the assigner
+	// computed is the image's own extent — which is why a whole-image source needs no lookup here.
+	return layer.Destination.Extent;
+}
+
+void DrmOutput::Record(std::span<const PresentLayer> layers) noexcept
+{
+	const std::uint32_t next = 1 - m_Recording.load(std::memory_order_relaxed);
+
+	for (std::uint32_t index = 0; index < MaxLayers; ++index)
+	{
+		const std::uint32_t framebuffer = index < layers.size() ? Framebuffer(layers[index]) : 0;
+
+		m_Committed[next][index].store(framebuffer, std::memory_order_relaxed);
+	}
+
+	m_Recording.store(next, std::memory_order_release);
+}
+
+bool DrmOutput::Holds(std::uint32_t framebuffer) const noexcept
+{
+	if (framebuffer == 0)
+	{
+		return false;
+	}
+
+	// Both halves, whichever is current: the newer is what was just committed and the older is what it
+	// has not yet replaced on the glass.
+	(void)m_Recording.load(std::memory_order_acquire);
+
+	for (const std::array<std::atomic<std::uint32_t>, MaxLayers>& set : m_Committed)
+	{
+		for (const std::atomic<std::uint32_t>& held : set)
+		{
+			if (held.load(std::memory_order_relaxed) == framebuffer)
+			{
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 Result<void> DrmOutput::Expressible(std::span<const PresentLayer> layers) const noexcept
 {
 	// **Refused rather than partly honoured.** Seam/Presenter.h calls a set that cannot be expressed
@@ -470,9 +542,12 @@ Result<void> DrmOutput::Expressible(std::span<const PresentLayer> layers) const 
 
 	for (const PresentLayer& layer : layers)
 	{
-		if (layer.Target >= m_TargetCount || m_Targets[layer.Target].Framebuffer == 0)
+		// A promoted layer that has no framebuffer on this card is refused here with the rest of the
+		// partition, which is decision 153's rule: the frame thread names an id, and an id that did not
+		// import costs decision 35's one composited frame rather than a hole on the screen.
+		if (Framebuffer(layer) == 0)
 		{
-			return Failure(EINVAL, "presenting a target this output does not own");
+			return Failure(EINVAL, "presenting an image this output cannot scan out");
 		}
 	}
 
@@ -526,14 +601,13 @@ void DrmOutput::Program(std::span<const PresentLayer> layers, std::span<const Fd
 
 		// An empty source means the whole image, which is what Seam/Presenter.h says and what every
 		// caller that is not cropping writes.
-		const RenderTarget& target = m_Descriptions[layer.Target];
+		const PixelSize<DeviceSpace> extent = Extent(layer);
 		const Rect<DeviceSpace> source =
 			layer.Source.IsEmpty() ?
-				Rect<DeviceSpace>{ {},
-			                       { static_cast<float>(target.Size.Width), static_cast<float>(target.Size.Height) } } :
+				Rect<DeviceSpace>{ {}, { static_cast<float>(extent.Width), static_cast<float>(extent.Height) } } :
 				layer.Source;
 
-		m_Values[at + 0] = m_Targets[layer.Target].Framebuffer;
+		m_Values[at + 0] = Framebuffer(layer);
 		m_Values[at + 1] = m_Crtc;
 		m_Values[at + 2] = Fixed(source.Origin.X);
 		m_Values[at + 3] = Fixed(source.Origin.Y);
@@ -593,9 +667,18 @@ Result<void> DrmOutput::Flip(std::span<const PresentLayer> layers, std::span<con
 
 	for (const PresentLayer& layer : layers)
 	{
-		m_Targets[layer.Target].State = TargetState::Committed;
-		m_InFlightMask |= std::uint32_t{ 1 } << layer.Target;
+		// A promoted layer's image is a client's and is not in this output's ring, so there is no target
+		// state to move and no bit to set: what holds it alive is `Holds` below rather than the mask.
+		if (layer.Target.IsTexture())
+		{
+			continue;
+		}
+
+		m_Targets[layer.Target.Index].State = TargetState::Committed;
+		m_InFlightMask |= std::uint32_t{ 1 } << layer.Target.Index;
 	}
+
+	Record(layers);
 
 	m_Flipping = true;
 	m_Pending = Pending{};
@@ -706,7 +789,10 @@ void DrmOutput::Settle()
 		{
 			for (std::uint32_t index = 0; index < count; ++index)
 			{
-				m_Targets[layers[index].Target].State = TargetState::Free;
+				if (!layers[index].Target.IsTexture())
+				{
+					m_Targets[layers[index].Target.Index].State = TargetState::Free;
+				}
 			}
 		}
 	}

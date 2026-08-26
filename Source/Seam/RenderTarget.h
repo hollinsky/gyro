@@ -10,6 +10,7 @@
 #include <variant>
 
 #include "Core/Fd.h"
+#include "Core/Texture.h"
 #include "Geometry/Space.h"
 
 // An image the presenter owns and something else writes into.
@@ -156,6 +157,48 @@ inline constexpr std::uint32_t MaxTargets = 4;
 // on the hardware gyro runs on, and a machine that offered forty would still be bounded by the memory
 // bandwidth of reading them. Raising it costs preallocated bytes and nothing else.
 inline constexpr std::uint32_t MaxLayers = 4;
+
+// What a layer's pixels are: one of the presenter's own targets, or a texture id.
+//
+// **Two spellings of one thing, because the two arrive from opposite ends.** A composite is written
+// into an image the presenter allocated and is named by its position in `Targets()`, which is
+// identity enough because the span is the presenter's and its invalidation is announced. A promoted
+// layer is a client's buffer that gyro never allocated and never rendered into, and the only identity
+// it has is the `TextureId` the draw item was already carrying — so decision 152's assigner names that
+// id and performs no lookup on the frame thread. See Docs/Decisions.md decision 153.
+//
+// **A backend that cannot resolve one refuses the partition rather than dropping the layer.** Whether
+// an id names a framebuffer on this card is `Seam/Scanout.h`'s business and is asked on the dispatch
+// thread; whether a given arrangement of layers commits is `IPresenter::TestLayers`', asked on the
+// frame thread. A layer whose texture never imported is simply a partition that fails the test, and
+// the frame composites — which is decision 35's cost, once, rather than a hole on the screen.
+//
+// The index converts implicitly and the texture id does not, so the composite — which every backend
+// presents and which is the overwhelming majority of layers ever built — reads as the number it always
+// was, and promoting is the spelling somebody had to choose.
+struct LayerSource
+{
+	// Index into Targets(), valid until TargetsInvalidated. Meaningless where `Texture` names one.
+	std::uint32_t Index = 0;
+
+	// Null unless this layer is a promotion, which is what discriminates the two: an id that names
+	// nothing is the composite's spelling, and Core/Handle.h makes that the default-constructed value.
+	TextureId Texture{};
+
+	constexpr LayerSource() noexcept = default;
+
+	constexpr LayerSource(std::uint32_t index) noexcept : Index{ index } {}
+
+	constexpr explicit LayerSource(TextureId texture) noexcept : Texture{ texture } {}
+
+	[[nodiscard]] constexpr bool IsTexture() const noexcept { return !Texture.IsNull(); }
+
+	friend constexpr bool operator==(LayerSource, LayerSource) noexcept = default;
+};
+
+static_assert(std::is_trivially_copyable_v<LayerSource>, "A layer is copied into a preallocated commit");
+static_assert(!LayerSource{}.IsTexture() && !LayerSource{ 3 }.IsTexture());
+static_assert(LayerSource{ TextureId{ 0, 1 } }.IsTexture(), "Index zero is a usable texture slot");
 
 struct RenderTarget
 {

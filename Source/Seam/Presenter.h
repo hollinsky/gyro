@@ -51,17 +51,16 @@ enum class BlendMode : std::uint8_t
 // **Z is the list order**, bottom first, for the same reason blending is not spelled twice: a z field
 // beside an ordered list is a second encoding of one fact.
 //
-// **The source is a target index today, and that is the honest limit of what this can express.** A
-// promoted *client* buffer needs a name at this seam, and naming one is not answerable yet: turning a
-// dmabuf into a scanout framebuffer is a kernel allocation that must not happen inside the frame
-// section, while the presenter itself is frame-side, so the import has no home until plane assignment
-// says where it lives. What that costs is recorded in [Open.md](../../Docs/Open.md); what it does not
-// cost is this shape, because a cursor image and a virtual output's imported buffers are both targets
-// and the multi-layer path is exercised by them.
+// **The source is a target index or a texture id**, which is decision 153 and is what gives the
+// partition something to promote. A composite is one of the presenter's own images; a promoted layer
+// is a client's buffer, named by the id the draw item was already carrying and turned into a scanout
+// framebuffer on the dispatch thread by `Seam/Scanout.h`, because that is a kernel allocation and the
+// presenter is frame-side.
 struct PresentLayer
 {
-	// Index into Targets(), valid until TargetsInvalidated.
-	std::uint32_t Target = 0;
+	// One of this presenter's targets, or a texture id a display engine scans out directly. See
+	// Seam/RenderTarget.h's `LayerSource` and Seam/Scanout.h for who resolves the second.
+	LayerSource Target{};
 
 	BlendMode Blend = BlendMode::Opaque;
 	std::uint8_t Reserved[3] = {};
@@ -87,9 +86,9 @@ struct PresentLayer
 	// would be a correctness bug the first time a frame is skipped — damage accumulates since the last
 	// *successful* present, never since the last iteration.
 	//
-	// The space follows the source, and today the source is always one of the output's own targets, so
-	// it is the device grid. A client buffer promoted to a plane would carry its damage in that
-	// buffer's space, which is part of what the deferred item above has to answer.
+	// The space follows the source: the device grid for a composite, and a promoted client buffer's
+	// own grid for a layer naming a texture id, which are the same numbers only where the promotion
+	// was unscaled — and decision 152's predicate is that it was.
 	Region<DeviceSpace> Damage;
 
 	ColorState Color = ColorState::Srgb();

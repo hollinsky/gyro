@@ -159,7 +159,7 @@ public:
 
 		for (const PresentLayer& layer : layers)
 		{
-			if (m_State[layer.Target] != TargetState::Acquired)
+			if (m_State[layer.Target.Index] != TargetState::Acquired)
 			{
 				return Failure(EINVAL, "layer names a target that was not acquired");
 			}
@@ -167,7 +167,7 @@ public:
 
 		for (const PresentLayer& layer : layers)
 		{
-			m_State[layer.Target] = TargetState::Queued;
+			m_State[layer.Target.Index] = TargetState::Queued;
 		}
 
 		m_Queued = layers.size();
@@ -346,7 +346,7 @@ private:
 
 		for (std::size_t index = 0; index < m_Queued; ++index)
 		{
-			const std::uint32_t target = m_QueuedLayers[index].Target;
+			const std::uint32_t target = m_QueuedLayers[index].Target.Index;
 
 			if (target < m_TargetCount)
 			{

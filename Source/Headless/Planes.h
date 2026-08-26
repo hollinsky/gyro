@@ -187,12 +187,20 @@ public:
 
 		for (std::size_t index = 0; index < layers.size(); ++index)
 		{
-			if (layers[index].Target >= targets.size())
+			// The instrument allocates nothing and imports nothing, so a promoted texture has no image
+			// behind it here. Refused rather than resolved, so a sweep never charges a cost for a layer
+			// a real device would have had to import first.
+			if (layers[index].Target.IsTexture())
+			{
+				return Failure(EINVAL, "a headless plane has no scanout for a promoted texture");
+			}
+
+			if (layers[index].Target.Index >= targets.size())
 			{
 				return Failure(EINVAL, "layer names a target the presenter does not own");
 			}
 
-			if (!m_Planes[index].CouldExpress(layers[index], targets[layers[index].Target]))
+			if (!m_Planes[index].CouldExpress(layers[index], targets[layers[index].Target.Index]))
 			{
 				return Failure(EINVAL, "layer is not expressible on the plane it would take");
 			}

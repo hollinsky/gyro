@@ -11737,7 +11737,9 @@ dmabuf on one device, so a table that closes its handle when one importer is don
 other's — a window that goes black when an unrelated window closes, on the machine where two clients
 share a buffer or one client's buffer is promoted on two outputs. The table is keyed on the dmabuf's
 identity and holds one handle with a count, and this is written down because every compositor that has
-shipped this got it wrong once.
+shipped this got it wrong once. *(Confirmed 2026-08-25 on an amdgpu card: two `drmPrimeFDToHandle`
+calls over one exported dumb buffer return the same handle, which is also the handle the buffer was
+created with. `Drm/Scanout.Test.cpp` is that check as a test, and it runs wherever a card node opens.)*
 
 #### Who imports, and when
 

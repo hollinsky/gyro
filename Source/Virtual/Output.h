@@ -202,12 +202,19 @@ public:
 
 		const PresentLayer& layer = layers.front();
 
-		if (layer.Target >= m_TargetCount || m_State[layer.Target] != TargetState::Acquired)
+		// A virtual output's consumer is a file or an encoder, and there is nothing here that scans a
+		// client's buffer out — so a promotion is refused by name rather than resolved to target zero.
+		if (layer.Target.IsTexture())
+		{
+			return Failure(EINVAL, "a virtual output has no scanout for a promoted texture");
+		}
+
+		if (layer.Target.Index >= m_TargetCount || m_State[layer.Target.Index] != TargetState::Acquired)
 		{
 			return Failure(EINVAL, "layer names a target that was not acquired");
 		}
 
-		m_State[layer.Target] = TargetState::Queued;
+		m_State[layer.Target.Index] = TargetState::Queued;
 		m_Queued = layer;
 		m_Pending = true;
 		m_Sequence = m_Timeline.Latch(m_Clock->Now(), Duration::zero());
@@ -261,8 +268,8 @@ public:
 		}
 
 		m_Pending = false;
-		m_State[m_Queued.Target] = TargetState::Held;
-		m_Presented = VirtualFrame{ .Target = m_Queued.Target,
+		m_State[m_Queued.Target.Index] = TargetState::Held;
+		m_Presented = VirtualFrame{ .Target = m_Queued.Target.Index,
 			                        .Sequence = m_Sequence,
 			                        .At = m_Timeline.At(m_Sequence),
 			                        .Acquire = m_Queued.Acquire };

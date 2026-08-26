@@ -3,6 +3,7 @@
 #include <xf86drmMode.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -12,6 +13,7 @@
 #include "Core/Time.h"
 #include "Drm/Device.h"
 #include "Drm/Fence.h"
+#include "Drm/Scanout.h"
 #include "Seam/Allocator.h"
 #include "Seam/Buffer.h"
 #include "Seam/OutputConfiguration.h"
@@ -55,7 +57,7 @@ namespace Drm
 // into another, and two makes a stall the ordinary case every time a flip is late.
 inline constexpr std::uint32_t DefaultDrmTargets = 3;
 
-class DrmOutput final : public IPresenter
+class DrmOutput final : public IPresenter, public IScanoutHold
 {
 public:
 	// The device and the allocator are references because neither is copyable and both outlive every
@@ -138,6 +140,15 @@ public:
 	// of `Presented`.
 	void OnPresented(Instant at, std::uint32_t sequence, bool hardwareClock);
 
+	// Drm/Scanout.h's question, answered on the dispatch thread about writes the frame thread made.
+	//
+	// **The last two commits, which is exactly the set the panel could be reading.** A framebuffer is on
+	// the glass until another commit replaces it, and this backend never has more than one commit
+	// outstanding — `Present` refuses a second — so the image being scanned out is always in the newer
+	// pair. Holding a framebuffer one commit longer than strictly necessary costs a client one buffer of
+	// its own cycle for one frame; releasing one early disables the plane it is on.
+	[[nodiscard]] bool Holds(std::uint32_t framebuffer) const noexcept override;
+
 private:
 	enum class TargetState : std::uint8_t
 	{
@@ -205,6 +216,18 @@ private:
 	// reason the header gives.
 	[[nodiscard]] Result<void> Commit(std::uint32_t flags) noexcept;
 
+	// What a layer's pixels are on this card: one of this output's own targets, or a framebuffer the
+	// device's scanout table holds for a promoted client buffer. Zero for neither, which `Expressible`
+	// turns into a refusal of the whole partition.
+	[[nodiscard]] std::uint32_t Framebuffer(const PresentLayer& layer) const noexcept;
+
+	// The image's own extent, which a layer with an empty source rectangle means the whole of.
+	[[nodiscard]] PixelSize<DeviceSpace> Extent(const PresentLayer& layer) const noexcept;
+
+	// Publish the framebuffers this commit named, so that the dispatch thread can tell whether it is
+	// safe to remove one. See `Holds`.
+	void Record(std::span<const PresentLayer> layers) noexcept;
+
 	// The commit that carries a mode. libdrm's, blocking, and off the frame thread by contract.
 	[[nodiscard]] Result<void> Modeset(bool allowModeset);
 
@@ -238,6 +261,13 @@ private:
 	static constexpr std::size_t MaxCommitProperties = MaxLayers * PropertiesPerPlane;
 
 	std::array<PlaneCommit, MaxLayers> m_Planes{};
+
+	// The framebuffers of the last two commits, written by the frame thread inside `Flip` and read by
+	// the dispatch thread inside `Holds`. Relaxed stores under one release, because the only thing that
+	// has to be ordered is *these values before this index*, and a reader that sees the older index
+	// reads a superset of what the panel is showing.
+	std::array<std::array<std::atomic<std::uint32_t>, MaxLayers>, 2> m_Committed{};
+	std::atomic<std::uint32_t> m_Recording{ 0 };
 	std::array<std::uint32_t, MaxLayers> m_Objects{};
 	std::array<std::uint32_t, MaxLayers> m_Counts{};
 	std::array<std::uint32_t, MaxCommitProperties> m_Properties{};
