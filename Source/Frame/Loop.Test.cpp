@@ -433,6 +433,42 @@ GYRO_TEST(FrameLoop, AnOutstandingFlipHoldsTheOutputUntilItLands)
 	GYRO_CHECK_EQ(harness.Output().Committed(), std::uint64_t{ 9 });
 }
 
+GYRO_TEST(FrameLoop, AFlipRetiresTheFrameItAnsweredRatherThanWaitingForTheAnchorToCatchUp)
+{
+	Harness harness;
+
+	harness.Anchor();
+
+	// Thirty periods of nothing, which is an ordinary idle: a still scene, a gym between retargets, a
+	// person not touching anything. The frame the loop names when it comes back is thirty ahead of the
+	// anchor, because that is how many refreshes the wall clock says have gone by.
+	harness.Clock.Set(At(1300));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE_EQ(harness.Presenter.Presents, 1);
+	GYRO_REQUIRE(harness.Output().Committed() > 8);
+
+	// And the panel answers with the very next count, which an msm laptop panel was measured doing: the
+	// sequence steps per flip gyro makes rather than per refresh that went by, so a compositor that
+	// slept through thirty of them finds the two numbers thirty apart with no event that will ever
+	// close the gap.
+	harness.Presenter.Flip(At(1300), 8);
+
+	GYRO_CHECK_EQ(harness.Output().Committed(), FrameClock::NoSequence);
+
+	// So the next frame goes out. Left unretired, `Owed` would name the frame after the one committed —
+	// thirty refreshes past an anchor that will not move until gyro presents again — and every iteration
+	// from here would fail both tiers and skip. On screen that is not a stutter: it is a panel that stops
+	// moving while the loop is still awake, still assessing, and still deciding not to draw.
+	harness.Clock.Set(At(1310));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 2);
+	GYRO_CHECK_EQ(harness.Output().Committed(), std::uint64_t{ 9 });
+}
+
 GYRO_TEST(FrameLoop, ARefusedPresentLeavesTheDamageAccumulated)
 {
 	Harness harness;

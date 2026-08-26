@@ -358,6 +358,32 @@ private:
 		m_InFlightSnapshots[m_InFlight] = 0;
 		m_InFlightFrames[m_InFlight] = FrameClock::NoSequence;
 		m_InFlightRows[m_InFlight] = TraceThread;
+
+		// **Retired here, because a frame that has flipped is not one this output is still speaking
+		// for.** `m_Committed` was only ever cleared by `Discard`, on the reading that the anchor would
+		// catch up to it on its own — every observation moves `LastSequence` forward, so `Owed`'s
+		// `max(anchor, committed) + 1` converges the moment the flip lands and the field is harmless
+		// until then. That holds where the reported sequence counts refreshes, and it is false where it
+		// counts gyro's own flips — which is what an msm laptop panel was measured doing, four counts
+		// per flip whether the flip came a refresh or six seconds after the last one, while the display
+		// engine ran a continuous sixty hertz underneath. A loop that slept through forty refreshes
+		// therefore names its next frame forty ahead and is answered with the fourth, the anchor never
+		// reaches what was committed, `Owed` stays pinned to a frame the panel is tens of seconds from,
+		// and every iteration after it fails both tiers and skips. What that looks like is a compositor
+		// that draws four frames in twenty seconds and then stops — not a stutter, a screen that stops
+		// moving while the loop is still awake and still deciding, once per wake, not to draw.
+		//
+		// SPEC: *why* the counter behaves that way is not settled — a vblank interrupt refcounted off
+		// while nothing is presenting, on a CRTC with no hardware frame counter to catch up from, is the
+		// candidate and wants reading rather than asserting. The repair below does not depend on the
+		// answer: it is wrong to be owed a frame past one the panel has already shown, whatever the
+		// driver counts.
+		//
+		// So the number is derived from the queue rather than left to expire: the newest frame still
+		// awaiting a flip, and nothing where none is. That is what `Committed()` already says it is, and
+		// on a panel whose counter free-runs it changes nothing — the last flip retires the last commit
+		// and `Owed` reads the anchor, which is the same frame the stale field named.
+		m_Committed = m_InFlight > 0 ? m_InFlightFrames[m_InFlight - 1] : FrameClock::NoSequence;
 	}
 
 	// The frame was accepted and never shown, which Seam/Presenter.h argues has to be its own signal.
