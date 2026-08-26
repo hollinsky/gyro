@@ -505,7 +505,7 @@ Result<std::unique_ptr<DrmDevice>> DrmDevice::OpenNode(const std::string& path, 
 
 	if (!device.IsValid())
 	{
-		return Failure(errno, std::format("opening {}", path));
+		return FailFromErrno("opening a DRM node", Subject{ path });
 	}
 
 	// **Master is first-open, and this is the confirmation rather than the claim.** A node nobody else
@@ -513,7 +513,7 @@ Result<std::unique_ptr<DrmDevice>> DrmDevice::OpenNode(const std::string& path, 
 	// naming that is worth more than the atomic commit's later `EACCES`.
 	if (::drmSetMaster(device.Get()) != 0 && ::drmIsMaster(device.Get()) == 0)
 	{
-		return Failure(EACCES, std::format("{} already has a DRM master", path));
+		return Failure(EACCES, "another process is DRM master of", Subject{ path });
 	}
 
 	// Universal planes first: the atomic cap implies it on current kernels and did not always, and the
@@ -522,7 +522,7 @@ Result<std::unique_ptr<DrmDevice>> DrmDevice::OpenNode(const std::string& path, 
 
 	if (::drmSetClientCap(device.Get(), DRM_CLIENT_CAP_ATOMIC, 1) != 0)
 	{
-		return Failure(ENOTSUP, std::format("{} does not accept atomic commits", path));
+		return Failure(ENOTSUP, "no atomic commits on", Subject{ path });
 	}
 
 	auto built = std::make_unique<DrmDevice>();
@@ -540,7 +540,7 @@ Result<std::unique_ptr<DrmDevice>> DrmDevice::OpenNode(const std::string& path, 
 
 	if (requireConnector && built->m_Pipelines.empty())
 	{
-		return Failure(ENODEV, std::format("{} has nothing connected", path));
+		return Failure(ENODEV, "nothing is connected to", Subject{ path });
 	}
 
 	std::uint64_t monotonic = 0;

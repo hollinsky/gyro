@@ -1,11 +1,15 @@
 #pragma once
 
 #include <cerrno>
+#include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <format>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <type_traits>
+#include <utility>
 
 // What a fallible operation returns, and what it says when it fails.
 //
@@ -23,10 +27,75 @@
 // remembered to put it.
 //
 // It is a string_view over a literal rather than an owned string, which is what keeps an Error
-// trivially copyable and allocation-free. The obligation that comes with that: **the text must have
-// static storage.** A context built with std::format and passed in dangles, and the type cannot
-// stop it — the consteval alternative that could would forbid the one legitimate variable case,
-// which is a literal chosen from a small fixed set.
+// trivially copyable and allocation-free. The obligation that comes with that: **the sentence must
+// have static storage**, and the constructor that took a std::string temporary is deleted rather
+// than documented, because the obligation went unmet for as long as it was only written down —
+// `Failure(errno, std::format("opening {}", path))` compiled, dangled, and printed freed heap on the
+// one log line standing between a black screen and a diagnosis.
+//
+// **The varying part is a Subject instead**, which owns its bytes. The sentence stays a literal and
+// the value beside it is copied, so there is nothing left to outlive: a device path, a connector
+// name, a fourcc and its modifier. That costs a fixed buffer on every Error, which lands on failure
+// returns and never in a loop that runs per frame.
+
+// The short token a sentence is about. Thirty-one characters because the longest real subject is a
+// format and its modifier — `XR24 mod 0x100000000000002` — and a site naming two values wants room
+// for both. Truncation is marked rather than silent: a subject that did not fit is still a subject
+// the reader can recognise, and the trailing `~` says what happened to the rest.
+class Subject
+{
+public:
+	static constexpr std::size_t Capacity = 31;
+
+	constexpr Subject() noexcept = default;
+
+	// Copies, so a std::string temporary is safe here in exactly the way it is not for the sentence.
+	constexpr Subject(std::string_view text) noexcept
+	{
+		const std::size_t taken = text.size() > Capacity ? Capacity - 1 : text.size();
+
+		for (std::size_t index = 0; index < taken; ++index)
+		{
+			m_Text[index] = text[index];
+		}
+
+		if (taken < text.size())
+		{
+			m_Text[taken] = '~';
+			m_Length = static_cast<std::uint8_t>(taken + 1);
+
+			return;
+		}
+
+		m_Length = static_cast<std::uint8_t>(taken);
+	}
+
+	// For a subject that is two values or a formattable one. std::format_to_n writes into the buffer
+	// and allocates nothing, which is the whole point of spelling it here rather than at the call site.
+	template<typename... Args>
+	[[nodiscard]] static Subject Of(std::format_string<Args...> pattern, Args&&... arguments)
+	{
+		// One larger than the buffer keeps, so that a subject which did not fit arrives here as a view
+		// longer than Capacity and picks up the truncation marker the copying constructor writes.
+		char scratch[Capacity + 1];
+
+		const auto written = std::format_to_n(scratch, Capacity + 1, pattern, std::forward<Args>(arguments)...);
+
+		return Subject{ std::string_view{ scratch, static_cast<std::size_t>(written.out - scratch) } };
+	}
+
+	[[nodiscard]] constexpr std::string_view View() const noexcept { return { m_Text, m_Length }; }
+
+	[[nodiscard]] constexpr bool IsEmpty() const noexcept { return m_Length == 0; }
+
+private:
+	char m_Text[Capacity]{};
+	std::uint8_t m_Length = 0;
+};
+
+// What a sentence may never be. Named so the deletions below read as a rule rather than as a trick.
+template<typename T>
+concept StringSentence = std::is_same_v<std::remove_cvref_t<T>, std::string>;
 
 class Error
 {
@@ -35,14 +104,44 @@ public:
 	// every way of producing one is a bug that this refuses to give a spelling to.
 	constexpr Error(int code, std::string_view context) noexcept : m_Context{ context }, m_Code{ code } {}
 
+	constexpr Error(int code, std::string_view context, Subject subject) noexcept
+		: m_Context{ context }, m_Subject{ subject }, m_Code{ code }
+	{}
+
+	// The dangle, made unspellable. A std::string is the only way the sentence has ever gone wrong —
+	// `Failure(errno, std::format(...))` compiled and printed freed heap — and a subject is where a
+	// value that had to be built belongs. Deleted for an lvalue too: a named string outlives the
+	// call and not necessarily the Error, which is copied out of a Result and kept.
+	//
+	// A template because the plain `std::string&&` overload is ambiguous against a string literal:
+	// both directions are one user conversion, and every existing call site stops compiling.
+	template<StringSentence T>
+	Error(int code, T&& context) = delete;
+
+	template<StringSentence T>
+	Error(int code, T&& context, Subject subject) = delete;
+
 	// Reads errno at the call site, which is the only place it is still the errno for the call that
 	// failed. Anything between the syscall and here — a destructor, a log statement, an allocation —
 	// is entitled to overwrite it.
 	[[nodiscard]] static Error FromErrno(std::string_view context) noexcept { return Error{ errno, context }; }
 
+	[[nodiscard]] static Error FromErrno(std::string_view context, Subject subject) noexcept
+	{
+		return Error{ errno, context, subject };
+	}
+
+	template<StringSentence T>
+	static Error FromErrno(T&& context) = delete;
+
+	template<StringSentence T>
+	static Error FromErrno(T&& context, Subject subject) = delete;
+
 	[[nodiscard]] constexpr int Code() const noexcept { return m_Code; }
 
 	[[nodiscard]] constexpr std::string_view Context() const noexcept { return m_Context; }
+
+	[[nodiscard]] constexpr Subject About() const noexcept { return m_Subject; }
 
 	// Compares the code alone. Two failures of the same call at two sites are the same failure to
 	// anything that branches on one, and a comparison that read the context would make a test assert
@@ -54,6 +153,7 @@ public:
 
 private:
 	std::string_view m_Context;
+	Subject m_Subject;
 	int m_Code;
 };
 
@@ -74,12 +174,35 @@ using Result = std::expected<T, Error>;
 	return std::unexpected{ Error{ code, context } };
 }
 
+[[nodiscard]] constexpr std::unexpected<Error> Failure(int code, std::string_view context, Subject subject) noexcept
+{
+	return std::unexpected{ Error{ code, context, subject } };
+}
+
+template<StringSentence T>
+std::unexpected<Error> Failure(int code, T&& context) = delete;
+
+template<StringSentence T>
+std::unexpected<Error> Failure(int code, T&& context, Subject subject) = delete;
+
 [[nodiscard]] inline std::unexpected<Error> FailFromErrno(std::string_view context) noexcept
 {
 	return std::unexpected{ Error::FromErrno(context) };
 }
 
-// Prints as `opening /dev/dri/card0: Permission denied (13)`. No format spec is accepted.
+[[nodiscard]] inline std::unexpected<Error> FailFromErrno(std::string_view context, Subject subject) noexcept
+{
+	return std::unexpected{ Error::FromErrno(context, subject) };
+}
+
+template<StringSentence T>
+std::unexpected<Error> FailFromErrno(T&& context) = delete;
+
+template<StringSentence T>
+std::unexpected<Error> FailFromErrno(T&& context, Subject subject) = delete;
+
+// Prints as `opening a DRM node /dev/dri/card0: Permission denied (13)`, and without the subject
+// where there is none. No format spec is accepted.
 //
 // **Formatting an Error allocates**, because std::system_category().message() returns a std::string,
 // and that is correct rather than a defect to work around: this runs on a log path and never on the
@@ -98,14 +221,17 @@ struct std::formatter<Error>
 	template<typename Context>
 	auto format(const Error& error, Context& context) const
 	{
-		return std::format_to(
-			context.out(), "{}: {} ({})", error.Context(), std::system_category().message(error.Code()), error.Code()
-		);
+		auto out = error.About().IsEmpty() ?
+		               std::format_to(context.out(), "{}", error.Context()) :
+		               std::format_to(context.out(), "{} {}", error.Context(), error.About().View());
+
+		return std::format_to(out, ": {} ({})", std::system_category().message(error.Code()), error.Code());
 	}
 };
 
 // The contract everything downstream assumes.
 static_assert(std::is_trivially_copyable_v<Error>, "An error is copied out of a Result, never owned behind one");
+static_assert(std::is_trivially_copyable_v<Subject>, "A subject rides in an Error and owns no storage of its own");
 static_assert(std::formattable<Error, char>, "A report prints the error rather than <unprintable>");
 
 static_assert(Error{ 13, "opening the render node" }.Code() == 13);

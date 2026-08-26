@@ -101,3 +101,41 @@ GYRO_TEST(Result, MonadicOperationsCompose)
 
 	GYRO_CHECK_EQ(OpenLike(false).value_or(-1), -1);
 }
+
+GYRO_TEST(Result, ASubjectOutlivesWhatItNamed)
+{
+	// The bug this type exists for: the sentence was built with std::format from a path that died at
+	// the end of the loop iteration, and what reached the log was freed heap. A subject copies, so
+	// the report reads the same after the string it came from is gone.
+	Error error{ EACCES, "opening a DRM node" };
+
+	{
+		const std::string path = std::format("{}/card{}", "/dev/dri", 7);
+		error = Error{ EACCES, "opening a DRM node", Subject{ path } };
+	}
+
+	GYRO_CHECK_EQ(error.About().View(), std::string_view{ "/dev/dri/card7" });
+	GYRO_CHECK(std::format("{}", error).starts_with("opening a DRM node /dev/dri/card7: "));
+}
+
+GYRO_TEST(Result, ASentenceWithNoSubjectPrintsAsItAlwaysDid)
+{
+	GYRO_CHECK(Error(EACCES, "opening the render node").About().IsEmpty());
+	GYRO_CHECK(std::format("{}", Error{ EACCES, "opening the render node" }).starts_with("opening the render node: "));
+}
+
+GYRO_TEST(Result, ASubjectTooLongIsMarkedRatherThanCut)
+{
+	// A reader who cannot tell a truncated subject from a complete one is worse off than one who has
+	// no subject at all, so what did not fit says so.
+	const Subject fits{ "XR24 mod 0x100000000000002" };
+	GYRO_CHECK_EQ(fits.View(), std::string_view{ "XR24 mod 0x100000000000002" });
+
+	const Subject overrun{ std::string(Subject::Capacity + 8, 'x') };
+	GYRO_CHECK_EQ(overrun.View().size(), Subject::Capacity);
+	GYRO_CHECK(overrun.View().ends_with("~"));
+
+	// Of formats into the same storage, which is what a site naming two values needs.
+	GYRO_CHECK_EQ(Subject::Of("{} on {}", 42, "eDP-1").View(), std::string_view{ "42 on eDP-1" });
+	GYRO_CHECK_EQ(Subject::Of("{}", std::string(64, 'y')).View().size(), Subject::Capacity);
+}

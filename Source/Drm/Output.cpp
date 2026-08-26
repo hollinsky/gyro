@@ -96,7 +96,7 @@ Result<void> DrmOutput::Open(const OutputConfiguration& wanted)
 
 	if (mode == nullptr)
 	{
-		return Failure(ENODEV, std::format("{} offers no mode", m_Pipeline->Name));
+		return Failure(ENODEV, "no mode is offered by", Subject{ m_Pipeline->Name });
 	}
 
 	m_Mode = *mode;
@@ -256,7 +256,9 @@ Result<void> DrmOutput::BuildTargets()
 
 	if (modifiers.empty())
 	{
-		return Failure(EINVAL, std::format("{} cannot scan out {}", m_Pipeline->Name, PixelFormat{ code }));
+		return Failure(
+			EINVAL, "this pipeline cannot scan out", Subject::Of("{} on {}", PixelFormat{ code }, m_Pipeline->Name)
+		);
 	}
 
 	const PixelSize<DeviceSpace> size = m_Configuration.Resolution;
@@ -331,7 +333,7 @@ Result<void> DrmOutput::BuildTargets()
 		{
 			DropTargets();
 
-			return Failure(errno, std::format("building a framebuffer for {}", described.Format));
+			return FailFromErrno("building a framebuffer for", Subject::Of("{}", described.Format));
 		}
 
 		m_Targets[index].Buffer = std::move(*allocated);

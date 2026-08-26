@@ -175,7 +175,7 @@ Result<void> DrmScanout::Adopt(TextureId id, const TextureSource& source)
 
 		// The ordinary refusal rather than a fault: a buffer laid out for sampling need not be one any
 		// plane can read, and what it costs is a surface that is never promoted.
-		return Failure(reason, std::format("a display framebuffer for {}", source.Format));
+		return Failure(reason, "a display framebuffer for", Subject::Of("{}", source.Format));
 	}
 
 	m_Images[m_Count] = built;

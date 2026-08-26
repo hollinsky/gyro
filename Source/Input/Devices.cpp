@@ -263,7 +263,7 @@ Result<std::unique_ptr<Devices>> Devices::Open(std::string seat)
 	// applied fails here rather than at the first keystroke that does not arrive.
 	if (::libinput_udev_assign_seat(devices->m_Context, devices->m_Seat.c_str()) != 0)
 	{
-		return Failure(EACCES, std::format("assigning libinput to seat {}", devices->m_Seat));
+		return Failure(EACCES, "assigning libinput to seat", Subject{ devices->m_Seat });
 	}
 
 	return devices;
