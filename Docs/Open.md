@@ -1199,6 +1199,34 @@ granularity of the lock the driver takes; per process is one thread rather than 
 the machines gyro will actually run on there is one card. The second is what makes a two-GPU laptop's
 external monitor wait behind the panel's mode set, and neither is measured.
 
+## What the partition cannot express yet
+
+*(2026-08-25, alongside the first multi-layer commit.)*
+[Decision 152](Decisions.md#152-promotion-is-a-partition-of-the-draw-list-computed-every-frame-and-a-node-is-promotable-when-its-resample-is-a-no-op-and-it-carries-no-dressing-on-itself)
+is built as a suffix of the draw list: gyro's composite sits on the primary plane and promoted layers
+go above it. Three things follow that are deliberately not built, and each is a real arrangement
+rather than an oversight.
+
+- **A layer *below* the composite.** Some hardware puts an overlay under the primary, and the
+  arrangement that wants it is a fullscreen video with a mostly empty interface over the top. Taking
+  it means the composite has to be transparent where the promoted layer lands — an alpha channel on a
+  scanout target, and a renderer that can be told to leave a hole — and it means the assigner may
+  promote out of the middle of the list rather than off the end of it. `Drm/Output.cpp` skips such a
+  plane rather than mis-assigning it, so the cost today is one overlay unused on the hardware that
+  has one.
+- **A promoted node keeping its shadow.** A shadow is drawn around an opaque quad and is separable in
+  principle: it could stay in the composite while the quad goes to a plane. Doing it means re-emitting
+  the item as a `DrawDressing` with no content of its own, which is the one thing `Seam/Renderer.h`
+  already has a shape for — and it means the assigner rewrites the list it was handed rather than only
+  partitioning it. Until then a lifted window is composited, which is most windows, and the promotion
+  that pays is the fullscreen one that casts no shadow anyway.
+- **Where the atomic test is actually cached.** `IPresenter::TestLayers` is the party that knows, and
+  decision 152 says it is asked when an item crosses the promotion predicate rather than once a frame.
+  Nothing yet holds that cache: the verb exists and `Frame/Assign.h` produces the partition, and the
+  frame loop still presents one layer. What the cache has to be keyed on is the partition's *shape* —
+  which items, which planes, at what sizes — and not its positions, since a plane that merely moved is
+  two integers in a commit that was happening anyway.
+
 ## One plane per output, and what the catalog is already for
 
 The DRM backend drives one primary plane and refuses a layer set with a second layer in it.

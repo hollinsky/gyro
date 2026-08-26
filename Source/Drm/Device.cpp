@@ -173,26 +173,61 @@ private:
 	return std::format("{}-{}", type != nullptr ? type : "Unknown", connector.connector_type_id);
 }
 
-// The plane this CRTC should scan its composite out of: a primary plane the CRTC is allowed to drive.
+// What one plane accepts, decoded.
 //
-// **Primary rather than the first that fits, because the plane type decides what a modeset means.** An
-// overlay bound to a CRTC with no primary is a legal atomic state on some drivers and a blank screen
-// on others, and the failure is at the first commit with nothing to say why. Decision 5's plane
-// assignment — promoting client buffers onto overlays — is what the rest of the catalog is for, and it
-// is not this change.
-[[nodiscard]] std::uint32_t FindPrimary(
-	RawFd device,
-	std::uint32_t crtcIndex,
-	std::span<const std::uint32_t> taken,
-	std::vector<PlaneFormat>& formats
-)
+// **`IN_FORMATS` is what a modern driver states its real constraints in** — the pairs of format and
+// modifier it can actually scan out. Its absence is an old driver, and what it leaves behind is the
+// plane's implicit format list under no modifier at all, which is the legacy contract and is the
+// honest thing to report rather than inventing `DRM_FORMAT_MOD_LINEAR` on its behalf.
+[[nodiscard]] std::vector<PlaneFormat>
+PlaneFormats(RawFd device, const drmModePlane& plane, const Properties& properties)
+{
+	std::vector<PlaneFormat> formats;
+
+	if (const std::uint64_t blobId = properties.Value("IN_FORMATS"); blobId != 0)
+	{
+		if (OwnedBlob blob{ drmModeGetPropertyBlob(device.Value, static_cast<std::uint32_t>(blobId)) }; blob)
+		{
+			formats = DecodeFormats(
+				std::span{ static_cast<const std::byte*>(blob->data), static_cast<std::size_t>(blob->length) }
+			);
+		}
+	}
+
+	if (formats.empty())
+	{
+		formats.reserve(plane.count_formats);
+
+		for (std::uint32_t format = 0; format < plane.count_formats; ++format)
+		{
+			formats.push_back(PlaneFormat{ .Code = plane.formats[format], .Modifiers = { ModifierInvalid } });
+		}
+	}
+
+	return formats;
+}
+
+// Every plane this CRTC is allowed to drive, sorted bottom of the stack first, or empty where it has
+// no primary.
+//
+// **A plane taken by an earlier pipeline is skipped whatever its kind**, because `possible_crtcs` is
+// permission rather than exclusivity: a plane legal on two CRTCs would otherwise be handed to both,
+// and the second output's commits would be programming the first output's picture.
+//
+// **A pipeline with no primary is no pipeline.** Decision 152's partition always has a composite in it
+// and the composite belongs on the primary, so an inventory of overlays alone describes an output that
+// cannot show anything — which is a connector to skip rather than a set of planes to hand out.
+[[nodiscard]] std::vector<Plane> ScanPlanes(RawFd device, std::uint32_t crtcIndex, std::span<const std::uint32_t> taken)
 {
 	OwnedPlaneResources planes{ drmModeGetPlaneResources(device.Value) };
 
 	if (!planes)
 	{
-		return 0;
+		return {};
 	}
+
+	std::vector<Plane> inventory;
+	bool primary = false;
 
 	for (std::uint32_t index = 0; index < planes->count_planes; ++index)
 	{
@@ -212,39 +247,53 @@ private:
 
 		const Properties properties{ device, id, DRM_MODE_OBJECT_PLANE };
 
-		if (properties.Value("type") != DRM_PLANE_TYPE_PRIMARY)
+		Plane entry{
+			.Id = id,
+			.Kind = KindOf(properties.Value("type")),
+			.ZPos = properties.Value("zpos"),
+			.Formats = PlaneFormats(device, *plane, properties),
+			.Props =
+				PlaneProperties{
+					.FbId = properties.Id("FB_ID"),
+					.CrtcId = properties.Id("CRTC_ID"),
+					.SrcX = properties.Id("SRC_X"),
+					.SrcY = properties.Id("SRC_Y"),
+					.SrcW = properties.Id("SRC_W"),
+					.SrcH = properties.Id("SRC_H"),
+					.CrtcX = properties.Id("CRTC_X"),
+					.CrtcY = properties.Id("CRTC_Y"),
+					.CrtcW = properties.Id("CRTC_W"),
+					.CrtcH = properties.Id("CRTC_H"),
+					.InFenceFd = properties.Id("IN_FENCE_FD"),
+					.FbDamageClips = properties.Id("FB_DAMAGE_CLIPS"),
+				},
+		};
+
+		// A plane missing the properties a commit sets is one no layer can be programmed onto. Dropping
+		// it costs a promotion; keeping it would cost the whole frame at the first commit that used it.
+		if (!entry.Props.IsComplete())
 		{
 			continue;
 		}
 
-		// `IN_FORMATS` is what a modern driver states its real constraints in — the pairs of format and
-		// modifier it can actually scan out. Its absence is an old driver, and what it leaves behind is
-		// the plane's implicit format list under no modifier at all, which is the legacy contract and is
-		// the honest thing to report rather than inventing `DRM_FORMAT_MOD_LINEAR` on its behalf.
-		if (const std::uint64_t blobId = properties.Value("IN_FORMATS"); blobId != 0)
-		{
-			if (OwnedBlob blob{ drmModeGetPropertyBlob(device.Value, static_cast<std::uint32_t>(blobId)) }; blob)
-			{
-				formats = DecodeFormats(
-					std::span{ static_cast<const std::byte*>(blob->data), static_cast<std::size_t>(blob->length) }
-				);
-			}
-		}
+		primary = primary || entry.Kind == PlaneKind::Primary;
 
-		if (formats.empty())
-		{
-			formats.reserve(plane->count_formats);
-
-			for (std::uint32_t format = 0; format < plane->count_formats; ++format)
-			{
-				formats.push_back(PlaneFormat{ .Code = plane->formats[format], .Modifiers = { ModifierInvalid } });
-			}
-		}
-
-		return id;
+		inventory.push_back(std::move(entry));
 	}
 
-	return 0;
+	if (!primary)
+	{
+		return {};
+	}
+
+	// **Sorted by what the driver reports, and ties broken by id so the order is the same on every
+	// run.** A device with no `zpos` at all answers zero for every plane, which leaves the kernel's own
+	// enumeration order — the one thing available when the hardware states nothing.
+	std::ranges::stable_sort(inventory, [](const Plane& left, const Plane& right) noexcept {
+		return left.ZPos != right.ZPos ? left.ZPos < right.ZPos : left.Id < right.Id;
+	});
+
+	return inventory;
 }
 
 // The CRTC that already drives this connector, or the first free one that can. Preferring the current
@@ -354,16 +403,15 @@ private:
 			continue;
 		}
 
-		pipeline.Plane = FindPrimary(device, pipeline.CrtcIndex, takenPlanes, pipeline.Formats);
+		pipeline.Planes = ScanPlanes(device, pipeline.CrtcIndex, takenPlanes);
 
-		if (pipeline.Plane == 0)
+		if (pipeline.Planes.empty())
 		{
 			continue;
 		}
 
 		const Properties connectorProperties{ device, pipeline.Connector, DRM_MODE_OBJECT_CONNECTOR };
 		const Properties crtcProperties{ device, pipeline.Crtc, DRM_MODE_OBJECT_CRTC };
-		const Properties planeProperties{ device, pipeline.Plane, DRM_MODE_OBJECT_PLANE };
 
 		pipeline.ConnectorProps = ConnectorProperties{
 			.CrtcId = connectorProperties.Id("CRTC_ID"),
@@ -376,29 +424,17 @@ private:
 			.VrrEnabled = crtcProperties.Id("VRR_ENABLED"),
 		};
 
-		pipeline.PlaneProps = PlaneProperties{
-			.FbId = planeProperties.Id("FB_ID"),
-			.CrtcId = planeProperties.Id("CRTC_ID"),
-			.SrcX = planeProperties.Id("SRC_X"),
-			.SrcY = planeProperties.Id("SRC_Y"),
-			.SrcW = planeProperties.Id("SRC_W"),
-			.SrcH = planeProperties.Id("SRC_H"),
-			.CrtcX = planeProperties.Id("CRTC_X"),
-			.CrtcY = planeProperties.Id("CRTC_Y"),
-			.CrtcW = planeProperties.Id("CRTC_W"),
-			.CrtcH = planeProperties.Id("CRTC_H"),
-			.InFenceFd = planeProperties.Id("IN_FENCE_FD"),
-			.FbDamageClips = planeProperties.Id("FB_DAMAGE_CLIPS"),
-		};
-
-		if (pipeline.ConnectorProps.CrtcId == 0 || pipeline.CrtcProps.ModeId == 0 || pipeline.CrtcProps.Active == 0 ||
-		    !pipeline.PlaneProps.IsComplete())
+		if (pipeline.ConnectorProps.CrtcId == 0 || pipeline.CrtcProps.ModeId == 0 || pipeline.CrtcProps.Active == 0)
 		{
 			continue;
 		}
 
 		takenCrtcs.push_back(pipeline.Crtc);
-		takenPlanes.push_back(pipeline.Plane);
+
+		for (const Plane& plane : pipeline.Planes)
+		{
+			takenPlanes.push_back(plane.Id);
+		}
 		pipelines.push_back(std::move(pipeline));
 	}
 

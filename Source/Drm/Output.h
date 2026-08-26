@@ -93,6 +93,15 @@ public:
 
 	[[nodiscard]] Result<void> Present(std::span<const PresentLayer> layers) override;
 
+	// `DRM_MODE_ATOMIC_TEST_ONLY` over exactly the commit `Present` would make. This is the party
+	// Seam/Presenter.h says knows the answer, and it is the only one: what a display engine refuses is a
+	// combination, bounded by bandwidth and by scaler units shared between pipes.
+	[[nodiscard]] Result<void> TestLayers(std::span<const PresentLayer> layers) override;
+
+	// The planes this output may put a layer on. Fixed at `Open`, because the inventory is the device's
+	// and the device does not grow planes.
+	[[nodiscard]] std::uint32_t LayerCeiling() const noexcept override { return m_PlaneCount; }
+
 	void Reconfigure(const OutputConfiguration& wanted) override;
 
 	// Everything owed once the device's events have been read to empty: a held commit whose composite
@@ -152,11 +161,27 @@ private:
 		TargetState State = TargetState::Free;
 	};
 
-	// The commit that is waiting for something: the layer, and the image it names.
+	// The commit that is waiting for something: the partition, and the images it names.
 	struct Pending
 	{
-		PresentLayer Layer{};
+		std::array<PresentLayer, MaxLayers> Layers{};
+		std::uint32_t Count = 0;
 		bool Waiting = false;
+	};
+
+	// Where one plane's properties sit in the preallocated commit.
+	//
+	// **Every usable plane has a block whether or not a layer is on it**, because a partition that
+	// shrinks has to turn off the plane the vanished layer was on. A commit that simply stopped
+	// mentioning it would leave the kernel's last state in place, which is the promoted window still on
+	// the screen after the composite stopped drawing a hole for it — a stale copy of a window that has
+	// moved, sitting over the top of everything, until something else happens to touch that plane.
+	struct PlaneCommit
+	{
+		std::uint32_t Object = 0;
+		std::uint32_t Offset = 0;
+		std::uint32_t Count = 0;
+		bool Fenced = false;
 	};
 
 	[[nodiscard]] Result<void> BuildTargets();
@@ -165,7 +190,20 @@ private:
 
 	// The frame commit: plane properties only, non-blocking, asking for a page-flip event. No libdrm
 	// and no allocation; see the header comment.
-	[[nodiscard]] Result<void> Flip(const PresentLayer& layer, RawFd fence);
+	[[nodiscard]] Result<void> Flip(std::span<const PresentLayer> layers, std::span<const Fd> fences);
+
+	// Whether this output could program that partition at all, which is the half of the question that
+	// needs no ioctl: a layer per plane, and every image one this output owns.
+	[[nodiscard]] Result<void> Expressible(std::span<const PresentLayer> layers) const noexcept;
+
+	// Fill the preallocated blocks for this partition: every usable plane written, the ones past the
+	// partition's end turned off. No allocation and no property lookup — see the header comment.
+	void Program(std::span<const PresentLayer> layers, std::span<const Fd> fences) noexcept;
+
+	// One atomic commit against the blocks `Program` filled, with whatever flags are wanted. This is
+	// the whole of what `Present` and `TestLayers` have in common, and it is a bare ioctl for the
+	// reason the header gives.
+	[[nodiscard]] Result<void> Commit(std::uint32_t flags) noexcept;
 
 	// The commit that carries a mode. libdrm's, blocking, and off the frame thread by contract.
 	[[nodiscard]] Result<void> Modeset(bool allowModeset);
@@ -190,18 +228,36 @@ private:
 
 	// The property ids and values one flip writes, sized and filled at `Open`. `Present` overwrites the
 	// values and issues the ioctl; nothing here grows.
-	static constexpr std::size_t MaxCommitProperties = 16;
+	//
+	// **Eleven per plane, which is what `PlaneProperties::IsComplete` already guarantees plus the
+	// fence.** The order inside a block is fixed — framebuffer, CRTC, the four source edges, the four
+	// destination edges, then the fence where the plane has one — so `Program` writes by offset rather
+	// than searching, which is what keeps a per-frame commit free of string comparisons and of
+	// branches on which property is which.
+	static constexpr std::size_t PropertiesPerPlane = 11;
+	static constexpr std::size_t MaxCommitProperties = MaxLayers * PropertiesPerPlane;
+
+	std::array<PlaneCommit, MaxLayers> m_Planes{};
+	std::array<std::uint32_t, MaxLayers> m_Objects{};
+	std::array<std::uint32_t, MaxLayers> m_Counts{};
 	std::array<std::uint32_t, MaxCommitProperties> m_Properties{};
 	std::array<std::uint64_t, MaxCommitProperties> m_Values{};
-	std::uint32_t m_PropertyCount = 0;
+
+	// How many planes this output may put a layer on: the primary and everything above it, capped.
+	std::uint32_t m_PlaneCount = 0;
 
 	Pending m_Pending{};
 
-	// Which image the panel is showing, and which one the kernel has accepted and not yet flipped.
-	// Separate because they are both live between a commit and its completion, and freeing the wrong
-	// one hands the renderer the image that is currently on screen.
-	std::optional<std::uint32_t> m_Scanout;
-	std::optional<std::uint32_t> m_InFlight;
+	// Which images the panel is showing, and which ones the kernel has accepted and not yet flipped, as
+	// bitmasks over the target ring.
+	//
+	// **Sets rather than single indices, because a partition names one image per layer and they retire
+	// together at the flip.** Freeing the wrong one hands the renderer an image that is currently on
+	// screen, which is the tear this pair exists to prevent, and a partition makes that a set
+	// difference rather than a comparison.
+	std::uint32_t m_ScanoutMask = 0;
+	std::uint32_t m_InFlightMask = 0;
+	bool m_Flipping = false;
 
 	// The last completion, for the period this output *actually ran at* — which Seam/PresentationInfo.h
 	// insists is measured rather than echoed from the mode. Two flips are needed before there is one,

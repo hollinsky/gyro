@@ -47,12 +47,31 @@ namespace Drm
 [[nodiscard]] const drmModeModeInfo*
 ChooseMode(std::span<const drmModeModeInfo> modes, PixelSize<DeviceSpace> wanted, Duration period) noexcept;
 
+// What a plane is for, which is the one thing about it that cannot be discovered by trying.
+//
+// **Primary is not *the best plane*; it is the plane a modeset means something on.** An overlay bound
+// to a CRTC with no primary is a legal atomic state on some drivers and a blank screen on others, and
+// the failure arrives at the first commit with nothing to say why. Cursor is named because the kernel
+// names it and because some drivers accept nothing else on it, not because gyro treats a pointer
+// specially — decision 152 makes the cursor one promotable node among others.
+enum class PlaneKind : std::uint8_t
+{
+	Primary,
+	Overlay,
+	Cursor,
+};
+
 // One format a plane accepts, with the modifiers it accepts it under.
 struct PlaneFormat
 {
 	std::uint32_t Code = 0;
 	std::vector<std::uint64_t> Modifiers;
 };
+
+// What `type` means, as the kernel's enumerator. Anything the kernel adds later is an overlay, which
+// is the reading that stays correct: a plane gyro does not recognise is one it may put a layer on only
+// if the atomic test agrees, and that is exactly the contract an overlay already has.
+[[nodiscard]] PlaneKind KindOf(std::uint64_t type) noexcept;
 
 // `IN_FORMATS` decoded: what this plane will scan out, and under which layouts.
 //

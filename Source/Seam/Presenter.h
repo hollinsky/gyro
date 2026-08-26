@@ -154,6 +154,39 @@ public:
 	// presenter answering more than `Targets().size() - 1` will simply find `AcquireTarget` empty.
 	[[nodiscard]] virtual std::uint32_t CommitDepth() const noexcept { return 1; }
 
+	// Whether this partition of the draw list is one the hardware will actually take.
+	//
+	// **The assigner proposes and the backend answers, rather than the backend describing itself and
+	// the assigner reasoning.** A portable capability struct — scaler ratios, plane counts, format
+	// pairs — is the obvious alternative and it cannot be written truthfully: what a display engine
+	// refuses is a *combination*, bounded by memory bandwidth and by scaler units shared between
+	// pipes, and no per-plane description gyro could publish would predict it. `DRM_MODE_ATOMIC_TEST_ONLY`
+	// is the only party that knows, so the question is asked in the form the kernel already answers.
+	//
+	// **The cost is an ioctl, which is why decision 152 makes the answer cacheable rather than the
+	// question cheap.** The caller is expected to ask when the partition's *shape* changes — an item
+	// crossing the promotion predicate, the draw list's membership changing — and not once per frame:
+	// a promoted layer that merely moved is a partition already tested, since a plane's position is two
+	// integers in a commit that was happening anyway.
+	//
+	// The vocabulary is `Present`'s, and `EINVAL` here is the ordinary answer rather than a bug: the
+	// whole point is to find out. A backend that has not implemented promotion inherits the default,
+	// which is the same rule its `Present` already holds, so an assigner running against it proposes
+	// once, is refused, and composites everything.
+	[[nodiscard]] virtual Result<void> TestLayers(std::span<const PresentLayer> layers)
+	{
+		return layers.size() == 1 ? Result<void>{} : Failure(EINVAL, "this output scans out one layer");
+	}
+
+	// How many layers this output could take at most, which is the ceiling the assigner stops at
+	// before it proposes anything.
+	//
+	// **A bound rather than a promise.** It is what the hardware has — planes on this CRTC, one of them
+	// the composite's — and says nothing about whether any particular partition of that width will be
+	// accepted, which is `TestLayers`' business. Its purpose is to stop an assigner enumerating
+	// partitions of forty windows on a device with two planes.
+	[[nodiscard]] virtual std::uint32_t LayerCeiling() const noexcept { return 1; }
+
 	// Put these layers on the screen, bottom first.
 	//
 	// **May never block.** No device-wide lock, no `ALLOW_MODESET`, no wait on another output's

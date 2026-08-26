@@ -143,6 +143,20 @@ struct MappedImage
 // ceiling and not a renderer's.
 inline constexpr std::uint32_t MaxTargets = 4;
 
+// The most layers one `Present` may carry, and therefore the widest partition decision 152's assigner
+// will ever propose.
+//
+// **An agreement for the same reason `MaxTargets` is one**, and the party it binds is the frame loop:
+// a partition is built on the frame thread, where nothing may allocate, so both the assigner's working
+// set and a presenter's preallocated commit are sized from this. A backend with fewer planes says so
+// through `IPresenter::LayerCeiling` and is never handed more than it answered.
+//
+// **Four because the shape worth having is the composite plus a small number of promotions**, which is
+// what a display engine actually offers: the pipes that can scan out independently number two to four
+// on the hardware gyro runs on, and a machine that offered forty would still be bounded by the memory
+// bandwidth of reading them. Raising it costs preallocated bytes and nothing else.
+inline constexpr std::uint32_t MaxLayers = 4;
+
 struct RenderTarget
 {
 	PixelSize<DeviceSpace> Size{};

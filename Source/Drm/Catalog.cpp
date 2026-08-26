@@ -96,6 +96,19 @@ ChooseMode(std::span<const drmModeModeInfo> modes, PixelSize<DeviceSpace> wanted
 	return modes.empty() ? nullptr : modes.data();
 }
 
+PlaneKind KindOf(std::uint64_t type) noexcept
+{
+	switch (type)
+	{
+		case DRM_PLANE_TYPE_PRIMARY:
+			return PlaneKind::Primary;
+		case DRM_PLANE_TYPE_CURSOR:
+			return PlaneKind::Cursor;
+		default:
+			return PlaneKind::Overlay;
+	}
+}
+
 std::vector<PlaneFormat> DecodeFormats(std::span<const std::byte> blob)
 {
 	std::vector<PlaneFormat> catalog;

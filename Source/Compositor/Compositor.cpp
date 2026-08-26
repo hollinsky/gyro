@@ -974,7 +974,7 @@ public:
 		const std::uint32_t code = wanted.Format.IsValid() ? wanted.Format.Code : FormatXrgb8888;
 		const std::array<IDmabufAllocator*, 2> chain{ &*m_Allocator, &*m_Dumb };
 		IDmabufAllocator& allocator =
-			ChooseAllocator(chain, code, Drm::ModifiersFor(m_Card->Pipelines()[index].Formats, code));
+			ChooseAllocator(chain, code, Drm::ModifiersFor(m_Card->Pipelines()[index].Primary().Formats, code));
 
 		auto panel = std::make_unique<Drm::DrmOutput>(*m_Card, m_Card->Pipelines()[index], allocator, renderer.get());
 

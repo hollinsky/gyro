@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <format>
 #include <utility>
@@ -28,6 +29,20 @@ constexpr Duration CompletionPoll = std::chrono::microseconds{ 500 };
 [[nodiscard]] constexpr std::uint64_t Fixed(std::int64_t pixels) noexcept
 {
 	return static_cast<std::uint64_t>(pixels) << 16;
+}
+
+// The same conversion from the real-valued side, which is what a source rectangle actually is.
+//
+// **Rounded rather than truncated, and clamped at zero.** Seam/Presenter.h keeps a layer's source in
+// floats precisely because a crop samples between texels, so the sixteen fractional bits are the point
+// rather than an artefact — truncating them would move a promoted layer up and left by up to a texel
+// against the composite that was drawn around it, which reads as a one-pixel seam that appears the
+// frame a window is promoted and vanishes the frame it is not.
+[[nodiscard]] inline std::uint64_t Fixed(float pixels) noexcept
+{
+	const float scaled = std::round(pixels * 65536.0F);
+
+	return scaled <= 0.0F ? 0 : static_cast<std::uint64_t>(scaled);
 }
 
 // The one interruptible-retry wrapper this module needs; a DRM ioctl is interruptible and gyro
@@ -105,36 +120,102 @@ Result<void> DrmOutput::Open(const OutputConfiguration& wanted)
 
 	// The plane state one flip writes, resolved once. The order is the order the ioctl sends and never
 	// changes; `Present` overwrites the values in place.
-	const PlaneProperties& plane = m_Pipeline->PlaneProps;
+	//
+	// **The primary and everything above it, and nothing below.** gyro's composite is layer zero and
+	// belongs on the primary — a modeset means something there and nowhere else — so a plane the driver
+	// puts *under* the primary could only ever hold something beneath the composite, which the composite
+	// would then have to be transparent over. That is a real arrangement and it is not this one; it is
+	// left in Open.md rather than half-built, and the cost is one overlay unused on the hardware that
+	// has such a plane.
+	std::uint32_t offset = 0;
 
-	const auto add = [&](std::uint32_t property, std::uint64_t value) {
-		if (property != 0 && m_PropertyCount < MaxCommitProperties)
-		{
-			m_Properties[m_PropertyCount] = property;
-			m_Values[m_PropertyCount] = value;
-			++m_PropertyCount;
-		}
-	};
-
-	add(plane.FbId, m_Targets[0].Framebuffer);
-	add(plane.CrtcId, m_Crtc);
-	add(plane.SrcX, 0);
-	add(plane.SrcY, 0);
-	add(plane.SrcW, Fixed(m_Configuration.Resolution.Width));
-	add(plane.SrcH, Fixed(m_Configuration.Resolution.Height));
-	add(plane.CrtcX, 0);
-	add(plane.CrtcY, 0);
-	add(plane.CrtcW, static_cast<std::uint64_t>(m_Configuration.Resolution.Width));
-	add(plane.CrtcH, static_cast<std::uint64_t>(m_Configuration.Resolution.Height));
-
-	// The fence slot is last and is always present where the hardware has one, because its *value*
-	// changes per frame and an absent property would change the property count instead — which is the
-	// one part of the commit that is supposed to be fixed. A frame with nothing to wait for writes -1,
-	// which is what the kernel reads as no fence.
-	if (plane.InFenceFd != 0)
+	for (const Plane& plane : m_Pipeline->Planes)
 	{
-		add(plane.InFenceFd, static_cast<std::uint64_t>(-1));
-		m_Fenced = true;
+		if (m_PlaneCount == 0 && plane.Kind != PlaneKind::Primary)
+		{
+			continue;
+		}
+
+		if (m_PlaneCount == MaxLayers)
+		{
+			break;
+		}
+
+		// A cursor plane is skipped, and it is the one kind that is refused by name rather than by the
+		// atomic test. Decision 152 makes the pointer an ordinary promotable node, but the hardware's
+		// cursor plane is not an ordinary plane: several drivers accept exactly one size on it, ignore
+		// the source rectangle, and take a format nothing else takes. Putting an arbitrary layer there
+		// would be a promotion that works on one machine and is refused on the next, for a plane that
+		// buys nothing an overlay does not.
+		if (plane.Kind == PlaneKind::Cursor)
+		{
+			continue;
+		}
+
+		const PlaneProperties& properties = plane.Props;
+
+		PlaneCommit& block = m_Planes[m_PlaneCount];
+		block.Object = plane.Id;
+		block.Offset = offset;
+		block.Fenced = properties.InFenceFd != 0;
+
+		const auto add = [&](std::uint32_t property, std::uint64_t value) {
+			m_Properties[offset] = property;
+			m_Values[offset] = value;
+			++offset;
+		};
+
+		// Fixed order, and `IsComplete` is what makes every one of these non-zero. The fence slot is
+		// last and is present whenever the plane has one, because its *value* changes per frame while
+		// the property count may not — a frame with nothing to wait for writes -1, which is what the
+		// kernel reads as no fence.
+		add(properties.FbId, 0);
+		add(properties.CrtcId, 0);
+		add(properties.SrcX, 0);
+		add(properties.SrcY, 0);
+		add(properties.SrcW, 0);
+		add(properties.SrcH, 0);
+		add(properties.CrtcX, 0);
+		add(properties.CrtcY, 0);
+		add(properties.CrtcW, 0);
+		add(properties.CrtcH, 0);
+
+		if (block.Fenced)
+		{
+			add(properties.InFenceFd, static_cast<std::uint64_t>(-1));
+		}
+
+		block.Count = offset - block.Offset;
+
+		m_Objects[m_PlaneCount] = block.Object;
+		m_Counts[m_PlaneCount] = block.Count;
+
+		++m_PlaneCount;
+	}
+
+	if (m_PlaneCount == 0)
+	{
+		return Failure(EINVAL, "this pipeline has no primary plane to scan out of");
+	}
+
+	// Whether an acquire fence can be handed to the hardware at all is the *composite's* plane, since
+	// that is the layer the renderer's work is behind. A promoted layer on a plane with no fence
+	// property is held by the same path for the same reason.
+	m_Fenced = m_Planes[0].Fenced;
+
+	// The composite is layer zero and starts as the whole screen out of target zero.
+	{
+		const PresentLayer initial{
+			.Target = 0,
+			.Blend = BlendMode::Opaque,
+			.Acquire = SyncPoint{},
+			.Source = {},
+			.Destination = { {}, m_Configuration.Resolution },
+			.Damage = {},
+			.Color = m_Configuration.Color,
+		};
+
+		Program({ &initial, 1 }, {});
 	}
 
 	// **Bare first, and `-EINVAL` is the kernel saying this was not an adoption.** Seam/Presenter.h's
@@ -153,7 +234,7 @@ Result<void> DrmOutput::Open(const OutputConfiguration& wanted)
 	}
 
 	m_Targets[0].State = TargetState::Scanout;
-	m_Scanout = 0;
+	m_ScanoutMask = std::uint32_t{ 1 } << 0;
 
 	m_Device->Attach(m_Crtc, *this);
 
@@ -163,7 +244,7 @@ Result<void> DrmOutput::Open(const OutputConfiguration& wanted)
 Result<void> DrmOutput::BuildTargets()
 {
 	const std::uint32_t code = m_Configuration.Format.IsValid() ? m_Configuration.Format.Code : FormatXrgb8888;
-	const std::span<const std::uint64_t> modifiers = ModifiersFor(m_Pipeline->Formats, code);
+	const std::span<const std::uint64_t> modifiers = ModifiersFor(m_Pipeline->Primary().Formats, code);
 
 	if (modifiers.empty())
 	{
@@ -274,8 +355,9 @@ void DrmOutput::DropTargets() noexcept
 
 	m_TargetCount = 0;
 	m_Next = 0;
-	m_Scanout.reset();
-	m_InFlight.reset();
+	m_ScanoutMask = 0;
+	m_InFlightMask = 0;
+	m_Flipping = false;
 }
 
 std::span<const RenderTarget> DrmOutput::Targets() const
@@ -320,82 +402,167 @@ Result<void> DrmOutput::Present(std::span<const PresentLayer> layers)
 		return Failure(EBUSY, "presenting to an output that is mid-reconfiguration");
 	}
 
-	// **One layer, and more than one is refused rather than partly honoured.** Decision 5's plane
-	// assignment is what the format catalog is for and it is not built: this output drives one primary
-	// plane. Seam/Presenter.h calls a set that cannot be expressed `EINVAL` — a bug in the assigner
-	// rather than a condition to retry — and refusing it here is what keeps such a bug from being
-	// invisible on the backend that has planes.
-	if (layers.size() != 1)
+	if (const Result<void> expressible = Expressible(layers); !expressible)
 	{
-		return Failure(EINVAL, "this output scans out one layer");
-	}
-
-	const PresentLayer& layer = layers.front();
-
-	if (layer.Target >= m_TargetCount || m_Targets[layer.Target].Framebuffer == 0)
-	{
-		return Failure(EINVAL, "presenting a target this output does not own");
+		return expressible;
 	}
 
 	// KMS refuses a second nonblocking commit on a CRTC that has not flipped, which is the rule
 	// `CommitDepth`'s default of one already holds the loop to. Saying it here as well is what keeps a
 	// backend that raises that number from finding out as a kernel error.
-	if (m_InFlight.has_value() || m_Pending.Waiting)
+	if (m_Flipping || m_Pending.Waiting)
 	{
 		return Failure(EBUSY, "this output already has a commit outstanding");
 	}
 
-	Fd fence;
+	// One exported fence per layer, held here so that every descriptor outlives the ioctl that reads
+	// it. `MaxLayers` of them, on the stack, because the frame section forbids the vector.
+	std::array<Fd, MaxLayers> fences;
+	bool wait = false;
 
-	if (m_Fenced)
+	for (std::size_t index = 0; index < layers.size(); ++index)
 	{
-		Result<Fd> exported = m_Fences.Export(layer.Acquire);
+		const PresentLayer& layer = layers[index];
 
-		if (exported)
+		if (m_Planes[index].Fenced)
 		{
-			fence = std::move(*exported);
-		}
-		else if (m_Completion != nullptr && !m_Completion->IsComplete(layer.Acquire))
-		{
-			// The device would not give up a fence and the pixels are not there yet. Holding is the only
-			// honest response — committing now scans out a half-drawn frame — and the cost is the frame
-			// of overlap this backend exists to have. `Settle` releases it.
-			m_Pending = Pending{ .Layer = layer, .Waiting = true };
-			++m_HeldCommits;
+			if (Result<Fd> exported = m_Fences.Export(layer.Acquire); exported)
+			{
+				fences[index] = std::move(*exported);
 
-			return {};
+				continue;
+			}
 		}
+
+		// Either the plane has no fence property or the device would not give one up. Both come to the
+		// same question: are the pixels there yet.
+		wait = wait || (m_Completion != nullptr && !m_Completion->IsComplete(layer.Acquire));
 	}
-	else if (m_Completion != nullptr && !m_Completion->IsComplete(layer.Acquire))
+
+	if (wait)
 	{
-		m_Pending = Pending{ .Layer = layer, .Waiting = true };
+		// The pixels are not there and the hardware cannot be told to wait for them. Holding is the only
+		// honest response — committing now scans out a half-drawn frame — and the cost is the frame of
+		// overlap this backend exists to have. `Settle` releases it.
+		//
+		// **Held whole rather than per layer.** A partition is one picture, and committing the layers
+		// that happen to be ready would put a promoted window on the screen a frame before the composite
+		// that draws the rest of it.
+		m_Pending = Pending{ .Count = static_cast<std::uint32_t>(layers.size()), .Waiting = true };
+		std::ranges::copy(layers, m_Pending.Layers.begin());
 		++m_HeldCommits;
 
 		return {};
 	}
 
-	return Flip(layer, fence.Borrow());
+	return Flip(layers, fences);
 }
 
-Result<void> DrmOutput::Flip(const PresentLayer& layer, RawFd fence)
+Result<void> DrmOutput::Expressible(std::span<const PresentLayer> layers) const noexcept
 {
-	m_Values[0] = m_Targets[layer.Target].Framebuffer;
-
-	if (m_Fenced)
+	// **Refused rather than partly honoured.** Seam/Presenter.h calls a set that cannot be expressed
+	// `EINVAL` — a bug in the assigner rather than a condition to retry — and refusing here is what
+	// keeps such a bug from being invisible on the backend that actually has planes.
+	if (layers.empty() || layers.size() > m_PlaneCount)
 	{
-		// Last, by construction — see `Open`. -1 is the kernel's *no fence*, and it is what an immediate
-		// point writes rather than the property being left out.
-		m_Values[m_PropertyCount - 1] = static_cast<std::uint64_t>(fence.IsValid() ? fence.Value : -1);
+		return Failure(EINVAL, "this output has no plane for every layer of that partition");
 	}
 
-	std::uint32_t object = m_Pipeline->Plane;
-	std::uint32_t count = m_PropertyCount;
+	for (const PresentLayer& layer : layers)
+	{
+		if (layer.Target >= m_TargetCount || m_Targets[layer.Target].Framebuffer == 0)
+		{
+			return Failure(EINVAL, "presenting a target this output does not own");
+		}
+	}
 
+	return {};
+}
+
+Result<void> DrmOutput::TestLayers(std::span<const PresentLayer> layers)
+{
+	if (const Result<void> expressible = Expressible(layers); !expressible)
+	{
+		return expressible;
+	}
+
+	// **The blocks the real commit would use, filled with the values the real commit would write.**
+	// Testing a partition assembled differently from the one that will be presented tests a different
+	// question, and the difference would show up as a promotion the kernel accepted in the test and
+	// refused on the frame. No fences: `TEST_ONLY` does not consume them and a test that exported one
+	// would leak a descriptor per proposal.
+	Program(layers, {});
+
+	const Result<void> answer = Commit(DRM_MODE_ATOMIC_TEST_ONLY);
+
+	// The blocks are left holding a partition that was never committed, so the next `Present` must
+	// rewrite them — which it does unconditionally. Saying so here is for the reader; nothing depends
+	// on the state surviving.
+	return answer;
+}
+
+void DrmOutput::Program(std::span<const PresentLayer> layers, std::span<const Fd> fences) noexcept
+{
+	for (std::uint32_t index = 0; index < m_PlaneCount; ++index)
+	{
+		const PlaneCommit& block = m_Planes[index];
+		const std::uint32_t at = block.Offset;
+
+		if (index >= layers.size())
+		{
+			// Off: no framebuffer and no CRTC. The rest of the block is written zero as well, so that a
+			// plane turned off carries no stale geometry into the commit that turns it back on.
+			std::ranges::fill_n(m_Values.begin() + at, static_cast<std::ptrdiff_t>(block.Count), 0);
+
+			if (block.Fenced)
+			{
+				m_Values[at + PropertiesPerPlane - 1] = static_cast<std::uint64_t>(-1);
+			}
+
+			continue;
+		}
+
+		const PresentLayer& layer = layers[index];
+
+		// An empty source means the whole image, which is what Seam/Presenter.h says and what every
+		// caller that is not cropping writes.
+		const RenderTarget& target = m_Descriptions[layer.Target];
+		const Rect<DeviceSpace> source =
+			layer.Source.IsEmpty() ?
+				Rect<DeviceSpace>{ {},
+			                       { static_cast<float>(target.Size.Width), static_cast<float>(target.Size.Height) } } :
+				layer.Source;
+
+		m_Values[at + 0] = m_Targets[layer.Target].Framebuffer;
+		m_Values[at + 1] = m_Crtc;
+		m_Values[at + 2] = Fixed(source.Origin.X);
+		m_Values[at + 3] = Fixed(source.Origin.Y);
+		m_Values[at + 4] = Fixed(source.Extent.Width);
+		m_Values[at + 5] = Fixed(source.Extent.Height);
+		m_Values[at + 6] = static_cast<std::uint64_t>(layer.Destination.Origin.X);
+		m_Values[at + 7] = static_cast<std::uint64_t>(layer.Destination.Origin.Y);
+		m_Values[at + 8] = static_cast<std::uint64_t>(layer.Destination.Extent.Width);
+		m_Values[at + 9] = static_cast<std::uint64_t>(layer.Destination.Extent.Height);
+
+		if (block.Fenced)
+		{
+			// -1 is the kernel's *no fence*, and it is what an immediate point writes rather than the
+			// property being left out.
+			const bool have = index < fences.size() && fences[index].Borrow().IsValid();
+
+			m_Values[at + PropertiesPerPlane - 1] =
+				static_cast<std::uint64_t>(have ? fences[index].Borrow().Value : -1);
+		}
+	}
+}
+
+Result<void> DrmOutput::Commit(std::uint32_t flags) noexcept
+{
 	drm_mode_atomic atomic{};
-	atomic.flags = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
-	atomic.count_objs = 1;
-	atomic.objs_ptr = reinterpret_cast<std::uintptr_t>(&object);
-	atomic.count_props_ptr = reinterpret_cast<std::uintptr_t>(&count);
+	atomic.flags = flags;
+	atomic.count_objs = m_PlaneCount;
+	atomic.objs_ptr = reinterpret_cast<std::uintptr_t>(m_Objects.data());
+	atomic.count_props_ptr = reinterpret_cast<std::uintptr_t>(m_Counts.data());
 	atomic.props_ptr = reinterpret_cast<std::uintptr_t>(m_Properties.data());
 	atomic.prop_values_ptr = reinterpret_cast<std::uintptr_t>(m_Values.data());
 
@@ -410,8 +577,27 @@ Result<void> DrmOutput::Flip(const PresentLayer& layer, RawFd fence)
 		return Failure(errno, "committing a page flip");
 	}
 
-	m_Targets[layer.Target].State = TargetState::Committed;
-	m_InFlight = layer.Target;
+	return {};
+}
+
+Result<void> DrmOutput::Flip(std::span<const PresentLayer> layers, std::span<const Fd> fences)
+{
+	Program(layers, fences);
+
+	if (const Result<void> committed = Commit(DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT); !committed)
+	{
+		return committed;
+	}
+
+	m_InFlightMask = 0;
+
+	for (const PresentLayer& layer : layers)
+	{
+		m_Targets[layer.Target].State = TargetState::Committed;
+		m_InFlightMask |= std::uint32_t{ 1 } << layer.Target;
+	}
+
+	m_Flipping = true;
 	m_Pending = Pending{};
 	++Commits;
 
@@ -430,23 +616,27 @@ Result<void> DrmOutput::Modeset(bool allowModeset)
 		return Failure(ENOMEM, "allocating an atomic request");
 	}
 
-	const PlaneProperties& plane = m_Pipeline->PlaneProps;
+	const PlaneProperties& plane = m_Pipeline->Primary().Props;
 	const PixelSize<DeviceSpace> size = m_Configuration.Resolution;
 
 	::drmModeAtomicAddProperty(request, m_Pipeline->Connector, m_Pipeline->ConnectorProps.CrtcId, m_Crtc);
 	::drmModeAtomicAddProperty(request, m_Crtc, m_Pipeline->CrtcProps.ModeId, m_ModeBlob);
 	::drmModeAtomicAddProperty(request, m_Crtc, m_Pipeline->CrtcProps.Active, m_Configuration.Powered ? 1 : 0);
 
-	::drmModeAtomicAddProperty(request, m_Pipeline->Plane, plane.FbId, m_Targets[0].Framebuffer);
-	::drmModeAtomicAddProperty(request, m_Pipeline->Plane, plane.CrtcId, m_Crtc);
-	::drmModeAtomicAddProperty(request, m_Pipeline->Plane, plane.SrcX, 0);
-	::drmModeAtomicAddProperty(request, m_Pipeline->Plane, plane.SrcY, 0);
-	::drmModeAtomicAddProperty(request, m_Pipeline->Plane, plane.SrcW, Fixed(size.Width));
-	::drmModeAtomicAddProperty(request, m_Pipeline->Plane, plane.SrcH, Fixed(size.Height));
-	::drmModeAtomicAddProperty(request, m_Pipeline->Plane, plane.CrtcX, 0);
-	::drmModeAtomicAddProperty(request, m_Pipeline->Plane, plane.CrtcY, 0);
-	::drmModeAtomicAddProperty(request, m_Pipeline->Plane, plane.CrtcW, static_cast<std::uint64_t>(size.Width));
-	::drmModeAtomicAddProperty(request, m_Pipeline->Plane, plane.CrtcH, static_cast<std::uint64_t>(size.Height));
+	::drmModeAtomicAddProperty(request, m_Pipeline->Primary().Id, plane.FbId, m_Targets[0].Framebuffer);
+	::drmModeAtomicAddProperty(request, m_Pipeline->Primary().Id, plane.CrtcId, m_Crtc);
+	::drmModeAtomicAddProperty(request, m_Pipeline->Primary().Id, plane.SrcX, 0);
+	::drmModeAtomicAddProperty(request, m_Pipeline->Primary().Id, plane.SrcY, 0);
+	::drmModeAtomicAddProperty(
+		request, m_Pipeline->Primary().Id, plane.SrcW, Fixed(static_cast<std::int64_t>(size.Width))
+	);
+	::drmModeAtomicAddProperty(
+		request, m_Pipeline->Primary().Id, plane.SrcH, Fixed(static_cast<std::int64_t>(size.Height))
+	);
+	::drmModeAtomicAddProperty(request, m_Pipeline->Primary().Id, plane.CrtcX, 0);
+	::drmModeAtomicAddProperty(request, m_Pipeline->Primary().Id, plane.CrtcY, 0);
+	::drmModeAtomicAddProperty(request, m_Pipeline->Primary().Id, plane.CrtcW, static_cast<std::uint64_t>(size.Width));
+	::drmModeAtomicAddProperty(request, m_Pipeline->Primary().Id, plane.CrtcH, static_cast<std::uint64_t>(size.Height));
 
 	// Blocking and eventless: this is the one commit whose completion nothing is waiting for, because
 	// the frame loop does not exist yet.
@@ -483,17 +673,41 @@ void DrmOutput::Reconfigure(const OutputConfiguration& wanted)
 
 void DrmOutput::Settle()
 {
-	if (m_Pending.Waiting && (m_Completion == nullptr || m_Completion->IsComplete(m_Pending.Layer.Acquire)))
+	const auto ready = [&] {
+		if (m_Completion == nullptr)
+		{
+			return true;
+		}
+
+		// Every layer of the held partition, because it is committed whole. One layer still recording is
+		// a partition that would put a promoted window on the screen ahead of the composite drawing the
+		// rest of the picture.
+		for (std::uint32_t index = 0; index < m_Pending.Count; ++index)
+		{
+			if (!m_Completion->IsComplete(m_Pending.Layers[index].Acquire))
+			{
+				return false;
+			}
+		}
+
+		return true;
+	};
+
+	if (m_Pending.Waiting && ready())
 	{
-		const PresentLayer layer = m_Pending.Layer;
+		const std::array<PresentLayer, MaxLayers> layers = m_Pending.Layers;
+		const std::uint32_t count = m_Pending.Count;
 		m_Pending = Pending{};
 
 		// A commit that fails here has nowhere to report to — the frame loop has already been told the
-		// present was accepted — so the image goes back to the ring and the output stays flip-idle,
-		// which the loop's next iteration serves as an ordinary frame.
-		if (const Result<void> flipped = Flip(layer, RawFd{}); !flipped)
+		// present was accepted — so the images go back to the ring and the output stays flip-idle, which
+		// the loop's next iteration serves as an ordinary frame.
+		if (const Result<void> flipped = Flip({ layers.data(), count }, {}); !flipped)
 		{
-			m_Targets[layer.Target].State = TargetState::Free;
+			for (std::uint32_t index = 0; index < count; ++index)
+			{
+				m_Targets[layers[index].Target].State = TargetState::Free;
+			}
 		}
 	}
 
@@ -525,7 +739,7 @@ Instant DrmOutput::NextEvent() const noexcept
 
 void DrmOutput::OnPresented(Instant at, std::uint32_t sequence, bool hardwareClock)
 {
-	if (!m_InFlight.has_value())
+	if (!m_Flipping)
 	{
 		// A completion for a commit this output did not make. It happens across a teardown and is worth
 		// dropping rather than crediting: an observation with no frame behind it is a prediction built on
@@ -533,19 +747,29 @@ void DrmOutput::OnPresented(Instant at, std::uint32_t sequence, bool hardwareClo
 		return;
 	}
 
-	const std::uint32_t flipped = *m_InFlight;
-	m_InFlight.reset();
+	const std::uint32_t flipped = m_InFlightMask;
+	m_InFlightMask = 0;
+	m_Flipping = false;
 
-	// The image that was on the glass is off it now, and the one that was committed is on. Two slots
-	// rather than one, because freeing the wrong one hands the renderer the picture the panel is
-	// currently showing.
-	if (m_Scanout.has_value() && *m_Scanout != flipped)
+	// The images that were on the glass are off it now, and the ones that were committed are on. A set
+	// difference rather than a comparison, because freeing an image the panel is still showing hands the
+	// renderer the picture that is on screen — and a partition retires several at once.
+	for (std::uint32_t index = 0; index < m_TargetCount; ++index)
 	{
-		m_Targets[*m_Scanout].State = TargetState::Free;
+		const std::uint32_t bit = std::uint32_t{ 1 } << index;
+
+		if ((m_ScanoutMask & bit) != 0 && (flipped & bit) == 0)
+		{
+			m_Targets[index].State = TargetState::Free;
+		}
+
+		if ((flipped & bit) != 0)
+		{
+			m_Targets[index].State = TargetState::Scanout;
+		}
 	}
 
-	m_Targets[flipped].State = TargetState::Scanout;
-	m_Scanout = flipped;
+	m_ScanoutMask = flipped;
 
 	PresentationInfo info{};
 	info.PresentedAt = at;

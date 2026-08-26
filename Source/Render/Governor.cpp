@@ -38,7 +38,7 @@ constexpr std::array<std::uint64_t, 1> Candidates{ ModifierLinear };
 // layers still finish inside six milliseconds is better described by the batch length in the log than
 // by a probe that keeps doubling.
 constexpr std::uint32_t SeedLayers = 4;
-constexpr std::uint32_t MaxLayers = 512;
+constexpr std::uint32_t MaxCalibrationLayers = 512;
 
 // How the layer count is solved for: two passes of a few frames each, because growing the stack moves
 // the clock it was measured at and one division lands wide.
@@ -336,7 +336,7 @@ void GpuGovernor::Probe(const IClock& clock, VulkanDevice& device, VulkanTexture
 		const std::uint64_t scaled = std::uint64_t{ layers } * static_cast<std::uint64_t>(Batch.count()) /
 		                             static_cast<std::uint64_t>(seed.Elapsed.count());
 
-		layers = static_cast<std::uint32_t>(std::clamp<std::uint64_t>(scaled, 1U, MaxLayers));
+		layers = static_cast<std::uint32_t>(std::clamp<std::uint64_t>(scaled, 1U, MaxCalibrationLayers));
 		items = Stack(layers);
 	}
 

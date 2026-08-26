@@ -78,7 +78,33 @@ struct PlaneProperties
 	}
 };
 
-// One connector, the CRTC driving it and the plane it scans out of: everything an output is, before
+// One plane on this device that a given CRTC may drive.
+//
+// **The whole inventory is kept rather than the primary alone, which is what decision 152's partition
+// needs to exist at all.** A partition of the draw list is only as wide as the planes available to
+// hold it, so the assigner's ceiling is this list's length — and a backend that scanned one plane
+// would report a ceiling of one whatever the hardware could do.
+struct Plane
+{
+	std::uint32_t Id = 0;
+	PlaneKind Kind = PlaneKind::Overlay;
+
+	// Where this plane sits in the stack, as the driver currently reports it.
+	//
+	// **Read rather than programmed, and the layer order is matched to it rather than the other way
+	// round.** `zpos` is immutable on plenty of hardware, so a compositor that assigns a layer to a
+	// plane and then programs the order it wanted has written a commit half the devices in the field
+	// refuse. Sorting the inventory by what the driver already says costs nothing, works on both kinds
+	// of device, and leaves programming a mutable `zpos` as a thing to add when a partition is actually
+	// refused for want of it.
+	std::uint64_t ZPos = 0;
+
+	std::vector<PlaneFormat> Formats;
+
+	PlaneProperties Props{};
+};
+
+// One connector, the CRTC driving it and the planes it scans out of: everything an output is, before
 // there is an output.
 //
 // **The modes are copied rather than borrowed.** `drmModeGetConnector` returns an allocation that has
@@ -88,7 +114,6 @@ struct Pipeline
 {
 	std::uint32_t Connector = 0;
 	std::uint32_t Crtc = 0;
-	std::uint32_t Plane = 0;
 
 	// Which bit of a plane's `possible_crtcs` this CRTC is, which is also the index the kernel orders
 	// its CRTC list by. Kept because it is the only way to ask that question again later.
@@ -99,11 +124,28 @@ struct Pipeline
 	std::string Name;
 
 	std::vector<drmModeModeInfo> Modes;
-	std::vector<PlaneFormat> Formats;
+
+	// Every plane this CRTC may drive, sorted by `ZPos` ascending, with the primary guaranteed present
+	// — a pipeline that could not be given one is not built at all.
+	std::vector<Plane> Planes;
 
 	ConnectorProperties ConnectorProps{};
 	CrtcProperties CrtcProps{};
-	PlaneProperties PlaneProps{};
+
+	// The plane the composite scans out of when nothing has been promoted, and the one a modeset is
+	// programmed against.
+	[[nodiscard]] const Plane& Primary() const noexcept
+	{
+		for (const Plane& plane : Planes)
+		{
+			if (plane.Kind == PlaneKind::Primary)
+			{
+				return plane;
+			}
+		}
+
+		return Planes.front();
+	}
 
 	// The panel's own physical size, for the scale an output adapter derives. Millimetres, as EDID
 	// states it, and zero where the connector does not say — which is most projectors and every

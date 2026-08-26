@@ -676,6 +676,7 @@ gyro_add_module(Frame PORTABLE
 		Seam
 	TESTS
 		Admission.Test.cpp
+		Assign.Test.cpp
 		Budget.Test.cpp
 		Evaluator.Test.cpp
 		FrameClock.Test.cpp
