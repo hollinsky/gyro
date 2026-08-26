@@ -50,7 +50,17 @@ public:
 	[[nodiscard]] Result<DmabufBuffer>
 	Allocate(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t> modifiers) override;
 
-	[[nodiscard]] bool Supports(PixelFormat format) const noexcept override { return m_Device->Supports(format); }
+	// **Both halves, because a device that renders into a format need not hand one out.** This used to
+	// ask only whether the device could draw into the format, on the reading that a renderer's
+	// allocator and its renderer agree by construction. They do not: lavapipe renders into linear and
+	// exports nothing, so the one-sided answer was a provider promising a buffer it would then refuse
+	// to allocate — which reached the panel as an output that failed to build its targets and named
+	// the modifier list as the culprit. Decision 151's chain needs a provider's `Supports` to mean
+	// *I can produce this*, since that is what selects a rung.
+	[[nodiscard]] bool Supports(PixelFormat format) const noexcept override
+	{
+		return m_Device->Supports(format) && m_Device->Exports(format);
+	}
 
 	[[nodiscard]] std::string_view Name() const noexcept override { return "vulkan export"; }
 

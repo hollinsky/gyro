@@ -95,6 +95,30 @@ struct DeviceDescription
 	// than working around. Every current Mesa driver and both proprietary ones have it.
 	bool CopiesFromHost = false;
 
+	// Whether an image's tiling can be *stated* — a DRM modifier gyro names on the way in and reads
+	// back on the way out — or is only ever the driver's own linear.
+	//
+	// **`VK_EXT_image_drm_format_modifier`, and it is optional for the reason `CopiesFromHost` is
+	// rather than the reason `ExportsTimeline` is.** It is not a driver that advertises and refuses;
+	// it is a driver that genuinely does not have it, and lavapipe on Mesa 25 is that driver. Requiring
+	// it meant the one device that is present on every machine — the floor tier decision 40 was
+	// written around — could not be opened at all, so a laptop with a GPU gyro cannot bring up had no
+	// picture rather than a slow one.
+	//
+	// **What false costs is the tiling and nothing else.** Every image is then created
+	// `VK_IMAGE_TILING_LINEAR` and described as `DRM_FORMAT_MOD_LINEAR`, which is the pre-modifier
+	// path every compositor took until 2019 and is what mutter still takes today whenever its
+	// `DISABLE_MODIFIERS` flag is set — for a cursor plane, a secondary GPU, or a card whose driver it
+	// distrusts. A composite goes at the same rate; what is lost is the compressed and tiled layouts a
+	// real GPU would rather scan out of, which no software device has anyway.
+	//
+	// **The one thing it is not permitted to do is guess a stride.** An import states the offsets and
+	// strides the *allocator* committed to, and without the extension there is nowhere to say them —
+	// so `ImportImage` creates the image, reads back the layout the driver picked, and refuses where
+	// the two disagree. A named refusal rather than a window read at the wrong pitch, which is the
+	// failure this whole path is one mistake away from.
+	bool StatesModifiers = false;
+
 	// The GPU's own clock, as the two numbers a timestamp query has to be read through: how many
 	// nanoseconds one tick is, and how many of a query's sixty-four bits actually carry a value.
 	//
@@ -501,6 +525,26 @@ public:
 	// sampling costs a look rather than a screen.
 	[[nodiscard]] bool SupportsSampling(PixelFormat format) const noexcept;
 
+	// Whether this device will hand out a dmabuf for an image of this format at all.
+	//
+	// **A separate question from `Supports`, and lavapipe is why it had to become one.** That asks
+	// whether a target can be *drawn into*; this asks whether one can be *produced*, and the two come
+	// apart on any device that imports without exporting. lavapipe is exactly that device —
+	// `vkGetPhysicalDeviceImageFormatProperties2` reports `IMPORTABLE` without `EXPORTABLE` for every
+	// format and both tilings — so a renderer that composites perfectly well cannot allocate the thing
+	// it composites into.
+	//
+	// **It is asked of the driver rather than inferred**, which is decision 108's rule for the third
+	// time on this device: the extensions are all listed, the memory type is importable, and the only
+	// thing that says no is the capability query. Render/Allocator.h is the caller, so that a provider
+	// which cannot produce a buffer declines by name and the composition root walks to the next rung
+	// rather than consulting a bit about the device.
+	//
+	// The extent is not part of the question — a size too large for the device is a failure of the
+	// allocation rather than of the capability — so this asks about a nominal one and
+	// Docs/Decisions.md decision 151's chain does the rest.
+	[[nodiscard]] bool Exports(PixelFormat format) const noexcept;
+
 	// Whether an *optimally-tiled* image of this format can be sampled and filled by
 	// `vkCopyMemoryToImage`, which together are what a `wl_shm` client's buffer needs of a device.
 	//
@@ -523,6 +567,35 @@ public:
 	[[nodiscard]] std::uint32_t MemoryType(std::uint32_t allowed, VkMemoryPropertyFlags properties) const noexcept;
 
 	[[nodiscard]] std::uint32_t ImportableMemoryTypes(RawFd descriptor) const noexcept;
+
+	// Create an image over memory *somebody else laid out*, ready for that memory to be bound to it.
+	//
+	// **One function for two callers because the half that is easy to get wrong is the half they
+	// share.** A target coming back from a presenter and a client's buffer coming in over
+	// `zwp_linux_dmabuf_v1` are the same problem — an allocation this device did not make, whose
+	// offset and stride are facts rather than choices — and the rule for both is that the layout is
+	// *stated*, never picked. Asking the driver to choose a tiling for memory it did not allocate
+	// produces an image that imports cleanly and reads at the wrong pitch, which reaches a person as a
+	// window sheared diagonally across the screen and reaches a log as nothing at all.
+	//
+	// Where `Description().StatesModifiers` is true that statement is
+	// `VkImageDrmFormatModifierExplicitCreateInfoEXT` and the driver is bound by it. Where it is
+	// false there is no way to say it, so the image is created `VK_IMAGE_TILING_LINEAR` and the
+	// driver's own layout is *read back and compared* — same offset, same row pitch, or the import is
+	// refused. That is the whole of what the extension's absence costs, and it is checked rather than
+	// assumed because the two layouts agreeing is a property of the driver rather than of the spec.
+	//
+	// The image is the caller's from here: every failure destroys nothing and returns, and a success
+	// hands back a handle the caller must `vkDestroyImage`. `EINVAL` where the format is not one
+	// Render/Vulkan.h names, where the plane's offset is one a linear import cannot honour, or where
+	// the driver's layout disagreed.
+	//
+	// **The extent is Vulkan's own type rather than one of Geometry/Space.h's**, because the two
+	// callers do not agree on the space and neither is wrong: a composite target is measured in device
+	// pixels and a client's buffer in buffer pixels. What this function does with the number is name
+	// an image's texel grid, which is the one place the distinction has genuinely been discharged.
+	[[nodiscard]] Result<VkImage>
+	ImportImage(VkExtent2D size, PixelFormat format, const DmabufPlane& plane, VkImageUsageFlags usage) const;
 
 	// Allocate an image of this size and format under the first workable modifier, and export it as a
 	// dmabuf.

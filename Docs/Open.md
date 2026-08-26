@@ -927,6 +927,26 @@ nothing only proves the grep.
   build-time checks exist to prevent. That suite now exists and is exactly as hollow-able as
   predicted: on a machine with neither udmabuf nor an ICD, sixteen tests pass having asserted
   nothing.
+- **Which rung of the allocator chain a target comes from, and whether GBM ever earns its place.**
+  [Decision 151](Decisions.md#151-the-panel-allocates-its-own-targets-where-the-render-device-will-not)
+  makes target allocation an ordered walk — the Vulkan export first, because it is the only rung that
+  produces a tiled layout, and KMS dumb buffers last, because they are linear and always there. Two
+  rungs are built and the middle one is not: GBM on the card node, which is what would produce a
+  tiled buffer for a *pair* of devices rather than for one. Nothing needs it yet, and the case that
+  will is multi-GPU — render on the discrete part, scan out on the integrated one, where the buffer
+  has to be allocated somewhere both can reach and neither the renderer's exporter nor the display's
+  dumb ioctl is that place. The question is whether that case arrives before something else does,
+  because the answer decides whether GBM enters as a rung or as a dependency taken for one machine.
+  [Decision 102](Decisions.md#102-a-virtual-output-allocates-the-buffers-it-hands-out-and-that-is-what-stands-the-renderer-up)
+  declined the dependency once already and the reason still holds.
+- **What the dumb rung costs on a working GPU, which nothing has measured.** It is selected only when
+  the render device refuses to export, which today means lavapipe — and there the layout is linear
+  either way, so the choice is free. On a machine where the GPU renders but its exporter is broken or
+  disabled, the same rung would hand a real part a linear target, which
+  [decision 138](Decisions.md#138-the-device-picks-the-modifier-and-the-host-only-says-which-are-importable)
+  measured at 7.4ms against 2.8ms for the same composite. That is a tier drop the frame clock will
+  absorb silently. The log line names the provider, which is the whole of the instrumentation, and
+  whether that is enough to notice is the open half.
 - **Whether the frame clock absorbs a blocking `Record` on the floor tier.**
   [Decision 108](Decisions.md#108-a-device-that-cannot-export-a-timeline-finishes-the-frame-inside-record)
   has a renderer that cannot export a timeline wait for its own submission before returning, which is

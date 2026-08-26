@@ -296,3 +296,46 @@ behalf in order to compensate for a hint it is already sending correctly.
 **What would let gyro delete it.** `->set_deadline` on the i915, xe and amdgpu hardware fences, wired
 to RPS or DPM, with msm as a working reference for both halves. Nothing in gyro's userspace changes:
 it already sends the hint, and the probe simply stops selecting the floor.
+
+## There is no way to ask for a buffer several devices can all use
+
+A scanout target has to satisfy three parties at once: the display engine that will scan it out, the
+renderer that will draw into it, and whatever allocator actually produced the pages. Nothing in the
+kernel takes those three constraint sets and returns a buffer, so every compositor on Linux hand-rolls
+a chain of allocators and tries each one until something works — which is a negotiation performed by
+trial and error, in userspace, with no way to ask a question in advance.
+
+### dma-heaps allocate but do not negotiate
+
+`DMA_HEAP_IOCTL_ALLOC` takes a length and a set of flags. It does not take a set of devices, a format,
+a modifier, or an alignment, and it returns a dmabuf whose suitability for any particular device is
+discovered by attempting the import. `dma_buf_attach` is where a constraint would be expressed and it
+is the wrong end of the operation — the pages already exist by then, so an attach that fails is an
+allocation that has to be thrown away and retried somewhere else.
+
+The information exists on both sides and never meets. A DRM plane publishes `IN_FORMATS`, which is a
+format and modifier table. A Vulkan device answers
+`vkGetPhysicalDeviceImageFormatProperties2` with what it can render into and whether it can export.
+What is missing is the intersection, and a heap that could allocate from it.
+
+**What gyro does instead.** An ordered chain of providers behind `Seam/Allocator.h`, walked until one
+succeeds:
+[decision 151](Decisions.md#151-the-panel-allocates-its-own-targets-where-the-render-device-will-not)
+carries the argument. The chain is the workaround, and its rungs are each a different party guessing
+at what the other two will accept.
+
+**What this costs when the guess is wrong.** It is not a failed allocation — it is a working one that
+is slower than it needed to be. Handing a compositor's targets to whichever provider answered first
+produced a linear scanout buffer on hardware that renders two and a half times faster into a tiled
+one, which reached a person as a blur that switched itself off and reached the log as nothing;
+[decision 138](Decisions.md#138-the-device-picks-the-modifier-and-the-host-only-says-which-are-importable)
+is that measurement. A negotiated allocation is the difference between a picture and a fast picture,
+which is why trial and error is not good enough here.
+
+**What would let gyro delete it.** An allocation interface that takes a set of device constraints —
+the devices themselves, or the format-and-modifier tables they publish — and returns a buffer
+satisfying all of them, or says that none exists. This is the unix device memory allocator problem;
+it has been open for a decade, and every attempt so far has foundered on there being no common
+vocabulary for a constraint. gyro does not need the general solution. It needs the two-party case:
+*this DRM device will scan it out, this Vulkan device will render into it, give me the best layout
+they share.*

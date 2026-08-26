@@ -6385,6 +6385,16 @@ wherever Mesa is — advertises Vulkan 1.4 with `VK_EXT_external_memory_dma_buf`
 That is the complete set gyro asks of a device. So the software path is **a physical device
 selection, not a parallel code path**: no second renderer, no `#ifdef`, no backend.
 
+*Revised 2026-08-25.* The extension list above is wrong and was wrong when it was written:
+lavapipe does **not** implement `VK_EXT_image_drm_format_modifier`, on Mesa 25 or on any release
+before it. The claim came from a probe that printed a modifier table for it — the driver populates
+the chained structure without advertising the extension — so the instrument confirmed a reading
+nobody had taken. The consequence was that the floor tier this entry declares permanently occupied
+could not be opened at all: `VulkanDevice::Open` refused every device, and the software half of
+`RenderTests` skipped twenty-one tests on the machine gyro is developed on while reporting a green
+run. [Decision 150](#150-a-modifier-is-optional-and-a-device-without-one-lays-out-linear) is the
+repair; the argument of this entry is unaffected, because what it rests on is that a software device
+can be *selected* rather than which extensions it happens to carry.
 The frame loop is unchanged. lavapipe executes command buffers on llvmpipe's rasterizer pool and
 signals from a queue thread, so from the frame thread's side it is an asynchronous device that work
 is submitted to — indistinguishable in structure from a GPU. Record, submit, wait on a timeline
@@ -11383,3 +11393,110 @@ modifier is up while a finger is on it.
 **Repeat is the client's.** `repeat_info` carries the two numbers and nothing else: a compositor that
 repeated keys itself would hold a timer per held key and wake the `SCHED_FIFO` process's dispatch
 thread on it, to produce events a toolkit already produces from those numbers.
+
+### 150. A modifier is optional, and a device without one lays out linear
+
+`VK_EXT_image_drm_format_modifier` is what lets an image's tiling be *stated* — named on the way in,
+read back on the way out. Decision 40 required it of every device. lavapipe does not have it, which
+made the floor tier unopenable: on a machine whose GPU gyro cannot bring up, the answer was no
+picture at all rather than a slow one. That is the wrong failure for a compositor that is also the
+boot splash and the recovery console.
+
+**So it is optional, and its absence means linear.** `DeviceDescription::StatesModifiers` carries
+the answer, and every path branches on it once: `VK_IMAGE_TILING_LINEAR` instead of
+`VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT`, `DRM_FORMAT_MOD_LINEAR` asserted instead of queried,
+`VK_IMAGE_ASPECT_COLOR_BIT` instead of a memory-plane aspect, and the format's own
+`linearTilingFeatures` instead of a modifier table. Nothing else about the frame changes — the
+composite runs at the same rate, and what is given up is the compressed and tiled layouts a real GPU
+would rather scan out of, which no software device has to begin with.
+
+**The one thing the absence may not do is guess a stride.** An import states the offsets and strides
+the *allocator* already committed to, and without the extension there is nowhere to say them. So
+`VulkanDevice::ImportImage` creates the image, reads back the layout the driver picked, and refuses
+where the two disagree — and refuses a non-zero plane offset outright, since the only place left to
+put one is a bind offset constrained by an alignment the caller cannot see. A named refusal, because
+the failure it replaces is a window sheared diagonally across the screen with nothing in the log.
+The two importers — a presenter's target and a client's `zwp_linux_dmabuf_v1` buffer — are one
+function for that reason: the check must not exist in two copies that can drift.
+
+**Not a software-only path, which is why it is a device capability rather than a lavapipe
+workaround.** Mutter reached the same shape from the other side and uses it on real hardware:
+`META_DRM_BUFFER_FLAG_DISABLE_MODIFIERS` picks `drmModeAddFB2` over
+`drmModeAddFB2WithModifiers`, and it is set for every cursor plane, for a secondary GPU, and for any
+card its `META_KMS_DEVICE_FLAG_DISABLE_MODIFIERS` distrusts. Its software detection is a string
+prefix on `glGetString(GL_RENDERER)` feeding a *ranking* — `choose_primary_gpu` runs its whole
+preference list twice, once refusing software and once allowing it — which is what gyro's `Rank`
+already does, and nothing downstream of it refuses to run.
+
+**Rejected: growing `Blit` until it can draw real scenes.** The CPU renderer refuses a rotated quad,
+a material and an elevation, and making it answer all three means two full-fidelity renderers
+maintained forever — the floor beneath the floor is useful precisely because it is small. lavapipe
+is already a Vulkan implementation that runs everything; the repair is to let gyro talk to it.
+
+**Rejected: falling back to software when hardware bring-up fails.** A machine silently compositing
+at a tenth of its rate is worse than one that says why it will not start, and decision 40's whole
+shape is that the tier is *selected* rather than stumbled into.
+
+**What the reading cost, and what it bought.** Four sites branch, one helper absorbed four copies of
+an extension-list walk, and `Tools/VulkanProbe.cpp` stopped printing a modifier table for a device
+that has no modifiers — it was the instrument that produced the wrong claim in the first place, and
+an instrument that agrees with a mistake is worse than none. On the development machine the software
+half of `RenderTests` went from twenty-one skips to none.
+
+### 151. The panel allocates its own targets where the render device will not
+
+`VulkanDevice::Export` was the only way a target came into being on a KMS output — decision 120's
+shape, taken when the alternative was a nested output having nothing at all. lavapipe breaks it:
+`vkGetPhysicalDeviceImageFormatProperties2` reports `IMPORTABLE` without `EXPORTABLE` for every
+format and both tilings, so the device that draws the frame will not hand out the memory the frame
+lives in. A machine whose GPU driver did not come up therefore had no picture, which is the wrong
+failure for the process that is also the boot splash and the recovery console.
+
+**So allocation is an ordered chain of providers, walked per output, and the renderer is one rung.**
+The Vulkan export is first, the card's own `DRM_IOCTL_MODE_CREATE_DUMB` is last, and each is asked
+`IDmabufAllocator::Supports` over the plane's own modifier table — which is the set an allocation
+will actually be offered, so a rung selected against anything else was chosen for a negotiation that
+never happens. Nothing consults a bit about the device: a provider declines by name, and lavapipe's
+exporter refusing every format is one answer in the same vocabulary as a card that cannot scan out a
+fourcc.
+
+**The order is by what the composite costs, not by what is likely to work**, which is the whole
+reason it is a walk rather than a condition. Decision 138 measured a linear target on a tiled part at
+7.4ms against 2.8ms for the same composite, which reaches a person as the blur behind a panel
+switching itself off and reaches the log as nothing — so the rung that produces a tiled layout has to
+be tried first every time, and a rung reached is a rung named in the startup line.
+
+**Dumb buffers rather than GBM, and the pairing is why.** A dumb buffer has no tiling to state — the
+ioctl takes a width, a height and a bit depth and returns a pitch — so the rung offers
+`DRM_FORMAT_MOD_LINEAR` and nothing else. That is exactly the one modifier a software renderer
+imports, so the rung available when the export rung is not is also the rung producing what the
+importer accepts. It costs no dependency, it is on every KMS driver by definition, and it is the same
+ioctl family `Drm/Device.h` already speaks. GBM would produce a *tiled* buffer for a pair of devices
+and is the rung that multi-GPU will want; decision 102 declined the dependency once and nothing yet
+needs it, so Docs/Open.md carries it rather than this entry.
+
+**The stride is the kernel's, read back rather than computed.** A driver is free to align a scanout
+pitch to whatever its display engine fetches in, and a buffer described at the width times the depth
+would be read a row short of the truth. This is the same rule
+[decision 150](#150-a-modifier-is-optional-and-a-device-without-one-lays-out-linear) states from the
+importing side, and the two meet: the pitch i915 returned and the pitch lavapipe picked for a linear
+image of the same extent were measured equal before either was relied on.
+
+**Rejected: a `--gpu=software` flag, or a device bit the root branches on.** Both make the machine's
+answer a thing somebody types or a property somebody reads, and neither survives the second reason a
+rung declines. `Supports` already answers the real question, which is *can you produce this*, and
+making it truthful was the actual repair — `VulkanAllocator` had been answering with
+`VulkanDevice::Supports`, which is whether the device can *draw into* a format. The two come apart on
+any device that imports without exporting, and the one-sided answer was a provider promising a buffer
+it would then refuse to allocate.
+
+**Rejected: falling back silently on a working GPU.** The chain is walked wherever a rung declines,
+so a part whose exporter is broken would quietly take linear targets and drop a tier. That is honest
+in the case this entry is about and invisible in the case it is not, which is why the provider's name
+is in the startup line and why Docs/Open.md carries what it costs.
+
+**Measured on one machine, both rungs, same command.** Under the Intel driver: `mod
+0x100000000000002`, targets from the vulkan export. Under `VK_LOADER_DRIVERS_SELECT='lvp*'`: `mod
+0x0`, targets from the kms dumb buffer, four hundred and twenty-five commits in eight seconds on a
+60Hz panel. What the kernel cannot do — hand back a buffer satisfying a set of devices, rather than
+being asked one at a time until something works — is [KernelWishlist.md](KernelWishlist.md#there-is-no-way-to-ask-for-a-buffer-several-devices-can-all-use).

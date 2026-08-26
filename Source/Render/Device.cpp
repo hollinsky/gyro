@@ -33,10 +33,17 @@ constexpr std::uint32_t MaxModifiers = 64;
 // below; `VK_KHR_external_semaphore_fd` is not here because it is optional — lavapipe advertises
 // it and then refuses to create an exportable semaphore, so what settles the question is the
 // capability query rather than the extension list. See decision 108.
-constexpr std::array<const char*, 4> RequiredExtensions{
+//
+// **`VK_EXT_image_drm_format_modifier` was the fourth and is now optional**, which is decision 40 as
+// revised. It is what lets a tiling be named, and a device that cannot name one can still allocate,
+// import and composite — linear, the way everybody did before modifiers existed. Requiring it cost
+// the whole picture on the one device every machine has: lavapipe does not implement it, so a laptop
+// whose GPU gyro could not bring up fell through to nothing rather than to a slow composite.
+// `DeviceDescription::StatesModifiers` is where its absence is carried and every branch on it says
+// linear.
+constexpr std::array<const char*, 3> RequiredExtensions{
 	VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
 	VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
-	VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
 	VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
 };
 
@@ -122,14 +129,21 @@ constexpr std::array<const char*, 4> RequiredExtensions{
 	return false;
 }
 
-// Whether this device will write host memory into a tiled image with no queue involved.
+// Whether this device's extension list carries one name.
 //
-// **Both halves are asked, and the extension alone is not one of them.** `VK_EXT_host_image_copy`
-// can be present with `hostImageCopy` false — the extension says the entry points exist, the feature
-// says the driver implements them — and enabling an extension whose feature is false is a device
-// creation that fails, which on this path is a machine that comes up with no renderer at all. So it
-// is asked the way decision 108 taught: the capability query, not the extension list.
-[[nodiscard]] bool QueryHostImageCopy(VkPhysicalDevice device) noexcept
+// **A second enumeration per question, and that is the right trade here.** Four capabilities are
+// asked about at startup and each one re-reads a list of a few hundred entries, which costs a
+// fraction of a millisecond once — against a cached list that would have to be built before the
+// physical device is chosen and carried through selection, where three of the four callers do not
+// want it. What this replaces is four copies of the same fifteen lines, one of which is the place a
+// missed `!= VK_SUCCESS` would go unnoticed.
+//
+// **It is never the whole answer for a capability.** Decision 108's lesson is that an extension can
+// be listed and still refuse the thing it names, so every caller below pairs this with the query
+// that settles it. The one exception is the modifier extension, where being listed *is* the
+// capability: what it provides is the ability to state a tiling, and the per-format vetoes that
+// follow are asked of each format anyway.
+[[nodiscard]] bool Lists(VkPhysicalDevice device, std::string_view extension) noexcept
 {
 	std::uint32_t count = 0;
 
@@ -145,11 +159,21 @@ constexpr std::array<const char*, 4> RequiredExtensions{
 		return false;
 	}
 
-	const bool listed = std::ranges::any_of(available, [](const VkExtensionProperties& entry) noexcept {
-		return std::string_view{ entry.extensionName } == VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME;
+	return std::ranges::any_of(available, [extension](const VkExtensionProperties& entry) noexcept {
+		return std::string_view{ entry.extensionName } == extension;
 	});
+}
 
-	if (!listed)
+// Whether this device will write host memory into a tiled image with no queue involved.
+//
+// **Both halves are asked, and the extension alone is not one of them.** `VK_EXT_host_image_copy`
+// can be present with `hostImageCopy` false — the extension says the entry points exist, the feature
+// says the driver implements them — and enabling an extension whose feature is false is a device
+// creation that fails, which on this path is a machine that comes up with no renderer at all. So it
+// is asked the way decision 108 taught: the capability query, not the extension list.
+[[nodiscard]] bool QueryHostImageCopy(VkPhysicalDevice device) noexcept
+{
+	if (!Lists(device, VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME))
 	{
 		return false;
 	}
@@ -172,25 +196,7 @@ constexpr std::array<const char*, 4> RequiredExtensions{
 // Core/Time.h's timebase is the adjusted one and the two diverge under NTP.
 [[nodiscard]] bool QueryCalibration(VkPhysicalDevice device) noexcept
 {
-	std::uint32_t count = 0;
-
-	if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) != VK_SUCCESS)
-	{
-		return false;
-	}
-
-	std::vector<VkExtensionProperties> available(count);
-
-	if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, available.data()) != VK_SUCCESS)
-	{
-		return false;
-	}
-
-	const bool listed = std::ranges::any_of(available, [](const VkExtensionProperties& entry) noexcept {
-		return std::string_view{ entry.extensionName } == VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
-	});
-
-	if (!listed)
+	if (!Lists(device, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME))
 	{
 		return false;
 	}
@@ -284,25 +290,7 @@ struct DrmMinors
 
 [[nodiscard]] DrmMinors QueryDrmMinors(VkPhysicalDevice device) noexcept
 {
-	std::uint32_t count = 0;
-
-	if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) != VK_SUCCESS)
-	{
-		return {};
-	}
-
-	std::vector<VkExtensionProperties> available(count);
-
-	if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, available.data()) != VK_SUCCESS)
-	{
-		return {};
-	}
-
-	const bool listed = std::ranges::any_of(available, [](const VkExtensionProperties& entry) noexcept {
-		return std::string_view{ entry.extensionName } == VK_EXT_PHYSICAL_DEVICE_DRM_EXTENSION_NAME;
-	});
-
-	if (!listed)
+	if (!Lists(device, VK_EXT_PHYSICAL_DEVICE_DRM_EXTENSION_NAME))
 	{
 		return {};
 	}
@@ -337,6 +325,7 @@ void Describe(VkPhysicalDevice device, std::uint32_t family, DeviceDescription& 
 	into.ApiVersion = properties.properties.apiVersion;
 	into.ExportsTimeline = QueryTimelineExport(device);
 	into.CopiesFromHost = QueryHostImageCopy(device);
+	into.StatesModifiers = Lists(device, VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
 	into.TimestampPeriod = properties.properties.limits.timestampPeriod;
 	into.TimestampValidBits = QueryTimestampBits(device, family);
 	into.CalibratesTimestamps = QueryCalibration(device);
@@ -485,13 +474,23 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 	// The optional one. Asked for only where the capability query said the answer is yes, so that a
 	// driver which advertises the extension and refuses the semaphore does not fail device creation
 	// — decision 108's whole subject, and lavapipe's actual behaviour.
-	std::array<const char*, RequiredExtensions.size() + 3> extensions{};
+	std::array<const char*, RequiredExtensions.size() + 4> extensions{};
 	std::ranges::copy(RequiredExtensions, extensions.begin());
 	std::uint32_t extensionCount = RequiredExtensions.size();
 
 	if (device.m_Description.ExportsTimeline)
 	{
 		extensions[extensionCount] = VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME;
+		++extensionCount;
+	}
+
+	// The fourth optional one, and the one that used to be required. It carries no feature struct —
+	// what it adds is a tiling an image can be created with and two queries about it — so being
+	// listed is the whole of the capability, and `Describe` reads it that way. Where it is absent
+	// every path takes linear; see `DeviceDescription::StatesModifiers`.
+	if (device.m_Description.StatesModifiers)
+	{
+		extensions[extensionCount] = VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME;
 		++extensionCount;
 	}
 
@@ -595,8 +594,12 @@ namespace
 // and which modifier an export should pick. They differ in the feature bit they read and in the plane
 // count they will accept; none of them differs in how the list is fetched, and three copies of a
 // sixty-four-entry query is three places for the cap to drift.
-[[nodiscard]] bool
-ModifierEntry(VkPhysicalDevice physical, PixelFormat format, VkDrmFormatModifierPropertiesEXT& into) noexcept
+[[nodiscard]] bool ModifierEntry(
+	VkPhysicalDevice physical,
+	bool statesModifiers,
+	PixelFormat format,
+	VkDrmFormatModifierPropertiesEXT& into
+) noexcept
 {
 	if (format.Modifier == ModifierInvalid)
 	{
@@ -608,6 +611,31 @@ ModifierEntry(VkPhysicalDevice physical, PixelFormat format, VkDrmFormatModifier
 	if (vulkan == VK_FORMAT_UNDEFINED)
 	{
 		return false;
+	}
+
+	// **The device that cannot state a tiling knows exactly one, and it is answered from the format's
+	// linear features rather than from the modifier list.** The list has to be *fabricated* here
+	// rather than queried, and the reason is sharper than "the extension is absent": lavapipe fills a
+	// `VkDrmFormatModifierPropertiesListEXT` chained onto a format query it does not implement —
+	// `VulkanProbe` reported a linear entry off a driver whose extension list has no such name. So
+	// the query would appear to work and would be a driver answering about a structure it never
+	// agreed to. `linearTilingFeatures` is the same fact asked in a form 1.0 defines, and linear is
+	// one plane by construction.
+	if (!statesModifiers)
+	{
+		if (format.Modifier != ModifierLinear)
+		{
+			return false;
+		}
+
+		VkFormatProperties properties{};
+		vkGetPhysicalDeviceFormatProperties(physical, vulkan, &properties);
+
+		into = VkDrmFormatModifierPropertiesEXT{ .drmFormatModifier = ModifierLinear,
+			                                     .drmFormatModifierPlaneCount = 1,
+			                                     .drmFormatModifierTilingFeatures = properties.linearTilingFeatures };
+
+		return true;
 	}
 
 	std::array<VkDrmFormatModifierPropertiesEXT, MaxModifiers> entries{};
@@ -649,11 +677,12 @@ ModifierEntry(VkPhysicalDevice physical, PixelFormat format, VkDrmFormatModifier
 // nothing could draw into and reported *the targets were never bound* twenty seconds later. A target
 // this device exports is a target this device is about to render into, so the two paths take the same
 // answer from the same function.
-[[nodiscard]] bool Renderable(VkPhysicalDevice physical, PixelFormat format, VkFormatFeatureFlags wanted) noexcept
+[[nodiscard]] bool
+Renderable(VkPhysicalDevice physical, bool statesModifiers, PixelFormat format, VkFormatFeatureFlags wanted) noexcept
 {
 	VkDrmFormatModifierPropertiesEXT entry{};
 
-	if (!ModifierEntry(physical, format, entry) || entry.drmFormatModifierPlaneCount != 1)
+	if (!ModifierEntry(physical, statesModifiers, format, entry) || entry.drmFormatModifierPlaneCount != 1)
 	{
 		return false;
 	}
@@ -669,7 +698,7 @@ bool VulkanDevice::SupportsSampling(PixelFormat format) const noexcept
 		return false;
 	}
 
-	return Renderable(m_Physical, format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+	return Renderable(m_Physical, m_Description.StatesModifiers, format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
 }
 
 bool VulkanDevice::Supports(PixelFormat format) const noexcept
@@ -681,7 +710,7 @@ bool VulkanDevice::Supports(PixelFormat format) const noexcept
 
 	// Drawn into, which is the usage that matters — a target this device can sample but not render to
 	// is one `BindTargets` must refuse rather than discover at the first frame.
-	return Renderable(m_Physical, format, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
+	return Renderable(m_Physical, m_Description.StatesModifiers, format, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
 }
 
 bool VulkanDevice::SupportsHostTexture(PixelFormat format) const noexcept
@@ -799,6 +828,7 @@ namespace
 // allocation, with a half-built target to unwind.
 [[nodiscard]] bool CanExport(
 	VkPhysicalDevice physical,
+	bool statesModifiers,
 	VkFormat vulkan,
 	PixelSize<DeviceSpace> size,
 	VkImageUsageFlags usage,
@@ -813,16 +843,22 @@ namespace
 		.queueFamilyIndexCount = 0,
 		.pQueueFamilyIndices = nullptr
 	};
+
+	// The modifier half of the question drops out where there are no modifiers, and what is left is
+	// still the question worth asking: whether a descriptor can be got out of an image of this size
+	// at all. `ModifierEntry` has already refused anything but linear on that device, so the tiling
+	// below matches the one the allocation will use.
 	const VkPhysicalDeviceExternalImageFormatInfo externalInfo{
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
-		.pNext = &modifierInfo,
+		.pNext = statesModifiers ? &modifierInfo : nullptr,
 		.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
 	};
 	const VkPhysicalDeviceImageFormatInfo2 info{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
 		                                         .pNext = &externalInfo,
 		                                         .format = vulkan,
 		                                         .type = VK_IMAGE_TYPE_2D,
-		                                         .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+		                                         .tiling = statesModifiers ? VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT :
+		                                                                     VK_IMAGE_TILING_LINEAR,
 		                                         .usage = usage,
 		                                         .flags = 0 };
 
@@ -866,6 +902,36 @@ struct Candidate
 	VkImageUsageFlags Usage = 0;
 };
 } // namespace
+
+bool VulkanDevice::Exports(PixelFormat format) const noexcept
+{
+	if (!IsValid() || !format.IsValid())
+	{
+		return false;
+	}
+
+	const VkFormat vulkan = VulkanFormat(format.Code);
+
+	if (vulkan == VK_FORMAT_UNDEFINED)
+	{
+		return false;
+	}
+
+	// The same usage an export is created with, because a driver is entitled to refuse a handle type
+	// for one usage and allow it for another — and a capability answered under a narrower usage than
+	// the allocation will ask for is the reassurance that fails at the allocation.
+	constexpr VkFormatFeatureFlags Wanted =
+		VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+
+	return CanExport(
+		m_Physical,
+		m_Description.StatesModifiers,
+		vulkan,
+		PixelSize<DeviceSpace>{ 1, 1 },
+		ExportUsage(Wanted),
+		format.Modifier
+	);
+}
 
 void ExportedImage::Reset() noexcept
 {
@@ -972,7 +1038,7 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 		// `ModifierEntry` is where `ModifierInvalid` is refused, so a list carrying it loses that one
 		// candidate rather than the whole call — which is what a parent compositor advertising a
 		// legacy entry beside real ones deserves.
-		if (!ModifierEntry(m_Physical, PixelFormat{ code, 0, modifier }, entry))
+		if (!ModifierEntry(m_Physical, m_Description.StatesModifiers, PixelFormat{ code, 0, modifier }, entry))
 		{
 			continue;
 		}
@@ -980,12 +1046,12 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 		// `Renderable` is the whole filter for the tiling itself: one plane, and every feature the usage
 		// asks for. See its header for why the export path is held to the importer's limit rather than
 		// to the wider one a description could carry.
-		if (!Renderable(m_Physical, PixelFormat{ code, 0, modifier }, Wanted))
+		if (!Renderable(m_Physical, m_Description.StatesModifiers, PixelFormat{ code, 0, modifier }, Wanted))
 		{
 			continue;
 		}
 
-		if (!CanExport(m_Physical, vulkan, size, usage, modifier))
+		if (!CanExport(m_Physical, m_Description.StatesModifiers, vulkan, size, usage, modifier))
 		{
 			continue;
 		}
@@ -1009,8 +1075,12 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 		.drmFormatModifierCount = count,
 		.pDrmFormatModifiers = accepted.data()
 	};
+
+	// Nothing to offer where a tiling cannot be named: the survivor set is linear or it is empty, and
+	// `VK_IMAGE_TILING_LINEAR` says the same thing in the vocabulary such a device has.
 	const VkExternalMemoryImageCreateInfo externalInfo{ .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
-		                                                .pNext = &modifierInfo,
+		                                                .pNext =
+		                                                    m_Description.StatesModifiers ? &modifierInfo : nullptr,
 		                                                .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
 	const VkImageCreateInfo imageInfo{
 		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -1022,7 +1092,7 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 		.mipLevels = 1,
 		.arrayLayers = 1,
 		.samples = VK_SAMPLE_COUNT_1_BIT,
-		.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+		.tiling = m_Description.StatesModifiers ? VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT : VK_IMAGE_TILING_LINEAR,
 		.usage = usage,
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 		.queueFamilyIndexCount = 0,
@@ -1118,44 +1188,57 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 	// what goes into the description, so a nested output tells the parent what it has rather than what
 	// it asked for — and it is the only thing that makes handing over a set safe, because the set is
 	// exactly what a parent must not be left guessing among.
-	VkImageDrmFormatModifierPropertiesEXT actual{ .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT,
-		                                          .pNext = nullptr,
-		                                          .drmFormatModifier = ModifierInvalid };
+	// **Linear is asserted rather than read back, and it is the one place in this function that is
+	// allowed to assert.** There is no query to ask a device that does not implement the extension,
+	// and no ambiguity for it to resolve: the image was created `VK_IMAGE_TILING_LINEAR`, the
+	// candidate loop admitted no other modifier, and a linear image is one plane. What the driver
+	// still gets to decide is the *pitch*, and that is read below exactly as it is on the other arm.
+	Candidate chosen{ .Modifier = ModifierLinear, .PlaneCount = 1, .Usage = usage };
 
-	if (Result<void> read = Check(
-			vkGetImageDrmFormatModifierPropertiesEXT(m_Device, exported.m_Image, &actual),
-			"vkGetImageDrmFormatModifierPropertiesEXT"
-		);
-	    !read)
+	if (m_Description.StatesModifiers)
 	{
-		return std::unexpected{ read.error() };
-	}
+		VkImageDrmFormatModifierPropertiesEXT actual{ .sType =
+			                                              VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT,
+			                                          .pNext = nullptr,
+			                                          .drmFormatModifier = ModifierInvalid };
 
-	// Still checked, and against the set rather than against one entry. A driver that answered with a
-	// modifier nobody offered has laid the image out a way the parent will not import, and the failure
-	// that produces is a window of stripes three seconds later rather than an error here.
-	if (std::ranges::find(accepted.begin(), accepted.begin() + count, actual.drmFormatModifier) ==
-	    accepted.begin() + count)
-	{
-		return Failure(EIO, "the driver laid the image out under a modifier it was not offered");
-	}
+		if (Result<void> read = Check(
+				vkGetImageDrmFormatModifierPropertiesEXT(m_Device, exported.m_Image, &actual),
+				"vkGetImageDrmFormatModifierPropertiesEXT"
+			);
+		    !read)
+		{
+			return std::unexpected{ read.error() };
+		}
 
-	Candidate chosen{ .Modifier = actual.drmFormatModifier, .PlaneCount = 0, .Usage = usage };
-	VkDrmFormatModifierPropertiesEXT described{};
+		// Still checked, and against the set rather than against one entry. A driver that answered with
+		// a modifier nobody offered has laid the image out a way the parent will not import, and the
+		// failure that produces is a window of stripes three seconds later rather than an error here.
+		if (std::ranges::find(accepted.begin(), accepted.begin() + count, actual.drmFormatModifier) ==
+		    accepted.begin() + count)
+		{
+			return Failure(EIO, "the driver laid the image out under a modifier it was not offered");
+		}
 
-	// The plane count belongs to the modifier the driver settled on, so it is looked up here rather
-	// than carried down from the candidate loop — where, now that the loop keeps several, there is no
-	// single one to carry.
-	if (!ModifierEntry(m_Physical, PixelFormat{ code, 0, chosen.Modifier }, described))
-	{
-		return Failure(EIO, "the driver laid the image out under a modifier it does not describe");
-	}
+		chosen.Modifier = actual.drmFormatModifier;
+		chosen.PlaneCount = 0;
 
-	chosen.PlaneCount = described.drmFormatModifierPlaneCount;
+		VkDrmFormatModifierPropertiesEXT described{};
 
-	if (chosen.PlaneCount == 0 || chosen.PlaneCount > MaxImagePlanes)
-	{
-		return Failure(EIO, "the chosen modifier has a plane count a description cannot carry");
+		// The plane count belongs to the modifier the driver settled on, so it is looked up here rather
+		// than carried down from the candidate loop — where, now that the loop keeps several, there is
+		// no single one to carry.
+		if (!ModifierEntry(m_Physical, true, PixelFormat{ code, 0, chosen.Modifier }, described))
+		{
+			return Failure(EIO, "the driver laid the image out under a modifier it does not describe");
+		}
+
+		chosen.PlaneCount = described.drmFormatModifierPlaneCount;
+
+		if (chosen.PlaneCount == 0 || chosen.PlaneCount > MaxImagePlanes)
+		{
+			return Failure(EIO, "the chosen modifier has a plane count a description cannot carry");
+		}
 	}
 
 	const VkMemoryGetFdInfoKHR getInfo{ .sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
@@ -1179,7 +1262,15 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 
 	for (std::uint32_t plane = 0; plane < chosen.PlaneCount; ++plane)
 	{
-		const VkImageSubresource subresource{ .aspectMask = MemoryPlanes[plane], .mipLevel = 0, .arrayLayer = 0 };
+		// `COLOR_BIT` where there is no modifier, and the substitution is required rather than
+		// cosmetic: `VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT` is only a legal aspect for an image whose
+		// tiling *is* a modifier, so asking a linear image about it is the invalid usage the header
+		// above warns about, read from the other side.
+		const VkImageSubresource subresource{ .aspectMask = m_Description.StatesModifiers ?
+			                                                    MemoryPlanes[plane] :
+			                                                    VkImageAspectFlags{ VK_IMAGE_ASPECT_COLOR_BIT },
+			                                  .mipLevel = 0,
+			                                  .arrayLayer = 0 };
 		VkSubresourceLayout layout{};
 		vkGetImageSubresourceLayout(m_Device, exported.m_Image, &subresource, &layout);
 
@@ -1202,6 +1293,98 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 		RenderTarget{ .Size = size, .Format = PixelFormat{ code, 0, chosen.Modifier }, .Memory = image };
 
 	return exported;
+}
+
+Result<VkImage>
+VulkanDevice::ImportImage(VkExtent2D size, PixelFormat format, const DmabufPlane& plane, VkImageUsageFlags usage) const
+{
+	if (!IsValid())
+	{
+		return Failure(ENODEV, "no Vulkan device to import an image onto");
+	}
+
+	const VkFormat vulkan = VulkanFormat(format.Code);
+
+	if (vulkan == VK_FORMAT_UNDEFINED)
+	{
+		return Failure(EINVAL, "that fourcc is not one this device names");
+	}
+
+	// **The offset has nowhere to go on the linear arm, so a non-zero one is refused rather than
+	// dropped.** With a modifier it travels in `pPlaneLayouts`; without one the only place to put it
+	// is `vkBindImageMemory`'s own offset, which the driver constrains by an alignment the caller
+	// knows nothing about — and silently binding at zero is the whole buffer read one plane early.
+	// Every allocation gyro makes for itself is dedicated and therefore at zero, so this is a door
+	// that only a foreign allocator can arrive at.
+	if (!m_Description.StatesModifiers && plane.Offset != 0)
+	{
+		return Failure(EINVAL, "this device imports a linear buffer only at the start of its allocation");
+	}
+
+	const VkSubresourceLayout stated{
+		.offset = plane.Offset, .size = 0, .rowPitch = plane.Stride, .arrayPitch = 0, .depthPitch = 0
+	};
+
+	// **Explicit rather than a modifier list, and the difference matters.** A list asks the driver to
+	// pick a tiling and lay the image out itself; explicit states the layout the *allocator* already
+	// committed to, which is the only correct thing to do for memory this device did not allocate.
+	// Getting this backwards produces an image that imports cleanly and reads at the wrong stride.
+	const VkImageDrmFormatModifierExplicitCreateInfoEXT modifierInfo{
+		.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
+		.pNext = nullptr,
+		.drmFormatModifier = format.Modifier,
+		.drmFormatModifierPlaneCount = 1,
+		.pPlaneLayouts = &stated
+	};
+	const VkExternalMemoryImageCreateInfo externalInfo{ .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+		                                                .pNext =
+		                                                    m_Description.StatesModifiers ? &modifierInfo : nullptr,
+		                                                .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
+	const VkImageCreateInfo imageInfo{ .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		                               .pNext = &externalInfo,
+		                               .flags = 0,
+		                               .imageType = VK_IMAGE_TYPE_2D,
+		                               .format = vulkan,
+		                               .extent = { size.width, size.height, 1 },
+		                               .mipLevels = 1,
+		                               .arrayLayers = 1,
+		                               .samples = VK_SAMPLE_COUNT_1_BIT,
+		                               .tiling = m_Description.StatesModifiers ?
+		                                             VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT :
+		                                             VK_IMAGE_TILING_LINEAR,
+		                               .usage = usage,
+		                               .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		                               .queueFamilyIndexCount = 0,
+		                               .pQueueFamilyIndices = nullptr,
+		                               .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+
+	VkImage image = VK_NULL_HANDLE;
+
+	if (Result<void> created = Check(vkCreateImage(m_Device, &imageInfo, nullptr, &image), "vkCreateImage"); !created)
+	{
+		return std::unexpected{ created.error() };
+	}
+
+	// **Read back and compared, because on the linear arm the layout was never stated.** The driver
+	// laid this image out to suit itself, and the caller's stride is a fact about somebody else's
+	// allocation; the two agreeing is the ordinary case and the case where they do not is a window
+	// sheared across the screen with nothing in the log. Cheap to ask, and the answer is a named
+	// refusal a person can act on.
+	if (!m_Description.StatesModifiers)
+	{
+		const VkImageSubresource subresource{ .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .arrayLayer = 0 };
+		VkSubresourceLayout actual{};
+		vkGetImageSubresourceLayout(m_Device, image, &subresource, &actual);
+
+		if (actual.offset != stated.offset || actual.rowPitch != stated.rowPitch)
+		{
+			vkDestroyImage(m_Device, image, nullptr);
+
+			return Failure(EINVAL, "this device lays a linear image out at a stride the buffer was not written at");
+		}
+	}
+
+	return image;
 }
 
 Result<GpuCalibration> VulkanDevice::Calibrate() const

@@ -41,6 +41,7 @@
 #include "Core/Wake.h"
 #include "Dispatch/Loop.h"
 #include "Drm/Device.h"
+#include "Drm/Dumb.h"
 #include "Drm/Output.h"
 #include "Frame/Evaluator.h"
 #include "Frame/Loop.h"
@@ -820,6 +821,37 @@ private:
 // client until this backend needed one; it does not. The node comes from a udev rule and the process
 // that opens it first is master for the life of the file description, which on a machine with no VTs
 // nothing can take away.
+// Decision 151's chain, walked once per output.
+//
+// **Ordered by what the composite costs rather than by what is likely to work**, which is the whole
+// reason it is a walk instead of a condition. The Vulkan export is first because it is the only rung
+// that produces a tiled layout, and decision 138 measured what losing one costs: 7.4ms against 2.8ms
+// for the same composite on a tiled part, which lands on a person as the blur behind a panel
+// switching itself off. The card's own dumb buffer is last because it is linear and because it is
+// always there — a KMS driver has `CREATE_DUMB` by definition, so the walk cannot run out.
+//
+// **A provider is asked what it can produce, never what it is.** `Supports` is the whole of the
+// selection, so a rung declines by name — lavapipe's exporter refusing every format is one answer in
+// the same vocabulary as a card that cannot scan out a fourcc. Falling through to the last rung
+// rather than failing here is deliberate: the error a caller wants is the one the real allocation
+// produced, with an errno on it, not this function's opinion that nothing would have worked.
+[[nodiscard]] IDmabufAllocator& ChooseAllocator(
+	std::span<IDmabufAllocator* const> chain,
+	std::uint32_t code,
+	std::span<const std::uint64_t> modifiers
+) noexcept
+{
+	for (IDmabufAllocator* const provider : chain)
+	{
+		if (FirstSupported(*provider, code, modifiers).IsValid())
+		{
+			return *provider;
+		}
+	}
+
+	return *chain.back();
+}
+
 class DrmBackend final : public IBackend
 {
 public:
@@ -865,6 +897,7 @@ public:
 
 		m_Device = std::move(*rendering);
 		m_Allocator.emplace(m_Device);
+		m_Dumb.emplace(m_Card->Descriptor());
 		m_Textures.emplace(m_Device);
 
 		if (const Result<void>& built = m_Textures->Status(); !built)
@@ -908,8 +941,15 @@ public:
 
 		auto renderer = std::make_unique<VulkanRenderer>(*m_Clock, m_Device, *m_Textures);
 
-		auto panel =
-			std::make_unique<Drm::DrmOutput>(*m_Card, m_Card->Pipelines()[index], *m_Allocator, renderer.get());
+		// Which rung produces this output's targets. Asked with the plane's own table, because that is
+		// the set an allocation will actually be offered — a provider selected against anything else is
+		// one chosen for a negotiation that never happens.
+		const std::uint32_t code = wanted.Format.IsValid() ? wanted.Format.Code : FormatXrgb8888;
+		const std::array<IDmabufAllocator*, 2> chain{ &*m_Allocator, &*m_Dumb };
+		IDmabufAllocator& allocator =
+			ChooseAllocator(chain, code, Drm::ModifiersFor(m_Card->Pipelines()[index].Formats, code));
+
+		auto panel = std::make_unique<Drm::DrmOutput>(*m_Card, m_Card->Pipelines()[index], allocator, renderer.get());
 
 		if (const Result<void> opened = panel->Open(wanted); !opened)
 		{
@@ -917,10 +957,11 @@ public:
 		}
 
 		spdlog::info(
-			"  {}: {} on {}",
+			"  {}: {} on {}, targets from the {}",
 			m_Card->Pipelines()[index].Name,
 			panel->Configuration(),
-			panel->IsExplicitlySynchronized() ? "an in-fence" : "a held commit"
+			panel->IsExplicitlySynchronized() ? "an in-fence" : "a held commit",
+			allocator.Name()
 		);
 
 		into.Presenter = panel.get();
@@ -961,6 +1002,13 @@ private:
 
 	VulkanDevice m_Device;
 	std::optional<VulkanAllocator> m_Allocator;
+
+	// The rung beneath it. Constructed unconditionally rather than on a device bit, because whether it
+	// is *used* is `ChooseAllocator`'s answer per output and holding a borrowed descriptor costs
+	// nothing — and because a provider that only exists on the machines that need it is one no other
+	// machine ever exercises.
+	std::optional<Drm::DumbAllocator> m_Dumb;
+
 	std::optional<VulkanTextures> m_Textures;
 
 	bool m_Governs = true;

@@ -560,11 +560,16 @@ real driver has loaded, or on software — and the frame loop is identical in al
 ### Software rendering is the floor tier
 
 lavapipe ships in `mesa-vulkan-drivers`, so it is present wherever Mesa is, and it advertises
-Vulkan 1.4 with `VK_EXT_external_memory_dma_buf`, `VK_EXT_image_drm_format_modifier`,
-`VK_KHR_external_memory_fd`, and `VK_KHR_timeline_semaphore` — the complete set gyro asks of a
-device. It executes command buffers on llvmpipe's rasterizer pool and signals from a queue thread,
-so from the frame thread's side it is an asynchronous device that work is submitted to, structurally
-indistinguishable from a GPU.
+Vulkan 1.4 with `VK_EXT_external_memory_dma_buf`, `VK_KHR_external_memory_fd`, and
+`VK_KHR_timeline_semaphore` — the set gyro asks of a device. It executes command buffers on
+llvmpipe's rasterizer pool and signals from a queue thread, so from the frame thread's side it is an
+asynchronous device that work is submitted to, structurally indistinguishable from a GPU.
+
+What it does **not** have is `VK_EXT_image_drm_format_modifier`, so it cannot state an image's
+tiling. That is a capability rather than a requirement — a device without one lays every image out
+linear, which is what every compositor did before modifiers existed and what mutter still does
+whenever it disables them. See [decision
+150](Decisions.md#150-a-modifier-is-optional-and-a-device-without-one-lays-out-linear).
 
 So it needs no policy of its own. It is [the floor tier](#the-floor-tier), permanently occupied,
 which means a machine with a broken GPU driver runs the same render mode the tests and golden images

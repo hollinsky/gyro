@@ -491,47 +491,24 @@ Result<void> VulkanTextures::AdoptDmabuf(Image& into, const TextureSource& sourc
 	}
 
 	const DmabufPlane& plane = image.Planes[0];
-	const VkSubresourceLayout layout{
-		.offset = plane.Offset, .size = 0, .rowPitch = plane.Stride, .arrayPitch = 0, .depthPitch = 0
-	};
 
-	// Explicit rather than a modifier list, for the reason `VulkanRenderer::Import` states at length:
-	// this is memory somebody else laid out, and asking the driver to choose a tiling for it produces
-	// an image that imports cleanly and reads at the wrong stride.
-	const VkImageDrmFormatModifierExplicitCreateInfoEXT modifierInfo{
-		.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
-		.pNext = nullptr,
-		.drmFormatModifier = source.Format.Modifier,
-		.drmFormatModifierPlaneCount = 1,
-		.pPlaneLayouts = &layout
-	};
-	const VkExternalMemoryImageCreateInfo externalInfo{ .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
-		                                                .pNext = &modifierInfo,
-		                                                .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
-	const VkImageCreateInfo imageInfo{
-		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-		.pNext = &externalInfo,
-		.flags = 0,
-		.imageType = VK_IMAGE_TYPE_2D,
-		.format = VulkanFormat(source.Format.Code),
-		.extent = { static_cast<std::uint32_t>(source.Size.Width), static_cast<std::uint32_t>(source.Size.Height), 1 },
-		.mipLevels = 1,
-		.arrayLayers = 1,
-		.samples = VK_SAMPLE_COUNT_1_BIT,
-		.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
-		.usage = SampledUsage,
-		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-		.queueFamilyIndexCount = 0,
-		.pQueueFamilyIndices = nullptr,
-		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
-	};
+	// Render/Device.h owns the create info, and what it carries for this caller is the rule that this
+	// is memory somebody else laid out: the layout is stated rather than chosen, and on a device that
+	// cannot state one it is read back and compared instead. A client's buffer is the case that check
+	// exists for — gyro chose neither its stride nor its allocator.
+	Result<VkImage> imported = m_Device->ImportImage(
+		{ static_cast<std::uint32_t>(source.Size.Width), static_cast<std::uint32_t>(source.Size.Height) },
+		source.Format,
+		plane,
+		SampledUsage
+	);
 
-	if (Result<void> created =
-	        Check(vkCreateImage(m_Device->Handle(), &imageInfo, nullptr, &into.Handle), "vkCreateImage");
-	    !created)
+	if (!imported)
 	{
-		return created;
+		return std::unexpected{ imported.error() };
 	}
+
+	into.Handle = *imported;
 
 	const std::uint32_t types = m_Device->ImportableMemoryTypes(plane.Descriptor);
 

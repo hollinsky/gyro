@@ -170,13 +170,27 @@ void ReportSemaphore(
 	destroy(device, semaphore, nullptr);
 }
 
+// **Gated on the extension, because a driver will answer this query without implementing it.**
+// lavapipe fills a `VkDrmFormatModifierPropertiesListEXT` chained onto a format query and reports one
+// linear entry, on a device whose extension list has no such name — so the unguarded form printed a
+// table for a capability that is not there, which is exactly the wrong thing for the instrument a
+// person reaches for when gyro has just refused their machine. Nothing is printed instead of
+// something untrue.
 void ReportModifiers(
 	VkPhysicalDevice physical,
 	PFN_vkGetPhysicalDeviceFormatProperties2 query,
+	bool statesModifiers,
 	VkFormat format,
 	const char* name
 )
 {
+	if (!statesModifiers)
+	{
+		std::printf("    %s: no modifier table — this device states no tilings, so gyro uses linear\n", name);
+
+		return;
+	}
+
 	VkDrmFormatModifierPropertiesListEXT list{};
 	list.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
 
@@ -294,6 +308,9 @@ int main()
 
 		std::printf("  extensions gyro asks about:\n");
 
+		// Kept, because it decides whether the modifier table below is a report or a fabrication.
+		bool statesModifiers = false;
+
 		for (const char* wanted : Interesting)
 		{
 			bool found = false;
@@ -304,6 +321,9 @@ int main()
 			}
 
 			std::printf("    %-38s %s\n", wanted, found ? "yes" : "no");
+
+			statesModifiers =
+				statesModifiers || (found && std::strcmp(wanted, VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME) == 0);
 		}
 
 		VkPhysicalDeviceVulkan13Features features13{};
@@ -325,8 +345,10 @@ int main()
 		);
 
 		std::printf("  what a composite target can be:\n");
-		ReportModifiers(physical, formats, VK_FORMAT_B8G8R8A8_UNORM, "B8G8R8A8_UNORM (XR24/AR24)");
-		ReportModifiers(physical, formats, VK_FORMAT_A2R10G10B10_UNORM_PACK32, "A2R10G10B10 (XR30/AR30)");
+		ReportModifiers(physical, formats, statesModifiers, VK_FORMAT_B8G8R8A8_UNORM, "B8G8R8A8_UNORM (XR24/AR24)");
+		ReportModifiers(
+			physical, formats, statesModifiers, VK_FORMAT_A2R10G10B10_UNORM_PACK32, "A2R10G10B10 (XR30/AR30)"
+		);
 
 		// A device is created only to attempt the exports, and only with the one extension that
 		// makes them possible. A driver that refuses the device outright still gets its query
