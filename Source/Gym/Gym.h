@@ -65,7 +65,8 @@ enum class GymKind : std::uint8_t
 	// The rotation lane, driven. Wants the Vulkan renderer.
 	Turn,
 
-	// The lanes with a `Glass` and a `Smoke` panel over them. Wants the Vulkan renderer.
+	// The lanes with a `Glass` and a `Smoke` panel over them, and the rotation lane driven under
+	// them. Wants the Vulkan renderer.
 	Materials,
 
 	// An imported image, drawn four times, with the buffer swapped underneath it forever. The only gym

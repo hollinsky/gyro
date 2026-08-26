@@ -92,6 +92,47 @@ template<typename Write>
 	return commit.IsOpen() && write(commit);
 }
 
+// The rotation lane's tick, which is shared because two gyms drive it and one of them drives the other
+// three as well.
+//
+// **A step count rather than an accumulated angle, because six steps close the circle exactly**: an
+// angle that only ever grew would drift as the process ran, and a marker whose resting orientations
+// wander is one nobody can read a rotation bug off.
+class TurnDriver
+{
+public:
+	void Open(Instant now) noexcept { m_Edge = Advanced(now, TurnPeriod); }
+
+	// Retargets the lane if its edge has passed, and answers whether the write was accepted. A gym that
+	// is handed `false` latches off, the same way its own lanes' refusals do.
+	[[nodiscard]] bool Drive(SceneStore& scene, EntityId marker, Instant now)
+	{
+		if (m_Edge > now)
+		{
+			return true;
+		}
+
+		m_Step = (m_Step + 1) % TurnSteps;
+
+		const Quaternion orientation =
+			Quaternion::FromAxisAngle({ 0.0F, 0.0F, 1.0F }, static_cast<float>(m_Step) * TurnStepRadians);
+
+		const bool written = Tick(scene, m_Edge, [&](SceneCommit& commit) {
+			return commit.Turn(marker, orientation, Animate(TurnMotion));
+		});
+
+		m_Edge = NextEdge(m_Edge, TurnPeriod, now);
+
+		return written;
+	}
+
+	[[nodiscard]] Instant NextDue() const noexcept { return m_Edge; }
+
+private:
+	Instant m_Edge{};
+	int m_Step = 0;
+};
+
 // What every gym here has: the instrument, and the authoring of it.
 class LaneGym : public ISceneAuthor
 {
@@ -205,6 +246,12 @@ public:
 		return Wake::At(std::min({ m_Slide, m_Grow, m_Fade }));
 	}
 
+protected:
+	// Whether the lanes are still being written to, which a gym built on top of this one has to be able
+	// to read: a refusal here latches the whole instrument off, and a subclass still driving its own
+	// lane afterwards would keep a frozen scene answering wakes.
+	bool m_Driving = true;
+
 private:
 	Instant m_Slide{};
 	Instant m_Grow{};
@@ -213,8 +260,6 @@ private:
 	bool m_SlideFar = false;
 	bool m_GrowFull = false;
 	bool m_FadeFull = false;
-
-	bool m_Driving = true;
 };
 
 // The same instrument, authored once and left to finish.
@@ -287,7 +332,7 @@ public:
 			return authored;
 		}
 
-		m_Edge = Advanced(scene.Now(), TurnPeriod);
+		m_Turn.Open(scene.Now());
 
 		return {};
 	}
@@ -299,34 +344,18 @@ public:
 			return Wake::Never();
 		}
 
-		if (m_Edge <= now)
-		{
-			// A step count rather than an accumulated angle, because six steps close the circle exactly:
-			// an angle that only ever grew would drift as the process ran, and a marker whose resting
-			// orientations wander is one nobody can read a rotation bug off.
-			m_Step = (m_Step + 1) % TurnSteps;
-
-			const Quaternion orientation =
-				Quaternion::FromAxisAngle({ 0.0F, 0.0F, 1.0F }, static_cast<float>(m_Step) * TurnStepRadians);
-
-			m_Driving = Tick(scene, m_Edge, [&](SceneCommit& commit) {
-				return commit.Turn(m_Lanes.Turn.Marker, orientation, Animate(TurnMotion));
-			});
-
-			m_Edge = NextEdge(m_Edge, TurnPeriod, now);
-		}
+		m_Driving = m_Turn.Drive(scene, m_Lanes.Turn.Marker, now);
 
 		if (!m_Driving)
 		{
 			return Wake::Never();
 		}
 
-		return Wake::At(m_Edge);
+		return Wake::At(m_Turn.NextDue());
 	}
 
 private:
-	Instant m_Edge{};
-	int m_Step = 0;
+	TurnDriver m_Turn;
 	bool m_Driving = true;
 };
 
@@ -337,7 +366,11 @@ private:
 // picture is indistinguishable from a still picture somebody blurred once. So the instrument underneath
 // is the same instrument, and what is added is the two panels and the shadow they cast.
 //
-// Refused by the CPU renderer twice over, on the material and on the elevation.
+// **The rotation lane is driven here and not in `LanesGym`**, which is the one place the two scenes
+// differ. A turning quad is refused by the CPU renderer and one refusal loses the whole frame, so the
+// lane can only be driven by a gym that has already given the CPU renderer up — and this one has,
+// twice over, on the material and on the elevation. Turning it on in `LanesGym` would take the default
+// scene away from `--backend=dump` as well, which is the backend it is most useful on.
 class MaterialsGym final : public LanesGym
 {
 public:
@@ -359,8 +392,32 @@ public:
 			return std::unexpected{ overlay.error() };
 		}
 
+		m_Turn.Open(scene.Now());
+
 		return {};
 	}
+
+	[[nodiscard]] Wake Advance(SceneStore& scene, ITextures& textures, Instant now) override
+	{
+		const Wake lanes = LanesGym::Advance(scene, textures, now);
+
+		if (!m_Driving)
+		{
+			return Wake::Never();
+		}
+
+		m_Driving = m_Turn.Drive(scene, m_Lanes.Turn.Marker, now);
+
+		if (!m_Driving)
+		{
+			return Wake::Never();
+		}
+
+		return Sooner(lanes, Wake::At(m_Turn.NextDue()));
+	}
+
+private:
+	TurnDriver m_Turn;
 };
 // An imported image, drawn four times, with the buffer swapped underneath it forever.
 //

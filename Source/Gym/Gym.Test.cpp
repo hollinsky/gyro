@@ -102,6 +102,17 @@ void Walk(const SceneStore& store, EntityId id, const Visit& visit)
 
 	return moving;
 }
+
+// Whether anything in the scene is turning, which is the one channel a gym's choice of backend turns
+// on: `Blit` refuses a quad that is not axis-aligned and one refusal loses the whole frame.
+[[nodiscard]] bool AnythingTurning(const SceneStore& store)
+{
+	bool turning = false;
+
+	Walk(store, store.FirstRoot(), [&](const Entity& entity) { turning = turning || !entity.Turn.IsAtRest(); });
+
+	return turning;
+}
 // The texture space, as the little of it a gym can tell apart.
 //
 // `Dispatch/TextureRegistry` is the real one and is a module this may not name — `Dispatch` depends on
@@ -228,6 +239,30 @@ GYRO_TEST(Gym, ThePerpetualGymsNeverAnswerSettled)
 			GYRO_REQUIRE(next.Which == Wake::Kind::Timed);
 			GYRO_REQUIRE(next.When > now);
 		}
+	}
+}
+
+// Which gyms drive the rotation lane, asserted against `DrawsOnCpu` rather than against a list.
+//
+// A turning quad is refused by the CPU renderer outright, so a gym that promises to draw there and then
+// turns something writes no frames at all under `--backend=dump` — an empty output directory rather
+// than a picture with one marker missing, which is the failure this pins.
+GYRO_TEST(Gym, OnlyAGymThatHasGivenUpTheCpuRendererTurnsAnything)
+{
+	CountingTextures textures;
+
+	for (const GymKind kind : AllGyms)
+	{
+		Fixture fixture;
+
+		const Result<std::unique_ptr<ISceneAuthor>> gym = MakeGym(Name(kind));
+
+		GYRO_REQUIRE(gym);
+		GYRO_REQUIRE((*gym)->Open(fixture.Store, textures));
+
+		(void)(*gym)->Advance(fixture.Store, textures, fixture.Reach(WellPast));
+
+		GYRO_CHECK_EQ(AnythingTurning(fixture.Store), !DrawsOnCpu(kind));
 	}
 }
 
