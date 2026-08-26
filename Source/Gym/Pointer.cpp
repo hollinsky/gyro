@@ -9,6 +9,7 @@
 #include "Core/ColorState.h"
 #include "Geometry/Space.h"
 #include "World/Content.h"
+#include "World/Node.h"
 
 namespace
 {
@@ -237,7 +238,14 @@ Result<EntityId> AuthorGlyph(SceneStore& scene, EntityId parent, Glyph glyph, do
 	// The hotspot is this node's origin, which is what makes the subtree placeable by the pointer's
 	// position with nothing subtracted from it. The outline reaches above and to the left of it, and
 	// that is correct: a hotspot is a point on the screen rather than a corner of the drawing.
-	const EntityId root = builder.Container(parent, {});
+	//
+	// **`Node::Snap` is on the root and on nothing below it, which is the flag working as intended.**
+	// A glyph is a body of rectangles whose sub-pixel relationships are the drawing, so the grid is
+	// taken once here and inherited; flagging the rectangles would round each of them apart. Without
+	// it this gym's sliding specimen visibly boils — the outline is a stroke a pixel and a bit wide,
+	// and at a fractional device position it is one dark pixel at one phase and two grey ones at the
+	// next.
+	const EntityId root = builder.Container(parent, { .Flags = Node::Snap });
 
 	// The outline first and the body over it, which is the whole of the z-order here — decision 55
 	// makes it the list order, so the two staircases are one sibling pair rather than a group.

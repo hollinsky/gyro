@@ -11922,3 +11922,65 @@ a megabyte of dot patterns into a compositor that will never ask for one.
 lanes is the obvious first caller. Shaping, kerning, bidirectional reordering and line breaking are all
 absent and stay absent: decision 38's grid is what a recovery console *should* be, and each of those is
 a table or a state machine between the person at the keyboard and the message they need to read.
+
+### 156. A node may ask for the device grid whenever it is drawn, and the subtree under it takes that grid once
+
+*(Decided 2026-08-25, on the pointer glyph visibly boiling as it moved.)*
+
+**[Decision 67](#67-the-settled-snap-is-unconditional) puts settled geometry on the device grid, and
+the cursor is the node that is never settled while anybody is using it.** So it is drawn at a
+fractional device position every frame, and what that costs is not softness — it is motion. A glyph is
+a small, high-contrast drawing whose strokes are a pixel or two wide, and a stroke at a fractional
+position is one dark pixel at one sub-pixel phase and two grey ones half a pixel later. Its apparent
+weight therefore changes every frame the pointer moves. On screen that is a cursor that boils rather
+than glides, and it is the element people look at most and are most sensitive to.
+
+**So `Node::Snap` is a third flag beside `Hidden` and `Group`, and it is decision 67's arithmetic under
+a different condition rather than a second mechanism.** A node carrying it has its origin rounded to
+the output's device grid whenever it is drawn, settled or not — `Frame/Evaluator.h`'s `Snapped`, which
+already existed and already ran on the composed chain.
+
+**What is snapped is the drawing and never the model.** [Scene/Pointer.h](../Source/Scene/Pointer.h)
+holds the pointer in `GlobalSpace` at full precision and states the reason: rounding the *accumulated*
+position is how slow motion turns into a pointer that sticks and jumps, because a run of quarter-pixel
+steps each rounded to nothing never moves at all. Rounding at evaluation leaves the accumulation exact
+and quantises only the picture, so a slow pointer advances a whole pixel every fourth step instead of
+never. Hit-testing, `wl_pointer` coordinates and the Floorplanner all keep the exact position.
+
+**It also makes decision 152's partition honest.** A promoted plane is placed by `CRTC_X` and `CRTC_Y`,
+which are integers, so a composited cursor drawn at a fractional position and a promoted one drawn at a
+rounded position are visibly different pictures — and 152's whole claim is that the two frames are the
+same picture and there is no transition to see. Snapping the composited path is what makes that true
+for the node the partition will promote first.
+
+**The subtree takes the grid once, at the node that asked for it, and never again inside itself.** This
+is the half that was found by measuring rather than by reasoning, and it is the half that matters. A
+glyph is a few dozen rectangles whose sub-pixel relationships *are* the drawing; rounding each of them
+on its own hints them apart. Worse, decision 67's condition comes true for every descendant at once the
+instant the subtree settles, so a cursor snapped only at its root is body-snapped while it moves and
+rectangle-snapped the moment it stops — the shape ticks in the one frame a person's eye has come to
+rest on it. The walk therefore carries *already snapped* down the level stack beside *settled*, and a
+descendant of a snapped node is not snapped again.
+
+**How it was found, because the first two answers were wrong.** `Gym/Pointer.h`'s sliding specimen was
+the instrument. The first diagnosis was the column staircase, refuted by the shimmer being identical at
+eight, twenty and fifty-six steps. The second was the outline's own width, refuted by thickening it
+making no difference. What settled it was a per-pixel standard deviation over a hundred frames, which
+put the variation on the outline all the way round the glyph and nowhere else, and then a byte
+comparison of the glyph's own rectangle frame to frame: ninety-one frames of ninety-six identical, and
+the five that differed were exactly the two rest positions. That last number is what named the second
+half of the rule. With both halves the comparison is ninety-five of ninety-five, and the glyph's total
+light is constant to the bit as it crosses the screen.
+
+**Rejected: snapping the pointer's position where it is held.** It puts an integer in the world, which
+is what decisions 52 and 53 exist to prevent, and it breaks slow motion outright.
+
+**Rejected: leaving it to the plane.** Promotion quantises the position for free once the assigner
+exists, so the shimmer would only be in the composited fallback. Refused on decision 152's own argument:
+an atomic test can refuse a promotion at any time, and a fallback that looks different is the
+transition that decision exists to make unobservable.
+
+**Rejected: a rule that snaps by kind rather than by declaration** — *the cursor snaps* as a special
+case in the walk. The frame side does not know which node is the cursor and should not learn: decision
+86's boundary carries a scene, not a cast list. A flag is a fact the author states about a node, which
+is the same shape `Hidden` and `Group` already have.

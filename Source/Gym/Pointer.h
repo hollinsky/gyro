@@ -46,6 +46,15 @@
 // are under-covered against *black* rather than against a person's desktop, which is the direction the
 // edge was going anyway.
 //
+// **The glyph carries `Node::Snap`, and this gym is what found out that it had to.** The sliding
+// specimen below boiled: the outline is a stroke a pixel and a bit wide, and at a fractional device
+// position it is one dark pixel at one sub-pixel phase and two grey ones at the next, so its weight
+// pumped every frame. Decision 156 is the answer — the subtree's origin lands on the device grid
+// whenever it is drawn rather than only once it has settled, and the grid is taken once at the root so
+// the rectangles keep their proportions. With it the glyph is byte-identical from frame to frame and
+// simply translates, which is what the sliding pair is now the demonstration of rather than the
+// symptom.
+//
 // **`Bracket` is the alternative that owes the staircase nothing.** Two arms of a corner, upright by
 // construction, exact at every scale, and directional without a diagonal. It is here because a
 // designed glyph does not have to be the arrow everybody ships (decision 152 says so in as many

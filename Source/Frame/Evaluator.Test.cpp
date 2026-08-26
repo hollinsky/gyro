@@ -715,6 +715,78 @@ GYRO_TEST(Evaluator, SettledGeometryLandsOnTheGridAndMovingGeometryDoesNot)
 	GYRO_CHECK_EQ(flying.Items[0].Shape.Bounds().Left(), 10.4F);
 }
 
+// `Node::Snap`, which is decision 67's snap asked for by a node that never settles — the pointer.
+//
+// Both halves are here because either alone is the wrong picture. A cursor left at a fractional device
+// position has an outline a pixel and a bit wide whose weight pumps every frame: one dark pixel at one
+// sub-pixel phase and two grey ones at the next, which is a glyph that boils rather than glides. A
+// cursor whose *rectangles* each snap has been hinted apart, and its shape changes as it crosses the
+// grid. So the subtree takes the grid once, at its root, and keeps its own proportions below that.
+GYRO_TEST(Evaluator, ASnappedSubtreeTakesTheGridOnceAndNotPerNode)
+{
+	Wire wire;
+
+	// A moving root, so decision 67's own condition is false throughout and the flag is the only thing
+	// that could put this on the grid.
+	std::array nodes{ Container(1, 10.4, 20.6), Image(0, 0.3, 0.4, 5.0F, 5.0F) };
+	nodes[0].Flags = Node::Snap;
+	nodes[0].TranslationSpring = 0;
+
+	const Spring<Vector3<double>> spring{ .Origin = {},
+		                                  .Parameters = { .Frequency = 20.0, .Damping = 1.0 },
+		                                  .Target = { 10.4, 20.6, 0.0 },
+		                                  .Offset = {},
+		                                  .Velocity = {} };
+	const std::array springs{ spring };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.Put(SnapshotRun::Translation, std::span<const Spring<Vector3<double>>>{ springs });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// The root is on the grid although it is mid-flight, and the child sits at its authored offset from
+	// there rather than at a rounded one — 10 + 0.3 and 21 + 0.4, not 10 and 21.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Left(), 10.3F);
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Top(), 21.4F);
+}
+
+// The same subtree once it has come to rest. Without the second clause of the rule this is the frame a
+// person's eye has settled on and the frame the glyph's shape changes in, because decision 67's
+// condition comes true for every descendant at once.
+GYRO_TEST(Evaluator, ASettledChildOfASnappedSubtreeIsNotSnappedAgain)
+{
+	Wire wire;
+
+	std::array nodes{ Container(1, 10.4, 20.6), Image(0, 0.3, 0.4, 5.0F, 5.0F) };
+	nodes[0].Flags = Node::Snap;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Left(), 10.3F);
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Top(), 21.4F);
+}
+
 GYRO_TEST(Evaluator, ADressedContainerDrawsItsDressingAndNamesNoContent)
 {
 	Wire wire;

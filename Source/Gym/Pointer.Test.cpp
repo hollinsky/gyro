@@ -211,6 +211,31 @@ GYRO_TEST(GymPointer, GlyphHangsItsOutlineOutsideTheHotspot)
 	GYRO_CHECK(parts.front().Top < 0.0);
 }
 
+// The grid is taken once, at the glyph's root, and by nothing under it.
+//
+// A glyph is a body of rectangles whose sub-pixel relationships are the drawing, so flagging the
+// rectangles would round each of them apart — which is the difference between a pointer that glides
+// and one whose shape ticks as it crosses a pixel.
+GYRO_TEST(GymPointer, TheGridIsTakenAtTheGlyphRootAndNowhereBelowIt)
+{
+	Fixture fixture;
+
+	const Result<EntityId> glyph = AuthorGlyph(fixture.Store, {}, Glyph::Arrow, 24.0, 16);
+
+	GYRO_REQUIRE(glyph.has_value());
+
+	GYRO_CHECK((fixture.Store.Find(*glyph)->Flags & Node::Snap) != 0);
+
+	for (EntityId child = fixture.Store.Find(*glyph)->FirstChild; !child.IsNull();)
+	{
+		const Entity* const entity = fixture.Store.Find(child);
+
+		GYRO_CHECK((entity->Flags & Node::Snap) == 0);
+
+		child = entity->NextSibling;
+	}
+}
+
 // The bracket owes the staircase nothing, so it is the same four nodes at every size — which is the
 // whole of its case against the arrow.
 GYRO_TEST(GymPointer, BracketIsTheSameFourNodesAtEverySize)

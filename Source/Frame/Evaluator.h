@@ -214,6 +214,17 @@ private:
 		// mid-flight is mid-flight, and snapping it would fight the animation a pixel at a time.
 		bool Settled = true;
 
+		// Whether some node at or above this level carried `Node::Snap`, and therefore whether the
+		// grid has already been taken for this subtree.
+		//
+		// **A snapped subtree is placed on the grid once, as a body, and never again inside itself.**
+		// That is the whole content of the flag: a glyph is a few dozen rectangles whose sub-pixel
+		// relationships are the drawing, so rounding each of them on its own hints them apart. Without
+		// this the cursor is body-snapped while it moves and rect-snapped the instant it stops, since
+		// decision 67's condition comes true for every descendant at once — which is a pointer whose
+		// shape ticks as it comes to rest, in the one frame a person's eye has settled on it.
+		bool Snapped = false;
+
 		// The `DrawGroup` this run composites into, or `NoItem`. Backpatched on the way out, because
 		// a group's member count and its offscreen's placement are both facts about a subtree that
 		// has not been walked yet when the item is emitted.
@@ -412,7 +423,14 @@ private:
 		const float radius = transform.BoundingRadius(node.Extent.Width, node.Extent.Height);
 		ComposedTransform chain = level.Chain.Push(transform, radius);
 
-		if (settled)
+		// **A node that asks for the grid gets it whether or not it has settled**, which is the whole
+		// of `Node::Snap`. The pointer is the node it exists for and is never settled while somebody
+		// is using it, so decision 67's condition alone would leave its outline pumping for exactly
+		// as long as anybody is looking at it — and the second clause is the other half, because a
+		// subtree already placed on the grid must not be placed on it again one rectangle at a time.
+		const bool snapping = level.Snapped || node.IsSnapped();
+
+		if ((settled || node.IsSnapped()) && !level.Snapped)
 		{
 			chain = Snapped(chain);
 		}
@@ -522,6 +540,7 @@ private:
 			                      .TimeScale = timeScale,
 			                      .Opacity = descend,
 			                      .Settled = settled,
+			                      .Snapped = snapping,
 			                      .Group = group,
 			                      .Bounded = group != NoItem && drawn.Bounded,
 			                      .Bounds = drawn.Bounds };
@@ -704,7 +723,8 @@ private:
 		return at;
 	}
 
-	// Decision 67's snap, applied to the node's own origin in the output's device grid.
+	// Decision 67's snap, applied to the node's own origin in the output's device grid — and
+	// `Node::Snap`'s, which is the same arithmetic asked for by a node that never settles.
 	//
 	// **It is the position and not the extent**, because that is what the promise rests on: two tiled
 	// windows abut exactly when both their edges land on the grid, and decision 52 already governs the

@@ -106,6 +106,31 @@ struct Node
 		// is what this costs on every frame.
 		Hidden = 1u << 0,
 
+		// The subtree's origin lands on the output's device grid whenever it is drawn, rather than
+		// only once it has settled.
+		//
+		// **Decision 67 already snaps settled geometry unconditionally, and this is the same snap
+		// asked for by a node that is never settled while anybody is using it.** The pointer is that
+		// node. A glyph is a small, high-contrast drawing with strokes a pixel or two wide, and a
+		// stroke at a fractional device position is one dark pixel at one sub-pixel phase and two
+		// grey ones half a pixel later — so its weight pumps every frame the pointer moves, which is
+		// a cursor that boils rather than one that glides. Freezing the phase makes every frame's
+		// rasterisation identical and there is nothing left to pump.
+		//
+		// **It is the drawn position and never the model one.** `Scene/Pointer.h` holds the pointer
+		// in `GlobalSpace` at full precision and says why: rounding the accumulated position is how
+		// slow motion turns into a pointer that sticks and jumps, because a run of quarter-pixel
+		// steps each rounded to nothing never moves at all. Rounding here leaves the accumulation
+		// exact and quantises only the picture, which is also what a hardware cursor plane does with
+		// its two integer coordinates — so decision 152's partition puts the same glyph on the glass
+		// whichever side of it a frame lands on.
+		//
+		// **The subtree inherits it, and that is the whole reason the flag is on a node rather than
+		// on an item.** A glyph is a few dozen rectangles whose sub-pixel relationships are the
+		// drawing; rounding each of them on its own would hint them apart. One rounding at the root
+		// moves the subtree as a body.
+		Snap = 1u << 2,
+
 		// The subtree composites into an offscreen and is drawn as one image, which is decision 60's
 		// group fade. Dispatch declares it and never places it: the offscreen sits at the subtree's
 		// *screen-space* bound, which is evaluated and per output, so decision 86 leaves the
@@ -231,6 +256,8 @@ struct Node
 
 	[[nodiscard]] constexpr bool IsGroup() const noexcept { return (Flags & Group) != 0; }
 
+	[[nodiscard]] constexpr bool IsSnapped() const noexcept { return (Flags & Snap) != 0; }
+
 	[[nodiscard]] constexpr bool IsContainer() const noexcept { return Kind == NodeKind::Container; }
 
 	[[nodiscard]] constexpr bool IsReference() const noexcept { return Kind == NodeKind::Reference; }
@@ -293,7 +320,7 @@ static_assert(alignof(Node) == 8, "The widest member is a global-space coordinat
 static_assert(Node{}.SubtreeLength == 0 && Node{}.Past(7) == 8, "A leaf's subtree is the leaf");
 static_assert(!Node{}.IsTranslating() && !Node{}.IsScaling() && !Node{}.IsRotating());
 static_assert(!Node{}.IsFading() && !Node{}.IsDriven());
-static_assert(!Node{}.IsHidden() && !Node{}.IsGroup());
+static_assert(!Node{}.IsHidden() && !Node{}.IsGroup() && !Node{}.IsSnapped());
 static_assert(Node{}.IsContainer() && !Node{}.IsReference() && !Node{}.HasContent(), "Nothing drawn is nothing named");
 static_assert(Node{}.Content == NoContent && !Node{}.IsDressed() && !Node{}.IsLifted());
 static_assert(Node{}.Opacity == 1.0F && Node{}.TimeScale == 1.0F);
