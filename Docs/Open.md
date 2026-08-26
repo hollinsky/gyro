@@ -1233,10 +1233,24 @@ rather than an oversight.
   that pays is the fullscreen one that casts no shadow anyway.
 - **Where the atomic test is actually cached.** `IPresenter::TestLayers` is the party that knows, and
   decision 152 says it is asked when an item crosses the promotion predicate rather than once a frame.
-  Nothing yet holds that cache: the verb exists and `Frame/Assign.h` produces the partition, and the
-  frame loop still presents one layer. What the cache has to be keyed on is the partition's *shape* —
-  which items, which planes, at what sizes — and not its positions, since a plane that merely moved is
-  two integers in a commit that was happening anyway.
+  Nothing yet holds that cache: `Frame/Loop.h` asks on every frame that promotes anything, which is an
+  ioctl per frame on the arrangement promotion exists to make cheap. What the cache has to be keyed on
+  is the partition's *shape* — which items, which planes, at what sizes — and not its positions, since
+  a plane that merely moved is two integers in a commit that was happening anyway. A machine that
+  promotes nothing pays nothing today, which is why this is a cost rather than a defect.
+- **A frame with no composite at all.** `Assign` produces one — every item promoted, no render pass,
+  no queue submission, the tablet playing video with the GPU asleep — and `Frame/Loop.h` demotes the
+  bottom layer back into the composite rather than taking it. The reason is the loop's order: a target
+  is acquired *before* the draw list is evaluated, and `IPresenter` has no verb that gives one back, so
+  a frame that turned out to need no target has already taken one. The fix is to evaluate first and
+  acquire only where the partition says a composite happens, which moves the buffer-age join and the
+  damage backlog with it — worth doing once there is a client that can actually promote.
+- **Damaging only what changed sides.** A partition that differs from the last frame's repaints the
+  whole output, because a composite that stopped drawing a window has to repaint where it was and
+  nothing in the *scene* says so. The tight answer is the union of the quads that crossed the
+  partition, which needs last frame's quads kept per output rather than only its shape. What the blunt
+  answer costs is one full repaint on the frames a window starts or stops moving — decision 35's
+  budget exactly, a handful of times a session.
 
 ## One plane per output, and what the catalog is already for
 

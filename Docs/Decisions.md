@@ -11679,7 +11679,7 @@ is the minification argument arriving at the worst possible moment.
 *(Decided 2026-08-25, on finding that decision 152's partition had nothing it could promote.)*
 
 **The assigner works and the seam cannot say what it decided.**
-[Seam/Presenter.h](../Source/Seam/Presenter.h) has `PresentLayer::Source` as an index into the
+[Seam/Presenter.h](../Source/Seam/Presenter.h) has `PresentLayer::Target` as an index into the
 presenter's own ring, and a promotable draw item carries a `TextureId` naming an image in the
 renderer's import table. There is no bridge, which the header has said in its own words since
 [decision 78](#78-present-takes-a-layer-list-and-the-composite-is-one-member-of-it) — so `Frame/Assign.h`
@@ -11689,7 +11689,7 @@ everything.
 **The answer is that a promoted layer names the texture id directly, and the presenter resolves it.**
 `TextureId` is already in `Core` — [decision 87](#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)
 put it there — so the waist may name one, and the item that was going to be promoted is already
-carrying the only identity it has. `PresentLayer::Source` becomes *either* an index into `Targets()`
+carrying the only identity it has. `PresentLayer::Target` becomes *either* an index into `Targets()`
 or a texture id, and nothing on the frame thread performs a lookup: it names the id, and a backend
 that cannot scan that image out refuses the partition through `TestLayers`, which is the answer that
 mechanism exists to give.

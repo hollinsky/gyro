@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <vector>
 
 #include "Core/Clock.h"
 #include "Core/Time.h"
@@ -75,10 +76,26 @@ public:
 		return index;
 	}
 
+	[[nodiscard]] std::uint32_t LayerCeiling() const noexcept override { return Planes; }
+
+	[[nodiscard]] Result<void> TestLayers(std::span<const PresentLayer> layers) override
+	{
+		++Tests;
+		TestedLayers = layers.size();
+
+		if (RefuseTest || layers.size() > Planes)
+		{
+			return Failure(EINVAL, "fake presenter refuses that partition");
+		}
+
+		return {};
+	}
+
 	Result<void> Present(std::span<const PresentLayer> layers) override
 	{
 		++Presents;
 		PresentedDamage = layers.empty() ? Region<DeviceSpace>{} : layers[0].Damage;
+		PresentedLayers.assign(layers.begin(), layers.end());
 
 		if (Refuse)
 		{
@@ -118,6 +135,14 @@ public:
 	int Presents = 0;
 	bool Refuse = false;
 
+	// One by default, which is every backend that has no planes to offer. A case about promotion asks
+	// for more.
+	std::uint32_t Planes = 1;
+	bool RefuseTest = false;
+	int Tests = 0;
+	std::size_t TestedLayers = 0;
+	std::vector<PresentLayer> PresentedLayers;
+
 	// One by default, which is KMS's rule. A case about pipelining asks for two, which is what a nested
 	// output answers because its completion arrives from the host a whole refresh after the frame it is
 	// about.
@@ -143,6 +168,7 @@ public:
 	[[nodiscard]] Result<Submission> Record(const RecordRequest& request) override
 	{
 		++Records;
+		RecordedItems = request.Items.size();
 		RecordedTarget = request.Target;
 		RecordedMode = request.Mode;
 		RecordedGeneration = request.CostGeneration;
@@ -176,6 +202,7 @@ public:
 	bool Refuse = false;
 	int Code = ENOMEM;
 	std::uint32_t RecordedTarget = 0;
+	std::size_t RecordedItems = 0;
 	Duration Cost = 2ms;
 	RenderMode RecordedMode = RenderMode::Planned;
 	std::uint32_t RecordedGeneration = 0;
@@ -197,11 +224,15 @@ public:
 	{
 		++Evaluations;
 
-		return DrawList{ .Items = {}, .Damage = {}, .EvaluateCost = Cost };
+		return DrawList{ .Items = Items, .Damage = {}, .EvaluateCost = Cost };
 	}
 
 	int Evaluations = 0;
 	Duration Cost{};
+
+	// Bottom-first, the order the partition reads them in. Owned by the caller and outliving the loop,
+	// which is what `DrawList::Items` being a span already asks of a real evaluator.
+	std::span<const DrawItem> Items{};
 };
 
 // A source whose drain delivers a flip, which is how the ordering claim becomes observable: if the
@@ -1582,4 +1613,139 @@ GYRO_TEST(FrameLoop, AWakeThatDeclinesToDrawSaysWhy)
 	// the same shape as the one a frame makes is what a reader has to open to tell them apart.
 	GYRO_CHECK_EQ(declined, std::size_t{ 1 });
 	GYRO_CHECK_EQ(framesOnTheRow, std::size_t{ 0 });
+}
+
+// Decision 152's partition reaching the seam: what the display engine draws, and what is left for the
+// GPU.
+//
+// **The scene these run against is two items, and the interesting one is the top.** Everything below
+// is about which of them lands where, so the items are the smallest that satisfy and fail
+// `IsPromotable` — a texture that resamples not at all, and a solid, which no plane draws.
+
+namespace
+{
+[[nodiscard]] DrawItem Promotable(PixelRect<DeviceSpace> where)
+{
+	DrawItem item{};
+
+	item.Content = DrawTexture{ .Texture = TextureId{ 1, 1 }, .Source = {} };
+	item.Shape = Quad::FromRect(
+		{ { static_cast<float>(where.Origin.X), static_cast<float>(where.Origin.Y) },
+	      { static_cast<float>(where.Extent.Width), static_cast<float>(where.Extent.Height) } }
+	);
+	item.Extent = { static_cast<float>(where.Extent.Width), static_cast<float>(where.Extent.Height) };
+	item.Sampling = TransformClass{ .AxisAligned = true, .Upright = true, .UnitScale = true, .IntegerOffset = true };
+
+	return item;
+}
+
+[[nodiscard]] DrawItem Composited()
+{
+	DrawItem item{};
+
+	item.Content = DrawSolid{ .Red = 1.0F, .Green = 1.0F, .Blue = 1.0F, .Alpha = 1.0F };
+	item.Shape = Quad::FromRect({ {}, { 2560.0F, 1440.0F } });
+	item.Extent = { 2560.0F, 1440.0F };
+
+	return item;
+}
+} // namespace
+
+GYRO_TEST(FrameLoop, PromotesTheTopItemOntoAPlaneAndLeavesTheRestToTheGpu)
+{
+	Harness harness;
+	const std::array<DrawItem, 2> items{ Composited(), Promotable({ { 100, 100 }, { 640, 480 } }) };
+
+	harness.Presenter.Planes = 2;
+	harness.Evaluator.Items = items;
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	// The hardware was asked before anything was recorded, and it was asked about the partition that
+	// was then committed.
+	GYRO_CHECK_EQ(harness.Presenter.Tests, 1);
+	GYRO_CHECK_EQ(harness.Presenter.TestedLayers, std::size_t{ 2 });
+
+	// The composite drew the prefix and not the promoted item, which would otherwise be on the screen
+	// twice — once under an opaque plane and once on it.
+	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 1 });
+
+	GYRO_REQUIRE(harness.Presenter.PresentedLayers.size() == 2);
+	GYRO_CHECK(!harness.Presenter.PresentedLayers[0].Target.IsTexture());
+	GYRO_CHECK(harness.Presenter.PresentedLayers[1].Target.IsTexture());
+
+	// The layer names the id the draw item carried, which is decision 153: nothing on the frame thread
+	// performed a lookup.
+	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers[1].Target.Texture, TextureId{ 1, 1 });
+
+	// Where it lands is the quad's own pixels, exactly, because a promotion resamples not at all.
+	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers[1].Destination.Origin.X, 100);
+	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers[1].Destination.Extent.Width, 640);
+}
+
+GYRO_TEST(FrameLoop, AnOutputWithOnePlaneCompositesEverything)
+{
+	Harness harness;
+	const std::array<DrawItem, 2> items{ Composited(), Promotable({ { 100, 100 }, { 640, 480 } }) };
+
+	harness.Evaluator.Items = items;
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	// One plane is the composite's, so there is nothing to propose and nothing to ask about.
+	GYRO_CHECK_EQ(harness.Presenter.Tests, 0);
+	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 2 });
+	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 1 });
+}
+
+GYRO_TEST(FrameLoop, ARefusedPartitionCompositesTheWholeFrame)
+{
+	Harness harness;
+	const std::array<DrawItem, 2> items{ Composited(), Promotable({ { 100, 100 }, { 640, 480 } }) };
+
+	harness.Presenter.Planes = 2;
+	harness.Presenter.RefuseTest = true;
+	harness.Evaluator.Items = items;
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	// The driver said no — a format, a bandwidth limit, a shared scaler — and the frame composites.
+	// Decision 35's one frame, and nothing a person sees.
+	GYRO_CHECK_EQ(harness.Presenter.Tests, 1);
+	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 2 });
+	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 1 });
+}
+
+GYRO_TEST(FrameLoop, AllPromotableStillLeavesTheGpuOneItem)
+{
+	Harness harness;
+	const std::array<DrawItem, 1> items{ Promotable({ {}, { 2560, 1440 } }) };
+
+	harness.Presenter.Planes = 2;
+	harness.Evaluator.Items = items;
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	// The arrangement the mechanism exists for — every item on a plane and the GPU asleep — is the one
+	// this loop cannot take yet, because the target was acquired before there was a list to partition
+	// and no presenter can be handed one back. So the item is composited and the promotion is dropped,
+	// which is a correct picture at the cost of the render pass. See the comment beside `m_Partition`.
+	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 1 });
+	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 1 });
 }

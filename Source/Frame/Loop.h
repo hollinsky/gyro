@@ -15,6 +15,7 @@
 #include "Core/Trace.h"
 #include "Core/Wake.h"
 #include "Frame/Admission.h"
+#include "Frame/Assign.h"
 #include "Frame/Budget.h"
 #include "Frame/Evaluator.h"
 #include "Frame/FrameClock.h"
@@ -524,6 +525,21 @@ private:
 
 	Region<DeviceSpace> m_Damage{};
 
+	// Last frame's partition, kept for one reason: what the composite is responsible for changed.
+	//
+	// **A promotion has no state and its consequences do.** Decision 152's partition is recomputed from
+	// nothing every frame, which is what makes it glitch-free — but the composite that drew a window
+	// last frame and does not draw it this frame has to repaint where it was, and the composite that is
+	// about to stop being covered by a promoted layer has to repaint what was under it. Neither is
+	// visible in this frame's damage, because nothing in the *scene* changed.
+	//
+	// So a partition that differs from the last one damages the whole output. That is deliberately the
+	// blunt answer: promotion changes when a window starts or stops moving, or when a menu opens over a
+	// video, which is a handful of frames in a session — and each costs one full repaint, which is
+	// decision 35's budget exactly. Tightening it to the union of the quads that changed sides is an
+	// Open.md entry rather than a silence.
+	Partition m_Partition{};
+
 	// The published sequence this output was last evaluated against, or zero before it has drawn
 	// anything.
 	//
@@ -1025,6 +1041,67 @@ private:
 
 		TraceCount("items", static_cast<std::int64_t>(list.Items.size()), output.m_Trace);
 
+		// **Decision 152's partition: which of these items the display engine draws and which the GPU
+		// does.** Recomputed from this frame's list alone, with nothing carried over — see Frame/Assign.h.
+		Partition partition = Assign(list.Items, output.m_Presenter->LayerCeiling());
+
+		// **A composite always happens, and that is this loop's limitation rather than the assigner's.**
+		// A partition that promoted everything wants no render pass and no target at all, which is the
+		// arrangement the whole mechanism exists for — but the target was acquired above, before there was
+		// a list to evaluate, and `IPresenter` has no verb that gives one back. So the bottom promoted
+		// layer goes back into the composite and the GPU draws one item. What it costs is the sleeping-GPU
+		// case, and the fix is to acquire after evaluating rather than before; it is in Open.md.
+		if (!partition.NeedsComposite() && partition.Count != 0)
+		{
+			--partition.Count;
+			++partition.Composited;
+		}
+
+		if (partition != output.m_Partition)
+		{
+			// The composite is responsible for a different part of the screen than it was last frame, and
+			// nothing in the scene says so. See `m_Partition`.
+			output.m_Damage.Add(PixelRect<DeviceSpace>{ {}, output.m_Configuration.Resolution });
+		}
+
+		// The layers this frame would commit, built before anything is recorded so that the hardware can
+		// be asked while there is still time to change the answer. The composite's geometry is known
+		// without drawing it — it is the whole target — and its acquire point is filled in below, after
+		// the record that produces one. A test consumes no fence, which is what makes that order legal.
+		const PixelSize<DeviceSpace> size = targets[target].Size;
+
+		std::array<PresentLayer, MaxLayers> layers{};
+		std::uint32_t count = 0;
+
+		layers[count++] = PresentLayer{
+			.Target = LayerSource{ target },
+			.Blend = BlendMode::Opaque,
+			.Acquire = SyncPoint::Immediate(),
+			.Source = { {}, { static_cast<float>(size.Width), static_cast<float>(size.Height) } },
+			.Destination = { {}, size },
+			.Damage = {},
+			.Color = output.m_Configuration.Color,
+		};
+
+		for (std::uint32_t promoted = 0; promoted < partition.Count; ++promoted)
+		{
+			layers[count++] = Promoted(list.Items[partition.Items[promoted]], output.m_Configuration.Color);
+		}
+
+		// **Asked only where something would be promoted**, so a machine that promotes nothing pays no
+		// ioctl. A refusal is ordinary rather than a fault: a plane's format, its bandwidth, or a scaler
+		// it shares with another pipe are all things only the driver knows, and the answer is that this
+		// frame composites — which is decision 35's one frame and is why the fallback is silent.
+		if (partition.Count != 0 && !output.m_Presenter->TestLayers({ layers.data(), count }))
+		{
+			partition = Partition{ .Composited = static_cast<std::uint32_t>(list.Items.size()) };
+			count = 1;
+
+			output.m_Damage.Add(PixelRect<DeviceSpace>{ {}, output.m_Configuration.Resolution });
+		}
+
+		output.m_Partition = partition;
+
 		// The buffer-age join, and it is built after the evaluator has contributed so that this frame's
 		// own damage is in it. A copy rather than a reference because `RecordRequest` takes the region by
 		// value and the loop must not hand a target's backlog somewhere it could be cleared from — and it
@@ -1044,7 +1121,11 @@ private:
 			                         .Deadline =
 			                             decision.Deadline == FrameClock::Unscheduled ? Instant{} : decision.Deadline,
 			                         .Damage = stale,
-			                         .Items = list.Items };
+			                         // The prefix, which is the whole list wherever nothing was promoted.
+			                         // The suffix is on planes and the composite must not draw it twice — an
+			                         // item drawn under an opaque plane is invisible, and one drawn under a
+			                         // plane the driver later refuses is a window in two places.
+			                         .Items = list.Items.first(partition.Composited) };
 
 		TraceSpan record{ "record", output.m_Trace };
 
@@ -1069,21 +1150,16 @@ private:
 		free = decision.DeviceFreeAt;
 		(void)output.m_Cost.ObserveCpu(decision.Mode(), submission->RecordCost);
 
-		const PixelSize<DeviceSpace> size = targets[target].Size;
-		const PresentLayer layer{
-			.Target = target,
-			.Blend = BlendMode::Opaque,
-			.Acquire = submission->Point,
-			.Source = { {}, { static_cast<float>(size.Width), static_cast<float>(size.Height) } },
-			.Destination = { {}, size },
-			.Damage = output.m_Damage,
-			.Color = output.m_Configuration.Color,
-		};
+		// What the record produced, filled into the layer the test was run against rather than a second
+		// one built here: committing a partition assembled differently from the one the hardware accepted
+		// asks a different question of it.
+		layers[0].Acquire = submission->Point;
+		layers[0].Damage = output.m_Damage;
 
 		{
 			const TraceSpan present{ "present", output.m_Trace };
 
-			if (const Result<void> presented = output.m_Presenter->Present({ &layer, 1 }); !presented)
+			if (const Result<void> presented = output.m_Presenter->Present({ layers.data(), count }); !presented)
 			{
 				TraceMark("refused", output.m_Trace);
 				output.Refuse(presented.error());

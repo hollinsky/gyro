@@ -47,7 +47,7 @@ GYRO_TEST(FrameAssign, PromotesTheStillPlainTopOfTheList)
 {
 	const std::vector<DrawItem> items{ Composited(), Promotable() };
 
-	const Frame::Partition partition = Frame::Assign(items, 4);
+	const Partition partition = Assign(items, 4);
 
 	GYRO_REQUIRE(partition.Count == 1);
 	GYRO_CHECK(partition.Items[0] == 1);
@@ -63,7 +63,7 @@ GYRO_TEST(FrameAssign, WillNotPromoteUnderSomethingComposited)
 {
 	const std::vector<DrawItem> items{ Promotable(), Composited() };
 
-	const Frame::Partition partition = Frame::Assign(items, 4);
+	const Partition partition = Assign(items, 4);
 
 	GYRO_CHECK(partition.Count == 0);
 	GYRO_CHECK(partition.Composited == 2);
@@ -77,7 +77,7 @@ GYRO_TEST(FrameAssign, LeavesNoCompositeWhereEverythingPromoted)
 {
 	const std::vector<DrawItem> items{ Promotable(), Promotable() };
 
-	const Frame::Partition partition = Frame::Assign(items, 2);
+	const Partition partition = Assign(items, 2);
 
 	GYRO_REQUIRE(partition.Count == 2);
 	GYRO_CHECK(partition.Items[0] == 0);
@@ -93,7 +93,7 @@ GYRO_TEST(FrameAssign, KeepsAPlaneForTheComposite)
 {
 	const std::vector<DrawItem> items{ Composited(), Promotable(), Promotable() };
 
-	const Frame::Partition partition = Frame::Assign(items, 2);
+	const Partition partition = Assign(items, 2);
 
 	GYRO_REQUIRE(partition.Count == 1);
 	GYRO_CHECK(partition.Items[0] == 2);
@@ -107,19 +107,19 @@ GYRO_TEST(FrameAssign, PromotesNothingOntoOnePlane)
 {
 	const std::vector<DrawItem> items{ Promotable(), Promotable() };
 
-	const Frame::Partition partition = Frame::Assign(items, 1);
+	const Partition partition = Assign(items, 1);
 
 	GYRO_CHECK(partition.Count == 0);
 	GYRO_CHECK(partition.Composited == 2);
-	GYRO_CHECK(Frame::Assign(items, 0).Count == 0);
-	GYRO_CHECK(Frame::Assign({}, 4).Layers() == 0);
+	GYRO_CHECK(Assign(items, 0).Count == 0);
+	GYRO_CHECK(Assign({}, 4).Layers() == 0);
 }
 
 // Each clause of the predicate, one at a time, because every one of them is a thing a display engine
 // cannot do and would silently drop.
 GYRO_TEST(FrameAssign, RefusesWhatAPlaneCannotDraw)
 {
-	const auto promotes = [](const DrawItem& item) { return Frame::IsPromotable(item); };
+	const auto promotes = [](const DrawItem& item) { return IsPromotable(item); };
 
 	GYRO_CHECK(promotes(Promotable()));
 
@@ -162,17 +162,17 @@ GYRO_TEST(FrameAssign, RefusesAResample)
 	scaled.Sampling.UnitScale = false;
 
 	GYRO_CHECK(scaled.Sampling.IsPlaneExpressible());
-	GYRO_CHECK(!Frame::IsPromotable(scaled));
+	GYRO_CHECK(!IsPromotable(scaled));
 
 	DrawItem offset = Promotable();
 	offset.Sampling.IntegerOffset = false;
 
 	GYRO_CHECK(!offset.Sampling.IsPlaneExpressible());
-	GYRO_CHECK(!Frame::IsPromotable(offset));
+	GYRO_CHECK(!IsPromotable(offset));
 
 	// A general affine that did not reduce reports the whole ladder unset, and is refused with it.
 	DrawItem spun = Promotable();
 	spun.Sampling = TransformClass{};
 
-	GYRO_CHECK(!Frame::IsPromotable(spun));
+	GYRO_CHECK(!IsPromotable(spun));
 }

@@ -5,6 +5,8 @@
 #include <span>
 #include <variant>
 
+#include "Core/ColorState.h"
+#include "Seam/Presenter.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/Renderer.h"
 
@@ -31,8 +33,6 @@
 // pass over the list from the top, and no ioctl — asking the hardware is `IPresenter::TestLayers` and
 // is the caller's business, because it is the expensive half and the one worth caching.
 
-namespace Frame
-{
 // What one frame's draw list was split into.
 struct Partition
 {
@@ -99,7 +99,58 @@ struct Partition
 		return false;
 	}
 
-	return item.Sampling.IsPlaneExpressible() && item.Sampling.IsResampleFree();
+	// **`Upright` as well, which the two readings below deliberately leave out.** `IsResampleFree`
+	// admits a quarter turn because a turn permutes texels and filters nothing — true of a sampler and
+	// not of a plane, which needs a `rotation` property to do it and mostly has none. Nothing reads one
+	// yet, so a turned window is composited; when a plane's rotation is read, this clause is what moves.
+	return item.Sampling.Upright && item.Sampling.IsPlaneExpressible() && item.Sampling.IsResampleFree();
+}
+
+// One promoted item as the layer a presenter is handed.
+//
+// **Every number here is a copy rather than a conversion, and the predicate is why.** A promoted item
+// resamples not at all, so its quad's pixel bounds are exact rather than rounded outward, and the
+// texels it samples are the same count as the pixels it covers — which is what lets a source rectangle
+// stated in the client's buffer be handed to a plane as-is. An item that did not satisfy
+// `IsPromotable` would need a scale here, and there is deliberately nowhere to put one.
+[[nodiscard]] inline PresentLayer Promoted(const DrawItem& item, ColorState color) noexcept
+{
+	const DrawTexture& content = std::get<DrawTexture>(item.Content);
+	const PixelRect<DeviceSpace> destination = item.Shape.PixelBounds();
+
+	PresentLayer layer{};
+	layer.Target = LayerSource{ content.Texture };
+
+	// Opaque because `IsPromotable` refused anything carrying its own alpha — no opacity, no radius,
+	// no material — and what is left is a rectangle of a client's pixels. A buffer whose own texels are
+	// transparent is a case a blend mode per layer will have to carry, and there is no protocol yet
+	// that says which buffers those are.
+	layer.Blend = BlendMode::Opaque;
+
+	// Nothing was recorded for it, so there is nothing to wait for: a promoted layer's pixels were
+	// complete when the client committed them. The client's own fence belongs here when
+	// `zwp_linux_dmabuf_v1` brings one; today a `wl_shm` buffer is copied at commit and has none.
+	layer.Acquire = SyncPoint::Immediate();
+
+	// An empty source means the whole image on both sides of this, so the common case passes through
+	// untouched. A crop is the same numbers read in the other space, which holds only because the
+	// sampling is one-to-one.
+	layer.Source = content.Source.IsEmpty() ?
+	                   Rect<DeviceSpace>{} :
+	                   Rect<DeviceSpace>{ { content.Source.Origin.X, content.Source.Origin.Y },
+		                                  { content.Source.Extent.Width, content.Source.Extent.Height } };
+
+	layer.Destination = destination;
+
+	// The whole image, in the buffer's own grid. A client's damage is not carried this far — a commit
+	// says what changed and nothing between there and here keeps it per buffer — so this is the honest
+	// answer rather than a claim that nothing moved. No backend reads it yet: `FB_DAMAGE_CLIPS` is a
+	// plane property Drm/Output.h does not program.
+	layer.Damage.Add(PixelRect<DeviceSpace>{ {}, destination.Extent });
+
+	layer.Color = color;
+
+	return layer;
 }
 
 // Split a frame's draw list. `ceiling` is `IPresenter::LayerCeiling` — the planes this output has —
@@ -151,4 +202,3 @@ struct Partition
 
 	return partition;
 }
-} // namespace Frame
