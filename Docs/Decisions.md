@@ -11673,3 +11673,116 @@ node at rest under a fractional scale.
 **Rejected: letting the plane scaler serve a resampling node.** It reads as free — the scaler is
 sitting there — and it makes the sharpness of a window change on the frame it was handed over, which
 is the minification argument arriving at the worst possible moment.
+
+### 153. A promoted layer names a texture id, and a scanout framebuffer is a second importer on the same id space
+
+*(Decided 2026-08-25, on finding that decision 152's partition had nothing it could promote.)*
+
+**The assigner works and the seam cannot say what it decided.**
+[Seam/Presenter.h](../Source/Seam/Presenter.h) has `PresentLayer::Source` as an index into the
+presenter's own ring, and a promotable draw item carries a `TextureId` naming an image in the
+renderer's import table. There is no bridge, which the header has said in its own words since
+[decision 78](#78-present-takes-a-layer-list-and-the-composite-is-one-member-of-it) — so `Frame/Assign.h`
+partitions a list into layers that cannot be spelled, and every real frame falls back to compositing
+everything.
+
+**The answer is that a promoted layer names the texture id directly, and the presenter resolves it.**
+`TextureId` is already in `Core` — [decision 87](#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)
+put it there — so the waist may name one, and the item that was going to be promoted is already
+carrying the only identity it has. `PresentLayer::Source` becomes *either* an index into `Targets()`
+or a texture id, and nothing on the frame thread performs a lookup: it names the id, and a backend
+that cannot scan that image out refuses the partition through `TestLayers`, which is the answer that
+mechanism exists to give.
+
+**So there are two importers over one id space, and that is the whole design.** `ITextureImporter`
+makes an id name pixels a renderer can sample; a second interface beside it makes the same id name a
+framebuffer a display engine can scan out. One id, two questions, asked of two devices that need not
+be the same device. The composition root already drives adoption and re-adoption across a device
+rebuild for the first; it drives the second from the same place, over the same ids, in the same pass —
+which is the property [decision 131](#131-texture-import-is-a-second-interface-and-a-texture-retires-on-the-watermark)
+went to the waist to get, arriving a second time for a second reason.
+
+**It belongs to the device rather than to the presenter, for `Render/Textures.h`'s reason exactly.** A
+presenter is per output. A table hung off one would hold a framebuffer per monitor for every window on
+the machine, and re-import the same client buffer once per panel it happens to be visible on. A
+framebuffer is per *card* — `drmModeAddFB2` is an object on a device — so a two-GPU laptop legitimately
+holds two for one window on two screens, and a two-monitor card holds one.
+
+#### Retirement is the flip, and this is where it stops resembling a texture
+
+**A texture retires on the watermark and a scanout framebuffer does not.** Decision 131's rule is that
+the watermark says the scene stopped naming an id, and the importer then holds the image until its own
+completion says the reads are over — the renderer's queue, in that case. Here the reader is the display
+engine, the completion is the page flip, and the difference is not a detail: the last commit that named
+a framebuffer keeps scanning it out until the *next* flip replaces it, which is after the sequence that
+named it went below the watermark.
+
+**And removing one early is worse than a leak.** `drm_mode_rmfb` calls `drm_framebuffer_remove`, which
+disables every plane still using the framebuffer — a modeset, taken on whatever thread called it, on a
+device where `Reconfigure` exists precisely because [decision 73](#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it)
+found that path unbounded. So a framebuffer released on the watermark, in the ordinary case of a window
+that stopped being promoted, would blank the plane it is on and stall a `SCHED_FIFO` thread doing it.
+That is a claim read from the kernel's contract rather than measured, and it names the function so the
+next agent can retire it in an afternoon.
+
+**The rule is therefore the same sentence with a different completion.** `Forget` returns having
+promised to release; the scanout importer holds the framebuffer until the flip that stops scanning it
+out, and reclaims it at a frame boundary. `Drm/Output.cpp` already tracks exactly that — the scanout
+and in-flight masks decision 152's multi-layer commit introduced are the set of images the panel is
+reading, and a framebuffer is reclaimable when it is in neither.
+
+**The GEM handle underneath is refcounted by the kernel and not by the caller**, which is the bug this
+paragraph exists to prevent. `drmPrimeFDToHandle` returns the *same* handle for two imports of one
+dmabuf on one device, so a table that closes its handle when one importer is done has invalidated the
+other's — a window that goes black when an unrelated window closes, on the machine where two clients
+share a buffer or one client's buffer is promoted on two outputs. The table is keyed on the dmabuf's
+identity and holds one handle with a count, and this is written down because every compositor that has
+shipped this got it wrong once.
+
+#### Who imports, and when
+
+**Candidacy is the slow loop's answer and promotion is the frame's, and they must not be conflated.**
+A client buffer laid out for GPU sampling may carry a modifier no plane scans out, and correcting it is
+a `zwp_linux_dmabuf_v1` feedback tranche and a client round trip. That negotiation decides *which
+buffers are worth importing for scanout at all*; decision 152's partition decides *whether to promote
+on this frame*. A buffer in a scanout tranche is imported by both importers at commit; one that is not
+is imported by the texture importer alone and simply never promotes.
+
+**Until there is feedback to read, every dmabuf buffer is offered to both**, and that is the honest
+interim rather than a placeholder. `Protocol` has `wl_shm` and no `zwp_linux_dmabuf_v1`, so today the
+question does not arise; when it does, the cost of offering is one `AddFB2` per distinct buffer per
+device, which a client cycling three buffers pays three times rather than per frame, and which a plane
+that cannot scan out the modifier answers by declining. A `wl_shm` buffer is never offered: its pixels
+are copied into gyro's own memory at commit, which is not a dmabuf and has nothing to scan out.
+
+**The frame thread never asks for an import**, which is what keeps this off the deadline. It names an
+id; the id either resolves on that device or it does not; a partition that names one it cannot resolve
+is refused whole and the frame composites, which is
+[decision 35](#35-a-miss-costs-one-frame-bounded-by-the-floor-composite)'s cost and no more.
+
+#### Rejected alternatives
+
+**Rejected: importing at configuration time for a bounded set of promotable surfaces.** Open.md's first
+shape. It bounds what may be promoted by something other than the assigner, which is decision 152's
+per-frame partition losing the property that makes it worth having — a set decided in advance is
+sticky state on a surface under a different name.
+
+**Rejected: the layer carrying the dmabuf description inline, with the backend caching framebuffers
+against it.** Open.md's second. It puts a cache's eviction policy on the frame path, and the frame path
+is the one place nothing may allocate; a cache that may not evict is a leak, and one that may is an
+`AddFB2` inside the frame section.
+
+**Rejected: the composition root owning the import.** Open.md's third. It is a third party inside a
+per-frame decision, and it is unnecessary once the id space is shared: the root already drives adoption
+across a rebuild, and that is a lifetime concern rather than a per-frame one.
+
+**Rejected: a second id space for scanout.** It reads as the tidier factoring — a texture id for
+sampling, a scanout id for planes — and it costs a map from one to the other that somebody has to own
+and that the frame thread would have to read. Two ids for one image is also two things that can be
+retired at different times, which is exactly the defect the paragraph above is about. One id, two
+importers, two retirement rules stated where they differ.
+
+**Rejected: making it a verb on `ITextureImporter`.** The two are implemented by different modules
+against different devices — `Render` holds the sampler's table and `Drm` would hold the scanner's —
+and a machine composites on one card and scans out on another. A single interface would put both on
+whichever device the renderer happens to be.

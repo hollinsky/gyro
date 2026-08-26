@@ -738,6 +738,17 @@ nothing only proves the grep.
   composition root owns the import as it owns migration, which is a third party in a per-frame
   decision. This blocks nothing today and blocks plane assignment entirely, so it wants answering
   before that is written rather than during.
+
+  **Answered by [decision 153](Decisions.md#153-a-promoted-layer-names-a-texture-id-and-a-scanout-framebuffer-is-a-second-importer-on-the-same-id-space),
+  and none of the three shapes above is it.** *(2026-08-25.)* A promoted layer names the `TextureId`
+  the draw item was already carrying, and a second importer beside `ITextureImporter` makes that same
+  id name a framebuffer on a card. One id space, two importers, two devices that need not be the same
+  one — so the frame thread performs no lookup and the composition root drives both from where it
+  already drives one. What the entry adds that this one did not see is that the retirement rule is
+  *not* decision 131's: a scanout framebuffer is still being read by the display engine after the
+  sequence that named it went below the watermark, and `drm_framebuffer_remove` disables the planes
+  using one, so releasing it on the watermark would blank a plane and take a modeset on the frame
+  thread.
 - **How a texture is minted, and who holds it.** *(Shape answered 2026-08-23; the minter answered the
   same day. The Vulkan arm remains.)* [Decision 82](Decisions.md#82-the-renderer-is-handed-an-evaluated-draw-list-not-a-scene)
   has a draw item name a `TextureId` and nothing in `IRenderer` creates one, on the grounds that a
