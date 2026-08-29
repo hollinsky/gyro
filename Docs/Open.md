@@ -33,18 +33,26 @@ forwarded into. An entry can name its source correctly and still ask after a mec
 there, and what settles that is enumerating everything the source *does* do — a grep that finds
 nothing only proves the grep.
 
-- **The two client-reachable `wl_abort` sites**, which
-  [decision 2](Decisions.md#2-gyro-owns-the-protocol-seam-libwayland-implements-the-server-codec)
-  closes with a wrapper that refuses to publish a resource id before its implementation is set, and
-  with a generated dispatch table that cannot have a hole. Neither is written, both are small, and
-  the failure they prevent is a machine-wide abort at a moment a client picks. The wrapper is the
-  sort of thing that is obvious now and invisible once there are two hundred `wl_resource_create`
-  calls.
+A sixth left by neither route: it named work rather than a question, and the work is written. *The
+two client-reachable `wl_abort` sites* asked for a wrapper that cannot publish a resource id before
+its implementation is set and a dispatch table that cannot have a hole, and both are now what
+[Tools/Bindings](../Tools/Bindings/Emit.Server.cpp) emits — `Create` is the only door onto a
+resource and its two calls are adjacent, and the table is declared and filled from one walk over the
+XML. Writing it surfaced a third thing the entry did not know to ask for, and that one *was* settled
+by reading: for the core protocol the `wl_interface` libwayland bounds an opcode against is
+libwayland's own rather than the one the table was generated from, so the two agree by shipping in a
+single package rather than by construction. The bindings now compare the counts before a resource of
+that type can exist. An entry that names work can still be hiding a question, and the way to find out
+is to do the work.
+
 - **Re-reading the abort inventory on major libwayland bumps.** The count went 6 → 18 across 1.23 to
   1.24, and the reading behind decision 2 is a snapshot of `1.26.0-9-ged0b9f1` rather than a
   property of the library. What wants watching specifically is a new site reachable from client
   input with no gyro bug in front of it, since that is the first of the three conditions decision 2
-  names for reopening the in-tree server half.
+  names for reopening the in-tree server half. The two *client-reachable* sites are closed
+  structurally by the generated bindings and no longer depend on the reading — what a bump can still
+  move is the rest of the inventory, which is gyro's own API misuse and wants a person rather than a
+  compare.
 - **Tone mapping and gamut mapping policy**, in both directions, deferred by decision 47 as
   additive. The SDR-on-HDR direction is where every shipping system has gone wrong, and the rule is
   that SDR white maps to a reference — BT.2408 says 203 nits — or to a stated user preference, and

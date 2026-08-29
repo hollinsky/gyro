@@ -178,6 +178,29 @@ where this project is actually differentiated.
 one version and the trend is upward — 6 sites in 1.23, 18 in 1.24 — so it wants re-reading on major
 version bumps rather than being treated as settled forever.
 
+**Both closures are built, and building them found a third site the reading missed.** *(2026-08-29.)*
+`Create` in the generated server bindings is the only door onto a resource and calls
+`wl_resource_set_implementation` before it returns; the implementation table is declared and
+initialised from one walk over the XML, so it has an entry per request and nothing else. What neither
+closure covers is that the table is sized by the XML on disk while the *bounds check* is sized by the
+linked library: for the core protocol libwayland exports `wl_surface_interface` and the rest itself,
+so the bindings describe those rather than defining them — a second definition is a duplicate symbol
+— and libwayland resolves `implementation[opcode]` after bounding the opcode against its own
+`method_count`. The two numbers agree because `wayland.xml` and `libwayland-server.so` normally ship
+in one package, which is a packaging habit rather than a property. A library describing more requests
+than the bindings were generated from restores exactly the hole this entry claimed was unspellable,
+and the failure is the same one: a machine-wide abort at a moment a client picks. So `Create` and
+`Advertise` compare `method_count` against the emitted count, refuse the object or the global, and
+record a fault. One integer compare per resource creation on the dispatch thread, and it folds away
+entirely for every protocol whose `wl_interface` the bindings define themselves.
+
+**Rejected: refusing on a mismatch in either direction.** A library describing *fewer* requests than
+the bindings is also a skew and also a bug, but the bound is then tighter than the table and no abort
+is reachable — what a client sees is a request rejected as unknown, which is what it would see from a
+compositor that had not implemented it. Refusing to advertise the global there would turn a
+degraded install into no compositor at all, which is the wrong trade for a fault sink whose whole
+premise is that gyro's own mistakes are recorded and survived.
+
 ### 3. io_uring event loop via liburing
 
 `IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN`, timer-first.

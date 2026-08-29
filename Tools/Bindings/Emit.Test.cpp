@@ -602,6 +602,83 @@ GYRO_TEST(Emit, EveryRequestHasASlotInTheDispatchTable)
 	GYRO_CHECK(checked > 20);
 }
 
+GYRO_TEST(Emit, TheTableIsMeasuredAgainstTheLibraryThatIndexesIt)
+{
+	// The seam the previous test cannot see. A table with one entry per request is only hole-free
+	// against the `wl_interface` these bindings were generated from, and for the core protocol that is
+	// not the structure libwayland bounds the opcode against — libwayland exports `wl_surface_interface`
+	// itself, so the emitted file describes it and links whatever the installed library defines. The
+	// two agree because they usually ship in one package, which is not a guarantee, so the count is
+	// compared before an object of that type can exist.
+	const std::string_view paths[] = { WaylandXml, XdgShellXml, LinuxDmabufXml, PresentationTimeXml };
+	const Generated generated = Generate(paths, Direction::Server);
+
+	if (!generated.Note.empty())
+	{
+		GYRO_FAIL(generated.Note);
+		return;
+	}
+
+	std::size_t checked = 0;
+
+	for (const ProtocolSource& source : generated.Sources)
+	{
+		const std::string* const text =
+			generated.Find(std::format("Wayland/Server/{}.cpp", Pascalled(source.Model.Name)));
+		GYRO_REQUIRE(text != nullptr);
+
+		for (const Interface& interface : source.Model.Interfaces)
+		{
+			if (interface.Name == "wl_display" || interface.Name == "wl_registry")
+			{
+				continue;
+			}
+
+			const std::string name = Pascalled(interface.Name);
+			const std::string count = std::format("Wire{}RequestCount", name);
+
+			// The length as a number, and it is the XML's number rather than a plausible one.
+			const std::string declaration = std::format("constexpr int {} = {};", count, interface.Requests.size());
+
+			if (Occurrences(*text, declaration) != 1)
+			{
+				GYRO_FAIL(std::format("{} does not declare its request count", interface.Name));
+				continue;
+			}
+
+			const std::string guard = std::format("{}_interface.method_count > {}", interface.Name, count);
+
+			// In `Create`, before the resource exists: a client is refused an object rather than handed
+			// one whose opcodes libwayland will resolve past the end of the table.
+			const std::string_view creating = Body(*text, std::format("{0} {0}::Create(", name));
+
+			if (Occurrences(creating, guard) != 1)
+			{
+				GYRO_FAIL(std::format("{} is created without measuring the table", interface.Name));
+				continue;
+			}
+
+			GYRO_CHECK(creating.find(guard) < creating.find("wl_resource_create("));
+
+			// And in `Advertise`, which is the one call that happens before any client exists — so a
+			// skewed install is a startup fault naming the interface rather than a refusal at bind.
+			const std::string_view advertising = Body(*text, std::format("wl_global* {}::Advertise(", name));
+
+			if (Occurrences(advertising, guard) != 1)
+			{
+				GYRO_FAIL(std::format("{} is advertised without measuring the table", interface.Name));
+				continue;
+			}
+
+			GYRO_CHECK(advertising.find(guard) < advertising.find("wl_global_create("));
+
+			++checked;
+		}
+	}
+
+	GYRO_CHECK(checked > 20);
+}
+
 GYRO_TEST(Emit, AResourceIsNeverCreatedWithoutItsImplementation)
 {
 	// The first of decision 2's two claims, and the one a wrapper is supposed to make unspellable.

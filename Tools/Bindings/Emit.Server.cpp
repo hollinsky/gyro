@@ -983,7 +983,21 @@ void EmitImplementationTable(std::string& out, const Interface& interface)
 		);
 	}
 
-	out += "};\n\n";
+	// The length as a number, because the table's own length is not a thing the code that hands it to
+	// libwayland can ask for — the members are distinct function pointer types and a `sizeof` quotient
+	// would be arithmetic standing in for the XML. `int` rather than `std::size_t` to match the
+	// `method_count` it exists to be compared against.
+	std::format_to(
+		std::back_inserter(out),
+		"}};\n"
+		"\n"
+		"// How long the table above is. The party that bounds an opcode against it is libwayland, and\n"
+		"// for the core protocol that is a different source than this one — see `Create`.\n"
+		"constexpr int {} = {};\n"
+		"\n",
+		Trampoline(interface, "RequestCount"),
+		interface.Requests.size()
+	);
 }
 
 void EmitBindTrampoline(std::string& out, const Interface& interface)
@@ -1152,6 +1166,27 @@ void EmitResourceDefinitions(std::string& out, const Interface& interface, bool 
 			"\t\treturn {{}};\n"
 			"\t}}\n"
 			"\n"
+			"\t// **The table is sized by the XML and the bounds check is sized by the linked library.**\n"
+			"\t// libwayland dispatches a request as `implementation[opcode]` after bounding the opcode\n"
+			"\t// against `{3}.method_count`, and for the core protocol that structure is\n"
+			"\t// libwayland's own — this file describes it rather than defining it, because defining a\n"
+			"\t// second one is a duplicate symbol. So the two agree by shipping in one package rather\n"
+			"\t// than by construction, and a library describing more requests than these bindings were\n"
+			"\t// generated from puts back the hole decision 2 closed: a null entry libwayland resolves\n"
+			"\t// by aborting the process, at a moment a client picks. Refusing here costs that client\n"
+			"\t// its window; the abort costs every client of every user on the machine their screen.\n"
+			"\tif ({3}.method_count > {6})\n"
+			"\t{{\n"
+			"\t\tRecordFault(\"libwayland describes more {2} requests than these bindings implement\");\n"
+			"\n"
+			"\t\twl_client_post_implementation_error(\n"
+			"\t\t\t&client,\n"
+			"\t\t\t\"{2} is not implemented at the version this compositor was built against\"\n"
+			"\t\t);\n"
+			"\n"
+			"\t\treturn {{}};\n"
+			"\t}}\n"
+			"\n"
 			"\tconst std::uint32_t wireVersion = version < WireVersion ? version : WireVersion;\n"
 			"\n"
 			"\twl_resource* const wireResource =\n"
@@ -1184,6 +1219,16 @@ void EmitResourceDefinitions(std::string& out, const Interface& interface, bool 
 			"\t\treturn nullptr;\n"
 			"\t}}\n"
 			"\n"
+			"\t// `Create`'s check, brought forward to the one call that happens before any client exists.\n"
+			"\t// A skewed install then says so at startup with the interface named, rather than at the\n"
+			"\t// first `bind` with a client to blame.\n"
+			"\tif ({3}.method_count > {6})\n"
+			"\t{{\n"
+			"\t\tRecordFault(\"libwayland describes more {2} requests than these bindings implement\");\n"
+			"\n"
+			"\t\treturn nullptr;\n"
+			"\t}}\n"
+			"\n"
 			"\treturn wl_global_create(&display, &{3}, static_cast<int>(version), &binding, &{5});\n"
 			"}}\n"
 			"\n"
@@ -1202,7 +1247,8 @@ void EmitResourceDefinitions(std::string& out, const Interface& interface, bool 
 			interface.Name,
 			WireInterfaceSymbol(interface.Name),
 			Trampoline(interface, "Table"),
-			Trampoline(interface, "Bind")
+			Trampoline(interface, "Bind"),
+			Trampoline(interface, "RequestCount")
 		);
 	}
 
