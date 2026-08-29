@@ -11059,6 +11059,23 @@ against a part that reaches roughly 1.3 GHz, which is why a blur chain over an 8
 takes four distinct values in 1,200 samples. Neither is a new fact — both numbers were in the old
 trace. They were unreadable beside 3,000 arrows, which is the entire argument for this entry.
 
+*Revised 2026-08-29: a sixth row, because the flight lane's opening edge was a lie on the held
+path.* A lane opens when a present is accepted, and a backend that cannot fence waits for the
+composite before issuing the ioctl — so on that path the lane drew a frame as in the panel's hands
+for exactly the stretch it was still gyro's. The DRM backend's first marks for this (`flip issued`,
+`flip event`, and the four silent exits) went on the frame thread's row, tagged with a private
+commit counter and the kernel's vblank counter — numbers nothing else in the trace speaks, on a row
+where two panels' flips interleave unattributed. The correction is this entry's own rule applied to
+the party that was exempt from it: the presenter draws on a row of its own, between the flight lanes
+and the glass — a `held` slice whose width is the lie, then the issue and the landing as marks — and
+every record is named for the frame. The row and the number cross the seam per present as
+`Seam/Presenter.h`'s `PresentTrace`, which is `RecordRequest.Trace`'s reason applied to the second
+interface: a backend serves one output and does not know which, and a flip lands with no loop on the
+stack to say the name for it. Not slices on the frame thread's row, because a hold opens inside one
+loop iteration and resolves in another — a slice beginning inside `frame N` and ending outside it is
+the overlap Perfetto refuses. The kernel's own sequence survives where it is the only identity there
+is, on `flip event unclaimed`, which is what unclaimed means.
+
 ### 145. The DRM backend takes master by opening the node, and libdrm stops at the frame section
 
 The backend decision 5 designed the seam from, built. It fits without moving anything at the waist,

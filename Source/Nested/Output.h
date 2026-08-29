@@ -135,7 +135,9 @@ public:
 
 	[[nodiscard]] std::optional<std::uint32_t> AcquireTarget() override;
 
-	[[nodiscard]] Result<void> Present(std::span<const PresentLayer> layers) override;
+	using IPresenter::Present;
+
+	[[nodiscard]] Result<void> Present(std::span<const PresentLayer> layers, PresentTrace trace) override;
 
 	void Reconfigure(const OutputConfiguration& wanted) override;
 

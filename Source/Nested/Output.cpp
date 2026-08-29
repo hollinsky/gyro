@@ -311,7 +311,7 @@ std::optional<std::uint32_t> NestedOutput::AcquireTarget()
 	return std::nullopt;
 }
 
-Result<void> NestedOutput::Present(std::span<const PresentLayer> layers)
+Result<void> NestedOutput::Present(std::span<const PresentLayer> layers, PresentTrace)
 {
 	if (!m_Configuration.Powered)
 	{

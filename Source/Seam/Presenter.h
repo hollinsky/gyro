@@ -7,6 +7,7 @@
 #include "Core/ColorState.h"
 #include "Core/Result.h"
 #include "Core/Signal.h"
+#include "Core/Trace.h"
 #include "Geometry/Region.h"
 #include "Geometry/Space.h"
 #include "Seam/OutputConfiguration.h"
@@ -92,6 +93,20 @@ struct PresentLayer
 	Region<DeviceSpace> Damage;
 
 	ColorState Color = ColorState::Srgb();
+};
+
+// Where a commit's journey is drawn, and what the drawings are named. `Core/Trace.h`'s
+// `TraceCommit(output)` and the frame's number, travelling per call for Seam/Renderer.h's
+// `RecordRequest` reason: a backend serves one output and does not know which, and everything the
+// records need to *label* what happens after the ioctl has to be in hand when it happens — a flip
+// lands, a held commit is abandoned, and the loop is not on the stack for either. `frame 142` on the
+// commit row is the same words as on every other row, which is how a reader joins them.
+struct PresentTrace
+{
+	std::uint16_t Trace = TraceThread;
+
+	// Zero from a caller that has no frame to name.
+	std::uint64_t Frame = 0;
 };
 
 class IPresenter
@@ -203,7 +218,11 @@ public:
 	//
 	// Success means the commit was accepted, never that anything reached the glass. That arrives as
 	// Presented, or does not arrive at all.
-	virtual Result<void> Present(std::span<const PresentLayer> layers) = 0;
+	virtual Result<void> Present(std::span<const PresentLayer> layers, PresentTrace trace) = 0;
+
+	// The spelling for a caller with no row to draw on and no frame to name — a test driving one
+	// backend, never the loop. Backends re-expose it with `using IPresenter::Present`.
+	Result<void> Present(std::span<const PresentLayer> layers) { return Present(layers, {}); }
 
 	// Program the output to be this.
 	//

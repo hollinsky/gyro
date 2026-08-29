@@ -2111,6 +2111,17 @@ several because commits complete in the order they were made, so frame N opens b
 before it, which is the one shape a track refuses; a lane per commit slot is the honest drawing
 anyway, since how many lanes are occupied at an instant is the queue depth read without a counter.
 
+*The commit row* is the backend's stretch of that flight, which is the part the lane cannot draw
+honestly: a lane opens when a present is accepted, and a backend that cannot fence holds the commit
+until the composite lands — so on that path the lane draws a frame as in the panel's hands for
+exactly as long as it is still gyro's. The presenter draws the correction itself: a `held` slice
+whose width is that lie, a mark where the flip ioctl was issued, and a mark where the drain heard it
+land, all named for the frame. The row and the frame number cross the seam per present as
+`PresentTrace`, for `RecordRequest`'s reason — a backend serves one output and does not know which,
+and a flip lands with no loop on the stack. It is a row of its own rather than slices on the frame
+thread's row because a hold opens inside one loop iteration and resolves in another, which is the
+overlapping shape a track refuses.
+
 *The glass row* is what a person saw. One slice per frame shown, opened at the host's presentation
 instant rather than where the feedback was drained — a slice placed where the loop *learned* of a
 flip moves with every late wake, and would read a stutter of the reader as a lateness of the host —

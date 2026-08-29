@@ -34,7 +34,7 @@ public:
 
 	[[nodiscard]] std::optional<std::uint32_t> AcquireTarget() override { return std::nullopt; }
 
-	Result<void> Present(std::span<const PresentLayer>) override { return {}; }
+	Result<void> Present(std::span<const PresentLayer>, PresentTrace) override { return {}; }
 
 	void Reconfigure(const OutputConfiguration&) override {}
 };

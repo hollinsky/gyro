@@ -132,7 +132,9 @@ public:
 		return std::nullopt;
 	}
 
-	Result<void> Present(std::span<const PresentLayer> layers) override
+	using IPresenter::Present;
+
+	Result<void> Present(std::span<const PresentLayer> layers, PresentTrace) override
 	{
 		if (!m_Configuration.Powered)
 		{

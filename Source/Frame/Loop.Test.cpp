@@ -91,7 +91,9 @@ public:
 		return {};
 	}
 
-	Result<void> Present(std::span<const PresentLayer> layers) override
+	using IPresenter::Present;
+
+	Result<void> Present(std::span<const PresentLayer> layers, PresentTrace) override
 	{
 		++Presents;
 		PresentedDamage = layers.empty() ? Region<DeviceSpace>{} : layers[0].Damage;

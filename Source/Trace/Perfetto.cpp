@@ -59,6 +59,11 @@ using namespace Perfetto;
 		return std::format("output {} flight {}", output, lane - 3);
 	}
 
+	if (lane == 3 + TracedFlights)
+	{
+		return std::format("output {} commit", output);
+	}
+
 	return std::format("output {} glass", output);
 }
 

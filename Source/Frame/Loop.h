@@ -533,6 +533,11 @@ private:
 
 	// The refresh this output is aiming at, and what is on its glass.
 	std::uint16_t m_TraceGrid = TraceThread;
+
+	// The backend's stretch of the flight, handed out on every present because the backend serves one
+	// output and does not know which — Seam/Presenter.h's `PresentTrace`, which is Seam/Renderer.h's
+	// `RecordRequest` reason.
+	std::uint16_t m_TraceCommit = TraceThread;
 	std::uint16_t m_TraceGlass = TraceThread;
 
 	// Where this output's refresh ruler has been drawn up to, so the next tile abuts it exactly. The
@@ -672,6 +677,7 @@ public:
 			m_Outputs[index].m_TraceGpu = TraceGpu(index);
 			m_Outputs[index].m_TraceGrid = TraceGrid(index);
 			m_Outputs[index].m_TraceGlass = TraceGlass(index);
+			m_Outputs[index].m_TraceCommit = TraceCommit(index);
 			m_Outputs[index].m_TraceFlight = TraceFlight(index, 0);
 		}
 	}
@@ -1308,7 +1314,10 @@ private:
 		{
 			const TraceSpan present{ "present", output.m_Trace };
 
-			if (const Result<void> presented = output.m_Presenter->Present({ layers.data(), count }); !presented)
+			if (const Result<void> presented = output.m_Presenter->Present(
+					{ layers.data(), count }, { .Trace = output.m_TraceCommit, .Frame = decision.Sequence }
+				);
+			    !presented)
 			{
 				// The presenter's own words and its code, for the reason the record refusal above gives — and
 				// this is the site that wanted both. A composite that reaches here has already been paid for

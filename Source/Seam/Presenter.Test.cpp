@@ -52,7 +52,9 @@ public:
 		return std::nullopt;
 	}
 
-	Result<void> Present(std::span<const PresentLayer> layers) override
+	using IPresenter::Present;
+
+	Result<void> Present(std::span<const PresentLayer> layers, PresentTrace) override
 	{
 		// The one refusal this fake models, and the one decision 73 names: an output between the two
 		// verbs holds its last frame and does not present.

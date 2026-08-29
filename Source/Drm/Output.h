@@ -93,7 +93,9 @@ public:
 
 	[[nodiscard]] std::optional<std::uint32_t> AcquireTarget() override;
 
-	[[nodiscard]] Result<void> Present(std::span<const PresentLayer> layers) override;
+	using IPresenter::Present;
+
+	[[nodiscard]] Result<void> Present(std::span<const PresentLayer> layers, PresentTrace trace) override;
 
 	// `DRM_MODE_ATOMIC_TEST_ONLY` over exactly the commit `Present` would make. This is the party
 	// Seam/Presenter.h says knows the answer, and it is the only one: what a display engine refuses is a
@@ -178,6 +180,10 @@ private:
 		std::array<PresentLayer, MaxLayers> Layers{};
 		std::uint32_t Count = 0;
 		bool Waiting = false;
+
+		// The name the hold's slice was opened under, kept so the flip that ends the wait says the
+		// same words.
+		std::uint64_t Frame = 0;
 	};
 
 	// Where one plane's properties sit in the preallocated commit.
@@ -200,8 +206,9 @@ private:
 	void DropTargets() noexcept;
 
 	// The frame commit: plane properties only, non-blocking, asking for a page-flip event. No libdrm
-	// and no allocation; see the header comment.
-	[[nodiscard]] Result<void> Flip(std::span<const PresentLayer> layers, std::span<const Fd> fences);
+	// and no allocation; see the header comment. `frame` is what the records it writes are named for.
+	[[nodiscard]] Result<void>
+	Flip(std::span<const PresentLayer> layers, std::span<const Fd> fences, std::uint64_t frame);
 
 	// Whether this output could program that partition at all, which is the half of the question that
 	// needs no ioctl: a layer per plane, and every image one this output owns.
@@ -298,6 +305,12 @@ private:
 
 	bool m_Fenced = false;
 	std::uint64_t m_HeldCommits = 0;
+
+	// The row this output's records land on and the frame whose flip is outstanding, both from the
+	// last `Present`. The row is `PresentTrace`'s and not remembered across a presenter rebuild —
+	// decision 41 replaces one by constructing another, and a per-call row needs no re-handshake.
+	std::uint16_t m_Trace = TraceThread;
+	std::uint64_t m_FlippingFrame = 0;
 
 	// A reconfiguration the drain has not answered yet. Held as the request rather than as a flag,
 	// because what is echoed back is its generation.

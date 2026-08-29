@@ -82,7 +82,7 @@ inline constexpr std::uint16_t TraceThread = 0;
 // The rows were previously grouped the other way — every output's GPU row together, every output's
 // deadline row together — which reads fine with one monitor and puts four screens' worth of rows
 // between a frame and its own pixels with two.
-inline constexpr std::uint16_t TraceLanesPerOutput = static_cast<std::uint16_t>(4 + TracedFlights);
+inline constexpr std::uint16_t TraceLanesPerOutput = static_cast<std::uint16_t>(5 + TracedFlights);
 
 [[nodiscard]] constexpr std::uint16_t TraceLane(std::size_t output, std::uint16_t lane) noexcept
 {
@@ -132,6 +132,18 @@ inline constexpr std::uint16_t TraceLanesPerOutput = static_cast<std::uint16_t>(
 	return TraceLane(output, static_cast<std::uint16_t>(3 + (slot < TracedFlights ? slot : 0)));
 }
 
+// **The backend's stretch of the flight, which is the part the lane above cannot draw honestly.** A
+// flight lane opens when a present is accepted, and on a backend that holds commits the kernel has
+// nothing yet — the frame is still gyro's for as long as the composite takes. This row is the
+// presenter's own: a `held` slice from acceptance to the ioctl, a mark where the flip was issued,
+// and a mark where it landed. A row of its own rather than slices on the frame row, because a hold
+// opens inside one loop iteration and resolves in another — a slice doing that on a row the loop
+// draws would begin inside `frame N` and end outside it, which is the overlap Perfetto refuses.
+[[nodiscard]] constexpr std::uint16_t TraceCommit(std::size_t output) noexcept
+{
+	return TraceLane(output, static_cast<std::uint16_t>(3 + TracedFlights));
+}
+
 // What is on the glass. One slice per vblank, tiling, named for the *frame* it showed and carrying the
 // publication behind it as an attribute — so a frame scanned out twice is one wide slice rather than
 // two marks a reader has to notice are the same number, and that is the only thing this row merges.
@@ -139,7 +151,7 @@ inline constexpr std::uint16_t TraceLanesPerOutput = static_cast<std::uint16_t>(
 // dozen different pictures and drew an animation as a freeze.
 [[nodiscard]] constexpr std::uint16_t TraceGlass(std::size_t output) noexcept
 {
-	return TraceLane(output, static_cast<std::uint16_t>(3 + TracedFlights));
+	return TraceLane(output, static_cast<std::uint16_t>(4 + TracedFlights));
 }
 
 inline constexpr std::uint16_t TraceScopes = static_cast<std::uint16_t>(1 + TracedOutputs * TraceLanesPerOutput);

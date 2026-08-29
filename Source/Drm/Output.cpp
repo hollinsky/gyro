@@ -390,7 +390,7 @@ void DrmOutput::DropTargets() noexcept
 
 	// **Tagged with what was in flight when it ran**, because this clears `m_Flipping` with no event
 	// behind it: a one here is a commit the kernel is still holding and this output has forgotten.
-	TraceMark("targets dropped", TraceThread, TraceTag(m_Flipping ? 1 : 0));
+	TraceMark("targets dropped", m_Trace, TraceTag(m_Flipping ? 1 : 0));
 
 	m_TargetCount = 0;
 	m_Next = 0;
@@ -429,8 +429,12 @@ std::optional<std::uint32_t> DrmOutput::AcquireTarget()
 	return std::nullopt;
 }
 
-Result<void> DrmOutput::Present(std::span<const PresentLayer> layers)
+Result<void> DrmOutput::Present(std::span<const PresentLayer> layers, PresentTrace trace)
 {
+	// Adopted before any record is written, because the records this call does not write — a flip
+	// landing, a held commit abandoned — happen on later calls with no trace in hand.
+	m_Trace = trace.Trace;
+
 	if (!m_Configuration.Powered)
 	{
 		return Failure(EINVAL, "presenting to an output that is powered off");
@@ -487,20 +491,21 @@ Result<void> DrmOutput::Present(std::span<const PresentLayer> layers)
 		// **Held whole rather than per layer.** A partition is one picture, and committing the layers
 		// that happen to be ready would put a promoted window on the screen a frame before the composite
 		// that draws the rest of it.
-		// **Instrumentation, and the one record that says the lane is lying.** The loop is about to be
-		// told this present succeeded and will open a flight lane for it, but no ioctl has been issued —
-		// so the distance from here to `flip issued` is a frame the trace draws as in the panel's hands
-		// and which is in fact still in gyro's.
-		TraceMark("commit held", TraceThread, TraceTag(layers.size()));
+		// **A slice rather than a mark, because its width is the lie in the picture.** The loop is about
+		// to be told this present succeeded and will open a flight lane for it, but no ioctl has been
+		// issued — so for exactly as long as this slice runs, the lane draws a frame as in the panel's
+		// hands that is in fact still in gyro's. `Settle` closes it whichever way the hold ends.
+		TraceOpen("held", m_Trace, TraceTag(trace.Frame));
 
-		m_Pending = Pending{ .Count = static_cast<std::uint32_t>(layers.size()), .Waiting = true };
+		m_Pending =
+			Pending{ .Count = static_cast<std::uint32_t>(layers.size()), .Waiting = true, .Frame = trace.Frame };
 		std::ranges::copy(layers, m_Pending.Layers.begin());
 		++m_HeldCommits;
 
 		return {};
 	}
 
-	return Flip(layers, fences);
+	return Flip(layers, fences, trace.Frame);
 }
 
 std::uint32_t DrmOutput::Framebuffer(const PresentLayer& layer) const noexcept
@@ -691,7 +696,7 @@ Result<void> DrmOutput::Commit(std::uint32_t flags) noexcept
 	return {};
 }
 
-Result<void> DrmOutput::Flip(std::span<const PresentLayer> layers, std::span<const Fd> fences)
+Result<void> DrmOutput::Flip(std::span<const PresentLayer> layers, std::span<const Fd> fences, std::uint64_t frame)
 {
 	Program(layers, fences);
 
@@ -702,7 +707,8 @@ Result<void> DrmOutput::Flip(std::span<const PresentLayer> layers, std::span<con
 
 	// **When the kernel actually took it**, which is the number every ordering question below turns on:
 	// `present` on the loop's row is when the frame was handed over, and this is when it was committed.
-	TraceMark("flip issued", TraceThread, TraceTag(Commits));
+	TraceMark("flip issued", m_Trace, TraceTag(frame));
+	m_FlippingFrame = frame;
 
 	m_InFlightMask = 0;
 
@@ -821,7 +827,12 @@ void DrmOutput::Settle()
 	{
 		const std::array<PresentLayer, MaxLayers> layers = m_Pending.Layers;
 		const std::uint32_t count = m_Pending.Count;
+		const std::uint64_t frame = m_Pending.Frame;
 		m_Pending = Pending{};
+
+		// The wait is over whichever way the rest of this goes — the marks below are outcomes, and they
+		// read better beside the slice than inside it.
+		TraceClose(m_Trace);
 
 		const std::span<const PresentLayer> held{ layers.data(), count };
 
@@ -836,10 +847,10 @@ void DrmOutput::Settle()
 		if (!expressible)
 		{
 			// The other silent exit from a held commit: the ring went out from under it. The loop was
-			// told this frame was presented and it never will be.
-			TraceMark(
-				"held commit abandoned", TraceThread, TraceTag(static_cast<std::uint64_t>(expressible.error().Code()))
-			);
+			// told this frame was presented and it never will be. Tagged with the frame rather than the
+			// errno, because the frame is what a reader searches for and the refusal has one cause — the
+			// images the partition named went with the ring.
+			TraceMark("held commit abandoned", m_Trace, TraceTag(frame));
 		}
 
 		if (expressible)
@@ -847,13 +858,11 @@ void DrmOutput::Settle()
 			// A commit that fails here has nowhere to report to — the frame loop has already been told the
 			// present was accepted — so the images go back to the ring and the output stays flip-idle, which
 			// the loop's next iteration serves as an ordinary frame.
-			if (const Result<void> flipped = Flip(held, {}); !flipped)
+			if (const Result<void> flipped = Flip(held, {}, frame); !flipped)
 			{
 				// The comment below says this has nowhere to report to. It has the ring.
 				TraceMark(
-					flipped.error().Sentence(),
-					TraceThread,
-					TraceTag(static_cast<std::uint64_t>(flipped.error().Code()))
+					flipped.error().Sentence(), m_Trace, TraceTag(static_cast<std::uint64_t>(flipped.error().Code()))
 				);
 
 				for (std::uint32_t index = 0; index < count; ++index)
@@ -899,8 +908,9 @@ void DrmOutput::OnPresented(Instant at, std::uint32_t sequence, bool hardwareClo
 	{
 		// **Instrumented because it is one of the readings this is meant to separate.** A completion
 		// arriving for a commit this output does not believe it made is either a duplicate the kernel
-		// sent or a flip whose bookkeeping was cleared under it, and both are silent today.
-		TraceMark("flip event unclaimed", TraceThread, TraceTag(sequence));
+		// sent or a flip whose bookkeeping was cleared under it, and both are silent today. Tagged with
+		// the kernel's sequence because there is no frame to name — that is what unclaimed means.
+		TraceMark("flip event unclaimed", m_Trace, TraceTag(sequence));
 
 		// A completion for a commit this output did not make. It happens across a teardown and is worth
 		// dropping rather than crediting: an observation with no frame behind it is a prediction built on
@@ -908,7 +918,11 @@ void DrmOutput::OnPresented(Instant at, std::uint32_t sequence, bool hardwareClo
 		return;
 	}
 
-	TraceMark("flip event", TraceThread, TraceTag(sequence));
+	// Named for the frame whose commit this answers rather than for the kernel's vblank counter — the
+	// counter is already the glass row's `refresh` attribute, and the frame is the words every other
+	// row says. Stamped at the drain rather than at `at`, because the vblank instant is already drawn
+	// twice and *when gyro heard* is the number no other row carries.
+	TraceMark("flip event", m_Trace, TraceTag(m_FlippingFrame));
 
 	const std::uint32_t flipped = m_InFlightMask;
 	m_InFlightMask = 0;
