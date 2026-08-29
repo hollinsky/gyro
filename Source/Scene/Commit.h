@@ -10,8 +10,10 @@
 #include "Core/Texture.h"
 #include "Core/Time.h"
 #include "Geometry/NodeTransform.h"
+#include "Geometry/Shape.h"
 #include "Geometry/Space.h"
 #include "Scene/Entity.h"
+#include "Scene/Input.h"
 #include "Scene/Store.h"
 #include "World/Content.h"
 
@@ -281,6 +283,27 @@ public:
 	// False for a scope that is not the open one and for an id that names nothing live — the second being
 	// a double retire arriving through a handle that has already gone stale.
 	bool Retire(EntityId id) noexcept { return m_Open && m_Scene->Retire(id); }
+
+	// What this node accepts of the pointer: the whole of its extent where `shape` is nothing, and the
+	// shape's interior otherwise. See [Scene/Input.h](Input.h) for why the two are not the same absence.
+	//
+	// **It is a commit verb rather than a setter for `Resize`'s reason, and it is the same fact.** A
+	// client that resizes and reshapes in one `wl_surface.commit` has stated one arrangement, and a hit
+	// test that saw the new extent against the old shape would put a dead strip down the side of a
+	// window for exactly one frame — which is a click that does nothing, on the frame a person is most
+	// likely to be clicking. Both land inside the same scope, so no reader ever sees half of it.
+	//
+	// **No motion argument, because a shape does not animate.** Nothing here is a channel: the interior
+	// of a window is a fact about where its buttons are, and springing it would mean the pointer landing
+	// somewhere the picture had already left.
+	bool AcceptInput(EntityId id, std::optional<SurfaceShape> shape)
+	{
+		return m_Open && m_Scene->SetInput(id, NodeInput{ .Accepts = true, .Shape = std::move(shape) });
+	}
+
+	// Back to inert: this node takes no pointer at all. A surface that has lost its role, and the state
+	// every node in the world is in until something says otherwise.
+	bool RefuseInput(EntityId id) { return m_Open && m_Scene->SetInput(id, NodeInput{}); }
 
 	// A node's own quad, which has no coefficient slot and never had one. It is here because it is what
 	// a client commit mostly writes: a client resizing itself changes this, and decision 68 has a

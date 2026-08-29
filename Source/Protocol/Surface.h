@@ -81,13 +81,13 @@ struct SurfaceState
 
 	// Where the client promises to be fully opaque. Empty by default, which is the protocol's own
 	// default and means *assume nothing* rather than *assume transparent*.
-	SurfaceRegion Opaque;
+	SurfaceShape Opaque;
 
 	// Where the surface accepts pointer and touch input, or nothing for the default, which is
 	// **infinite** — the whole surface and, per the protocol, beyond it. The `optional` is carrying
 	// that distinction and not an unset flag: an input region a client explicitly emptied is a window
 	// that deliberately lets clicks through, and it must not read the same as one that never set one.
-	std::optional<SurfaceRegion> Input;
+	std::optional<SurfaceShape> Input;
 
 	// What changed, in each of the two spaces the client may name it in.
 	std::vector<PixelRect<SurfaceSpace>> SurfaceDamage;
@@ -241,7 +241,7 @@ private:
 
 	// The shape a `wl_region` resource currently describes, or an empty shape for a null resource. A
 	// copy, per Region.h: the client may destroy the region the instant this returns and usually does.
-	[[nodiscard]] static SurfaceRegion ShapeOf(Wayland::Server::WlRegion region);
+	[[nodiscard]] static SurfaceShape ShapeOf(Wayland::Server::WlRegion region);
 
 	// Turn the staged buffer into pending content, retire what it replaces, and release it back to the
 	// client. Called by `Apply` and only when an attach is actually pending, because a commit that did

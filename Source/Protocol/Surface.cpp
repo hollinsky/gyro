@@ -150,7 +150,7 @@ void ClientSurface::Forget(const FrameCallback& callback) noexcept
 	std::erase_if(m_DueCallbacks, matches);
 }
 
-SurfaceRegion ClientSurface::ShapeOf(Wayland::Server::WlRegion region)
+SurfaceShape ClientSurface::ShapeOf(Wayland::Server::WlRegion region)
 {
 	// A null region is the protocol's own way of saying *unset*, and both callers below give that its
 	// own meaning before asking. What reaches here is a resource the client named, which may be one of
@@ -255,7 +255,7 @@ void ClientSurface::OnSetOpaqueRegion(Wayland::Server::WlRegion region)
 {
 	// A null region is the empty one, which is the protocol's default and means the client promises
 	// nothing about its opacity.
-	m_Pending.Opaque = region.IsValid() ? ShapeOf(region) : SurfaceRegion{};
+	m_Pending.Opaque = region.IsValid() ? ShapeOf(region) : SurfaceShape{};
 }
 
 void ClientSurface::OnSetInputRegion(Wayland::Server::WlRegion region)

@@ -908,3 +908,65 @@ GYRO_TEST(NodeTransform, FormatsForALogReader)
 		std::string{ "transform[translate(0, 0, 0) rot(none) scale(1, 1, 1) anchor(0, 0, 0) perspective(none)]" }
 	);
 }
+
+GYRO_TEST(NodeTransform, TheUnprojectionIsTheProjectionRunBackwards)
+{
+	// What a hit test is, checked as the round trip rather than against a hand-worked case: a point on
+	// a node's own quad, projected out to where a person sees it, has to come back to where it started
+	// when the pointer lands there. The chain is the overview — perspective at three levels, a tilted
+	// deck holding a turned card — because a hit test that only agrees with a screen-aligned window is
+	// one that fails on precisely the arrangements this compositor exists to draw.
+	for (const double lift : { 0.0, 2.0 * static_cast<double>(Overview().Radii[1]) })
+	{
+		const Chain chain = Overview(lift);
+		const ComposedTransform composed = chain.Composed();
+
+		for (const Vector3<float> local : { Vector3<float>{ 0.0F, 0.0F, 0.0F },
+		                                    Vector3<float>{ 100.0F, 0.0F, 0.0F },
+		                                    Vector3<float>{ 100.0F, 80.0F, 0.0F },
+		                                    Vector3<float>{ 0.0F, 80.0F, 0.0F },
+		                                    Vector3<float>{ 37.0F, 19.0F, 0.0F } })
+		{
+			const Projected forward = composed.Project(local);
+			const Unprojected back = composed.Unproject(Point<GlobalSpace>{ forward.Position.X, forward.Position.Y });
+
+			GYRO_CHECK(back.IsVisible());
+			CheckNear(back.Local.X, local.X, PositionTolerance, "the local x comes back");
+			CheckNear(back.Local.Y, local.Y, PositionTolerance, "the local y comes back");
+
+			// The weight is recovered from the same three numbers rather than computed again, so it has
+			// to agree with what the forward map produced — this is what lets the caller cull a point
+			// behind the eye without projecting anything a second time.
+			CheckNear(back.Weight, forward.Weight, PositionTolerance, "and so does the weight");
+		}
+	}
+}
+
+GYRO_TEST(NodeTransform, AMirroredQuadIsStillInFrontOfTheViewer)
+{
+	// A negative scale flips the determinant's sign, and the divisor's with it. Getting that wrong
+	// makes a mirrored node — which is an ordinary thing for a transition to author — untouchable
+	// everywhere, with no visual symptom at all: the window draws and swallows nothing.
+	const NodeTransform mirrored{ .Translation = { 100.0, 50.0, 0.0 }, .Scale = { -1.0F, 1.0F, 1.0F } };
+	const ComposedTransform composed = ComposedTransform{}.Push(mirrored, mirrored.BoundingRadius(80.0F, 60.0F));
+
+	const Projected forward = composed.Project({ 20.0F, 30.0F, 0.0F });
+	const Unprojected back = composed.Unproject(Point<GlobalSpace>{ forward.Position.X, forward.Position.Y });
+
+	GYRO_CHECK(back.IsVisible());
+	CheckNear(back.Local.X, 20.0F, PositionTolerance, "a mirrored quad unprojects");
+	CheckNear(back.Local.Y, 30.0F, PositionTolerance, "on both axes");
+}
+
+GYRO_TEST(NodeTransform, AQuadWithNoAreaAnswersNowhere)
+{
+	// A node scaled flat has no interior for a point to be in, and the arithmetic says so by way of a
+	// zero determinant. The answer is the default — a weight of zero, which fails IsVisible — rather
+	// than an infinity, for the reason Project floors its own divisor: a caller that ignored the flag
+	// would put a NaN into whatever it did next.
+	const NodeTransform flattened{ .Scale = { 1.0F, 0.0F, 1.0F } };
+	const ComposedTransform composed = ComposedTransform{}.Push(flattened, flattened.BoundingRadius(80.0F, 60.0F));
+
+	GYRO_CHECK(!composed.Unproject(Point<GlobalSpace>{ 0.0, 0.0 }).IsVisible());
+	GYRO_CHECK(!composed.Unproject(Point<GlobalSpace>{ 40.0, 30.0 }).IsVisible());
+}

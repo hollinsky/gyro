@@ -284,6 +284,7 @@ gyro_add_module(Geometry PORTABLE
 		NodeTransform.Test.cpp
 		Region.Test.cpp
 		Scale.Test.cpp
+		Shape.Test.cpp
 		Space.Test.cpp
 )
 
@@ -435,6 +436,7 @@ gyro_add_module(Scene PORTABLE DISPATCH
 		Cursor.Test.cpp
 		Entity.Test.cpp
 		Focus.Test.cpp
+		Hit.Test.cpp
 		Output.Test.cpp
 		Pointer.Test.cpp
 		Reach.Test.cpp
@@ -951,7 +953,6 @@ gyro_add_module(Protocol DISPATCH
 		Dmabuf.Test.cpp
 		Floor.Test.cpp
 		Host.Test.cpp
-		Region.Test.cpp
 		Server.Test.cpp
 		Shm.Test.cpp
 		Surface.Test.cpp

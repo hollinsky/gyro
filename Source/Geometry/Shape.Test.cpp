@@ -1,14 +1,14 @@
-#include "Protocol/Region.h"
+#include "Geometry/Shape.h"
 
 #include "Geometry/Space.h"
 #include "Testing/Test.h"
 
-// What is worth testing about a region is the one question anything ever asks it — *is this point
+// What is worth testing about a shape is the one question anything ever asks it — *is this point
 // inside* — and the answer under the sequence of adds and subtracts a client actually sends. The
 // representation is the op list, so a test that asserted on the rectangles would be asserting on the
 // storage; every case below asks about points.
 //
-// The order-dependence is the point of most of them. A region is not a set of rectangles with a sign,
+// The order-dependence is the point of most of them. A shape is not a set of rectangles with a sign,
 // it is a sequence, and add-then-subtract and subtract-then-add over the same two rectangles are
 // different shapes. A compositor that normalised into a rectangle set would have to get that right in
 // the normaliser instead, which is the code this design does not have.
@@ -26,18 +26,18 @@ namespace
 }
 } // namespace
 
-GYRO_TEST(Region, AnUnsetRegionContainsNothing)
+GYRO_TEST(Shape, AnUnsetRegionContainsNothing)
 {
-	const SurfaceRegion region;
+	const SurfaceShape region;
 
 	GYRO_CHECK(region.IsUnset());
 	GYRO_CHECK(!region.Contains(At(0, 0)));
 	GYRO_CHECK(region.Bounds().IsEmpty());
 }
 
-GYRO_TEST(Region, ARectangleIsHalfOpen)
+GYRO_TEST(Shape, ARectangleIsHalfOpen)
 {
-	SurfaceRegion region;
+	SurfaceShape region;
 	region.Add(Box(10, 10, 20, 20));
 
 	// The left and top edges are in and the right and bottom are out, which is the convention every
@@ -49,9 +49,9 @@ GYRO_TEST(Region, ARectangleIsHalfOpen)
 	GYRO_CHECK(!region.Contains(At(9, 20)));
 }
 
-GYRO_TEST(Region, SubtractionCutsAHoleAndOrderDecides)
+GYRO_TEST(Shape, SubtractionCutsAHoleAndOrderDecides)
 {
-	SurfaceRegion cut;
+	SurfaceShape cut;
 	cut.Add(Box(0, 0, 100, 100));
 	cut.Subtract(Box(40, 40, 20, 20));
 
@@ -61,16 +61,16 @@ GYRO_TEST(Region, SubtractionCutsAHoleAndOrderDecides)
 	// The same two rectangles the other way round: subtracting from nothing removes nothing, and the
 	// add that follows covers the whole square. A representation that summed signed rectangles would
 	// make these two regions equal, and a window with a hole in it would be a window without one.
-	SurfaceRegion filled;
+	SurfaceShape filled;
 	filled.Subtract(Box(40, 40, 20, 20));
 	filled.Add(Box(0, 0, 100, 100));
 
 	GYRO_CHECK(filled.Contains(At(50, 50)));
 }
 
-GYRO_TEST(Region, AHoleCanBeFilledBackIn)
+GYRO_TEST(Shape, AHoleCanBeFilledBackIn)
 {
-	SurfaceRegion region;
+	SurfaceShape region;
 	region.Add(Box(0, 0, 100, 100));
 	region.Subtract(Box(40, 40, 20, 20));
 	region.Add(Box(45, 45, 5, 5));
@@ -79,9 +79,9 @@ GYRO_TEST(Region, AHoleCanBeFilledBackIn)
 	GYRO_CHECK(region.Contains(At(46, 46)));
 }
 
-GYRO_TEST(Region, BoundsIgnoreWhatWasSubtracted)
+GYRO_TEST(Shape, BoundsIgnoreWhatWasSubtracted)
 {
-	SurfaceRegion region;
+	SurfaceShape region;
 	region.Add(Box(10, 10, 10, 10));
 	region.Add(Box(50, 50, 10, 10));
 
@@ -93,9 +93,9 @@ GYRO_TEST(Region, BoundsIgnoreWhatWasSubtracted)
 	GYRO_CHECK_EQ(region.Bounds(), Box(10, 10, 50, 50));
 }
 
-GYRO_TEST(Region, AnEmptyRectangleContributesNothing)
+GYRO_TEST(Shape, AnEmptyRectangleContributesNothing)
 {
-	SurfaceRegion region;
+	SurfaceShape region;
 	region.Add(Box(10, 10, 0, 0));
 	region.Add(Box(20, 20, 10, 10));
 
@@ -103,9 +103,9 @@ GYRO_TEST(Region, AnEmptyRectangleContributesNothing)
 	GYRO_CHECK_EQ(region.Bounds(), Box(20, 20, 10, 10));
 }
 
-GYRO_TEST(Region, EmptyIsNotUnset)
+GYRO_TEST(Shape, EmptyIsNotUnset)
 {
-	SurfaceRegion region;
+	SurfaceShape region;
 	region.Add(Box(0, 0, 100, 100));
 	region.Subtract(Box(0, 0, 100, 100));
 
@@ -116,11 +116,11 @@ GYRO_TEST(Region, EmptyIsNotUnset)
 	GYRO_CHECK(!region.Contains(At(50, 50)));
 }
 
-GYRO_TEST(Region, TheCapIsReachedBeforeTheAllocationIs)
+GYRO_TEST(Shape, TheCapIsReachedBeforeTheAllocationIs)
 {
-	SurfaceRegion region;
+	SurfaceShape region;
 
-	for (std::uint32_t index = 0; index < MaxRegionRects; ++index)
+	for (std::uint32_t index = 0; index < MaxShapeRects; ++index)
 	{
 		GYRO_REQUIRE(!region.IsFull());
 
@@ -130,4 +130,23 @@ GYRO_TEST(Region, TheCapIsReachedBeforeTheAllocationIs)
 	// The full region is the caller's cue to end the client, so what matters is that it says so before
 	// the rectangle that would have overrun rather than after.
 	GYRO_CHECK(region.IsFull());
+}
+
+// The overload the hit test uses. A pointer does not arrive on the grid a client stated its shape on,
+// and the two are compared without either being moved onto the other's: the column from 10 to 11 holds
+// every position from 10 up to but not including 11, so a window's edge is where the client put it
+// rather than half a pixel either side of it.
+GYRO_TEST(Shape, AFractionalPointIsInsideTheColumnItLandsIn)
+{
+	SurfaceShape shape;
+	shape.Add(Box(10, 10, 1, 1));
+
+	GYRO_CHECK(shape.Contains(Point<SurfaceSpace>{ 10.0F, 10.0F }));
+	GYRO_CHECK(shape.Contains(Point<SurfaceSpace>{ 10.75F, 10.75F }));
+	GYRO_CHECK(!shape.Contains(Point<SurfaceSpace>{ 11.0F, 10.5F }));
+	GYRO_CHECK(!shape.Contains(Point<SurfaceSpace>{ 9.75F, 10.5F }));
+
+	// The two overloads answer for the same point, which is what keeps a shape from meaning one thing
+	// to a client's own arithmetic and another to the pointer.
+	GYRO_CHECK(shape.Contains(At(10, 10)) == shape.Contains(Point<SurfaceSpace>{ 10.0F, 10.0F }));
 }

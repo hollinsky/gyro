@@ -693,6 +693,31 @@ struct Projected
 	[[nodiscard]] constexpr bool IsVisible() const noexcept { return Weight >= MinimumWeight; }
 };
 
+// A point of global space taken back into the plane of a node's own quad: the inverse of `Project`
+// restricted to `z = 0`, which is the arithmetic a hit test is.
+//
+// **Restricted to the plane rather than inverting the chain, because the question has no other
+// answer.** A hit test knows two numbers — where the pointer is on the desk — and a chain maps three.
+// The third is supplied by the node itself, whose quad lies at `z = 0` in its own space by
+// construction, and on that plane the chain is an ordinary planar homography: three columns of three
+// rows, invertible exactly wherever the quad is not edge-on. A 4x4 inverse would answer a question
+// nobody asked and would be singular on every node with no thickness, which is all of them.
+struct Unprojected
+{
+	// Where the point lands in the node's own space, which is the surface-local coordinate a client is
+	// owed. Meaningless unless `IsVisible()`.
+	Point<SurfaceSpace> Local{};
+
+	// The weight `Project` would have produced at `Local`, recovered from the same arithmetic rather
+	// than computed a second time — see `Unproject`. Zero where the quad is degenerate or the point
+	// lies on its horizon, and `Projected::MinimumWeight` is the floor for that type's reason: a point
+	// that has passed through the eye of some node above it is behind the viewer, cannot be drawn, and
+	// therefore cannot be clicked either.
+	float Weight = 0.0F;
+
+	[[nodiscard]] constexpr bool IsVisible() const noexcept { return Weight >= Projected::MinimumWeight; }
+};
+
 // The transform chain, composed. This is what decision 86's walk carries: the scan over the preorder
 // run pushes one of these per node and pops it on the way out, so a node's four corners cost four
 // multiplies rather than four walks of the ancestor chain — constant per node rather than growing
@@ -872,6 +897,58 @@ struct ComposedTransform
 			       (M[1][0] * x + M[1][1] * y + M[1][2] * z + M[1][3]) / divisor,
 			       (M[2][0] * x + M[2][1] * y + M[2][2] * z + M[2][3]) / divisor },
 			     static_cast<float>(weight) };
+	}
+
+	// `Project` read backwards: where on this node's own quad a point of the outer space came from.
+	//
+	// **The plane is what makes it invertible, and the third row of the matrix is what drops out.** A
+	// local point on the quad has `z = 0`, so only columns 0, 1 and 3 of the chain can act on it, and
+	// only rows 0, 1 and 3 produce anything the caller reads — the row carrying depth reaches nothing,
+	// exactly as `ForView` already zeroes it on the grounds that decision 55 composites in tree order
+	// with no depth buffer. What is left is a 3x3 acting on `(u, v, 1)`, and this is its adjugate
+	// applied to `(x, y, 1)`.
+	//
+	// **The determinant is not divided by and the forward weight comes out of the same three
+	// numbers.** Writing `H(u, v, 1) = s(x, y, 1)`, applying the adjugate gives `det/s * (u, v, 1)`,
+	// so the homogeneous component of the result *is* `det/s` — the local coordinates are the other
+	// two divided by it, and the weight the forward map would have produced is `det` over it. That is
+	// why there is no reciprocal formed anywhere here: dividing by the determinant first would cost
+	// precision on a heavily scaled node and would then have to be undone to recover `s`.
+	//
+	// A zero determinant is a quad with no area — a node scaled flat — and a zero divisor is a point
+	// on the horizon of its perspective. Both answer *nowhere*, which is the default: a weight of zero
+	// fails `IsVisible` and the caller passes through the node.
+	[[nodiscard]] constexpr Unprojected Unproject(Point<GlobalSpace> point) const noexcept
+	{
+		const double a = M[0][0];
+		const double b = M[0][1];
+		const double c = M[0][3];
+		const double d = M[1][0];
+		const double e = M[1][1];
+		const double f = M[1][3];
+		const double g = M[3][0];
+		const double h = M[3][1];
+		const double i = M[3][3];
+
+		// The three cofactors of the first column, which the determinant and the homogeneous row both
+		// want. Named once so the two readings cannot drift apart.
+		const double cofactorA = e * i - f * h;
+		const double cofactorD = f * g - d * i;
+		const double cofactorG = d * h - e * g;
+
+		const double determinant = a * cofactorA + b * cofactorD + c * cofactorG;
+
+		const double u = cofactorA * point.X + (c * h - b * i) * point.Y + (b * f - c * e);
+		const double v = cofactorD * point.X + (a * i - c * g) * point.Y + (c * d - a * f);
+		const double divisor = cofactorG * point.X + (b * g - a * h) * point.Y + (a * e - b * d);
+
+		if (divisor == 0.0 || determinant == 0.0)
+		{
+			return {};
+		}
+
+		return { { static_cast<float>(u / divisor), static_cast<float>(v / divisor) },
+			     static_cast<float>(determinant / divisor) };
 	}
 };
 

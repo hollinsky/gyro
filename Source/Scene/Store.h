@@ -13,6 +13,7 @@
 #include "Core/Time.h"
 #include "Scene/Entity.h"
 #include "Scene/Focus.h"
+#include "Scene/Input.h"
 #include "Scene/Output.h"
 #include "Scene/Pointer.h"
 #include "World/Content.h"
@@ -174,6 +175,21 @@ public:
 	[[nodiscard]] ScenePointer& Pointer() noexcept { return m_Pointer; }
 	[[nodiscard]] const ScenePointer& Pointer() const noexcept { return m_Pointer; }
 
+	// What this entity accepts of the pointer, or null where it accepts nothing — which is every node
+	// nobody has said otherwise about, and is the whole of what most of the world is. [Input.h](Input.h)
+	// carries why the default runs that way; `Scene/Hit.h` is the one reader.
+	[[nodiscard]] const NodeInput* InputFor(EntityId id) const noexcept
+	{
+		const std::optional<std::uint32_t> index = m_Ids.IndexOf(id);
+
+		if (!index || *index >= m_Input.size() || !m_Input[*index].Accepts)
+		{
+			return nullptr;
+		}
+
+		return &m_Input[*index];
+	}
+
 	[[nodiscard]] bool IsLive(EntityId id) const noexcept { return m_Ids.IsValid(id); }
 
 	// The top of the tree, as the first of a sibling chain. Decision 55 makes the list order the z
@@ -252,6 +268,33 @@ private:
 		const std::optional<std::uint32_t> index = m_Ids.IndexOf(id);
 
 		return index ? &m_Entities[*index] : nullptr;
+	}
+
+	// What a node accepts of the pointer, written through the same door as everything else — see
+	// `Scene/Commit.h`. Kept beside the store rather than in a table `Protocol` holds because the slot
+	// is the store's: an acceptance has to die with the entity that owned the index, and nothing
+	// outside here is told when that happens.
+	//
+	// False for an id that names nothing live. The row is grown on demand rather than with the entity
+	// array, since the nodes that take input are the client surfaces and they are a small part of a
+	// world full of containers.
+	bool SetInput(EntityId id, NodeInput input)
+	{
+		const std::optional<std::uint32_t> index = m_Ids.IndexOf(id);
+
+		if (!index)
+		{
+			return false;
+		}
+
+		if (m_Input.size() <= *index)
+		{
+			m_Input.resize(*index + 1);
+		}
+
+		m_Input[*index] = std::move(input);
+
+		return true;
 	}
 
 	// The writable side of an image's payload, and it is the one payload with a standing reason to
@@ -400,6 +443,15 @@ private:
 			// have its index repaired, and an entity already freed is one whose payload was already
 			// popped and so cannot be the element that moves.
 			Release(*entity);
+
+			// The slot's acceptance goes with it, because the slot comes back. Left behind, it is a
+			// region belonging to a program that has exited deciding where the clicks land on whatever
+			// window is minted into that index next — which reads as one application swallowing another's
+			// input, on a machine where nothing connects the two.
+			if (at.Index < m_Input.size())
+			{
+				m_Input[at.Index] = NodeInput{};
+			}
 
 			[[maybe_unused]] const bool freed = m_Ids.Free(at);
 		}
@@ -678,6 +730,12 @@ private:
 
 	// Who the keyboard is on. Withdrawn from by `Retire`, offered to by whoever maps a window.
 	SceneFocus m_Focus;
+
+	// One per slot rather than one per live entity, and sparse: an entity that accepts nothing is a
+	// default-constructed row. Keyed by index for the reason `Core/SlotAllocator.h` hands indices out at
+	// all — whatever wants something per entity keeps its own array — and the hit test reads it once per
+	// node it visits, which is what makes an index rather than a lookup the right shape.
+	std::vector<NodeInput> m_Input;
 
 	// Where the pointer is. Reconfined by `SetOutputs`, moved by whoever drains a device that has a
 	// cursor.
