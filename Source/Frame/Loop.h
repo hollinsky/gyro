@@ -883,7 +883,7 @@ private:
 		// reader had to open each one to find out which.
 		//
 		// So a wake that declines costs one mark that says *why*, and a wake that draws opens a slice
-		// named for the frame. Five ways out of this function and every one of them now says something,
+		// named for the frame. Six ways out of this function and every one of them now says something,
 		// where before there were two marks and three silent returns.
 		Instant& free = deviceFree[output.m_Device];
 		const FrameDecision decision = m_Timing.Assess(output.m_Clock, output.m_Cost, now, output.m_Committed, free);
@@ -918,6 +918,33 @@ private:
 			// verdict that declines is decision 35's third branch, which is gyro deciding it cannot fit
 			// the frame it owes.
 			TraceMark("over budget", output.m_Trace);
+
+			return;
+		}
+
+		// **The arming enforced, rather than merely computed.** `Assess` says the work fits before the
+		// deadline, and inside one refresh it fits from the instant the previous flip retires — so a
+		// wake that came from a socket, an input device or a flip, rather than from this output's own
+		// timer, recorded the frame as much as fourteen milliseconds before the point the policy named.
+		// `Admission::Wait` cannot see it: that verdict is a reach behind the frame owed, and work
+		// starting early in the same refresh still reaches exactly it.
+		//
+		// **What a person loses by recording early is a refresh of the pointer.** Anything a spring
+		// solves is evaluated at the predicted presentation and does not care when the work ran, but a
+		// pointer position and a client's committed pixels are model values held in the snapshot the
+		// record reads: starting a refresh early publishes a cursor a refresh behind the hand that
+		// moved it, with nothing downstream to recover it. The commit also lands next to the previous
+		// flip, which is where the panel refuses a second one.
+		//
+		// So the frame waits for its own record point and the next `WakeFor` arms for exactly this
+		// instant, which is why declining here does not spin.
+		const Instant recordAt = Alone(output) ?
+		                             m_Timing.RecordPoint(output.m_Clock, output.m_Cost, decision.Sequence) :
+		                             FrameClock::Unscheduled;
+
+		if (recordAt != FrameClock::Unscheduled && now < recordAt)
+		{
+			TraceMark("early", output.m_Trace);
 
 			return;
 		}
@@ -1514,6 +1541,33 @@ private:
 		const Instant at = output.m_Clock.WakeupAt(sequence, m_Timing.Arming(output.m_Cost));
 
 		return at == FrameClock::Unscheduled ? Wake::Never() : Wake::At(at);
+	}
+
+	// Whether this output has its device to itself, which is the condition the record point above is
+	// enforced under.
+	//
+	// **A record point prices one composite against an idle GPU, and two outputs on one queue
+	// serialise.** The second one's execution begins where the first one's ended, so its own record
+	// point is not when it can afford to start — the pair was admitted as one task set on one queue, and
+	// what the loop has always done is serve them back to back from wherever it woke. Holding each to
+	// its own point makes the second wait and then charges it the first's execution on top, and
+	// Source/Integration/Schedulability.Test.cpp's sweep watches an admitted set start missing frames.
+	//
+	// So a shared device keeps today's behaviour until the arming is priced per device rather than per
+	// output, which is a change to what `Timing` is asked rather than to what the loop does with the
+	// answer. Docs/Open.md carries it. One output on a device is every laptop and the machine the
+	// latency this check exists to remove was measured on.
+	[[nodiscard]] bool Alone(const FrameOutput& output) const noexcept
+	{
+		for (const FrameOutput& other : m_Outputs)
+		{
+			if (&other != &output && other.IsBound() && other.m_Device == output.m_Device)
+			{
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 	// SPEC: how many finished frames a renderer may report in one iteration. Two per output per

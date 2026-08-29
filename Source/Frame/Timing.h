@@ -219,17 +219,27 @@ struct TimingPolicy
 	// instant a frame starts at set by the other end of the socket rather than by this policy. Sized to
 	// beat that, the timer wins the race and the start time becomes gyro's own.
 	//
-	// **It does not delay the frame it leads, which is the thing to get right before sizing it.** The
-	// work moves to the start of the refresh window rather than the end, and the frame reaches the same
-	// vblank from either place — so a lead costs nothing on the way to the glass and *saves* a refresh
-	// wherever the window's end left a composite finishing with no room for the flip in front of it.
-	// Animation is unaffected in both cases, being evaluated at the predicted presentation whatever
-	// instant the work began at.
+	// **It does not delay the frame it leads, but it is not free either, and the earlier reading of
+	// this paragraph had it free.** The work moves to the start of the refresh window rather than the
+	// end and the frame reaches the same vblank from either place, so nothing is lost on the way to the
+	// glass and a refresh is *saved* wherever the window's end left a composite finishing with no room
+	// for the flip in front of it. What that argued from was animation, and there it holds: a sprung
+	// channel is a closed form evaluated at the predicted presentation, so it lands identically
+	// whatever instant the work began at.
+	//
+	// **It does not hold for anything the world states rather than solves.** A pointer position is
+	// written as a model value on every dispatch iteration (Dispatch/Loop.h), and a client's committed
+	// pixels are the buffer that was attached when the commit arrived — both are whatever the snapshot
+	// held at record time, and neither has a curve behind it that a later presentation instant would
+	// re-evaluate. So the lead is latency for them at one nanosecond per nanosecond: a hand that moved
+	// after the record moves on the screen a refresh later, and there is nothing downstream that
+	// recovers it. That is the real bound on this figure — it buys margin against the wakeup and pays
+	// for it in pointer lag, and the two are traded rather than one being had for nothing.
 	//
 	// **What bounds it from above is the period.** A lead longer than one refresh arms before the
 	// previous frame's window and asks the loop to render against a scene it has not been handed, which
-	// is a frame of latency paid for nothing. Below that the figure is free, so it wants to be the
-	// smallest that covers the wakeup rather than the smallest that fits.
+	// is a frame of latency paid for nothing. Below that the figure is not free but it is cheap, so it
+	// wants to be the smallest that covers the wakeup rather than the smallest that fits.
 	//
 	// Zero is the permissive reading and is the recoverable direction: an unset lead arms at the last
 	// instant the planned composite still fits and takes the floor composite whenever it is not early,
@@ -575,6 +585,27 @@ public:
 	[[nodiscard]] constexpr Duration Arming(const Budget& budget) const noexcept
 	{
 		return Detail::Sum(Reserve(budget, RenderMode::Planned), m_Policy.Lead);
+	}
+
+	// The instant `WakeFor` would arm for a named frame, which is the same instant read as a place in
+	// the refresh rather than as an alarm.
+	//
+	// **It is read that way because the arming is otherwise a figure nothing enforces.** `Assess`
+	// answers whether the work *fits* before the deadline, and inside one refresh the answer is yes from
+	// the instant the previous flip retires — so a loop woken by anything other than its own timer
+	// records immediately and the arming describes a schedule gyro is not on. `Admission::Wait` does not
+	// catch it: that verdict is a reach *behind* the frame owed, and work starting early in the same
+	// refresh reaches exactly it. The loop compares against this before it records, so a frame starts
+	// where the policy said rather than wherever the wake came from. What it does *not* price is a
+	// device with two outputs on it, which is why `FrameLoop::Serve` enforces this on an output that has
+	// its device to itself and says there what the other case costs.
+	//
+	// `FrameClock::Unscheduled` where the clock names no such frame, which a caller reads as *no
+	// opinion* rather than as a bound in either direction.
+	[[nodiscard]] constexpr Instant
+	RecordPoint(const FrameClock& clock, const Budget& budget, std::uint64_t sequence) const noexcept
+	{
+		return clock.WakeupAt(sequence, Arming(budget));
 	}
 
 	// When work started now would be done: record on the frame thread while the device finishes what it

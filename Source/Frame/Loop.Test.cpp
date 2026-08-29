@@ -306,7 +306,14 @@ struct Harness
 	std::array<FrameOutput, 1> Outputs;
 	std::array<IEventSource*, 1> Sources{ &Source };
 
-	FrameLoop Loop{ Clock, Ring, Returns, Evaluator };
+	// **A lead of eight milliseconds on a ten millisecond panel, so the record point is two
+	// milliseconds into the refresh** — which is where every case below steps the clock to, because
+	// `Serve` declines a frame started before its own armed instant. With the default policy every
+	// figure is zero and the record point *is* the deadline, so a harness with no lead would leave one
+	// instant a frame may start at and it would be the instant its commit is due.
+	Timing Policy{ TimingPolicy{ .Lead = 8ms } };
+
+	FrameLoop Loop{ Clock, Ring, Returns, Evaluator, Policy };
 
 	// Two targets by default, because that is the shallowest ring a nonblocking flip can be built on and
 	// most cases here are about one image going round. A case that is about *age* asks for three, since
@@ -467,6 +474,72 @@ GYRO_TEST(FrameLoop, AFlipRetiresTheFrameItAnsweredRatherThanWaitingForTheAnchor
 
 	GYRO_CHECK_EQ(harness.Presenter.Presents, 2);
 	GYRO_CHECK_EQ(harness.Output().Committed(), std::uint64_t{ 9 });
+}
+
+// The arming as a rule the loop obeys rather than a figure it computes. A wake that is not this
+// output's own — a flip, a socket, an input device — finds the work fits the moment the previous frame
+// retires, and drawing there publishes whatever the snapshot held a refresh before the glass shows it.
+GYRO_TEST(FrameLoop, AFrameWokenBeforeItsRecordPointWaitsForIt)
+{
+	Harness harness;
+
+	harness.Anchor();
+	harness.Output().DamageWholeOutput();
+
+	// Frame 8 is owed at 1010 and the harness's lead puts its record point at 1002. This is the
+	// millisecond after the flip that retired frame 7, which is where a loop woken by that flip stands.
+	harness.Clock.Set(At(1001));
+
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Renderer.Records, 0);
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 0);
+	GYRO_CHECK(!harness.Output().Damage().IsEmpty());
+
+	// And the wake it answers with is the record point itself, so the frame is not lost — it starts
+	// where the policy said it would.
+	harness.Clock.Set(At(1002));
+
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Renderer.Records, 1);
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
+	GYRO_CHECK_EQ(harness.Output().Committed(), std::uint64_t{ 8 });
+}
+
+// The other half, and the reason the check is not simply the record point: two outputs on one queue
+// serialise, so the second's own record point is not when it can afford to start. Until the arming is
+// priced per device they are served together from wherever the loop woke.
+GYRO_TEST(FrameLoop, TwoOutputsOnOneDeviceAreNotHeldToTheirOwnRecordPoints)
+{
+	ManualClock clock{ At(1000) };
+	SnapshotRing ring;
+	ReturnChannel returns;
+	NullEvaluator evaluator;
+
+	FakePresenter first;
+	FakePresenter second;
+	FakeRenderer renderer;
+
+	std::array<FrameOutput, 2> outputs;
+	outputs[0].Bind(first, renderer, 0, Panel());
+	outputs[1].Bind(second, renderer, 0, Panel());
+
+	FrameLoop loop{ clock, ring, returns, evaluator };
+	loop.Bind(outputs);
+
+	first.Flip(At(1000), 7);
+	second.Flip(At(1000), 7);
+	clock.Set(At(1001));
+	outputs[0].DamageWholeOutput();
+	outputs[1].DamageWholeOutput();
+
+	// With no lead and no measured cost the record point is the deadline itself, so an output alone on
+	// its device would decline here. Neither of these does.
+	(void)loop.Step();
+
+	GYRO_CHECK_EQ(first.Presents, 1);
+	GYRO_CHECK_EQ(second.Presents, 1);
 }
 
 GYRO_TEST(FrameLoop, ARefusedPresentLeavesTheDamageAccumulated)
@@ -1041,6 +1114,7 @@ GYRO_TEST(FrameLoop, TheWalkIsFiledWhereNoTierCanTakeItAway)
 {
 	Harness harness;
 	harness.Anchor();
+	harness.Clock.Set(At(1002));
 	harness.Evaluator.Cost = 700us;
 	harness.Output().DamageWholeOutput();
 
@@ -1057,6 +1131,7 @@ GYRO_TEST(FrameLoop, ARefusedRecordStillPaidForItsWalk)
 {
 	Harness harness;
 	harness.Anchor();
+	harness.Clock.Set(At(1002));
 	harness.Evaluator.Cost = 700us;
 	harness.Renderer.Refuse = true;
 	harness.Output().DamageWholeOutput();

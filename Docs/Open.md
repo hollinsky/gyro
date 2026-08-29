@@ -1303,3 +1303,30 @@ What that leaves open, now that a descriptor can arrive:
   150's rule that unknown is not linear. That is right for an allocation gyro makes and it turns away
   a legacy client whose buffer genuinely has no stated layout — which is what a GBM allocation without
   modifier support produces, and there are still drivers that do it.
+
+## The arming is priced per output, and a device with two outputs on it is one queue
+
+`Timing::Arming` composes one output's cost figures and subtracts the sum from that output's deadline.
+That is what a record point is, and `FrameLoop::Serve` now holds a frame to it: a wake that came from
+a flip, a socket or a key press finds the work fits from the instant the previous frame retires, and
+recording there publishes a pointer position and a window's pixels a whole refresh before the glass
+shows them.
+
+The rule is only applied where an output has its device to itself, which is where the arithmetic is
+true. Two outputs on one card share a queue: the second one's composite does not begin executing when
+its own record starts, it begins where the first one's ended, so its own record point is not an instant
+it can afford to wait for. Serving them back to back from wherever the loop happened to wake is what
+made an admitted set meet its deadlines, and `Integration/Schedulability.Test.cpp`'s phase sweep sees
+it go the moment each output is held to its own figure — the second output waits, is charged the
+first's execution on top, and misses a frame the set was admitted to make.
+
+What is missing is a reserve that prices the *batch*: every composite the device owes this refresh,
+subtracted from the earliest deadline among them, which is decision 29's serialisation test read
+backwards. It has to appear in the arming as well as in the check, or the alarm still names the instant
+one output alone could start at and the output served second is late by exactly the other's cost. What
+has to be decided is where it lives — `Timing` is written per output on purpose, and the party that
+knows which outputs share a device is the loop.
+
+Until then a second monitor on the same card keeps the old behaviour: it draws as soon as the work
+fits, and its pointer is a refresh behind. A second monitor on a *second* card is unaffected, because
+each is alone on its own queue.

@@ -302,7 +302,14 @@ private:
 	SceneEvaluator m_Evaluator{ m_Clock };
 
 	std::array<FrameOutput, 1> m_Outputs{};
-	FrameLoop m_Loop{ m_Clock, m_Ring, m_Returns, m_Evaluator };
+	// **A lead of most of a refresh, because `Turn` steps once per period and `FrameLoop::Serve` holds
+	// a frame to its record point.** With the default policy every timing figure is zero, so the record
+	// point is the deadline itself, and a turn landing a whole period before it draws nothing. This machine is
+	// about pixels rather than about pacing, and the lead is what puts the one instant it steps at
+	// inside the window the frame is allowed to start in.
+	Timing m_Timing{ TimingPolicy{ .Lead = Period } };
+
+	FrameLoop m_Loop{ m_Clock, m_Ring, m_Returns, m_Evaluator, m_Timing };
 	std::array<IEventSource*, 1> m_Sources{ &m_Device };
 };
 
