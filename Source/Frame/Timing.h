@@ -117,6 +117,21 @@
 // outputs serialises on one queue however it was recorded — which is decision 29's reason for
 // rejecting parallel recording as a rescue, arriving here as a parameter.
 //
+// **And the composition stops being addition here, which is what the paragraph above was written
+// against.** `deviceFreeAt` prices the queue for the *check* — an output admitted second starts
+// executing where the first finished, and `Assess` sees that — but the *arming* was still one output's
+// own composite subtracted from its own deadline. Those are different questions and only the first was
+// answered: a wake armed at `deadline - Reserve` names the instant this output alone could start at,
+// and the output served after it on the same queue is then late by exactly the first one's execution.
+// `Batch` below is the second question, and it is decision 29's processor-demand test solved for the
+// release instant rather than for feasibility — every composite the device owes, folded in the order
+// the loop will serve them, with each member's deadline tested against the demand ahead of it.
+//
+// **What the loop supplies is membership and what this supplies is arithmetic**, which is the split the
+// paragraph above already committed to: the party that knows which outputs share a queue is the loop,
+// and it folds them in here one at a time. A batch of one is this object's old answer to the digit, so
+// the machine every one of these figures was measured on does not move.
+//
 // **The CPU term is a sum of two figures and the GPU term is one, which is decision 94 landing in a
 // single line.** Producing the draw list is CPU work that happens before either composite is
 // recorded and is the same work whichever one follows, so `Budget::IrreducibleCpu()` is added to the
@@ -415,6 +430,58 @@ struct Projection
 	Instant Finish{};
 };
 
+// The composites one device owes this refresh, folded in the order the loop will serve them.
+//
+// **It exists because a record point prices one composite against an idle GPU and two outputs on one
+// queue serialise.** The second output's execution begins where the first one's ended, so its own
+// deadline less its own reserve is not an instant it can afford to wait for — the pair was admitted as
+// one task set on one queue, and the instant that matters is the one the *device* must begin at for
+// every panel in the set to land. That is one instant rather than one per output, which is the whole
+// reason this is an accumulator and not a second figure on `FrameDecision`.
+//
+// **`RecordAt` is a minimum over members and not the earliest deadline less the total**, which is the
+// conservative reading and costs a frame's worth of latency on the panel with the nearest deadline. A
+// member whose deadline is a period away does not need the batch to finish before the member in front
+// of it does; what it needs is for the demand *ahead of it plus its own* to fit before its own
+// deadline. Testing that per member and taking the earliest answer is decision 29's test read
+// backwards — the same summation, solved for the release instant — and it degenerates to the single
+// output's record point exactly when there is one member.
+//
+// **A member is charged a `Margin` of its own, which is the one place the figure is not once per
+// frame.** `TimingPolicy::Margin` covers the error in a cost model, and a composite that overruns
+// delays every composite queued behind it as surely as it delays its own frame — so a batch of three
+// carries three tails rather than one. The alternative under-reserves in precisely the case the margin
+// exists for, and over-reserving is the recoverable direction: the batch starts a little early and
+// pays the pointer latency `TimingPolicy::Lead` already describes, where under-reserving is the second
+// monitor missing a frame the set was admitted to make.
+//
+// **The lead is charged once**, because it is the kernel's wakeup, one drain and one snapshot
+// acquisition — all of which happen once per iteration however many outputs that iteration serves.
+struct Batch
+{
+	// When the frame thread must be running for every member to land. `Unscheduled` while the batch is
+	// empty, which is the same *no opinion* every other instant in this header means by it.
+	Instant RecordAt = FrameClock::Unscheduled;
+
+	// The lead plus every member's reserve, which is what the device is committed to once it begins.
+	// It is the demand term of the test above, accumulated as the fold walks the members.
+	Duration Owed = Duration::zero();
+
+	// How many outputs are in it. One is the case that has to agree with the single-output arming to
+	// the nanosecond, and the `static_assert` at the bottom of this file is where that is pinned.
+	std::uint32_t Members = 0;
+
+	[[nodiscard]] constexpr bool IsEmpty() const noexcept { return Members == 0; }
+
+	// When the device is predicted to be done with everything in it, which is what the next output's
+	// own start is tested against. The lead is inside `Owed`, and it belongs there: work begins a lead
+	// after the thread has to be running, so the device is free exactly `Owed` after `RecordAt`.
+	[[nodiscard]] constexpr Instant FreeAt() const noexcept
+	{
+		return RecordAt == FrameClock::Unscheduled ? FrameClock::Unscheduled : Advanced(RecordAt, Owed);
+	}
+};
+
 class Timing
 {
 public:
@@ -463,7 +530,7 @@ public:
 				     .DeviceFreeAt = planned.DeviceFreeAt };
 		}
 
-		const std::uint64_t owed = Owed(clock, committed);
+		const std::uint64_t owed = OwedFrame(clock, committed);
 		const std::uint64_t plannedReach = clock.SequenceAfter(planned.Finish);
 
 		if (plannedReach == owed)
@@ -521,7 +588,33 @@ public:
 		Instant deviceFreeAt = Instant{}
 	) const noexcept
 	{
-		const Duration arming = Arming(budget);
+		return WakeFor(clock, budget, now, committed, deviceFreeAt, Arming(budget));
+	}
+
+	// The same wake against an arming this output does not compose for itself, which is how a batch
+	// reaches the alarm.
+	//
+	// **It is a reserve rather than an instant, and that is what keeps every floor below intact.** The
+	// batch names one instant for the whole device, and handing that instant to the loop directly would
+	// arm it whatever frame the output is actually able to make — including a frame already committed,
+	// and including one whose record point has gone by, which are the two defects the floors below exist
+	// for. Read back as `deadline - RecordAt` against the frame the batch was folded for, it is a
+	// duration this function applies to whichever frame it *chooses*, so a batched output that is a
+	// refresh behind arms for the frame it can reach with its whole queue's demand held back rather than
+	// with its own.
+	//
+	// **It is never smaller than `Arming(budget)`**, because the batch's instant is a minimum that
+	// includes this output's own solo term. So a batch can only arm the loop earlier and never later,
+	// which is the property that makes it safe to apply to the frames the floors below substitute in.
+	[[nodiscard]] constexpr Wake WakeFor(
+		const FrameClock& clock,
+		const Budget& budget,
+		Instant now,
+		std::uint64_t committed,
+		Instant deviceFreeAt,
+		Duration arming
+	) const noexcept
+	{
 		const std::uint64_t reach = clock.SequenceAfter(Project(now, deviceFreeAt, budget, RenderMode::Planned).Finish);
 
 		if (reach == FrameClock::NoSequence)
@@ -554,7 +647,7 @@ public:
 		// flip is one the clock has not observed, so the reach names it and the wake becomes its own
 		// record point — an instant the loop has already served, and one it would be handed back on
 		// every iteration until the flip lands. One frame past it is the answer.
-		const Instant wakeAt = clock.WakeupAt(std::max({ reach, Owed(clock, committed), armable }), arming);
+		const Instant wakeAt = clock.WakeupAt(std::max({ reach, OwedFrame(clock, committed), armable }), arming);
 
 		return wakeAt == FrameClock::Unscheduled ? Wake::Never() : Wake::At(wakeAt);
 	}
@@ -596,16 +689,80 @@ public:
 	// records immediately and the arming describes a schedule gyro is not on. `Admission::Wait` does not
 	// catch it: that verdict is a reach *behind* the frame owed, and work starting early in the same
 	// refresh reaches exactly it. The loop compares against this before it records, so a frame starts
-	// where the policy said rather than wherever the wake came from. What it does *not* price is a
-	// device with two outputs on it, which is why `FrameLoop::Serve` enforces this on an output that has
-	// its device to itself and says there what the other case costs.
+	// where the policy said rather than wherever the wake came from.
+	//
+	// **The arming is the caller's now, and for a device with two outputs on it that is the batch's
+	// rather than this output's.** It used to be composed here from the budget, which made this the
+	// figure that could only ever be right for an output alone on its queue — so the loop enforced it
+	// there and served a shared device from wherever it woke. `Batch` composes the other case and both
+	// arrive the same way, which is what stops the two spellings from drifting.
 	//
 	// `FrameClock::Unscheduled` where the clock names no such frame, which a caller reads as *no
 	// opinion* rather than as a bound in either direction.
 	[[nodiscard]] constexpr Instant
-	RecordPoint(const FrameClock& clock, const Budget& budget, std::uint64_t sequence) const noexcept
+	RecordPoint(const FrameClock& clock, Duration arming, std::uint64_t sequence) const noexcept
 	{
-		return clock.WakeupAt(sequence, Arming(budget));
+		return clock.WakeupAt(sequence, arming);
+	}
+
+	// Fold one output's owed composite into its device's batch, or begin a new one where it does not
+	// contend for the queue.
+	//
+	// **The contention test is what keeps a slow panel from taxing the fast one beside it.** A 60 Hz
+	// projector sharing a card with a 144 Hz panel is owed a frame whose deadline is most of a period
+	// away, and folding it in unconditionally would subtract its whole composite from every one of the
+	// fast panel's deadlines — a pointer that lags by the projector's cost on every frame, forever, to
+	// reserve for work that is not going to start until the device has been idle for milliseconds. So an
+	// output joins only where its own start falls *before* the device is predicted free of the members
+	// ahead of it, and otherwise it seeds a batch of its own. Two panels genuinely contending is then
+	// one batch, and two whose windows do not overlap is two, and neither case needs a rule about
+	// refresh rates.
+	//
+	// **Members arrive in the order the loop will serve them**, which is earliest deadline first, and
+	// the fold is only correct for that order — the demand ahead of a member is the work the loop will
+	// actually put in front of it. `FrameLoop::OrderByDeadline` is that order and it is the loop's, for
+	// the reason this function takes a batch rather than a set: which outputs share a queue is a fact
+	// about the machine, and this object holds policy.
+	//
+	// A clock naming no frame leaves the batch untouched. An unanchored output renders on demand under
+	// decision 31, so it has no place in a schedule and takes no place in the queue's.
+	[[nodiscard]] constexpr Batch
+	Fold(Batch batch, const FrameClock& clock, const Budget& budget, std::uint64_t sequence) const noexcept
+	{
+		const Instant deadline = clock.DeadlineAt(sequence);
+
+		if (deadline == FrameClock::Unscheduled)
+		{
+			return batch;
+		}
+
+		const Duration alone = Arming(budget);
+		const Instant solo = Advanced(deadline, -alone);
+
+		if (batch.IsEmpty() || solo >= batch.FreeAt())
+		{
+			return { .RecordAt = solo, .Owed = alone, .Members = 1 };
+		}
+
+		const Duration owed = Detail::Sum(batch.Owed, Reserve(budget, RenderMode::Planned));
+
+		return { .RecordAt = std::min(batch.RecordAt, Advanced(deadline, -owed)),
+			     .Owed = owed,
+			     .Members = batch.Members + 1 };
+	}
+
+	// The frame this output owes: one past the later of what has reached the glass and what has been
+	// spoken for. Saturating, because `SequenceAfter` answers the maximum on overflow and a floor
+	// derived from that answer must not wrap around behind it.
+	//
+	// Public because the batch is folded a named frame at a time and the loop is what names them — it
+	// is the same question `Assess` asks itself, and having the loop derive it a second way would be two
+	// spellings of the frame the whole schedule is about.
+	[[nodiscard]] static constexpr std::uint64_t OwedFrame(const FrameClock& clock, std::uint64_t committed) noexcept
+	{
+		const std::uint64_t latest = std::max(clock.LastSequence(), committed);
+
+		return latest == std::numeric_limits<std::uint64_t>::max() ? latest : latest + 1;
 	}
 
 	// When work started now would be done: record on the frame thread while the device finishes what it
@@ -660,7 +817,7 @@ private:
 				     .DeviceFreeAt = projected.DeviceFreeAt };
 		}
 
-		const std::uint64_t owed = Owed(clock, committed);
+		const std::uint64_t owed = OwedFrame(clock, committed);
 		const std::uint64_t reach = clock.SequenceAfter(projected.Finish);
 
 		if (reach < owed)
@@ -669,16 +826,6 @@ private:
 		}
 
 		return Decide(clock, admission, reach, projected);
-	}
-
-	// The frame this output owes: one past the later of what has reached the glass and what has been
-	// spoken for. Saturating, because `SequenceAfter` answers the maximum on overflow and a floor
-	// derived from that answer must not wrap around behind it.
-	[[nodiscard]] static constexpr std::uint64_t Owed(const FrameClock& clock, std::uint64_t committed) noexcept
-	{
-		const std::uint64_t latest = std::max(clock.LastSequence(), committed);
-
-		return latest == std::numeric_limits<std::uint64_t>::max() ? latest : latest + 1;
 	}
 
 	// The tier's own figure plus the part of the frame no tier reduces. Saturating for `Sum`'s reason:
@@ -794,6 +941,86 @@ static_assert(
 			   ) == Monotonic::FromNanoseconds(1'012'000'000);
 	}(),
 	"Recording overlaps the device and execution does not"
+);
+
+namespace Detail
+{
+// A clock anchored on frame 7 at one second, and a budget seeded with a composite, both for the batch
+// assertions below and named so that nothing else in `Detail` reaches for them. Frame 8's deadline is
+// 1010ms and every frame after it is one period later.
+[[nodiscard]] constexpr FrameClock AssertionClock(Duration period = std::chrono::milliseconds{ 10 }) noexcept
+{
+	FrameClock clock;
+	clock.Configure(OutputConfiguration{ .Period = period });
+	clock.Observe({ .PresentedAt = Monotonic::FromNanoseconds(1'000'000'000), .Period = period, .Sequence = 7 });
+
+	return clock;
+}
+
+[[nodiscard]] constexpr Budget AssertionBudget(Duration gpu) noexcept
+{
+	return Budget{ BudgetPolicy{ .InitialCpu = std::chrono::milliseconds{ 1 }, .InitialGpu = gpu } };
+}
+} // namespace Detail
+
+// **A batch of one is the arming an output composes for itself, to the nanosecond.** Every figure in
+// this file was measured on a machine with one panel on its card, and the batch must not move that
+// machine at all — so the fold's single-member answer is the old `RecordPoint` rather than something
+// that agrees with it in the cases somebody happened to test. Asserted rather than swept because a
+// regression here is invisible to anything that counts frames: it is a latency shift on a schedule that
+// still meets every deadline.
+static_assert(
+	[] {
+		const Budget budget = Detail::AssertionBudget(std::chrono::milliseconds{ 3 });
+		const Timing timing{ TimingPolicy{ .Margin = std::chrono::milliseconds{ 1 },
+		                                   .Lead = std::chrono::milliseconds{ 2 } } };
+		const FrameClock clock = Detail::AssertionClock();
+		const Batch batch = timing.Fold(Batch{}, clock, budget, 8);
+
+		return batch.Members == 1 && batch.Owed == timing.Arming(budget) &&
+	           batch.RecordAt == timing.RecordPoint(clock, timing.Arming(budget), 8) &&
+	           batch.RecordAt == Monotonic::FromNanoseconds(1'003'000'000);
+	}(),
+	"A batch of one is the arming an output composes for itself"
+);
+
+// **A member that contends moves the instant earlier and never later**, which is the property that
+// makes a batch safe to hand to `WakeFor` as a reserve. That function substitutes a different frame
+// whenever the loop is behind or a commit is in flight, and applying a hold that could be *stricter*
+// than the output's own would arm for an instant the output cannot use. Here the second panel's frame is
+// owed a millisecond later and its composite is three: alone it would begin at 1007, and behind the
+// first one's execution it has to begin at 1003 for both to land.
+static_assert(
+	[] {
+		const Budget budget = Detail::AssertionBudget(std::chrono::milliseconds{ 3 });
+		const Timing timing;
+		const FrameClock first = Detail::AssertionClock();
+		const FrameClock second = Detail::AssertionClock(std::chrono::milliseconds{ 11 });
+
+		const Batch one = timing.Fold(Batch{}, first, budget, 8);
+		const Batch two = timing.Fold(one, second, budget, 8);
+
+		return two.Members == 2 && two.RecordAt < one.RecordAt &&
+	           two.RecordAt <= timing.RecordPoint(second, timing.Arming(budget), 8) &&
+	           two.RecordAt == Monotonic::FromNanoseconds(1'003'000'000);
+	}(),
+	"A batch never holds a member later than that member would have held itself"
+);
+
+// **An output whose own start clears the queue begins a batch of its own**, which is what keeps a 60 Hz
+// projector from taxing the 144 Hz panel beside it on every frame. The second clock here runs at a
+// hundred milliseconds, so its frame is owed long after the first panel's composite has left the device
+// — folding it in would subtract its whole cost from a deadline it is nowhere near.
+static_assert(
+	[] {
+		const Budget budget = Detail::AssertionBudget(std::chrono::milliseconds{ 3 });
+		const Timing timing;
+		const Batch one = timing.Fold(Batch{}, Detail::AssertionClock(), budget, 8);
+		const Batch two = timing.Fold(one, Detail::AssertionClock(std::chrono::milliseconds{ 100 }), budget, 8);
+
+		return one.Members == 1 && two.Members == 1 && two.RecordAt > one.RecordAt;
+	}(),
+	"An output that does not contend for the queue is not charged to it"
 );
 
 // An output that has never presented renders at once and evaluates at the instant it will be ready,

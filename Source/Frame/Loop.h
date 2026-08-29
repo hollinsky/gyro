@@ -733,6 +733,8 @@ public:
 		}
 
 		std::array<Instant, MaxDevices> deviceFree{};
+		std::array<std::uint8_t, MaxOutputs> order{};
+		std::size_t due = 0;
 
 		{
 			// Core/FrameSection.h names this span exactly: from acquiring the published snapshot through
@@ -746,8 +748,15 @@ public:
 
 			TraceCount("held", static_cast<std::int64_t>(m_Held));
 
-			std::array<std::uint8_t, MaxOutputs> order{};
-			const std::size_t due = OrderByDeadline(order);
+			due = OrderByDeadline(order);
+
+			// **The whole device's schedule, before any of it is served.** Each output is held to when
+			// its *queue* must begin rather than to when it alone could, and that is one instant shared
+			// by everything on the card — so it cannot be composed as each output is reached, because a
+			// member folded in later moves the instant the members before it are held to. Costs are
+			// collected above this for the same reason they are collected before anything is assessed: a
+			// budget that moved is a budget this iteration should be reserving against.
+			Schedule({ order.data(), due });
 
 			for (std::size_t position = 0; position < due; ++position)
 			{
@@ -768,6 +777,14 @@ public:
 			// whose pixels are still in a queue.
 			(void)m_Returns->Post(m_Held, {}, Presentations());
 		}
+
+		// **Folded again, because the frames it is about are not the frames that were just served.** The
+		// pass above reserved for what each output owed on the way in; the outputs that drew now owe the
+		// frame after, and the alarm has to name that batch rather than the one it has already run. The
+		// order is untouched by any of it — `OrderByDeadline` reads the anchor, and only a flip moves an
+		// anchor — so what changed between the two calls is exactly the frames, which is what the second
+		// call is for.
+		Schedule({ order.data(), due });
 
 		m_Armed = Fold(now, deviceFree);
 
@@ -967,8 +984,17 @@ private:
 		//
 		// So the frame waits for its own record point and the next `WakeFor` arms for exactly this
 		// instant, which is why declining here does not spin.
-		const Instant recordAt = Alone(output) ?
-		                             m_Timing.RecordPoint(output.m_Clock, output.m_Cost, decision.Sequence) :
+		//
+		// **The point is the device's rather than this output's, which is the whole of what two monitors
+		// on one card changed.** A record point prices one composite against an idle GPU, and outputs
+		// sharing a queue serialise — so this used to be enforced only where an output had its card to
+		// itself, and a second monitor was served from wherever the loop happened to wake, drawing a
+		// pointer position a whole refresh before the glass showed it. `Schedule` composes the instant
+		// the *queue* must begin at instead, and every output on that queue is held to it: they are
+		// served back to back as they always were, from a place the policy chose rather than from
+		// whichever flip or key press got here first.
+		const Instant recordAt = m_Gated[index] ?
+		                             m_Timing.RecordPoint(output.m_Clock, m_Arming[index], decision.Sequence) :
 		                             FrameClock::Unscheduled;
 
 		if (recordAt != FrameClock::Unscheduled && now < recordAt)
@@ -1474,6 +1500,171 @@ private:
 		return target;
 	}
 
+	// What each output must hold back from its own deadline, which is every composite the device it is
+	// on owes this refresh rather than only its own.
+	//
+	// **It is a duration per output and an instant per device, and the two are the same statement.**
+	// `Batch::RecordAt` is one instant for the whole queue; read back against a member's own deadline it
+	// is a reserve, and a reserve is what both readers want — `Serve` applies it to the frame `Assess`
+	// decided on and `Timing::WakeFor` applies it to whichever frame its own floors name. Handing either
+	// of them the instant instead would pin them to the frame this fold happened to use, which is the
+	// frame already committed on every iteration between a submit and its flip.
+	//
+	// **Two passes, because a member joining moves the instant the members before it are held to.** The
+	// fold produces a grouping and the finished batches are read afterwards; assigning as it walks would
+	// give the first output on a card an arming composed before its neighbour was known.
+	//
+	// Every output starts at the arming it composes for itself, so an output in no batch — settled, or
+	// on a clock with no anchor — is held to exactly what an output alone on its device has always been
+	// held to.
+	void Schedule(std::span<const std::uint8_t> order) noexcept
+	{
+		std::array<Batch, MaxOutputs> batches{};
+		std::array<std::uint64_t, MaxOutputs> owed{};
+		std::array<std::uint8_t, MaxOutputs> group{};
+		std::array<std::uint8_t, MaxDevices> open{};
+		std::array<Duration, MaxDevices> demand{};
+		std::array<Duration, MaxDevices> shortest{};
+		std::uint8_t count = 0;
+
+		open.fill(Unbatched);
+		shortest.fill(Duration::max());
+
+		for (std::size_t index = 0; index < m_Outputs.size(); ++index)
+		{
+			m_Arming[index] = m_Timing.Arming(m_Outputs[index].m_Cost);
+			m_Gated[index] = false;
+			group[index] = Unbatched;
+			owed[index] = FrameClock::NoSequence;
+		}
+
+		for (const std::uint8_t index : order)
+		{
+			const FrameOutput& output = m_Outputs[index];
+
+			if (!Owes(output, index))
+			{
+				continue;
+			}
+
+			owed[index] = Timing::OwedFrame(output.m_Clock, output.m_Committed);
+
+			// No anchor is no deadline, so there is no demand to place and nothing to place it before.
+			// Decision 31 has such an output render on demand, and it is charged to no queue while it
+			// does — which is the same answer `Timing::Fold` gives and is tested here so that the fold's
+			// refusal cannot be mistaken for a batch that stayed as it was.
+			if (output.m_Clock.DeadlineAt(owed[index]) == FrameClock::Unscheduled)
+			{
+				owed[index] = FrameClock::NoSequence;
+
+				continue;
+			}
+
+			demand[output.m_Device] =
+				Detail::Sum(demand[output.m_Device], m_Timing.Reserve(output.m_Cost, RenderMode::Planned));
+			shortest[output.m_Device] = std::min(shortest[output.m_Device], output.m_Clock.Period());
+		}
+
+		for (const std::uint8_t index : order)
+		{
+			const FrameOutput& output = m_Outputs[index];
+
+			if (owed[index] == FrameClock::NoSequence || !MayHold(demand, shortest, output.m_Device))
+			{
+				continue;
+			}
+
+			const std::uint8_t held = open[output.m_Device];
+			const Batch before = held == Unbatched ? Batch{} : batches[held];
+			const Batch after = m_Timing.Fold(before, output.m_Clock, output.m_Cost, owed[index]);
+
+			if (after.Members == 1)
+			{
+				// Either the device had nothing open or this output's own start clears everything already
+				// queued on it, and those are the same statement about what happens next: the batch open
+				// on this device from here is one whose first member is this output.
+				batches[count] = after;
+				open[output.m_Device] = count;
+				++count;
+			}
+			else
+			{
+				batches[open[output.m_Device]] = after;
+			}
+
+			group[index] = open[output.m_Device];
+		}
+
+		for (std::size_t index = 0; index < m_Outputs.size(); ++index)
+		{
+			if (group[index] != Unbatched)
+			{
+				m_Arming[index] =
+					Elapsed(batches[group[index]].RecordAt, m_Outputs[index].m_Clock.DeadlineAt(owed[index]));
+				m_Gated[index] = true;
+			}
+		}
+	}
+
+	// Whether this device has any idle time to hold a frame back *with*.
+	//
+	// **A record point is a latency optimisation and it is spent out of slack the device has.** Holding a
+	// composite until the last instant that still meets its deadline is free exactly while the queue has
+	// somewhere to put the work it is not doing yet; on a queue whose composites already fill the fastest
+	// panel's period there is no such place, and the hold pushes the work it delayed into the next
+	// refresh's window. What that costs is a frame per beat of the two panels' phase — which the sweep
+	// measured the moment the batch was enforced on a set admission control had cut to exactly
+	// `C_fast + C_slow = P_fast`, and which decision 30's relaxed release was quietly paying for before:
+	// an output rendering as soon as the work fits is released a whole period early, and a queue that
+	// never idles needs every bit of that.
+	//
+	// So a saturated device keeps the behaviour it has always had — served back to back from wherever the
+	// loop woke, work-conserving — and the hold applies where there is genuinely room for it. The
+	// comparison is against the *shortest* member's period because that is the panel whose next release
+	// the held work would collide with, and it is strict because equality is a queue with exactly no
+	// idle time, which is the case that fails.
+	//
+	// **It is a fact about the device rather than a rung**, which is why it is not admission control's:
+	// the plan is unchanged, every output spends what it was allocated, and what varies is only whether
+	// gyro chooses to start early. A set this refuses to hold is a set that still meets every deadline.
+	[[nodiscard]] bool MayHold(
+		const std::array<Duration, MaxDevices>& demand,
+		const std::array<Duration, MaxDevices>& shortest,
+		std::size_t device
+	) const noexcept
+	{
+		if (shortest[device] == Duration::max())
+		{
+			return false;
+		}
+
+		return Detail::Sum(demand[device], m_Timing.Policy().Lead) < shortest[device];
+	}
+
+	// Whether this output is owed a frame as soon as one can be made: damage that has not reached the
+	// glass, a scene it has not drawn, a flip whose completion the clock is still waiting for, or a
+	// contributor that wants every frame.
+	//
+	// **It is the batch's membership and the fold's contribution at once, and one predicate rather than
+	// two is the point.** A settled panel beside an animating one must not hold the queue — a batch that
+	// counted it would drag its neighbour's record point earlier by a composite that is never going to
+	// be recorded, which is pointer latency bought to reserve for nothing. The two questions have to
+	// answer together, because an output the fold declines to arm for is an output the batch must not be
+	// reserving for.
+	//
+	// What is deliberately outside it is a full commit queue. Such an output records nothing *this*
+	// iteration and is still owed the frame after its flip, so leaving it in reserves for a composite
+	// that is merely early rather than absent — and the error is in the recoverable direction, since a
+	// larger batch only ever moves the record point earlier and can therefore cost latency but never a
+	// frame.
+	[[nodiscard]] bool Owes(const FrameOutput& output, std::size_t index) const noexcept
+	{
+		const Wake scene = SceneWake(index);
+
+		return !output.m_Damage.IsEmpty() || output.m_Drawn != m_Held || output.IsFlipPending() ||
+		       (scene.Which == Wake::Kind::Continuous && scene.Interval == Duration::zero());
+	}
+
 	// Whether this output is owed the frame `Assess` says it could make.
 	//
 	// Damage outranks everything, since it is pixels that have not reached the glass. Otherwise it is the
@@ -1539,15 +1730,15 @@ private:
 
 		const Wake scene = SceneWake(index);
 
-		// Owed a frame as soon as one can be made: damage that has not reached the glass, a flip whose
-		// completion the clock is still waiting for, or a scene contributor that wants every frame.
-		const bool immediate = !output.m_Damage.IsEmpty() || output.m_Drawn != m_Held || output.IsFlipPending() ||
-		                       (scene.Which == Wake::Kind::Continuous && scene.Interval == Duration::zero());
-
-		if (immediate)
+		if (Owes(output, index))
 		{
+			// **Armed for when the queue must begin and not for when this output alone could.** The
+			// arming is `Schedule`'s, so an output sharing a card wakes the loop early enough for
+			// everything in front of it to run first — without which the alarm names the instant one
+			// output could have started at and whatever is served after it is late by exactly that
+			// output's execution.
 			return m_Timing.WakeFor(
-				output.m_Clock, output.m_Cost, now, output.m_Committed, deviceFree[output.m_Device]
+				output.m_Clock, output.m_Cost, now, output.m_Committed, deviceFree[output.m_Device], m_Arming[index]
 			);
 		}
 
@@ -1570,37 +1761,17 @@ private:
 			return Wake::At(scene.When);
 		}
 
-		const Instant at = output.m_Clock.WakeupAt(sequence, m_Timing.Arming(output.m_Cost));
+		// `m_Arming[index]` is this output's own composed arming here rather than a batch's: `Owes`
+		// declined it above, so `Schedule` left it out of every queue and out of the fill it starts from.
+		// A frame wanted later is one no device is reserving for yet.
+		const Instant at = output.m_Clock.WakeupAt(sequence, m_Arming[index]);
 
 		return at == FrameClock::Unscheduled ? Wake::Never() : Wake::At(at);
 	}
 
-	// Whether this output has its device to itself, which is the condition the record point above is
-	// enforced under.
-	//
-	// **A record point prices one composite against an idle GPU, and two outputs on one queue
-	// serialise.** The second one's execution begins where the first one's ended, so its own record
-	// point is not when it can afford to start — the pair was admitted as one task set on one queue, and
-	// what the loop has always done is serve them back to back from wherever it woke. Holding each to
-	// its own point makes the second wait and then charges it the first's execution on top, and
-	// Source/Integration/Schedulability.Test.cpp's sweep watches an admitted set start missing frames.
-	//
-	// So a shared device keeps today's behaviour until the arming is priced per device rather than per
-	// output, which is a change to what `Timing` is asked rather than to what the loop does with the
-	// answer. Docs/Open.md carries it. One output on a device is every laptop and the machine the
-	// latency this check exists to remove was measured on.
-	[[nodiscard]] bool Alone(const FrameOutput& output) const noexcept
-	{
-		for (const FrameOutput& other : m_Outputs)
-		{
-			if (&other != &output && other.IsBound() && other.m_Device == output.m_Device)
-			{
-				return false;
-			}
-		}
-
-		return true;
-	}
+	// No output's place in a batch, which is what an output the fold declined occupies. `MaxOutputs` is
+	// sixteen, so a byte says this without a second array of flags beside the grouping.
+	static constexpr std::uint8_t Unbatched = 0xFF;
 
 	// SPEC: how many finished frames a renderer may report in one iteration. Two per output per
 	// iteration is the steady state under decision 30's pipeline; eight is slack for a device coming
@@ -1623,6 +1794,17 @@ private:
 	// Scratch for the run `Presentations` hands the return channel, a member rather than a local so that
 	// the span it returns outlives the call. Nothing reads it between iterations.
 	std::array<PresentedFrame, MaxOutputs> m_Presentations{};
+
+	// What each output holds back from its own deadline, which is its whole device's batch. Recomputed
+	// twice per iteration by `Schedule` and read by the two parties that need it in between, so it is a
+	// member for the reason the array above is one rather than because anything survives the step.
+	std::array<Duration, MaxOutputs> m_Arming{};
+
+	// And whether the record point is enforced at all, which is `MayHold` per output. A device with no
+	// idle time to spend keeps the arming above for its *alarm* — the loop still wants waking at a
+	// sensible instant — and is not held to it, because on that queue the honest answer is to start as
+	// soon as there is anything to start.
+	std::array<bool, MaxOutputs> m_Gated{};
 
 	// What the previous iteration answered, kept only so that the next one can say how much of its lead
 	// it still had. It is not read by anything that decides: the loop recomputes the fold from scratch

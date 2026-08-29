@@ -1347,29 +1347,31 @@ What that leaves open, now that a descriptor can arrive:
   a legacy client whose buffer genuinely has no stated layout — which is what a GBM allocation without
   modifier support produces, and there are still drivers that do it.
 
-## The arming is priced per output, and a device with two outputs on it is one queue
+## The batch reserve is folded from the frames outputs are owed *now*, and a scene wake is not one
 
-`Timing::Arming` composes one output's cost figures and subtracts the sum from that output's deadline.
-That is what a record point is, and `FrameLoop::Serve` now holds a frame to it: a wake that came from
-a flip, a socket or a key press finds the work fits from the instant the previous frame retires, and
-recording there publishes a pointer position and a window's pixels a whole refresh before the glass
-shows them.
+`FrameLoop::Schedule` builds a device's batch from the outputs that are immediately owed a frame —
+damage that has not reached the glass, a scene the output has not drawn, or a flip still outstanding.
+An output whose only claim on a frame is a scene contributor naming an instant *later* is not in it, and
+keeps the arming it composes for itself.
 
-The rule is only applied where an output has its device to itself, which is where the arithmetic is
-true. Two outputs on one card share a queue: the second one's composite does not begin executing when
-its own record starts, it begins where the first one's ended, so its own record point is not an instant
-it can afford to wait for. Serving them back to back from wherever the loop happened to wake is what
-made an admitted set meet its deadlines, and `Integration/Schedulability.Test.cpp`'s phase sweep sees
-it go the moment each output is held to its own figure — the second output waits, is charged the
-first's execution on top, and misses a frame the set was admitted to make.
+That is right for what the batch is about and it leaves a case unpriced. A window animating under a
+spring on one panel wakes the loop through the retarget its commit performed, which is damage and is in
+the fold; a contributor that says *a frame is wanted at T* and nothing else is not, so when T arrives
+that output is served from its own record point with its neighbours' composites unaccounted. The cost is
+the one this whole entry was about, on a narrower case: a frame served at an instant that did not price
+the queue in front of it. Folding it needs the batch to be composed per *frame* rather than per refresh,
+since two outputs wanting frames at different future instants are not one batch.
 
-What is missing is a reserve that prices the *batch*: every composite the device owes this refresh,
-subtracted from the earliest deadline among them, which is decision 29's serialisation test read
-backwards. It has to appear in the arming as well as in the check, or the alarm still names the instant
-one output alone could start at and the output served second is late by exactly the other's cost. What
-has to be decided is where it lives — `Timing` is written per output on purpose, and the party that
-knows which outputs share a device is the loop.
+## A hold is refused for the whole device, where the honest unit is the interval
 
-Until then a second monitor on the same card keeps the old behaviour: it draws as soon as the work
-fits, and its pointer is a refresh behind. A second monitor on a *second* card is unaffected, because
-each is alone on its own queue.
+`FrameLoop::MayHold` compares a device's whole demand against its shortest member's period and turns the
+record point off entirely when the two meet. That is exact for the case it was written against — a
+queue with no idle time has nothing to hold a frame back *with* — and it is coarse: a card that
+saturates only at the alignment where every panel's deadline coincides gives up the hold at every other
+alignment too, and a card carrying one heavy output beside two cheap ones gives it up for all three.
+
+What the rule is standing in for is a demand test over an interval rather than over a device. Decision
+160 records why the coarse form is the one that landed: the failure it prevents is a frame dropped on a
+saturated card, the cost of being coarse is latency on a card that is not, and only the first is
+something a person cannot see coming.
+

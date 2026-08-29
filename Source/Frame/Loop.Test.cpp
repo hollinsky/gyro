@@ -510,9 +510,9 @@ GYRO_TEST(FrameLoop, AFrameWokenBeforeItsRecordPointWaitsForIt)
 }
 
 // The other half, and the reason the check is not simply the record point: two outputs on one queue
-// serialise, so the second's own record point is not when it can afford to start. Until the arming is
-// priced per device they are served together from wherever the loop woke.
-GYRO_TEST(FrameLoop, TwoOutputsOnOneDeviceAreNotHeldToTheirOwnRecordPoints)
+// serialise, so the second's own record point is not when it can afford to start. What they are held to
+// instead is one instant for the card, which is earlier than either of them would have chosen.
+GYRO_TEST(FrameLoop, TwoOutputsOnOneDeviceAreHeldToOneRecordPointForTheCard)
 {
 	ManualClock clock{ At(1000) };
 	SnapshotRing ring;
@@ -524,20 +524,73 @@ GYRO_TEST(FrameLoop, TwoOutputsOnOneDeviceAreNotHeldToTheirOwnRecordPoints)
 	FakeRenderer renderer;
 
 	std::array<FrameOutput, 2> outputs;
-	outputs[0].Bind(first, renderer, 0, Panel());
-	outputs[1].Bind(second, renderer, 0, Panel());
+	outputs[0].Bind(first, renderer, 0, Panel(), {}, BudgetPolicy{ .InitialCpu = 1ms, .InitialGpu = 3ms });
+	outputs[1].Bind(second, renderer, 0, Panel(), {}, BudgetPolicy{ .InitialCpu = 1ms, .InitialGpu = 3ms });
 
 	FrameLoop loop{ clock, ring, returns, evaluator };
 	loop.Bind(outputs);
 
 	first.Flip(At(1000), 7);
-	second.Flip(At(1000), 7);
+	second.Flip(At(1001), 7);
+	outputs[0].DamageWholeOutput();
+	outputs[1].DamageWholeOutput();
+
+	// Frame 8 is owed at 1010 on the first panel and at 1011 on the second, and each composite is a
+	// millisecond of recording and three of execution. Alone, they would start at 1006 and 1007. They are
+	// not alone: the second cannot begin executing until the first has finished, so the pair has to begin
+	// at 1003 for the second to land — which is the demand ahead of it plus its own subtracted from its
+	// own deadline, and a figure neither output could have reached from what it knows about itself.
+	clock.Set(At(1002));
+
+	(void)loop.Step();
+
+	GYRO_CHECK_EQ(first.Presents, 0);
+	GYRO_CHECK_EQ(second.Presents, 0);
+
+	// And at the instant the card is due to start, both go — served back to back, which is what they
+	// always did, from a place the policy chose rather than from wherever the loop happened to wake.
+	clock.Set(At(1003));
+
+	(void)loop.Step();
+
+	GYRO_CHECK_EQ(first.Presents, 1);
+	GYRO_CHECK_EQ(second.Presents, 1);
+	GYRO_CHECK_EQ(outputs[0].Committed(), std::uint64_t{ 8 });
+	GYRO_CHECK_EQ(outputs[1].Committed(), std::uint64_t{ 8 });
+}
+
+// The rule's other half: a queue with no idle time in it is not held at all.
+//
+// A record point is spent out of slack the device has, and holding a composite back is only free while
+// the queue has somewhere to put the work it is not doing yet. Six milliseconds apiece on a ten
+// millisecond panel is a card whose composites more than fill the period they share — so there is
+// nothing to hold with, and a hold would push the work it delayed into the next refresh's window. Both
+// are served from wherever the loop woke, which is what every shared device did before the batch and
+// what a saturated one goes on doing.
+GYRO_TEST(FrameLoop, ASaturatedDeviceIsServedWorkConservingRatherThanHeld)
+{
+	ManualClock clock{ At(1000) };
+	SnapshotRing ring;
+	ReturnChannel returns;
+	NullEvaluator evaluator;
+
+	FakePresenter first;
+	FakePresenter second;
+	FakeRenderer renderer;
+
+	std::array<FrameOutput, 2> outputs;
+	outputs[0].Bind(first, renderer, 0, Panel(), {}, BudgetPolicy{ .InitialGpu = 6ms });
+	outputs[1].Bind(second, renderer, 0, Panel(), {}, BudgetPolicy{ .InitialGpu = 6ms });
+
+	FrameLoop loop{ clock, ring, returns, evaluator };
+	loop.Bind(outputs);
+
+	first.Flip(At(1000), 7);
+	second.Flip(At(1001), 7);
 	clock.Set(At(1001));
 	outputs[0].DamageWholeOutput();
 	outputs[1].DamageWholeOutput();
 
-	// With no lead and no measured cost the record point is the deadline itself, so an output alone on
-	// its device would decline here. Neither of these does.
 	(void)loop.Step();
 
 	GYRO_CHECK_EQ(first.Presents, 1);
@@ -1096,17 +1149,22 @@ GYRO_TEST(FrameLoop, TwoOutputsOnOneDeviceSerialiseOnTheQueue)
 
 	first.Flip(At(1000), 7);
 	second.Flip(At(1001), 7);
-	clock.Set(At(1002));
 	outputs[0].DamageWholeOutput();
 	outputs[1].DamageWholeOutput();
 
+	// At the card's record point rather than a millisecond before it, which is where the pair is now held
+	// — see `TwoOutputsOnOneDeviceAreHeldToOneRecordPointForTheCard` for the arithmetic that names 1003.
+	// What is under test here is unchanged by it: whichever instant the queue starts at, the second
+	// output's execution begins where the first one's ended.
+	clock.Set(At(1003));
+
 	(void)loop.Step();
 
-	// Decision 29 as a loop variable. The first output records at 1002 and its work is done on the
-	// device at 1006; the second records at once but cannot begin executing until then, so its
+	// Decision 29 as a loop variable. The first output records at 1003 and its work is done on the
+	// device at 1007; the second records at once but cannot begin executing until then, so its
 	// prediction is three milliseconds of GPU past the first's rather than past now.
-	GYRO_CHECK_EQ(outputs[0].Last().DeviceFreeAt, At(1006));
-	GYRO_CHECK_EQ(outputs[1].Last().DeviceFreeAt, At(1009));
+	GYRO_CHECK_EQ(outputs[0].Last().DeviceFreeAt, At(1007));
+	GYRO_CHECK_EQ(outputs[1].Last().DeviceFreeAt, At(1010));
 }
 
 // Decision 94's term arriving where the schedule can see it. The evaluator measures its own walk for

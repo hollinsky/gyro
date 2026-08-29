@@ -12199,3 +12199,83 @@ is the honest answer to *when did this reach a person*.
 **What a person gets** is the internal panel of a laptop running at 60 rather than at 36. At the
 default arming lead it dropped 54% of its commits a refresh late; it now drops none, and neither does a
 3440x1440 ultrawide on the same machine.
+
+### 160. The record point is priced for the whole card, and a card with no idle time is not held at all
+
+*(Decided 2026-08-29. `Batch` and `Timing::Fold` are the arithmetic in
+[`Frame/Timing.h`](../Source/Frame/Timing.h); `FrameLoop::Schedule` and `FrameLoop::MayHold` are the
+membership in [`Frame/Loop.h`](../Source/Frame/Loop.h). It answers Open.md's *the arming is priced per
+output, and a device with two outputs on it is one queue*, and leaves two narrower entries behind it.)*
+
+**The record point was enforced only on an output alone on its card, and the reason was that the
+arithmetic was wrong for any other.** `Timing::Arming` composed one output's cost figures and subtracted
+them from that output's deadline, which is the instant that output alone could start at. Two outputs on
+one card serialise — the second's execution begins where the first's ended — so holding each to its own
+figure makes the second wait and then charges it the first's execution on top, and the schedulability
+sweep watched an admitted set start missing frames the moment that was tried. What the loop did instead
+was serve a shared card back to back from wherever it woke: a flip, a socket, a key press. A frame
+starting there is a frame recorded as much as a whole refresh before the glass shows it, and **what a
+person saw was a second monitor whose pointer trailed the one on the first.** Anything a spring solves
+is evaluated at the predicted presentation and does not care when the work ran; a pointer position and a
+client's committed pixels are model values held in the snapshot the record reads, so a refresh of
+earliness is a refresh of lag with nothing downstream to recover it.
+
+**So the reserve prices the batch: every composite the card owes, folded in the order the loop will
+serve them.** `Timing` holds the arithmetic and the loop holds the membership, which is the split
+`Timing`'s own header committed to when it said the frame loop is the object that will know how many
+outputs share a queue. It is decision 29's processor-demand test solved for the release instant rather
+than for feasibility.
+
+**A minimum over members rather than the earliest deadline less the total**, which the Open.md entry had
+proposed and which is the conservative reading. A member whose deadline is most of a period away does
+not need the batch to finish before the member in front of it does; what it needs is for the demand
+ahead of it *plus its own* to fit before its own deadline. Testing that per member and taking the
+earliest answer degenerates to the single output's record point exactly — asserted, because every figure
+in that file was measured on a laptop with one panel and the change must not move that machine at all.
+
+**Read back as a duration rather than handed over as an instant**, which is what keeps `WakeFor`'s three
+floors intact. The batch names one instant for the card; expressed as `deadline - RecordAt` against the
+frame it was folded for, it is a reserve the alarm applies to whichever frame its own floors end up
+naming — a frame already committed, or one whose record point has gone by. It is never smaller than the
+output's own arming, because the minimum includes that output's own term, so a batch can only arm the
+loop earlier and never later.
+
+**A member joins only where it contends, and that is not a refinement.** A 60 Hz projector sharing a
+card with a 144 Hz panel is owed a frame whose deadline is most of a period away; folding it in
+unconditionally would subtract its whole composite from every one of the fast panel's deadlines, which
+is a pointer lagging by the projector's cost on every frame forever to reserve for work that will not
+start until the device has been idle for milliseconds. So an output joins where its own start falls
+before the device is predicted free of what is queued ahead of it, and otherwise begins a batch of its
+own — which needs no rule about refresh rates.
+
+**And the part that was not foreseen: a hold is spent out of slack the card has, so a saturated card
+is not held at all.** Holding a composite until the last instant that still meets its deadline is free
+exactly while the queue has somewhere to put the work it is not yet doing. Decision 30's relaxed release
+was quietly providing that: an output rendering as soon as the work fits is released a whole period
+before its deadline, and the sweep's boundary sets — the ones admission control had cut to exactly
+`C_fast + C_slow = P_fast` — were only schedulable because of it. Enforcing the batch on those took a
+panel from meeting every deadline to losing a frame per beat of the two grids' phase, at every phase.
+So `MayHold` compares the card's demand against its shortest member's period and turns the record point
+off where the two meet, strictly: equality is a queue with exactly no idle time, which is the case that
+fails. A saturated card keeps the work-conserving behaviour every shared card had before this, the plan
+is untouched, and what varies is only whether gyro chooses to start early.
+
+**What it costs is a neighbour's frame under a transient, and that is the trade taken deliberately.** A
+composite that overruns by a whole period is a non-preemptible job the panel beside it cannot get onto
+the queue behind in time, and it now loses one frame where it used to lose none — because the period of
+earliness that absorbed it is exactly what was spent. Rejected the other way round: a neighbour losing a
+frame to a transient is a hitch on two monitors instead of one, roughly never, and a neighbour rendering
+a refresh early is a pointer that lags on that monitor always. The sweep asserts the loss stays at one
+frame and does not cascade.
+
+**What the sweep found first was itself.** `Source/Integration/Schedulability.Test.cpp` ran with a zero
+lead, which `Frame/Timing.h` already refuses in a `static_assert` — an arming must lead the reserve it
+is derived from, or the alarm names the instant the verdict has already run out of time at. A frame
+started there finishes exactly on its own vblank, which the headless panel latches onto the next one,
+and real hardware loses that race too. It went unnoticed for as long as every output in that file shared
+one card and nothing was ever held to that instant. The machine now runs the composition root's own
+measured figure.
+
+**What a person gets** is a second monitor whose pointer is as current as the first one's: a frame
+recorded within the card's own composite time of the glass rather than a refresh ahead of it, on any
+card with room to spare — which is every card that is not already dropping frames.

@@ -99,6 +99,28 @@ constexpr Duration kWarmup = 20 * kSlow;
 // sweep costs under a second of wall clock, because nothing here draws anything.
 constexpr Duration kMeasured = 120 * kSlow;
 
+// **The machine has a lead, and running without one is the configuration Frame/Timing.h refuses.** That
+// header's own `static_assert` is that an arming leads the reserve it is derived from: with both figures
+// zero the alarm names the instant the verdict has already run out of time at, and a frame started there
+// finishes exactly on its own vblank — which this panel latches onto the *next* one, because a commit
+// landing at the flip is a race gyro loses on real hardware too.
+//
+// It went unnoticed for as long as the record point was enforced only on an output alone on its card.
+// Every output here shares one device, so nothing was ever held to that instant and every frame started
+// early with slack to spare. Pricing the batch is what put this loop on its own schedule, and the first
+// thing that schedule found was this file running a machine no real one is.
+//
+// The figure is `Compositor.cpp`'s `ArmingLead` rather than one chosen here, because a machine this file
+// runs and a machine gyro runs should differ in the panels rather than in the policy — and that one is
+// measured: the kernel getting the frame thread onto a core plus the drain and the acquisition, at the
+// worst of twelve hundred iterations, with room. It is charged once per iteration however many outputs
+// that iteration serves.
+//
+// It is deliberately not handed to `Admit`: Frame/Timing.h keeps the lead out of admission control
+// because it is a fact about when gyro wakes rather than about whether a set fits in a period, so every
+// plan below is the plan it was.
+constexpr Duration kLead = 500us;
+
 // Reaching this means the loop asked to be woken at an instant it had already passed, repeatedly, with
 // nothing in the machine able to move — a livelock to report rather than a run to wait out.
 constexpr std::size_t kStallLimit = 16;
@@ -575,7 +597,7 @@ private:
 	std::array<FrameOutput, kMaxPanels> m_Outputs{};
 	std::array<Witness, kMaxPanels> m_Witnesses{};
 
-	FrameLoop m_Loop{ m_Clock, m_Ring, m_Returns, m_Evaluator };
+	FrameLoop m_Loop{ m_Clock, m_Ring, m_Returns, m_Evaluator, Timing{ TimingPolicy{ .Lead = kLead } } };
 	std::array<IEventSource*, 1> m_Sources{ &m_Device };
 
 	std::array<HeadlessOutput*, kMaxPanels> m_Panels{};
@@ -798,6 +820,15 @@ GYRO_TEST(Schedulability, AMissCostsOneFrameAndDoesNotCascade)
 	machine.Run(kWarmup);
 	machine.Arm();
 
+	// **A frame is landed before the overrun is injected, and the gap below is why.** `Witness` measures
+	// a gap between two *presented* sequences, so it has nothing to measure the first present in a window
+	// against — and with the loop now held to its record point, the first thing it does after arming is
+	// the overrunning frame itself. The miss then lands before any frame has been seen, which reads as a
+	// clean run rather than as the one dropped frame this test is named for. Two fast periods is enough
+	// for both panels to have presented and costs nothing else: the overrun is a one-shot on the next
+	// record whenever that happens.
+	machine.Run(2 * kFast);
+
 	// A whole period more than the output was allocated, which is a frame that cannot reach its vblank
 	// however early it started.
 	machine.Overrun(0, kFast);
@@ -805,7 +836,18 @@ GYRO_TEST(Schedulability, AMissCostsOneFrameAndDoesNotCascade)
 
 	GYRO_CHECK_EQ(machine.Missed(0), std::uint64_t{ 1 });
 	GYRO_CHECK_EQ(machine.Panel(0).LongestGap(), std::uint64_t{ 1 });
-	GYRO_CHECK_EQ(machine.Missed(1), std::uint64_t{ 0 });
+	// **The panel beside it pays one frame and no more, and that is a change this commit made.** It used
+	// to pay nothing, because an output rendering as soon as the work fits is a whole period ahead of its
+	// deadline and had that period to absorb a neighbour's blocking job. Holding a frame to its record
+	// point spends exactly that buffer, and a non-preemptible composite running a period longer than it
+	// was allocated is then a queue the other panel genuinely cannot get onto in time — which is decision
+	// 29's serialisation being reported rather than hidden.
+	//
+	// What is asserted is that it stays one frame. A neighbour losing a frame to a transient is a hitch on
+	// two monitors instead of one, roughly never; a neighbour rendering a refresh early is a pointer that
+	// lags on that monitor always, and Docs/Decisions.md records which of the two gyro would rather have.
+	GYRO_CHECK_EQ(machine.Missed(1), std::uint64_t{ 1 });
+	GYRO_CHECK_EQ(machine.Panel(1).LongestGap(), std::uint64_t{ 1 });
 
 	// And it goes on meeting them at the floor tier, which is decision 35's second branch rather than
 	// an afterthought: the overrun is filed into the planned mark and stays there for a window, so what
@@ -934,7 +976,13 @@ GYRO_TEST(Schedulability, DamageSettlesBackToIdleInABoundedNumberOfIterations)
 	constexpr std::size_t kBound = 6;
 	constexpr std::size_t kRounds = 24;
 
-	std::optional<std::size_t> steady;
+	// How many rounds at each end are compared. Eight of twenty-four is enough alignments that both
+	// windows see the expensive phase and the cheap one, which is what makes an equality between them an
+	// assertion rather than a coincidence of where the sampling landed.
+	constexpr std::size_t kWindow = 8;
+
+	std::size_t early = 0;
+	std::size_t late = 0;
 
 	for (std::size_t round = 0; round < kRounds; ++round)
 	{
@@ -952,16 +1000,23 @@ GYRO_TEST(Schedulability, DamageSettlesBackToIdleInABoundedNumberOfIterations)
 		GYRO_CHECK_EQ(machine.Commits(1), round + 1);
 
 		// The cold start is allowed to differ from the rest — the first round has no anchor to predict
-		// against and decision 31 has an unanchored output render on demand — but every round after it
-		// is the same round, and that is the claim.
-		if (round == 1)
+		// against and decision 31 has an unanchored output render on demand — so it is in neither window.
+		//
+		// **What must not happen is growth, and phase variation is not growth.** The count is four or five
+		// depending on where in each panel's refresh the damage lands: an output owed a frame is now held
+		// to its record point, so damage arriving before that instant costs one iteration to notice and
+		// one to serve, and damage arriving after it costs only the second. Pinning the count to a single
+		// number would be pinning the phase, which is the one input this file exists to sweep rather than
+		// to fix. So the two halves of the run are compared against each other — state accumulating in the
+		// fold shows up as the later rounds costing more than the earlier ones, whatever the phase.
+		if (round >= 1 && round < 1 + kWindow)
 		{
-			steady = iterations;
+			early = std::max(early, *iterations);
 		}
 
-		if (round > 1)
+		if (round >= kRounds - kWindow)
 		{
-			GYRO_CHECK_EQ(iterations, steady);
+			late = std::max(late, *iterations);
 		}
 
 		// Time passes between rounds, and deliberately not a whole number of either period: the anchor
@@ -971,7 +1026,8 @@ GYRO_TEST(Schedulability, DamageSettlesBackToIdleInABoundedNumberOfIterations)
 		machine.Idle(37 * kSlow + 7ms);
 	}
 
-	GYRO_REQUIRE(steady.has_value());
+	GYRO_REQUIRE(early > 0);
+	GYRO_CHECK_EQ(late, early);
 }
 
 // The fold is partitioned per output, which is decision 69's associativity spent rather than merely
