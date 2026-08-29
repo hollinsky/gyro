@@ -50,8 +50,8 @@ per-buffer hold. It is
 given somewhere to live.
 
 **`Seam` is the control waist** — every interface with more than one implementation, and the plain
-data that crosses them: `IPresenter`, `IEventSource`, `IRenderer`, `ITextureImporter`, `ISession`,
-`IInput`, alongside `RenderTarget`, `TextureSource`, `SyncPoint`, and `PresentationInfo`. It is [the seam](Architecture.md#the-seam) plus
+data that crosses them: `IPresenter`, `IEventSource`, `IRenderer`, `ITextureImporter`, `IInput`,
+`IDmabufAllocator`, alongside `RenderTarget`, `TextureSource`, `SyncPoint`, and `PresentationInfo`. It is [the seam](Architecture.md#the-seam) plus
 the one interface that is not platform at all, for the reason under
 [Frame is portable](#frame-is-portable).
 
@@ -134,7 +134,7 @@ one bounded queue and not four ad-hoc mechanisms — see
 
 ```mermaid
 flowchart TB
-    Compositor --> Dispatch["Dispatch side<br/>Protocol · Session · Scene"]
+    Compositor --> Dispatch["Dispatch side<br/>Protocol · Input · Scene"]
     Compositor --> Frame["Frame side<br/>Frame · Render · backends"]
     Dispatch --> Publication
     Frame --> Publication
@@ -155,7 +155,7 @@ which is the one direction a waist may go: a draw item carries the material the 
 the enum is *below* the seam rather than declared in it, and `Protocol` and `Scene` can name a
 material without either of them naming `Seam`.
 
-**The frame side does not depend on `Scene`, `Protocol`, or `Session`, and that edge must never be
+**The frame side does not depend on `Scene`, `Protocol`, or `Input`, and that edge must never be
 added.** It is the one thing in this document worth enforcing rather than describing: an include of
 `Scene` from `Frame` compiles, links, runs, and surfaces months later as jitter with no obvious
 cause. `CMake/CheckLayering.cmake` is what draws the line.
@@ -171,22 +171,31 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Publication` | portable | **both** | `Core`, `Geometry` |
 | `Seam` | portable | **both** | `Core`, `Geometry`, `World` |
 | `Scene` | portable | dispatch | `Core`, `Geometry`, `World`, `Animation`, `Publication` |
-| `Gym` | portable | dispatch | `Core`, `Geometry`, `World`, `Animation`, `Scene` |
-| `Dispatch` | portable | dispatch | `Core`, `Publication`, `Scene`, `Gym` |
+| `Gym` | portable | dispatch | `Core`, `Geometry`, `World`, `Text`, `Animation`, `Scene` |
+| `Dispatch` | portable | dispatch | `Core`, `Publication`, `Scene`, `Seam`, `Gym` |
 | `Trace` | portable | own | `Core` |
 | `Blit` | **portable** | frame | `Core`, `Geometry`, `Seam` |
 | `Frame` | portable | frame | `Core`, `Geometry`, `World`, `Animation`, `Publication`, `Seam` |
-| `Render` | platform | **both** | `Core`, `Geometry`, `Publication`, `Seam` |
+| `Render` | platform | **both** | `Core`, `Geometry`, `Seam` |
 | `Protocol` | platform | dispatch | `Core`, `Geometry`, `Scene` |
 | `Input` | platform | dispatch | `Core`, `Seam` |
-| `Session` | platform | dispatch | `Core`, `Protocol`, `Scene`, `Seam` |
 | `Headless` | **portable** | split | `Core`, `Geometry`, `Seam` |
 | `Virtual` | platform | frame, own | `Core`, `Geometry`, `Seam`, `Headless` |
 | `Nested` | platform | split | `Core`, `Geometry`, `Seam`, `Wire` |
-| `Drm` | platform | frame | `Core`, `Geometry`, `Seam` |
-| `Console` | platform | own | `Core`, `Geometry`, `Seam`, `Blit` |
+| `Drm` | platform | frame, own | `Core`, `Geometry`, `Seam` |
+| `Console`&nbsp;† | platform | own | `Core`, `Geometry`, `Seam`, `Blit` |
 | `Compositor` | platform | constructs | everything |
 | `Testing` | portable | — | — |
+
+**† `Console` is the one row that is not built.** *(Marked 2026-08-29, having read as built since
+the table was written.)* The recovery console is promised by [Experience.md](Experience.md) and its
+renderer half exists — that is `Blit`, and
+[decision 79](Decisions.md#79-the-console-is-a-renderer-not-a-presenter) is why the two are separate
+modules rather than one — but the grid, the cursor and the input that would sit above it have no
+code. The row is the shape it will take rather than a description of the tree, and every other row
+matches `CMakeLists.txt` exactly. Note also that `Gym/Console.h` is *not* this module arriving early:
+it is a gym driver that puts every rung of `Text`'s font ladder on screen, and it is the specimen the
+console will be built against rather than the console.
 
 Portable means what [decision 6](Decisions.md#6-no-macos-port-development-continues-over-ssh) means:
 ISO C++ and POSIX, no Linux-only or platform-stack headers, so the tests build and run on a machine
@@ -204,8 +213,9 @@ by the time `Blit` is what is drawing, there is nothing else left to draw with.
 
 It is not inside `Console` because the console is a text grid with its own thread and its own input,
 and the blitter is an `IRenderer` on the frame thread that the boot splash reaches before any console
-exists. `Console` depends on it; the reverse would put the console's grid, its cursor and its input
-below the seam.
+exists. `Console` will depend on it; the reverse would put the console's grid, its cursor and its
+input below the seam. That the blitter is built and the console is not is the order this argument
+predicts — the splash needs the renderer first.
 
 *(Clarified 2026-08-25 by [decision 155](Decisions.md#155-text-is-a-producer-of-pixels-rather-than-a-verb-on-a-renderer-and-the-font-is-spleen-because-it-is-a-ladder),
 which does put the glyph tables in the portable tier — in `Text`, which is a peer of `World` rather
@@ -301,7 +311,8 @@ the sink copies on the frame thread and a writer thread does the `open`, the `wr
 `rename`. That thread is neither frame nor dispatch: it is off both partitions, it touches nothing
 either one owns, and what crosses to it is a copy in the sink's own slab rather than a target
 descriptor, which is why it does not race `AcquireTarget` on the ring it is reading out of. This is
-the "own" in the table's thread column, the same answer `Console` carries. See
+the "own" in the table's thread column, which `Trace`'s writer carries for the same reason and
+`Console` is marked for in advance. See
 [decision 121](Decisions.md#121---backenddump-is-a-backend-and-the-frame-it-writes-crosses-to-a-writer-thread-as-a-copy).
 
 **The allocator it drives is in `Seam` rather than in this module.** *(Revised 2026-08-22.)*
@@ -320,6 +331,30 @@ has the host connection pumped by the *frame* thread, so what the module owes wh
 handoff across the publication boundary rather than a second reader. Until there is a dispatch thread
 on the far end of that handoff there is nothing to declare: `gyro_add_module` refuses a
 `DISPATCH_HALF` that names no directory, which is the right moment for the declaration to appear.
+
+### Drm runs a thread per output, and it is the one "own" thread that is not off to the side
+
+`Trace`'s writer and `Virtual`'s are off both partitions: they touch nothing either thread owns, and
+what reaches them is a copy. [Drm/Commit.h](../Source/Drm/Commit.h) is the third and it is nothing
+like them — it sits *in* the path to the glass, one thread per output, and it runs at the frame
+thread's priority plus one.
+
+**What it is for is that a non-blocking atomic commit does not do the work.** The ioctl returns
+having queued it, and a `SCHED_OTHER` kernel worker is what then waits on the composite's fence,
+evades the vblank and writes the registers that arm the flip — so the last few hundred microseconds
+before a person sees the frame run at a priority gyro cannot raise, and gyro's own real-time thread
+can preempt the worker arming gyro's own flip. Dropping `DRM_MODE_ATOMIC_NONBLOCK` runs all of that
+on the caller instead, and the caller may not be the frame thread, because the frame thread may not
+sit in a syscall for a refresh. Hence a thread, and hence one per output: KMS refuses a second commit
+on a CRTC that has not flipped, so a thread shared between two panels would put one panel's
+flip-done wait in front of the other panel's latch.
+
+**It does not make `Drm` a straddler.** The straddler table below is about a *dependency* half — code
+that may name authoring — and nothing here does. What crosses to a commit thread is a
+`CommitRequest` copied out of the output, so the frame thread may refill its own arrays the moment it
+has armed, and what comes back is an errno and a duration. The frame thread's whole cost is one
+atomic store and a futex wake; it never blocks on this thread, and the flip still completes through
+the card's descriptor and the device's ordinary drain.
 
 ### The draw list is in Seam
 
@@ -436,6 +471,25 @@ not name `Seam`. The interface stayed at the waist and only the record came down
 this rule draws — the data crossing between two parties is not the interface between them.
 See [decision 87](Decisions.md#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam).
 
+### The plane partition is in Frame, and the backend is not asked what it wants
+
+[Frame/Assign.h](../Source/Frame/Assign.h) decides which of a frame's draw items go on planes and
+which are left for the GPU, and it is in `Frame` for the same reason the quad builder is: it is a
+walk over the evaluated draw list rather than an interface, and what it produces is a type
+`IPresenter` already took. A backend computing its own partition would be four backends each
+deciding what gets promoted, differing, and each having to be tested for it.
+
+The split with the backend is where the *cost* is. This side is a suffix rule over the list with no
+memory — nothing is sticky, an item promoted this frame may composite the next, and the two frames
+are the same picture — so it allocates nothing and asks the hardware nothing. Asking the hardware is
+`IPresenter::TestLayers`, which is an ioctl, and it stays behind the seam because it is the expensive
+half and the one worth caching. See
+[decision 152](Decisions.md#152-promotion-is-a-partition-of-the-draw-list-computed-every-frame-and-a-node-is-promotable-when-its-resample-is-a-no-op-and-it-carries-no-dressing-on-itself).
+
+`PromotionRefusal` rides on the partition rather than being logged where it is computed, which is the
+frame section's rule showing through: the party that can record is the one holding a trace row, and
+that is the caller.
+
 ### Geometry is not part of Core
 
 `Core` is dependency-free primitives: the timebase, the wake, handles, the slot allocator, the
@@ -528,7 +582,7 @@ reached, and the boundary draws which half may reach it.
 nothing](Architecture.md#doing-nothing-must-cost-nothing) folds over, and it reads as animation
 content — a spring is its commonest contributor and
 [Animation.md](Animation.md#settling-answers-with-a-wake-not-a-boolean) carries the argument for its
-shape. It is in `Core` anyway, and the module table settles it rather than taste: `Console` depends
+shape. It is in `Core` anyway, and the module table settles it rather than taste: `Console` is to depend
 on `Core`, `Geometry`, and `Seam` alone, and the recovery console's blinking cursor is one of the
 contributions the fold exists to accept. Putting `Wake` in `Animation` would make the console unable
 to name its own blink in the vocabulary the scheduler reduces, and `CheckLayering.cmake` would say so
@@ -754,12 +808,15 @@ and the two are not the same shape. Four modules straddle the boundary, and each
 | `Animation` | `Solve` — closed form over published coefficients | `Author` — `Animatable`, catalog, retargeting |
 | `Publication` | `Reader` — wait-free, const | `Publisher` — serializes, allocates, reclaims |
 | `Render` | `Record` — passes, submission | `Import` — dmabuf, shm upload, resource creation. **Not declarable**, and [the section above](#the-importer-is-the-first-waist-interface-the-dispatch-thread-calls) says why: `Textures` is read from both threads by design |
-| `Platform` | presentation | input, session |
+| `Platform` | presentation | input |
 
 That last row is worth noticing rather than arranging: [the seam](Architecture.md#the-seam) keeps
 session, presentation, input, and outputs independent on testability grounds, and **they turn out to
-split by thread as well.** Presentation is frame-side; input and session are dispatch-side. Keeping
-them unfused buys the thread separation for nothing.
+split by thread as well.** Presentation is frame-side and input is dispatch-side. Keeping them
+unfused buys the thread separation for nothing. Session is absent from the row because
+[decision 145](Decisions.md#145-the-drm-backend-takes-master-by-opening-the-node-and-libdrm-stops-at-the-frame-section)
+left it with no work to place on either thread — a device is opened once, by the composition root,
+from a udev rule.
 
 What the module graph enforces is the negative form, and that is the half that matters: the frame
 side cannot reach the world, because the edge does not exist. What it cannot express is that `Frame`
@@ -792,6 +849,12 @@ has but only for its dispatch half is a boundary one. Declaring it is optional a
 halves get `DEPENDS`, since a module whose halves want the same edges should not have to say so
 twice.
 
+**Three threads are neither, and the table's "own" column is where they are.** `Trace`'s writer and
+`Virtual`'s are off both partitions by construction; `Drm`'s commit threads are not, and
+[the section above](#drm-runs-a-thread-per-output-and-it-is-the-one-own-thread-that-is-not-off-to-the-side)
+is why that is deliberate. None of them is a straddler, because a straddler is a *dependency* half
+and none of these may name authoring.
+
 The rest of thread discipline is runtime instrumentation rather than structure — the debug allocator
 of [decision 36](Decisions.md#36-frame-path-discipline-is-enforced-mechanically-not-by-review),
 which aborts on an allocation inside the frame section, and the priority ordering of
@@ -805,13 +868,14 @@ needs. Nothing else names an implementation. This is `IClock`'s argument general
 that can reach a dependency ambiently is a subsystem that eventually does, and *a singleton would
 put a reachable now back exactly where this design just took one out.*
 
-**An interface exists where there is a fake.** Clock, presenter, renderer, session, input — that set
+**An interface exists where there is a fake.** Clock, presenter, renderer, input — that set
 is exactly what the headless backend substitutes, which is a serviceable test of whether a seam is
 real or merely tasteful. An interface with one implementation and no prospect of a second is a cost
 with no buyer.
 
 **`Signal<>` is intra-thread only.** [The seam](Architecture.md#the-seam) puts signals on
-`IPresenter` and `ISession`, and they are ordinary observer callbacks within one thread. A signal
+`IPresenter` and `IInput`, and they are ordinary observer callbacks within one thread — one set
+emitted on the frame thread and the other on dispatch, neither crossing. A signal
 crossing the boundary would be a third channel, and the design turns on there being two. The rule is
 mechanical in the one direction where it is unambiguous: a signal is claimed by the first thread to
 emit it and aborts on a second. Connect and disconnect are not checked, because teardown legitimately

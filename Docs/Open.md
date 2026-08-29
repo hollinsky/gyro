@@ -1323,9 +1323,16 @@ the multi-layer list from the start for exactly this, so the shape is not the qu
 
 Where a *client* buffer becomes a scanout framebuffer is settled — decision 153 makes it a second
 importer over the same id space, `Drm/Scanout.h` is that importer, and decision 154 gives a client a
-way to hand over a descriptor in the first place. What is left here is the assignment itself: one
-primary plane is driven and a second layer is refused, so `Frame/Assign.h`'s partition can promote at
-most the top item and only onto the plane the composite would otherwise have used.
+way to hand over a descriptor in the first place. So is driving the planes: an output takes the
+primary plus every overlay its CRTC can drive, up to `MaxLayers`, and commits them together.
+*(Corrected 2026-08-29; this paragraph read "one primary plane is driven and a second layer is
+refused" after that stopped being true.)*
+
+What is left is the assignment *policy*. The planes are enumerated in the order the card reports
+them and a promoted layer takes the slot at its own index, so which overlay a layer lands on is not
+chosen — and the cost of being wrong is unmeasured, because a plane a driver will not accept for
+this format at this scale is an atomic test failure that costs the whole frame's promotion. The
+hardware's cursor plane is skipped by name for a version of that reason already.
 
 What that leaves open, now that a descriptor can arrive:
 

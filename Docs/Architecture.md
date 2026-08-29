@@ -310,34 +310,31 @@ This is why nested is worth building: the real deadline scheduler runs unmodifie
 
 ### Session
 
-Device acquisition and revocation only — no VT handling.
+Device acquisition only, and **there is no interface here** — the concern is real and its
+implementation on every backend is nothing. *(Revised 2026-08-29; this section carried an `ISession`
+with `OpenDevice`, `CloseDevice` and pause/resume signals until the DRM backend was built and needed
+none of it.)*
 
-```cpp
-class ISession
-{
-public:
-	virtual Result<Fd> OpenDevice(std::string_view path) = 0;
-	virtual void       CloseDevice(Fd fd)                = 0;
+A device node arrives from a udev rule granting the gyro uid, so a plain `open` is the whole of
+acquisition — `Drm/Device.h` for the card and `Input/Devices.h` for the evdev nodes. Master comes
+from being the first to open a node that has none, and on a machine with no VTs nothing exists that
+could take it away, so there is no revocation to signal, no pause, no resume, and no bus client to
+choose. See
+[decision 145](Decisions.md#145-the-drm-backend-takes-master-by-opening-the-node-and-libdrm-stops-at-the-frame-section),
+which closed [decision 7](Decisions.md#7-session-claiming-is-deferred-basu-rejected) by finding
+that the thing it deferred choosing was not needed.
 
-	Signal<RawFd> DevicePaused;
-	Signal<RawFd> DeviceResumed;
-	Signal<bool>  ActiveChanged;
-};
-```
-
-**The signals carry a borrowed descriptor and the calls carry an owning one, and the asymmetry is
-forced.** `Fd` owns and is move-only, which is what `OpenDevice` returning one and `CloseDevice`
-consuming one mean. A broadcast cannot transfer ownership to anyone — with N observers at most one
-could take the descriptor and nothing in the signature says which — so what a signal delivers is the
-descriptor's *identity*, which the receiver matches against the `Fd` it already holds. See
+What the deleted interface is still worth for is the rule its signals forced, because that rule
+outlived it and the next signal carrying a resource will meet it again: **a broadcast can never
+transfer ownership — to anyone.** With N observers at most one could take the resource and nothing
+in the signature says which, so what a signal delivers is a *fact*. `Core/Fd.h`'s split into an
+owning `Fd` and a borrowed `RawFd` is that rule as two types, and it is load-bearing in the
+descriptors that did survive — `IEventSource::Descriptor()`, a `DmabufBuffer`'s planes, a
+`SyncPoint`. See
 [decision 77](Decisions.md#77-a-signals-observers-are-links-the-observers-own).
 
-Nested and headless implement this as three functions that always succeed. The real implementation
-is deferred until the DRM backend needs it — see
-[Decisions.md](Decisions.md#7-session-claiming-is-deferred-basu-rejected).
-
-Note that `ISession` is about *devices*. gyro's own notion of a user session is a separate concept
-that does not pass through this interface at all; see [Sessions and users](#sessions-and-users).
+Note that this concern was always about *devices*. gyro's own notion of a user session is a separate
+thing that never passed through it; see [Sessions and users](#sessions-and-users).
 
 ## Backends
 
@@ -2861,12 +2858,16 @@ Real vblank pacing and latency budgets · `SCHED_FIFO` behaviour under contentio
 modesetting, plane assignment, hardware cursor · **direct scanout of client buffers**, and with it
 whether the KMS color pipeline can express what the composite would have done · VRR panel
 response · **the display half of color** — HDR output modes, gamma LUTs, EDID and panel characterisation · tearing control ·
-multi-GPU · DRM master loss, device pause/resume · real hotplug and DPMS · **the boot path** — BGRT
+multi-GPU · real hotplug and DPMS · **the boot path** — BGRT
 reproduction, the firmware-mode handoff, and `simpledrm` → real-driver
 [migration](#device-migration), none of which have a nested equivalent.
 
 The second list is largely the DRM backend's own code, which is work done in front of real hardware
-regardless.
+regardless. It lost an entry rather than gaining one: *DRM master loss, device pause and resume* was
+on it until
+[decision 145](Decisions.md#145-the-drm-backend-takes-master-by-opening-the-node-and-libdrm-stops-at-the-frame-section)
+found there is nothing on a machine with no VTs that can take master away, so there is no behaviour
+there to be untestable.
 
 One thing that *looks* like it belongs in the second list and does not: **software rendering**.
 Because it is a device selection rather than a backend, nested with lavapipe forced exercises the

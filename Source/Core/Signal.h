@@ -7,7 +7,7 @@
 
 // An observer callback, with both directions of lifetime made structural.
 //
-// Docs/Architecture.md's seam puts three of these on IPresenter and three on ISession, and the first
+// Docs/Architecture.md's seam puts four of these on IPresenter and eight on IInput, and the first
 // is the one that sets every constraint: `Signal<const PresentationInfo&> Presented` is how
 // FrameClock::Observe learns that a frame reached glass, which is the sole input to the prediction
 // every deadline in the system is derived from. It fires on the frame thread, inside the frame

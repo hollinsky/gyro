@@ -10,37 +10,35 @@
 // records the same distinction for Core/Clock.cpp's clock_gettime. The close() itself is in Fd.cpp so
 // that including this does not drag <unistd.h> into every translation unit that merely holds one.
 //
-// **Why there are two types, and it is not a style preference.** Docs/Architecture.md's ISession has
-// `Result<Fd> OpenDevice` and `CloseDevice(Fd)` beside `Signal<Fd> DevicePaused`, and those cannot
-// all be the same type: the first two only make sense if an Fd owns, and a move-only value cannot be
-// broadcast. The general rule that settles it is worth stating once, because it will come up again
-// wherever a signal is added:
+// **Why there are two types, and it is not a style preference.** A descriptor is opened by one party
+// and named by several: Seam/EventSource.h's `Descriptor()` hands the number to whoever does the
+// waiting while the source keeps the file, and a `DmabufBuffer` plane and a `SyncPoint` are both a
+// descriptor somebody else owns. Those cannot be the same type as the one an open returns, and the
+// general rule that settles it is worth stating once, because it will come up again wherever a
+// signal is added:
 //
 //   **A broadcast can never transfer ownership — to anyone.** If N observers each receive a
 //   notification, at most one of them could take the resource, and nothing in the signature says
-//   which. So what a signal carries is a *fact*, never a resource, and DevicePaused carries the
-//   descriptor's identity rather than the descriptor.
+//   which. So what a signal carries is a *fact*, never a resource.
 //
-// RawFd is that identity. The receiver already holds the Fd it got from OpenDevice, so matching is a
-// comparison with no bookkeeping on either side.
+// RawFd is that fact. The receiver already holds the Fd it opened, so matching is a comparison with
+// no bookkeeping on either side.
 //
-// **Rejected: one type, with signals carrying `const Fd&`.** Fewer names, and it trades a naming
-// distinction anyone can learn for a lifetime one nobody can see. A broadcast is precisely the
-// context where an observer caches what it is handed, and a const reference to something ISession
-// still owns gives no hint that outliving the call is wrong.
+// **Rejected: one type, with signals and accessors handing out `const Fd&`.** Fewer names, and it
+// trades a naming distinction anyone can learn for a lifetime one nobody can see. A broadcast is
+// precisely the context where an observer caches what it is handed, and a const reference to
+// something the source still owns gives no hint that outliving the call is wrong.
 //
 // **Rejected: RawFd named WeakFd.** `weak` in C++ means there is an upgrade to attempt and an expiry
 // to observe — weak_ptr::lock is the whole content of the word. There is neither here: the number is
 // valid or it is not, and only the owner knows which. The name would promise a check that does not
 // exist.
 //
-// **Deferred: pause and resume identified by something that is not a descriptor at all.** Semantically
-// the most honest — ISession is about devices, and a logind-shaped implementation hands back a *new*
-// descriptor on resume, which would make the old number wrong as identity across the cycle. It is not
-// taken now because decision 7 has session claiming deferred and gyro's native path is udev rules plus
-// first-open master rather than logind, so the shape of a real revocation here is not yet known. And
-// if a resume ever does deliver a new owning descriptor, that operation is not a broadcast in the
-// first place: it goes to the single owner, and DeviceResumed goes back to announcing a fact.
+// **Retired: device pause and resume identified by something that is not a descriptor at all.**
+// A logind-shaped session would hand back a *new* descriptor on resume, which would make the old
+// number wrong as identity across the cycle — so the concern was real for as long as a session
+// interface was expected. Decision 145 removed it: device access is a udev rule and master comes
+// from first-open, so nothing revokes a descriptor and there is no cycle to be identified across.
 
 // The value a closed or never-opened descriptor carries. Named rather than spelled -1 at each site,
 // since the two places that compare against it are the ones a reader most wants to be sure of.

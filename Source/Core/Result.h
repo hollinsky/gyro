@@ -13,8 +13,8 @@
 
 // What a fallible operation returns, and what it says when it fails.
 //
-// Every current caller is a syscall wrapper — Docs/Architecture.md's ISession::OpenDevice is the
-// first — so the error domain is errno and nothing else. A gyro-wide error enum spanning capacity
+// Every current caller is a syscall wrapper — opening a device node is the first — so the error
+// domain is errno and nothing else. A gyro-wide error enum spanning capacity
 // refusals, protocol violations, and decision 27's kill-the-client cases is a real thing to want
 // later and is deliberately not invented here: it would be categories designed in advance of the
 // callers that justify them, which is how a domain ends up with an Other.
@@ -149,7 +149,7 @@ private:
 };
 
 // The alias, rather than a class of its own. std::expected already has the shape — the monadic
-// operations, the value-or, the void specialisation ISession::CloseDevice's neighbours will want —
+// operations, the value-or, the void specialisation a fallible verb returning nothing will want —
 // and a wrapper around it would exist to rename things.
 //
 // Note that it is [[nodiscard]] by virtue of std::expected being so: a Result dropped on the floor

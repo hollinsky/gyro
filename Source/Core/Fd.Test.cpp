@@ -155,8 +155,8 @@ GYRO_TEST(Fd, BorrowNamesWithoutOwning)
 		GYRO_CHECK_EQ(borrowed.Value, raw);
 		GYRO_CHECK(borrowed.IsValid());
 
-		// The comparison a DevicePaused handler makes: the fact it was handed against the descriptor
-		// it holds. No bookkeeping on either side.
+		// The comparison a poller makes on an IEventSource's Descriptor(): the fact it was handed
+		// against the descriptor the source holds. No bookkeeping on either side.
 		GYRO_CHECK_EQ(borrowed, descriptor.Borrow());
 	}
 
