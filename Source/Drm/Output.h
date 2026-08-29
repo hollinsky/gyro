@@ -11,6 +11,7 @@
 #include "Core/Fd.h"
 #include "Core/Result.h"
 #include "Core/Time.h"
+#include "Drm/Commit.h"
 #include "Drm/Device.h"
 #include "Drm/Fence.h"
 #include "Drm/Scanout.h"
@@ -36,6 +37,15 @@
 // is not a build rule. Everything off the frame path is libdrm's: enumeration, property blobs,
 // `AddFB2`, and the mode set itself. What is left inside the frame is a fixed set of property ids and
 // values that were resolved when the output was opened, written into arrays that were sized then.
+//
+// **And it is issued *blocking*, on a thread of this output's own.** A non-blocking commit is finished
+// by an `SCHED_OTHER` kworker whose priority gyro cannot raise, which under load misses vblanks in
+// bursts and lands on a person as a pointer that stutters whenever the machine is busy. The blocking
+// form does the same work on the calling thread, so it runs at a priority gyro chose — and because that
+// call does not return until the flip is done, the caller cannot be the frame thread. Drm/Commit.h is
+// the thread, the mailbox and the whole of the argument. What stays here is that `Present` returns when
+// the commit was *handed over* rather than when the kernel took it, which is why a refused commit comes
+// back as `Missed` rather than as a failure from `Present`.
 //
 // **The commit carries an `IN_FENCE_FD` where the device can produce one, and is held where it
 // cannot.** Drm/Fence.h is the translation from the renderer's timeline point; the fallback is
@@ -205,10 +215,27 @@ private:
 
 	void DropTargets() noexcept;
 
-	// The frame commit: plane properties only, non-blocking, asking for a page-flip event. No libdrm
-	// and no allocation; see the header comment. `frame` is what the records it writes are named for.
-	[[nodiscard]] Result<void>
-	Flip(std::span<const PresentLayer> layers, std::span<const Fd> fences, std::uint64_t frame);
+	// The frame commit: plane properties only, asking for a page-flip event, and handed to the commit
+	// thread rather than issued here. No libdrm and no allocation; see the header comment. `frame` is
+	// what the records it writes are named for.
+	//
+	// The fences are taken by mutable span because they are *moved* into the request: a raw descriptor
+	// in the property values is only valid while something holds it open, and once the ioctl left this
+	// thread the caller's stack stopped being that something.
+	[[nodiscard]] Result<void> Flip(std::span<const PresentLayer> layers, std::span<Fd> fences, std::uint64_t frame);
+
+	// The commit thread's ioctl. Static because it is what `CommitIssuer` is, and it runs on that thread
+	// — it may touch nothing here but the device's descriptor, which is fixed at construction.
+	static int Issue(void* context, const CommitRequest& request) noexcept;
+
+	// Take the outcome of a commit that has finished, and unwind the frame where it failed.
+	//
+	// **A failure cannot arrive as a `Present` refusal any more**, because `Present` returned when the
+	// commit was handed over rather than when the kernel took it. It arrives as `Missed`, which
+	// Seam/Presenter.h built for exactly this — a frame the backend accepted and will never show — and
+	// which the loop already answers by dropping what was in flight, invalidating the clock rather than
+	// predicting from a cadence with a hole in it, and re-damaging the output.
+	void Reap();
 
 	// Whether this output could program that partition at all, which is the half of the question that
 	// needs no ioctl: a layer per plane, and every image one this output owns.
@@ -218,9 +245,9 @@ private:
 	// partition's end turned off. No allocation and no property lookup — see the header comment.
 	void Program(std::span<const PresentLayer> layers, std::span<const Fd> fences) noexcept;
 
-	// One atomic commit against the blocks `Program` filled, with whatever flags are wanted. This is
-	// the whole of what `Present` and `TestLayers` have in common, and it is a bare ioctl for the
-	// reason the header gives.
+	// One atomic commit against the blocks `Program` filled, issued on the calling thread. `TestLayers`
+	// is the only caller left — the frame commit goes to the commit thread instead, and takes a copy of
+	// the blocks with it — and it is a bare ioctl for the reason the header gives.
 	[[nodiscard]] Result<void> Commit(std::uint32_t flags) noexcept;
 
 	// What a layer's pixels are on this card: one of this output's own targets, or a framebuffer the
@@ -315,5 +342,12 @@ private:
 	// A reconfiguration the drain has not answered yet. Held as the request rather than as a flag,
 	// because what is echoed back is its generation.
 	std::optional<OutputConfiguration> m_Request;
+
+	// The thread that issues this output's commits, and the slot the frame thread hands one through.
+	//
+	// **Last, so it is destroyed first**, which is the ordering that matters and the reason the
+	// destructor also stops it by hand: `DropTargets` removes framebuffers a commit in flight has the
+	// kernel scanning out.
+	CommitThread m_Commit;
 };
 } // namespace Drm

@@ -996,6 +996,7 @@ gyro_add_module(Drm
 		Seam
 	SOURCES
 		Catalog.cpp
+		Commit.cpp
 		Device.cpp
 		Dumb.cpp
 		Fence.cpp
@@ -1003,6 +1004,7 @@ gyro_add_module(Drm
 		Scanout.cpp
 	TESTS
 		Catalog.Test.cpp
+		Commit.Test.cpp
 		Dumb.Test.cpp
 		Scanout.Test.cpp
 )

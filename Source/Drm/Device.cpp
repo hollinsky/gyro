@@ -606,6 +606,31 @@ void DrmDevice::Detach(std::uint32_t crtc) noexcept
 
 Result<void> DrmDevice::Drain()
 {
+	const Result<void> read = Read();
+
+	// **The outputs are settled even where the read failed**, which is NestedHost::Drain's rule for its
+	// reason: a completion that did arrive before the failure should be acted on rather than dropped
+	// along with it.
+	//
+	// **And this is the call that was missing.** `DrmOutput::Settle` releases a commit held for a
+	// composite the hardware could not be told to wait for, reaps a commit thread that has finished, and
+	// answers a reconfiguration — and until now nothing on this backend called it at all. What that cost
+	// was a panel with no in-fence support freezing on its first held frame: `Present` returned success,
+	// the loop opened a flight lane, and the commit sat in `m_Pending` forever with nothing ever looking
+	// at it again.
+	for (const Subscriber& subscriber : m_Subscribers)
+	{
+		if (subscriber.Output != nullptr)
+		{
+			subscriber.Output->Settle();
+		}
+	}
+
+	return read;
+}
+
+Result<void> DrmDevice::Read()
+{
 	if (!m_Device.IsValid())
 	{
 		return Failure(ENODEV, "draining a device that was never opened");

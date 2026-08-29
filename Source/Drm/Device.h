@@ -248,8 +248,8 @@ public:
 
 	void Detach(std::uint32_t crtc) noexcept;
 
-	// Seam/EventSource.h: read page-flip completions until the file is empty and emit each one into the
-	// output that owns its CRTC.
+	// Seam/EventSource.h: read page-flip completions until the file is empty, emit each one into the
+	// output that owns its CRTC, and then settle every output on this card.
 	//
 	// Failure is the vocabulary that seam names: `ENODEV` where the device is gone. A read that finds
 	// nothing is success and is the ordinary result of a wakeup something else caused.
@@ -281,6 +281,9 @@ private:
 	// Open one node and take everything fixed off it, or say why not. `requireConnector` is what makes
 	// the search for a card with a panel on it a search rather than a first hit.
 	[[nodiscard]] static Result<std::unique_ptr<DrmDevice>> OpenNode(const std::string& path, bool requireConnector);
+
+	// The reading half of `Drain`, split out so that the settling half runs whichever way it ends.
+	[[nodiscard]] Result<void> Read();
 
 	// One page-flip completion, resolved to the output that drives its CRTC.
 	void Complete(std::uint32_t crtc, std::uint32_t sequence, std::uint32_t seconds, std::uint32_t microseconds);

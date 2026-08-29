@@ -49,6 +49,11 @@ namespace
 // against a refresh and long against the cost of asking.
 constexpr Duration CompletionPoll = std::chrono::microseconds{ 500 };
 
+// How long to wait on a commit before looking at it unprompted, where the output has no period to
+// measure against — which is only ever an output that has not finished coming up. A real panel's
+// period is what the backstop is actually scaled to; see `NextEvent`.
+constexpr Duration CommitBackstop = std::chrono::milliseconds{ 50 };
+
 // SRC_X and friends are 16.16 fixed point; CRTC_X and friends are whole pixels.
 [[nodiscard]] constexpr std::uint64_t Fixed(std::int64_t pixels) noexcept
 {
@@ -98,6 +103,11 @@ DrmOutput::DrmOutput(
 
 DrmOutput::~DrmOutput()
 {
+	// **First, and by hand rather than by member order.** A commit still in the kernel has the panel
+	// scanning out a framebuffer `DropTargets` below is about to remove, and the request it is reading
+	// points into this object. Joining here is a wait of at most one refresh, on the teardown path.
+	m_Commit.Stop();
+
 	if (m_Device != nullptr)
 	{
 		m_Device->Detach(m_Crtc);
@@ -270,6 +280,11 @@ Result<void> DrmOutput::Open(const OutputConfiguration& wanted)
 	m_ScanoutMask = std::uint32_t{ 1 } << 0;
 
 	m_Device->Attach(m_Crtc, *this);
+
+	// **After the mode set rather than before it.** This runs on whichever thread the composition root
+	// builds outputs on, which is where the one allocation a thread costs is ordinary — and starting it
+	// earlier would put a thread behind an output that then failed to come up.
+	m_Commit.Start(&DrmOutput::Issue, this);
 
 	return {};
 }
@@ -450,10 +465,16 @@ Result<void> DrmOutput::Present(std::span<const PresentLayer> layers, PresentTra
 		return expressible;
 	}
 
-	// KMS refuses a second nonblocking commit on a CRTC that has not flipped, which is the rule
-	// `CommitDepth`'s default of one already holds the loop to. Saying it here as well is what keeps a
-	// backend that raises that number from finding out as a kernel error.
-	if (m_Flipping || m_Pending.Waiting)
+	// KMS refuses a second commit on a CRTC that has not flipped, which is the rule `CommitDepth`'s
+	// default of one already holds the loop to. Saying it here as well is what keeps a backend that
+	// raises that number from finding out as a kernel error.
+	//
+	// **The slot is a third term now**, because the ioctl outlives the flip event it produces: the tail
+	// sends the completion and then cleans up, so the loop can be woken, serve this output and arrive
+	// back here microseconds before the commit thread is free. A refusal is the honest answer and the
+	// loop already treats `EBUSY` as transient — but the ordinary path never sees it, because a whole
+	// refresh separates one present from the next and `Settle` has reaped long before.
+	if (m_Flipping || m_Pending.Waiting || !m_Commit.IsIdle())
 	{
 		return Failure(EBUSY, "this output already has a commit outstanding");
 	}
@@ -603,6 +624,22 @@ Result<void> DrmOutput::TestLayers(std::span<const PresentLayer> layers)
 		return expressible;
 	}
 
+	// **Refused while a commit is in flight, because this ioctl would otherwise *block* on it.** A
+	// blocking commit holds the modeset locks it acquired until it returns — `drm_mode_atomic_ioctl`
+	// drops them after `drm_atomic_commit` rather than after the swap — and a `TEST_ONLY` commit naming
+	// the same CRTC takes the same locks. That wait would land on the `SCHED_FIFO` frame thread inside
+	// Core/FrameSection.h's guard, which is decision 29's `B(L)` and admits nothing that is not a
+	// composite.
+	//
+	// The window is small — the loop serves this output at its next deadline, most of a refresh after
+	// the flip event, and the commit's tail is done microseconds after that event — so what this costs
+	// in practice is nothing. When it does fire, decision 152's promotion falls back to compositing for
+	// one frame, which is the ordinary answer a refusal already has and is silent to the person.
+	if (!m_Commit.IsIdle())
+	{
+		return Failure(EBUSY, "testing a partition while this output has a commit in flight");
+	}
+
 	// **The blocks the real commit would use, filled with the values the real commit would write.**
 	// Testing a partition assembled differently from the one that will be presented tests a different
 	// question, and the difference would show up as a promotion the kernel accepted in the test and
@@ -696,17 +733,60 @@ Result<void> DrmOutput::Commit(std::uint32_t flags) noexcept
 	return {};
 }
 
-Result<void> DrmOutput::Flip(std::span<const PresentLayer> layers, std::span<const Fd> fences, std::uint64_t frame)
+int DrmOutput::Issue(void* context, const CommitRequest& request) noexcept
 {
+	const DrmOutput& self = *static_cast<const DrmOutput*>(context);
+
+	drm_mode_atomic atomic{};
+	atomic.flags = request.Flags;
+	atomic.count_objs = request.ObjectCount;
+	atomic.objs_ptr = reinterpret_cast<std::uintptr_t>(request.Objects.data());
+	atomic.count_props_ptr = reinterpret_cast<std::uintptr_t>(request.Counts.data());
+	atomic.props_ptr = reinterpret_cast<std::uintptr_t>(request.Properties.data());
+	atomic.prop_values_ptr = reinterpret_cast<std::uintptr_t>(request.Values.data());
+
+	// The completion is resolved by CRTC in the device's drain, so there is nothing to carry here. A
+	// pointer would be a pointer the kernel holds across a teardown.
+	atomic.user_data = 0;
+
+	return Ioctl(self.m_Device->Descriptor(), DRM_IOCTL_MODE_ATOMIC, &atomic) != 0 ? errno : 0;
+}
+
+Result<void> DrmOutput::Flip(std::span<const PresentLayer> layers, std::span<Fd> fences, std::uint64_t frame)
+{
+	// The request is assembled from the same blocks a synchronous commit used, which is what keeps the
+	// property ids and the array sizes one fact rather than two that can drift apart.
+	static_assert(CommitRequest::PropertiesPerPlane == PropertiesPerPlane);
+	static_assert(CommitRequest::MaxProperties == MaxCommitProperties);
+
 	Program(layers, fences);
 
-	if (const Result<void> committed = Commit(DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT); !committed)
+	CommitRequest request;
+
+	// **Blocking**, which is the whole change: no `DRM_MODE_ATOMIC_NONBLOCK`, so the thread that makes
+	// this call is the one that waits on the fence, evades the vblank and writes the registers — at a
+	// priority gyro chose rather than a kworker's. See Drm/Commit.h.
+	request.Flags = DRM_MODE_PAGE_FLIP_EVENT;
+	request.ObjectCount = m_PlaneCount;
+	request.Objects = m_Objects;
+	request.Counts = m_Counts;
+	request.Properties = m_Properties;
+	request.Values = m_Values;
+
+	// Moved rather than copied: `Program` wrote these descriptors' numbers into the values above, and
+	// they have to stay open until the kernel has read them on the other thread.
+	for (std::size_t index = 0; index < fences.size() && index < MaxLayers; ++index)
 	{
-		return committed;
+		request.Fences[index] = std::move(fences[index]);
 	}
 
-	// **When the kernel actually took it**, which is the number every ordering question below turns on:
-	// `present` on the loop's row is when the frame was handed over, and this is when it was committed.
+	if (!m_Commit.Arm(std::move(request)))
+	{
+		return Failure(EBUSY, "handing a commit to a thread that still has one");
+	}
+
+	// **When the commit was handed over**, which is no longer when the kernel took it — that happens on
+	// the commit thread, and `commit path` on its own row is what says how long it took.
 	TraceMark("flip issued", m_Trace, TraceTag(frame));
 	m_FlippingFrame = frame;
 
@@ -801,8 +881,53 @@ void DrmOutput::Reconfigure(const OutputConfiguration& wanted)
 	m_Request->Generation = wanted.Generation;
 }
 
+void DrmOutput::Reap()
+{
+	const std::optional<CommitOutcome> outcome = m_Commit.Reap();
+
+	if (!outcome)
+	{
+		return;
+	}
+
+	if (outcome->Error == 0)
+	{
+		// The kernel took it. Everything else about this frame arrives as the page flip, on the device's
+		// descriptor, exactly as it did when the ioctl was synchronous.
+		return;
+	}
+
+	// **A commit the kernel refused, discovered a frame after the loop was told it was accepted.** The
+	// vocabulary is `Present`'s, and the reader wants the code: `EBUSY` is a race to back off from and
+	// `EINVAL` is a request to fix, and they read identically without it.
+	TraceMark("commit refused", m_Trace, TraceTag(static_cast<std::uint64_t>(outcome->Error)));
+
+	// The images go back to the ring — all but the ones the panel is still showing, because a commit
+	// that failed changed nothing on the glass and the last frame is still up there.
+	for (std::uint32_t index = 0; index < m_TargetCount; ++index)
+	{
+		const std::uint32_t bit = std::uint32_t{ 1 } << index;
+
+		if ((m_InFlightMask & bit) != 0 && (m_ScanoutMask & bit) == 0)
+		{
+			m_Targets[index].State = TargetState::Free;
+		}
+	}
+
+	m_InFlightMask = 0;
+	m_Flipping = false;
+
+	// The lane this frame was flying in is closed by the loop's own handler, which is why nothing here
+	// closes it: `Missed` is the signal, and Frame/Loop.h owns what a missed frame does to the picture.
+	Missed.Emit();
+}
+
 void DrmOutput::Settle()
 {
+	// First, so that a commit which finished since the last drain has freed its slot before anything
+	// below asks whether this output is busy.
+	Reap();
+
 	const auto ready = [&] {
 		if (m_Completion == nullptr)
 		{
@@ -897,6 +1022,19 @@ Instant DrmOutput::NextEvent() const noexcept
 		const MonotonicClock clock;
 
 		return Advanced(clock.Now(), m_Pending.Waiting ? CompletionPoll : Duration::zero());
+	}
+
+	// **A commit that fails produces no page flip, and silence is the thing that must not happen.** The
+	// loop marks this output flip-pending at the commit and will not serve it again until something
+	// clears that, so a refusal nobody hears is a panel that stops drawing for good. A commit that
+	// *succeeds* is answered by its flip long before this falls due, which is what makes one backstop
+	// cheaper than the poll a held commit needs: this wakes the loop once per failed commit rather than
+	// thirty times per good one.
+	if (!m_Commit.IsIdle())
+	{
+		const Duration period = m_Configuration.Period > Duration::zero() ? m_Configuration.Period : CommitBackstop;
+
+		return Advanced(m_Commit.ArmedAt(), period * 2);
 	}
 
 	return Instant{ Duration::max() };
