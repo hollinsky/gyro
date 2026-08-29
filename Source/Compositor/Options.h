@@ -821,16 +821,17 @@ namespace Detail
 
 // What the command line asked for, turned into what is actually going to be constructed.
 //
-// Two rules and an ordering between them, which is the whole reason this is a function rather than
-// four lines at the top of `Run`. `Auto` picks the panel where there is no host to nest in, and a
-// hosted backend gives up `SCHED_FIFO` unless somebody asked for it by name — and the second rule
-// has to read the backend the *first* one settled on. Read the other way round, `Auto` is not `Drm`,
-// so gyro booting on a panel with no arguments at all — which is how it boots — quietly ran the
-// frame thread at normal priority and missed frames nobody could account for.
+// Three rules and an ordering between them, which is the whole reason this is a function rather than
+// a few lines at the top of `Run`. `Auto` picks the panel where there is no host to nest in; a
+// hosted backend gives up `SCHED_FIFO` unless somebody asked for it by name; and a request that
+// names a connector is refused under a backend that has none. Both later rules have to read the
+// backend the *first* one settled on. Read the other way round, `Auto` is not `Drm`, so gyro booting
+// on a panel with no arguments at all — which is how it boots — quietly ran the frame thread at
+// normal priority and missed frames nobody could account for.
 //
 // `host` is passed in rather than read from the environment here so that the ordering is testable on
 // any machine; `Run` is where `WAYLAND_DISPLAY` is looked at.
-[[nodiscard]] inline Options ResolveOptions(const Options& options, bool host) noexcept
+[[nodiscard]] inline Result<Options> ResolveOptions(const Options& options, bool host) noexcept
 {
 	Options resolved = options;
 
@@ -849,6 +850,25 @@ namespace Detail
 	if (resolved.Backend != BackendKind::Drm && !resolved.RealTimeForced)
 	{
 		resolved.RealTime = false;
+	}
+
+	// **A named connector under a backend with no connectors is refused rather than ignored**, for
+	// `--dump`'s reason: somebody who typed `--output=DP-7` believes a panel has been chosen, and a
+	// nested or headless run binds the request to nothing of the kind. Here rather than beside
+	// `--device`'s parse-time twin because the parse cannot see this one — `--output=DP-7` with no
+	// backend typed is drm on a panel and nested inside a desktop session, and only the second is
+	// wrong, so the rule has to read the backend `Auto` settled on.
+	if (resolved.Backend != BackendKind::Drm)
+	{
+		for (const OutputRequest& request : resolved.Requested())
+		{
+			if (!request.Connector.empty())
+			{
+				return Failure(
+					EINVAL, "--output names a connector only the drm backend can drive, so it wants --backend=drm"
+				);
+			}
+		}
 	}
 
 	return resolved;

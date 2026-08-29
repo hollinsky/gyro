@@ -2474,13 +2474,15 @@ Result<void> Run(const Options& options)
 	// them, because reading the backend before `Auto` has been settled makes gyro booting on a panel
 	// with no arguments give up `SCHED_FIFO` — see ResolveOptions.
 	const bool host = ::getenv("WAYLAND_DISPLAY") != nullptr || ::getenv("WAYLAND_SOCKET") != nullptr;
-	const Options resolved = ResolveOptions(options, host);
+	const Result<Options> resolution = ResolveOptions(options, host);
 
 	// Said out loud rather than silently, because somebody who typed nothing and got one of the two
 	// should be able to find out why without reading this file. `WAYLAND_SOCKET` counts as well as
 	// `WAYLAND_DISPLAY`, because a client launched by something that already opened the socket inherits
 	// the descriptor rather than the path — which is how a sandboxed client reaches a compositor whose
-	// socket it cannot open, and Wire's own connect path already prefers it.
+	// socket it cannot open, and Wire's own connect path already prefers it. Before the refusal below
+	// on purpose: `--output=DP-7` typed inside a desktop session is refused *because* this resolved to
+	// nested, and this line is the half of that sentence the error cannot carry.
 	if (options.Backend == BackendKind::Auto)
 	{
 		spdlog::info(
@@ -2488,6 +2490,13 @@ Result<void> Run(const Options& options)
 				   "no backend selected and there is no wayland host; driving the panel"
 		);
 	}
+
+	if (!resolution)
+	{
+		return std::unexpected{ resolution.error() };
+	}
+
+	const Options& resolved = *resolution;
 
 	if (resolved.RealTime)
 	{

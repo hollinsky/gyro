@@ -204,11 +204,13 @@ GYRO_TEST(Options, AutoOnAPanelKeepsRealTime)
 
 	GYRO_REQUIRE(silent.has_value());
 
-	const Options panel = ResolveOptions(*silent, false);
-	const Options nested = ResolveOptions(*silent, true);
+	const Result<Options> panel = ResolveOptions(*silent, false);
+	const Result<Options> nested = ResolveOptions(*silent, true);
 
-	GYRO_CHECK(panel.Backend == BackendKind::Drm && panel.RealTime);
-	GYRO_CHECK(nested.Backend == BackendKind::Nested && !nested.RealTime);
+	GYRO_REQUIRE(panel.has_value() && nested.has_value());
+
+	GYRO_CHECK(panel->Backend == BackendKind::Drm && panel->RealTime);
+	GYRO_CHECK(nested->Backend == BackendKind::Nested && !nested->RealTime);
 }
 
 // The safety rule itself, and the one thing that beats it. A hosted backend gives up `SCHED_FIFO`
@@ -221,8 +223,37 @@ GYRO_TEST(Options, AHostedBackendGivesUpRealTimeUnlessAskedByName)
 
 	GYRO_REQUIRE(silent.has_value() && asked.has_value());
 
-	GYRO_CHECK(!ResolveOptions(*silent, true).RealTime);
-	GYRO_CHECK(ResolveOptions(*asked, true).RealTime);
+	const Result<Options> gaveUp = ResolveOptions(*silent, true);
+	const Result<Options> kept = ResolveOptions(*asked, true);
+
+	GYRO_REQUIRE(gaveUp.has_value() && kept.has_value());
+
+	GYRO_CHECK(!gaveUp->RealTime);
+	GYRO_CHECK(kept->RealTime);
+}
+
+// A connector name under a backend with no connectors is refused at resolve rather than ignored,
+// because resolve is where `Auto` has finally picked one. The parse cannot answer this: `--output=DP-7`
+// with nothing else typed is drm on a panel and nested inside a desktop session, and only the second
+// binds the request to nothing of the kind.
+GYRO_TEST(Options, AConnectorNameWantsABackendWithConnectors)
+{
+	const Result<Options> named = Parse({ "--output=DP-7" });
+
+	GYRO_REQUIRE(named.has_value());
+
+	GYRO_CHECK(ResolveOptions(*named, false).has_value());
+	GYRO_CHECK(!ResolveOptions(*named, true).has_value());
+
+	const Result<Options> nested = Parse({ "--backend=nested", "--output=DP-7:2560x1440" });
+	const Result<Options> headless = Parse({ "--backend=headless", "--output=DP-7" });
+	const Result<Options> drm = Parse({ "--backend=drm", "--output=DP-7" });
+
+	GYRO_REQUIRE(nested.has_value() && headless.has_value() && drm.has_value());
+
+	GYRO_CHECK(!ResolveOptions(*nested, true).has_value());
+	GYRO_CHECK(!ResolveOptions(*headless, false).has_value());
+	GYRO_CHECK(ResolveOptions(*drm, true).has_value());
 }
 
 GYRO_TEST(Options, MoreOutputsThanTheLoopAdmitsIsRefused)
