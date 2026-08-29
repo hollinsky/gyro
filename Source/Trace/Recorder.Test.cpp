@@ -196,6 +196,76 @@ GYRO_TEST(Recorder, ARequestIsAnsweredByTheWriterThread)
 	GYRO_CHECK(recorder.Outcome().has_value());
 }
 
+// The trigger is the process asking for the file when the anomaly is too rare for a person to ask in
+// time. Answered once and then disarmed, because the conditions worth arming it for recur — and a
+// trigger that stayed armed would answer a busy afternoon with a directory of near-identical files.
+GYRO_TEST(Recorder, ATriggerIsAnsweredOnceAndThenDisarmed)
+{
+	const MonotonicClock clock;
+	Scratch scratch{ "gyro-recorder-trigger.pftrace" };
+
+	Recorder recorder{ TracePolicy{
+		.Bytes = 64 * 1024, .Path = scratch.Path(), .Poll = std::chrono::milliseconds{ 5 }, .OnTrigger = true } };
+
+	TraceBuffer* const frame = recorder.Arm("frame", clock);
+
+	GYRO_REQUIRE(frame != nullptr);
+
+	recorder.Join(*frame, 0);
+	TraceMark("landed late");
+
+	recorder.Start();
+	TraceTrigger();
+
+	for (int attempt = 0; attempt < 400 && recorder.Snapshots() == 0; ++attempt)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds{ 5 });
+	}
+
+	GYRO_CHECK_EQ(recorder.Snapshots(), std::uint64_t{ 1 });
+
+	// Disarmed by its own firing: a second trigger is counted by Core and answered by nobody.
+	TraceTrigger();
+	std::this_thread::sleep_for(std::chrono::milliseconds{ 50 });
+
+	recorder.Stop();
+	EnrollTracing(nullptr);
+
+	GYRO_CHECK_EQ(recorder.Snapshots(), std::uint64_t{ 1 });
+	GYRO_CHECK(std::filesystem::exists(NumberedTrace(scratch.Path(), 1)));
+	GYRO_CHECK(recorder.Outcome().has_value());
+}
+
+// A recorder whose policy did not ask treats the counter as somebody else's — the same firing, no
+// file. The baseline is `Start`'s, so a trigger left over from an earlier arming is not answered
+// either, which is what keeps two recorders in one process from stealing each other's requests.
+GYRO_TEST(Recorder, ATriggerIsIgnoredWhereThePolicyDidNotAsk)
+{
+	const MonotonicClock clock;
+	Scratch scratch{ "gyro-recorder-unarmed.pftrace" };
+
+	Recorder recorder{ TracePolicy{
+		.Bytes = 64 * 1024, .Path = scratch.Path(), .Poll = std::chrono::milliseconds{ 5 } } };
+
+	TraceBuffer* const frame = recorder.Arm("frame", clock);
+
+	GYRO_REQUIRE(frame != nullptr);
+
+	recorder.Join(*frame, 0);
+	TraceMark("something happened");
+
+	recorder.Start();
+	TraceTrigger();
+
+	std::this_thread::sleep_for(std::chrono::milliseconds{ 50 });
+
+	recorder.Stop();
+	EnrollTracing(nullptr);
+
+	GYRO_CHECK_EQ(recorder.Snapshots(), std::uint64_t{ 0 });
+	GYRO_CHECK(!std::filesystem::exists(NumberedTrace(scratch.Path(), 1)));
+}
+
 // A GPU span arrives in the ring long after the frame-thread records around it, so what the writer
 // copies is not in time order. `Covered` is the cheapest place that shows: it is the front of the
 // snapshot against the back, which is only the window if the sort happened.

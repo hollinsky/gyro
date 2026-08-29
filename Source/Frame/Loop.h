@@ -326,6 +326,24 @@ private:
 			m_Glass = frame;
 		}
 
+		// **The reader's subtraction, done once, because the reader cannot be watching.** The glass
+		// slice's name is the refresh this frame was aimed at and the attribute beside it is the one it
+		// landed on, and the difference being nonzero is the miss Open.md is hunting — one frame in some
+		// fifteen hundred, which recurs about as often as the ring is long, so a person cannot catch it
+		// by reaching for `SIGUSR1` in time. The mark makes the bad vblank findable by name, in this
+		// trace and in a system trace merged over it; the trigger asks the recorder to keep the file,
+		// where `--trace-on-miss` armed it to.
+		//
+		// Greater rather than unequal, deliberately. The retirement comment below describes a panel
+		// whose counter steps per *flip* rather than per refresh, and on that machine the reported
+		// sequence runs behind the name on every landing — a hunt armed there would spend its snapshot
+		// on the driver's counting before the first real miss.
+		if (frame != 0 && info.Sequence > frame)
+		{
+			TraceMarkAt("landed late", info.PresentedAt, m_Trace, TraceTag(info.Sequence - frame));
+			TraceTrigger();
+		}
+
 		if (m_InFlight == 0)
 		{
 			return;

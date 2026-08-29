@@ -54,6 +54,14 @@ struct TracePolicy
 
 	// How long the writer thread sleeps between looks at the request flag.
 	Duration Poll = std::chrono::milliseconds{ 200 };
+
+	// Answer `Core/Trace.h`'s `TraceTrigger` with a snapshot — the frame loop asking for the file when
+	// it watches the anomaly a person could never ask for in time. **Once, and the first trigger
+	// disarms it**: the conditions worth arming this for also recur — under a parallel build one commit
+	// in forty lands late — and a trigger that stayed armed would answer a busy afternoon with a
+	// directory of near-identical files. The person hunting a rare event wants the first one; asking
+	// again is a restart, which is what a hunt session is anyway.
+	bool OnTrigger = false;
 };
 
 struct TraceSummary
@@ -130,6 +138,10 @@ private:
 	std::atomic<bool> m_Requested{ false };
 	std::atomic<bool> m_Stopping{ false };
 	std::atomic<std::uint64_t> m_Snapshots{ 0 };
+
+	// The trigger count at `Start`, which is where this recorder's answerability begins. Written before
+	// the writer thread exists and read only by it, so the thread's creation is the ordering.
+	std::uint64_t m_Seen = 0;
 
 	std::mutex m_Mutex;
 	std::condition_variable m_Wake;

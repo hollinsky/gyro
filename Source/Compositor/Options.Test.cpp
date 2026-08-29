@@ -418,3 +418,26 @@ GYRO_TEST(Options, ACompositeThatNamesNoTierIsRefused)
 	GYRO_CHECK(!Parse({ "--composite=cheap" }).has_value());
 	GYRO_CHECK(!Parse({ "--composite" }).has_value());
 }
+
+GYRO_TEST(Options, TheMissTriggerIsOffUntilAskedForAndTakesNoValue)
+{
+	const Result<Options> silent = Parse({});
+	const Result<Options> armed = Parse({ "--trace-on-miss" });
+
+	GYRO_REQUIRE(silent.has_value() && armed.has_value());
+	GYRO_CHECK(!silent->TraceOnMiss);
+	GYRO_CHECK(armed->TraceOnMiss);
+
+	// Which anomaly triggers is the frame loop's to know, so a value here is somebody refining a knob
+	// that does not exist — refused rather than read as the plain arming.
+	GYRO_CHECK(!Parse({ "--trace-on-miss=2" }).has_value());
+}
+
+// The third way a command line is wrong, from the comment at the top of this file: two figures that
+// parse individually and contradict each other. A hunt armed over a ring somebody switched off would
+// run for days and record nothing.
+GYRO_TEST(Options, TheMissTriggerOverNoRingIsAContradiction)
+{
+	GYRO_CHECK(Parse({ "--trace-on-miss", "--trace-buffer=1M" }).has_value());
+	GYRO_CHECK(!Parse({ "--trace-on-miss", "--trace-buffer=0" }).has_value());
+}

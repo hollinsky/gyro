@@ -81,6 +81,13 @@ void Recorder::Start()
 		return;
 	}
 
+	// The trigger baseline, read *before* the writer exists so the ordering is the caller's: anything
+	// tripped after `Start` returns is this recorder's to answer, and anything before it — a test's, a
+	// previous arming's — is not. Read on the writer thread instead, a trigger fired into the gap
+	// between the spawn and the thread's first instruction would be absorbed into the baseline and the
+	// one snapshot the hunt was armed for would never be written.
+	m_Seen = TraceTriggers();
+
 	m_Writer = std::thread{ [this] { Watch(); } };
 }
 
@@ -104,6 +111,12 @@ void Recorder::Watch()
 {
 	// Not enrolled, deliberately. A thread that recorded its own waiting would fill a ring with the fact
 	// that nothing was happening, which is the one thing a trace never needs to be told.
+
+	bool armed = m_Policy.OnTrigger;
+
+	// `Start` read the baseline; from here the counter is this thread's alone.
+	std::uint64_t seen = m_Seen;
+
 	while (!m_Stopping.load(std::memory_order_relaxed))
 	{
 		{
@@ -112,7 +125,23 @@ void Recorder::Watch()
 			m_Wake.wait_for(held, m_Policy.Poll, [this] { return m_Stopping.load(std::memory_order_relaxed); });
 		}
 
-		if (!m_Requested.exchange(false, std::memory_order_relaxed))
+		bool requested = m_Requested.exchange(false, std::memory_order_relaxed);
+
+		// A changed count is the same request `SIGUSR1` makes, taken once — `TracePolicy::OnTrigger`
+		// says why once — and any triggers that fired between looks collapse into the one snapshot,
+		// which already holds all of them.
+		if (const std::uint64_t fired = TraceTriggers(); fired != seen)
+		{
+			seen = fired;
+
+			if (armed)
+			{
+				requested = true;
+				armed = false;
+			}
+		}
+
+		if (!requested)
 		{
 			continue;
 		}

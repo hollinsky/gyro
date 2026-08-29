@@ -1313,8 +1313,10 @@ public:
 		if (options.TraceBytes != 0)
 		{
 			m_Recorder.emplace(
-				TracePolicy{
-					.Bytes = options.TraceBytes, .Path = std::filesystem::path{ options.TracePath }, .Pid = ::getpid() }
+				TracePolicy{ .Bytes = options.TraceBytes,
+			                 .Path = std::filesystem::path{ options.TracePath },
+			                 .Pid = ::getpid(),
+			                 .OnTrigger = options.TraceOnMiss }
 			);
 
 			m_FrameTrace = m_Recorder->Arm("frame", m_Clock);

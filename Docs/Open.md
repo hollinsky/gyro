@@ -591,7 +591,12 @@ nothing only proves the grep.
   completion delivered twice, and gyro's own sequence bookkeeping across a flip that reported nothing;
   the first two are visible in a capture recording the kernel's sequence against gyro's own on every
   event, which the ring now does. So this wants an accumulation of long quiet captures rather than an
-  argument.
+  argument — and the catching is no longer by hand: the event recurs about as often as the ring is
+  long, so waiting with a finger on `SIGUSR1` meant catching the right half-minute by luck.
+  `--trace-on-miss` arms the loop to make the request itself the moment a flip lands past the refresh
+  its frame named, once per run, and marks the vblank `landed late` so the frame is findable by name —
+  including in a system trace merged over the file, which is where the kworker the wishlist entry
+  blames would actually be seen.
 - **The snapshot atlas multiple.** Decision 46 denominates capacity in output render-target
   equivalents and declines to guess the number. The derivation to check it against is the largest
   *legitimate* simultaneous retirement — closing an application with a menu open is a window plus

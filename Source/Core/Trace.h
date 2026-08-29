@@ -428,6 +428,11 @@ namespace Detail
 // un-enrolled thread — a test, a device worker, the writer itself — cost a load and a branch.
 inline thread_local TraceBuffer* Tracing = nullptr;
 
+// Process-wide where the rings above are per-thread, because a trigger is a claim about the run
+// rather than about a thread: *the thing being hunted just happened, somebody should keep the ring*.
+// One word written on an anomaly is not the per-record contention the comment above refuses.
+inline std::atomic<std::uint64_t> Triggers{ 0 };
+
 } // namespace Detail
 
 // Whether this thread is recording, for a caller that would otherwise compute something only to trace
@@ -447,6 +452,26 @@ inline thread_local TraceBuffer* Tracing = nullptr;
 inline void EnrollTracing(TraceBuffer* buffer) noexcept
 {
 	Detail::Tracing = buffer;
+}
+
+// An anomaly worth keeping the ring for, raised by the thread that watched it happen. The ring is
+// always armed because a profiler somebody switches on records the run after the interesting one —
+// and this is that argument's last step: an event rare enough that a person cannot reach the
+// keyboard within the seconds the ring holds needs the process to make the request itself. A relaxed
+// increment of a counter is the whole verb — no lock, no allocation, legal inside a frame section,
+// and the same cost whether anything is listening. What a trigger *does* is the recorder's policy,
+// read off the counter below on the writer thread's own schedule.
+inline void TraceTrigger() noexcept
+{
+	Detail::Triggers.fetch_add(1, std::memory_order_relaxed);
+}
+
+// How many times the process has tripped the trigger, for the party whose policy answers it. A
+// count rather than a flag so a reader owns its own baseline: consuming a flag would make two
+// readers steal each other's answer.
+[[nodiscard]] inline std::uint64_t TraceTriggers() noexcept
+{
+	return Detail::Triggers.load(std::memory_order_relaxed);
 }
 
 // A point in time worth naming: a frame skipped, a target refused, a flip that landed.

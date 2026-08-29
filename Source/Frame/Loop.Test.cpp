@@ -1360,6 +1360,106 @@ GYRO_TEST(FrameLoop, TheGlassRowOpensWhereThePanelScannedOutAndNamesTheFrame)
 	GYRO_CHECK_EQ(arguments[2].second, std::uint64_t{ 10'000'000 });
 }
 
+// The reader's subtraction, done by the loop: the glass slice's name is the refresh a frame was aimed
+// at and the attribute beside it is the one it landed on, and Open.md's rare miss is the difference
+// being nonzero. The mark makes the vblank findable by name; the trigger asks the recorder for the
+// file while the ring still holds the story, which a person reaching for SIGUSR1 cannot be relied on
+// to do in time.
+GYRO_TEST(FrameLoop, AFlipThatLandsPastItsNamedRefreshIsMarkedAndTripsTheTrigger)
+{
+	Harness harness;
+
+	std::array<TraceRecord, 64> records{};
+	TraceBuffer trace;
+	trace.Arm(records, harness.Clock);
+
+	// Sequence 7, so the frame drawn below is aimed at 8.
+	harness.Anchor();
+
+	EnrollTracing(&trace);
+
+	const std::uint64_t before = TraceTriggers();
+
+	harness.Publish(1, {});
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	// The panel shows it two refreshes after the one it was drawn for.
+	harness.Presenter.Flip(At(1030), 10);
+	harness.Clock.Set(At(1040));
+	(void)harness.Loop.Step();
+
+	EnrollTracing(nullptr);
+
+	GYRO_CHECK_EQ(TraceTriggers() - before, std::uint64_t{ 1 });
+
+	std::array<TraceEvent, 64> events{};
+	const std::size_t count = trace.Copy(events);
+
+	std::size_t marked = 0;
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		const TraceEvent& event = events[index];
+
+		if (event.Kind != TraceKind::Mark || std::string_view{ event.Name } != "landed late")
+		{
+			continue;
+		}
+
+		++marked;
+
+		// On the output's own row, at the vblank's stamp rather than the wake that learned of it, and
+		// the tag is how many refreshes late the landing was.
+		GYRO_CHECK(event.Scope == TraceOutput(0));
+		GYRO_CHECK(event.Stamp == At(1030));
+		GYRO_CHECK_EQ(event.Payload, std::uint64_t{ 2 });
+	}
+
+	GYRO_CHECK_EQ(marked, std::size_t{ 1 });
+}
+
+// The other direction is not a miss. A panel whose counter steps per flip rather than per refresh
+// answers *behind* the frame's name — the pathology the retirement comment in `OnPresented` records —
+// and a hunt armed on that machine must not spend its one snapshot on the driver's counting.
+GYRO_TEST(FrameLoop, ACounterAnsweringBehindTheNameIsNotAMiss)
+{
+	Harness harness;
+
+	std::array<TraceRecord, 64> records{};
+	TraceBuffer trace;
+	trace.Arm(records, harness.Clock);
+
+	harness.Anchor();
+
+	EnrollTracing(&trace);
+
+	const std::uint64_t before = TraceTriggers();
+
+	harness.Publish(1, {});
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	// Aimed at 8, answered with 5.
+	harness.Presenter.Flip(At(1010), 5);
+	harness.Clock.Set(At(1020));
+	(void)harness.Loop.Step();
+
+	EnrollTracing(nullptr);
+
+	GYRO_CHECK_EQ(TraceTriggers() - before, std::uint64_t{ 0 });
+
+	std::array<TraceEvent, 64> events{};
+	const std::size_t count = trace.Copy(events);
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		GYRO_CHECK(std::string_view{ events[index].Name != nullptr ? events[index].Name : "" } != "landed late");
+	}
+}
+
 // A refusal names itself and carries its code. The mark used to be the word `refused` for every way a
 // frame can be thrown away, which on a real capture meant twenty-seven discarded composites that a
 // reader could not tell apart — and the code matters beside the words wherever the sentence belongs to

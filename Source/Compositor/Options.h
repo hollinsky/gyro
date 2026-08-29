@@ -206,6 +206,13 @@ struct Options
 	std::string TracePath{ DefaultTracePath };
 	bool TraceAtExit = false;
 
+	// Snapshot on the first frame that lands a refresh after the one it was aimed at. The miss being
+	// hunted recurs about as often as the ring is long, so waiting for it with a finger on `SIGUSR1`
+	// means catching the right half-minute by hand; this is the loop making the request the moment it
+	// sees the landing. Off by default, because on a loaded machine late landings are ordinary — the
+	// latch-lead ratchet's business rather than a file each.
+	bool TraceOnMiss = false;
+
 	// Stop after this many iterations rather than running until signalled. Zero is *until signalled*,
 	// which is the ordinary case; anything else is a smoke test that terminates on its own.
 	std::uint64_t Iterations = 0;
@@ -596,6 +603,21 @@ namespace Detail
 			continue;
 		}
 
+		if (Detail::Matches(argument, "--trace-on-miss", value))
+		{
+			// No value to take: which anomaly triggers is the frame loop's to know, and a flag that
+			// swallowed one would read `--trace-on-miss=2` as the plain arming somebody thought they
+			// refined.
+			if (!value.empty())
+			{
+				return Failure(EINVAL, "--trace-on-miss takes no value");
+			}
+
+			options.TraceOnMiss = true;
+
+			continue;
+		}
+
 		if (Detail::Matches(argument, "--output", value))
 		{
 			if (options.OutputCount >= options.Outputs.size())
@@ -814,6 +836,14 @@ namespace Detail
 	if (options.Gym)
 	{
 		options.Clients = false;
+	}
+
+	// The trigger watches the ring, so arming it while switching the ring off is two figures that parse
+	// individually and contradict each other — the third way a command line is wrong, and the one whose
+	// recovery is a hunt that silently records nothing.
+	if (options.TraceOnMiss && options.TraceBytes == 0)
+	{
+		return Failure(EINVAL, "--trace-on-miss watches the ring that --trace-buffer=0 switched off");
 	}
 
 	return options;
