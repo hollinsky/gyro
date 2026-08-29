@@ -779,7 +779,7 @@ void EmitListenDefinition(std::string& out, const Interface& interface)
 			"\t// ever dereferences this — the dispatcher below takes no `self` at all.\n"
 			"\tif (const Result<void> bound = m_Connection->Bind(m_Id, &WireAnchor, &{0}::Dispatch); !bound)\n"
 			"\t{{\n"
-			"\t\tm_Connection->Output().RecordFault(bound.error().Code(), bound.error().Context());\n"
+			"\t\tm_Connection->Output().RecordFault(bound.error().Code(), bound.error().Sentence());\n"
 			"\t}}\n"
 			"}}\n\n",
 			ProxyName(interface.Name)
@@ -808,9 +808,9 @@ void EmitListenDefinition(std::string& out, const Interface& interface)
 		"\n"
 		"\tif (const Result<void> bound = m_Connection->Bind(m_Id, &listener, &{0}::Dispatch); !bound)\n"
 		"\t{{\n"
-		"\t\t// The context is a view over static storage either way, so the connection's own sentence\n"
-		"\t\t// is carried rather than replaced by a vaguer one from here.\n"
-		"\t\tm_Connection->Output().RecordFault(bound.error().Code(), bound.error().Context());\n"
+		"\t\t// The sentence is a literal with static storage either way, so the connection's own is\n"
+		"\t\t// carried rather than replaced by a vaguer one from here.\n"
+		"\t\tm_Connection->Output().RecordFault(bound.error().Code(), bound.error().Sentence());\n"
 		"\n"
 		"\t\tlistener.m_Object = {{}};\n"
 		"\t}}\n"

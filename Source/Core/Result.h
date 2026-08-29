@@ -26,12 +26,19 @@
 // difference between the information existing where it was known and existing where someone
 // remembered to put it.
 //
-// It is a string_view over a literal rather than an owned string, which is what keeps an Error
-// trivially copyable and allocation-free. The obligation that comes with that: **the sentence must
-// have static storage**, and the constructor that took a std::string temporary is deleted rather
-// than documented, because the obligation went unmet for as long as it was only written down —
-// `Failure(errno, std::format("opening {}", path))` compiled, dangled, and printed freed heap on the
-// one log line standing between a black screen and a diagnosis.
+// It is a pointer to a literal rather than an owned string, which is what keeps an Error trivially
+// copyable and allocation-free. The obligation that comes with that — **the sentence must have static
+// storage** — is carried by the type rather than by a paragraph, because it went unmet for as long as
+// it was only written down: `Failure(errno, std::format("opening {}", path))` compiled, dangled, and
+// printed freed heap on the one log line standing between a black screen and a diagnosis.
+//
+// **A `const char*` rather than a `string_view`, which is the second obligation the first one hid.**
+// A view over a literal is NUL-terminated in fact and not by type, so `Failure(code, sentence.substr(
+// 4))` was a spelling the compiler allowed — and the reader that would find out is Trace/Recorder.h,
+// on the writer thread, `strlen`ing a pointer a frame put in the ring some seconds ago. Taking the
+// pointer makes both obligations one thing the caller cannot get wrong, and it retires the deleted
+// std::string overloads along with them: a std::string does not convert to a `const char*` at all, so
+// the rule no longer needs a trick to state it.
 //
 // **The varying part is a Subject instead**, which owns its bytes. The sentence stays a literal and
 // the value beside it is copied, so there is nothing left to outlive: a device path, a connector
@@ -93,53 +100,37 @@ private:
 	std::uint8_t m_Length = 0;
 };
 
-// What a sentence may never be. Named so the deletions below read as a rule rather than as a trick.
-template<typename T>
-concept StringSentence = std::is_same_v<std::remove_cvref_t<T>, std::string>;
-
 class Error
 {
 public:
 	// No default constructor. A default-constructed error is a failure with nothing to say, and
 	// every way of producing one is a bug that this refuses to give a spelling to.
-	constexpr Error(int code, std::string_view context) noexcept : m_Context{ context }, m_Code{ code } {}
+	constexpr Error(int code, const char* context) noexcept : m_Context{ context }, m_Code{ code } {}
 
-	constexpr Error(int code, std::string_view context, Subject subject) noexcept
+	constexpr Error(int code, const char* context, Subject subject) noexcept
 		: m_Context{ context }, m_Subject{ subject }, m_Code{ code }
 	{}
-
-	// The dangle, made unspellable. A std::string is the only way the sentence has ever gone wrong —
-	// `Failure(errno, std::format(...))` compiled and printed freed heap — and a subject is where a
-	// value that had to be built belongs. Deleted for an lvalue too: a named string outlives the
-	// call and not necessarily the Error, which is copied out of a Result and kept.
-	//
-	// A template because the plain `std::string&&` overload is ambiguous against a string literal:
-	// both directions are one user conversion, and every existing call site stops compiling.
-	template<StringSentence T>
-	Error(int code, T&& context) = delete;
-
-	template<StringSentence T>
-	Error(int code, T&& context, Subject subject) = delete;
 
 	// Reads errno at the call site, which is the only place it is still the errno for the call that
 	// failed. Anything between the syscall and here — a destructor, a log statement, an allocation —
 	// is entitled to overwrite it.
-	[[nodiscard]] static Error FromErrno(std::string_view context) noexcept { return Error{ errno, context }; }
+	[[nodiscard]] static Error FromErrno(const char* context) noexcept { return Error{ errno, context }; }
 
-	[[nodiscard]] static Error FromErrno(std::string_view context, Subject subject) noexcept
+	[[nodiscard]] static Error FromErrno(const char* context, Subject subject) noexcept
 	{
 		return Error{ errno, context, subject };
 	}
 
-	template<StringSentence T>
-	static Error FromErrno(T&& context) = delete;
-
-	template<StringSentence T>
-	static Error FromErrno(T&& context, Subject subject) = delete;
-
 	[[nodiscard]] constexpr int Code() const noexcept { return m_Code; }
 
 	[[nodiscard]] constexpr std::string_view Context() const noexcept { return m_Context; }
+
+	// The same sentence for a caller that needs the pointer rather than the view, which today is the
+	// trace ring: Core/Trace.h holds a record's name as a `const char*` and the writer thread reads it
+	// long after the frame that recorded it. That is exactly what the storage rule above promises, so
+	// it is handed over rather than copied — a refusal names itself on the timeline for the cost of a
+	// pointer already in .rodata.
+	[[nodiscard]] constexpr const char* Sentence() const noexcept { return m_Context; }
 
 	[[nodiscard]] constexpr Subject About() const noexcept { return m_Subject; }
 
@@ -152,7 +143,7 @@ public:
 	}
 
 private:
-	std::string_view m_Context;
+	const char* m_Context;
 	Subject m_Subject;
 	int m_Code;
 };
@@ -169,37 +160,25 @@ using Result = std::expected<T, Error>;
 // Spelled here so that a failure return is one name rather than two. `return Failure(EACCES, "...")`
 // and `return FailFromErrno("...")` read as what they are at the call site, where
 // `std::unexpected{ Error::FromErrno("...") }` reads as a type conversion.
-[[nodiscard]] constexpr std::unexpected<Error> Failure(int code, std::string_view context) noexcept
+[[nodiscard]] constexpr std::unexpected<Error> Failure(int code, const char* context) noexcept
 {
 	return std::unexpected{ Error{ code, context } };
 }
 
-[[nodiscard]] constexpr std::unexpected<Error> Failure(int code, std::string_view context, Subject subject) noexcept
+[[nodiscard]] constexpr std::unexpected<Error> Failure(int code, const char* context, Subject subject) noexcept
 {
 	return std::unexpected{ Error{ code, context, subject } };
 }
 
-template<StringSentence T>
-std::unexpected<Error> Failure(int code, T&& context) = delete;
-
-template<StringSentence T>
-std::unexpected<Error> Failure(int code, T&& context, Subject subject) = delete;
-
-[[nodiscard]] inline std::unexpected<Error> FailFromErrno(std::string_view context) noexcept
+[[nodiscard]] inline std::unexpected<Error> FailFromErrno(const char* context) noexcept
 {
 	return std::unexpected{ Error::FromErrno(context) };
 }
 
-[[nodiscard]] inline std::unexpected<Error> FailFromErrno(std::string_view context, Subject subject) noexcept
+[[nodiscard]] inline std::unexpected<Error> FailFromErrno(const char* context, Subject subject) noexcept
 {
 	return std::unexpected{ Error::FromErrno(context, subject) };
 }
-
-template<StringSentence T>
-std::unexpected<Error> FailFromErrno(T&& context) = delete;
-
-template<StringSentence T>
-std::unexpected<Error> FailFromErrno(T&& context, Subject subject) = delete;
 
 // Prints as `opening a DRM node /dev/dri/card0: Permission denied (13)`, and without the subject
 // where there is none. No format spec is accepted.

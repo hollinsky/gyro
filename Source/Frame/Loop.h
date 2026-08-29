@@ -1192,7 +1192,18 @@ private:
 
 		if (!submission)
 		{
-			TraceMark("refused", output.m_Trace);
+			// **Named by the refusal's own sentence rather than by the word `refused`**, which is a mark
+			// that says a frame was thrown away and never why. A capture with fifty of them in it left a
+			// reader to guess between every branch that can decline, and the guessing was the whole cost:
+			// a refusal is almost always a standing condition, so the one thing worth knowing is which
+			// one, and that is a word this frame already has in its hand. Core/Result.h's sentence is a
+			// literal with static storage, so the ring takes the pointer and copies nothing — legal
+			// inside the frame section for the same reason every other mark is.
+			//
+			// The errno is deliberately not printed beside it. A label is the number a slice is *about* —
+			// the frame, the scene — and a reader who has the sentence has strictly more than `16` was
+			// going to tell them.
+			TraceMark(submission.error().Sentence(), output.m_Trace);
 
 			// Seam/Renderer.h's *an item the renderer cannot express* arriving: the draw list held
 			// something this backend refuses to draw wrong, so it drew none of it. The reason is the
@@ -1218,7 +1229,12 @@ private:
 
 			if (const Result<void> presented = output.m_Presenter->Present({ layers.data(), count }); !presented)
 			{
-				TraceMark("refused", output.m_Trace);
+				// The presenter's own words, for the reason the record refusal above gives — and this is the
+				// site that wanted them. A composite that reaches here has already been paid for in full and
+				// is discarded, so a run with a standing refusal burns a whole frame's GPU work per refresh
+				// and draws the same refresh twice on the ruler. Which backend condition is doing that is a
+				// sentence apart in every case and was a word the trace threw away.
+				TraceMark(presented.error().Sentence(), output.m_Trace);
 				output.Refuse(presented.error());
 
 				return;

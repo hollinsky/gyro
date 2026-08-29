@@ -60,7 +60,7 @@ enum class ParseFailure : std::uint8_t
 	InvalidValue,
 };
 
-[[nodiscard]] constexpr std::string_view Name(ParseFailure failure) noexcept
+[[nodiscard]] constexpr const char* Name(ParseFailure failure) noexcept
 {
 	switch (failure)
 	{

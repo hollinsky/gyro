@@ -65,7 +65,7 @@
 // A failed call turned into the seam's answer, with the driver's own enumerator kept in the message.
 // The number is what a Mesa bug report is filed with, so losing it to a generic errno is losing the
 // only part a driver author can act on.
-[[nodiscard]] inline Result<void> Check(VkResult result, std::string_view context) noexcept
+[[nodiscard]] inline Result<void> Check(VkResult result, const char* context) noexcept
 {
 	if (result == VK_SUCCESS)
 	{

@@ -278,7 +278,7 @@ public:
 	// A message that could not be marshalled — one too large for the 16-bit size field, or the nested
 	// writer above. Latched rather than reported, because the writer that hit it has no connection to
 	// fail and the next `Flush` does.
-	void RecordFault(int code, std::string_view context)
+	void RecordFault(int code, const char* context)
 	{
 		if (!m_Fault)
 		{

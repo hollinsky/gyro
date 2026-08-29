@@ -192,7 +192,7 @@ private:
 		Slot State = Slot::Free;
 	};
 
-	[[nodiscard]] std::unexpected<Error> Fail(int code, std::string_view context);
+	[[nodiscard]] std::unexpected<Error> Fail(int code, const char* context);
 
 	[[nodiscard]] Result<void> Adopt(Fd socket);
 

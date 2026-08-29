@@ -108,7 +108,7 @@ enum class EmitFailure : std::uint8_t
 	CyclicReference,
 };
 
-[[nodiscard]] constexpr std::string_view Name(EmitFailure failure) noexcept
+[[nodiscard]] constexpr const char* Name(EmitFailure failure) noexcept
 {
 	switch (failure)
 	{

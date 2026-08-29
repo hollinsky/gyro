@@ -52,7 +52,7 @@ constexpr unsigned WantedFlags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER
 // Which sentence to hand back when the wanted configuration could not be had. Every one of them names
 // something a person can go and change, which is the whole obligation gyro takes on by carrying no
 // epoll fallback.
-[[nodiscard]] std::string_view Diagnose(unsigned entries) noexcept
+[[nodiscard]] const char* Diagnose(unsigned entries) noexcept
 {
 	switch (Disabled())
 	{

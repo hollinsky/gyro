@@ -87,7 +87,7 @@ struct alignas(::cmsghdr) ControlBuffer
 }
 } // namespace
 
-std::unexpected<Error> Connection::Fail(int code, std::string_view context)
+std::unexpected<Error> Connection::Fail(int code, const char* context)
 {
 	// The first failure is the one kept. Everything after it is a consequence — a half-read message,
 	// a write to a socket the host already closed — and reporting the last one would name the
@@ -211,7 +211,7 @@ Result<void> Connection::Flush()
 	// which is what keeps generated marshalling code free of error handling. See Wire/Writer.h.
 	if (const std::optional<Error>& fault = m_Out.Fault(); fault)
 	{
-		return Fail(fault->Code(), fault->Context());
+		return Fail(fault->Code(), fault->Sentence());
 	}
 
 	if (!m_Socket.IsValid())
