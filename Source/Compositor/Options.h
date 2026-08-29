@@ -160,6 +160,24 @@ struct Options
 	Duration PlannedCost = std::chrono::microseconds{ 2'000 };
 	Duration FloorCost = std::chrono::microseconds{ 500 };
 
+	// What the frame loop holds ahead of the instant it arms for, overriding the composition root's
+	// figure. Nothing is *use the compiled-in one*, which is the answer for every run that is not
+	// measuring this.
+	//
+	// **A flag because the figure it overrides is not one gyro can be confident of.** The arming lead
+	// covers the wakeup, and it also has to cover everything between the atomic commit and the point
+	// the display engine latches it — which is a property of somebody else's driver, measured at
+	// between one and a quarter and two milliseconds on one Tiger Lake panel and unknown everywhere
+	// else. A constant chosen against one machine is a constant that drops frames on the next, and the
+	// only way to learn the shape of the curve is to be able to move the figure without a rebuild.
+	//
+	// Bounded above by nothing, here or anywhere else. The period is the real ceiling and only the
+	// frame clock knows it, so this header cannot name one without naming a panel — but nothing
+	// downstream refuses an overlong lead either: `Timing::WakeFor`'s third floor arms for the next
+	// frame gyro can still be early for, so a lead longer than a refresh is absorbed as a refresh of
+	// latency nobody is told about rather than rejected at startup.
+	std::optional<Duration> Lead{};
+
 	// The always-armed trace ring, per recorded thread, in bytes. Zero records nothing at all.
 	//
 	// **Sized rather than timed, because how many seconds it buys is what the compositor is doing.** A
@@ -570,6 +588,22 @@ namespace Detail
 			}
 
 			options.PlannedCost = *cost;
+
+			continue;
+		}
+
+		if (Detail::Matches(argument, "--lead", value))
+		{
+			const Result<Duration> lead = Detail::ParseMilliseconds(value);
+
+			if (!lead)
+			{
+				// `ParseMilliseconds`' own sentence names a cost, which this is not. The figure is the
+				// same shape and the word is wrong, so the message is this flag's own.
+				return Failure(EINVAL, "--lead is a non-negative number of milliseconds");
+			}
+
+			options.Lead = *lead;
 
 			continue;
 		}

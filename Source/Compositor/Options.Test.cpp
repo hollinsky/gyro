@@ -103,6 +103,33 @@ GYRO_TEST(Options, CostsArriveInMilliseconds)
 	GYRO_CHECK_EQ(options->FloorCost, 500us);
 }
 
+// Unset rather than defaulted here, because the figure it overrides lives in the composition root and
+// a default in two places is a default that drifts.
+GYRO_TEST(Options, TheArmingLeadIsAnOverrideRatherThanAValue)
+{
+	const Result<Options> bare = Parse({});
+
+	GYRO_REQUIRE(bare.has_value());
+	GYRO_CHECK(!bare->Lead.has_value());
+
+	const Result<Options> led = Parse({ "--lead=1.5" });
+
+	GYRO_REQUIRE(led.has_value());
+	GYRO_REQUIRE(led->Lead.has_value());
+	GYRO_CHECK_EQ(*led->Lead, 1500us);
+
+	// Zero is the permissive reading Timing.h names and has to survive the parse, since it is the arm
+	// of a sweep that says what the lead was worth at all.
+	const Result<Options> none = Parse({ "--lead=0" });
+
+	GYRO_REQUIRE(none.has_value());
+	GYRO_REQUIRE(none->Lead.has_value());
+	GYRO_CHECK_EQ(*none->Lead, Duration::zero());
+
+	GYRO_CHECK(!Parse({ "--lead=-1" }).has_value());
+	GYRO_CHECK(!Parse({ "--lead=2ms" }).has_value());
+}
+
 // Each of these parses; together they describe a machine whose floor composite costs more than the
 // frame it is the recovery for, which decision 35's second branch cannot mean.
 GYRO_TEST(Options, AFloorAboveTheCostIsRefused)

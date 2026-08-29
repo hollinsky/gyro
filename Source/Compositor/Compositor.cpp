@@ -1248,8 +1248,23 @@ public:
 			m_Snapshots,
 			m_Returns,
 			m_Evaluator,
-			Timing{ TimingPolicy{ .Margin = CompletionMargin, .Lead = ArmingLead, .Composite = m_Options.Composite } }
+			Timing{ TimingPolicy{ .Margin = CompletionMargin,
+		                          .Lead = m_Options.Lead.value_or(ArmingLead),
+		                          .Composite = m_Options.Composite } }
 		);
+		// **Said out loud where it is not the default, because a sweep is four runs that differ by one
+		// number and a capture does not carry it.** Four traces taken at four leads are indistinguishable
+		// from each other on the day after they were taken, and the one that matters is always the one
+		// whose filename was wrong.
+		if (m_Options.Lead)
+		{
+			spdlog::info(
+				"arming lead is {:.3f} ms rather than the default {:.3f}",
+				std::chrono::duration<double, std::milli>{ *m_Options.Lead }.count(),
+				std::chrono::duration<double, std::milli>{ ArmingLead }.count()
+			);
+		}
+
 		m_Loop->Bind({ m_Outputs.data(), m_Count });
 		m_Loop->Listen({ m_Sources.data(), m_Sources.size() });
 
