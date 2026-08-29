@@ -543,17 +543,33 @@ nothing only proves the grep.
   the two constrain each other, since a floor that holds the previous blur is a different number from
   one that draws a flat fill.
 - **Scheduling policy constants.** The `// SPEC:` numbers in `FrameClockPolicy`, `TimingPolicy`, and
-  `BudgetPolicy` cite this entry and it had never been written. They are the latch lead a commit must
-  be programmed by, the clearance the variable-refresh servo keeps from the panel's longest period,
-  the servo's per-frame step bound, the safety margin held over a composed reserve, and the length of
-  the window a budget's mark is the maximum over. What makes them one entry rather than five is their
-  provenance: every one is read from documentation and driver source rather than from a panel, which
-  is why they are policy fields a test can vary rather than constants compiled into the arithmetic.
-  Each one's unset value is chosen to be the recoverable direction — a zero margin admits a frame
-  that may miss by the wakeup latency, where an overstated one holds an output at the floor tier for
-  as long as it is wrong — so the whole set is deferrable, and it is deferred until there is hardware
-  in front of it. Retiring this is a bench with panels on it and not an afternoon of reading, which
-  is the triage rule above sorting it into the slow pile.
+  `BudgetPolicy` cite this entry and it had never been written. They are the clearance the
+  variable-refresh servo keeps from the panel's longest period, the servo's per-frame step bound, the
+  safety margin held over a composed reserve, and the length of the window a budget's mark is the
+  maximum over. What makes them one entry rather than four is their provenance: every one is read
+  from documentation and driver source rather than from a panel, which is why they are policy fields
+  a test can vary rather than constants compiled into the arithmetic.
+
+  **The latch lead was the fifth and is
+  [decision 159](Decisions.md#159-the-latch-lead-is-the-modes-blanking-interval-plus-the-drivers-commit-path-and-it-belongs-to-the-output-rather-than-to-policy),
+  which broke two of this entry's premises and both are worth holding against what is left.** The
+  first is that every unset value is the recoverable direction: for the latch lead it was not a
+  margin but a cliff, with a latch rate of 0.0% below the threshold in every mode measured, and the
+  only thing hiding a permanently floored output was a reserve planning for more work than the
+  composite did. Ask of each remaining number whether being wrong is linear or total, rather than
+  assuming the first. The second is that retiring these is "a bench with panels on it and not an
+  afternoon of reading": it took one panel advertising two modes with different pixel clocks, which
+  most panels do, because a second mode separates quantities that are proportional within one. That
+  is the cheap instrument the other four should be tried against before they are deferred again.
+- **The latch lead wants to be a ratchet.** Decision 159 leaves `Drm/Output.cpp`'s `CommitPath` a
+  compiled-in 500 microseconds against a measurement of 288 to 387, and the part it is covering is a
+  commit worker being scheduled — which grows under load, on a machine whose load gyro does not
+  control. The shape is settled and the mechanism is not built: start high, step up on a miss, and
+  come down only on an invalidation. Never a servo, because the threshold is observable only by
+  failing and the failure is every frame rather than a worse one. What it needs from the trace is
+  already there — a commit's distance to the anchor it was aimed at, and whether the refresh that
+  showed it was the one it named — and what it needs from the loop is a place to keep a per-output
+  figure that a mode set drops, which is where the number already lives.
 - **The snapshot atlas multiple.** Decision 46 denominates capacity in output render-target
   equivalents and declines to guess the number. The derivation to check it against is the largest
   *legitimate* simultaneous retirement — closing an application with a menu open is a window plus

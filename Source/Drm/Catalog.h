@@ -34,6 +34,22 @@ namespace Drm
 // — done in 64-bit because that product overflows 32 bits at 4K.
 [[nodiscard]] Duration PeriodOf(const drmModeModeInfo& mode) noexcept;
 
+// The vertical blanking interval those same timings describe: `(vtotal - vdisplay) * htotal / clock`.
+//
+// **This is the distance between the last instant a commit still makes a frame and the instant the
+// kernel timestamps that frame at**, which is why a presenter owes it to `Seam/OutputConfiguration.h`.
+// `drm_calc_vbltimestamp_from_scanoutpos` computes its answer as the "end of vblank" — the start of
+// scanout of the first active line — while a commit has to be latched before the vblank *begins*, and
+// `drm_mode_set_crtcinfo` puts that boundary at `vdisplay` exactly (`crtc_vblank_start =
+// min(vsync_start, vdisplay)`). So the two ends of this interval are the two things gyro has to hold
+// apart, and neither is a guess: measured across five modes of two panels the latch threshold tracks
+// this number with a slope of one.
+//
+// **Not the sync pulse and not the back porch**, both of which are the same shape and the wrong
+// answer. A capture that mistook one for the other agreed with a 60 Hz panel to within five
+// microseconds and was out by a factor of two at 40 Hz on that same panel.
+[[nodiscard]] Duration BlankingOf(const drmModeModeInfo& mode) noexcept;
+
 // The mode closest to what was asked for, or null where the connector offers none at all.
 //
 // **Resolution is matched exactly and refresh is matched nearest, and the asymmetry is deliberate.** A

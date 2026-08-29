@@ -67,6 +67,28 @@ GYRO_TEST(DrmCatalog, PeriodComesFromTheTimings)
 	GYRO_CHECK(Drm::PeriodOf(Mode(1920, 1080, 0, 2200, 1125)) == Duration::zero());
 }
 
+// The two panels the figure was measured on, so the arithmetic that carries it is checked against the
+// modes it was checked against. The pair on one connector is the point: same totals, different pixel
+// clock, so the blanking interval moves while every line count stays put — which is what separated a
+// duration from a count of lines and killed the back-porch reading.
+GYRO_TEST(DrmCatalog, TheBlankingIntervalIsTheDistanceToTheLatchDeadline)
+{
+	// eDP-1, 1920x1080 at 60.05 and at 40.03: 36 blanked lines either way.
+	GYRO_CHECK(Drm::BlankingOf(Mode(1920, 1080, 141'000, 2104, 1116)) == std::chrono::nanoseconds{ 537'191 });
+	GYRO_CHECK(Drm::BlankingOf(Mode(1920, 1080, 94'000, 2104, 1116)) == std::chrono::nanoseconds{ 805'787 });
+
+	// DP-7, 2560x1080 at 60 against 1600x1200 at 60: twenty blanked lines against fifty, and the
+	// interval is a duration rather than either count.
+	GYRO_CHECK(Drm::BlankingOf(Mode(2560, 1080, 198'000, 3000, 1100)) == std::chrono::nanoseconds{ 303'030 });
+	GYRO_CHECK(Drm::BlankingOf(Mode(1600, 1200, 162'000, 2160, 1250)) == std::chrono::nanoseconds{ 666'667 });
+
+	// A table gyro did not author. Zero rather than the several hours an unsigned subtraction produces,
+	// because this number is subtracted from every deadline the output ever predicts.
+	GYRO_CHECK(Drm::BlankingOf(Mode(1920, 1080, 148'500, 2200, 1080)) == Duration::zero());
+	GYRO_CHECK(Drm::BlankingOf(Mode(1920, 1080, 148'500, 2200, 1000)) == Duration::zero());
+	GYRO_CHECK(Drm::BlankingOf(Mode(1920, 1080, 0, 2200, 1125)) == Duration::zero());
+}
+
 GYRO_TEST(DrmCatalog, ChoosesTheModeAtTheWantedRate)
 {
 	const std::vector<drmModeModeInfo> modes{

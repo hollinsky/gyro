@@ -3,6 +3,7 @@
 #include <drm/drm_mode.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 
@@ -42,6 +43,24 @@ Duration PeriodOf(const drmModeModeInfo& mode) noexcept
 	// systematically early and FrameClock accumulates it.
 	const std::int64_t hertzTimesThousand = static_cast<std::int64_t>(mode.clock);
 	const std::int64_t numerator = total * 1'000'000;
+
+	return Duration{ (numerator + hertzTimesThousand / 2) / hertzTimesThousand };
+}
+
+Duration BlankingOf(const drmModeModeInfo& mode) noexcept
+{
+	// Signed, because a mode whose `vtotal` does not exceed its `vdisplay` is a table gyro did not
+	// author and the subtraction would otherwise wrap into a blanking interval of several hours.
+	const std::int64_t lines = static_cast<std::int64_t>(mode.vtotal) - static_cast<std::int64_t>(mode.vdisplay);
+
+	if (mode.clock == 0 || mode.htotal == 0 || lines <= 0)
+	{
+		return Duration::zero();
+	}
+
+	// `PeriodOf`'s arithmetic over a partial frame, and rounded the same way for the same reason.
+	const std::int64_t numerator = lines * static_cast<std::int64_t>(mode.htotal) * 1'000'000;
+	const std::int64_t hertzTimesThousand = static_cast<std::int64_t>(mode.clock);
 
 	return Duration{ (numerator + hertzTimesThousand / 2) / hertzTimesThousand };
 }

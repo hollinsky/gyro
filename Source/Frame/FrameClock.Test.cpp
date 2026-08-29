@@ -24,11 +24,12 @@ constexpr Instant At(std::int64_t nanoseconds) noexcept
 	return Monotonic::FromNanoseconds(nanoseconds);
 }
 
-OutputConfiguration Fixed(Duration period)
+OutputConfiguration Fixed(Duration period, Duration latch = Duration::zero())
 {
 	OutputConfiguration configuration;
 	configuration.Resolution = { 2560, 1440 };
 	configuration.Period = period;
+	configuration.LatchLead = latch;
 
 	return configuration;
 }
@@ -160,12 +161,13 @@ GYRO_TEST(FrameClock, PredictionAnswersForThePastAsReadilyAsTheFuture)
 	GYRO_CHECK_EQ(clock.PresentationAt(97), At(970'000'000));
 }
 
-// The two verbs of the deadline: a lead that a driver needs, and a reserve the caller measured of
-// itself. Neither is the other's, and the clock holds only the first.
+// The two verbs of the deadline: a lead the panel and its driver need, which arrives with the mode,
+// and a reserve the caller measured of itself. Neither is the other's, and the clock holds only the
+// first.
 GYRO_TEST(FrameClock, TheDeadlineLeadsThePresentationAndTheWakeupLeadsTheDeadline)
 {
-	FrameClock clock{ FrameClockPolicy{ .LatchLead = 400us } };
-	clock.Configure(Fixed(10ms));
+	FrameClock clock;
+	clock.Configure(Fixed(10ms, 400us));
 	clock.Observe(Flip(At(1'000'000'000), 10ms, 7));
 
 	GYRO_CHECK_EQ(clock.NextPresentation(), At(1'010'000'000));
@@ -212,8 +214,8 @@ GYRO_TEST(FrameClock, SequenceAfterNamesTheFrameWorkCanStillMake)
 // rather than counting periods at the call site.
 GYRO_TEST(FrameClock, SequenceAfterCountsFromTheDeadlineRatherThanThePresentation)
 {
-	FrameClock clock{ FrameClockPolicy{ .LatchLead = 1ms } };
-	clock.Configure(Fixed(10ms));
+	FrameClock clock;
+	clock.Configure(Fixed(10ms, 1ms));
 	clock.Observe(Flip(At(1'000'000'000), 10ms, 7));
 
 	// Frame 8's deadline is 1'009'000'000, so work finishing a microsecond later has missed it.

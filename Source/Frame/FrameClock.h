@@ -100,10 +100,6 @@
 // constants compiled into the arithmetic. See Open.md, *scheduling policy constants*.
 struct FrameClockPolicy
 {
-	// How early a commit must be programmed for the vblank that latches it. Zero nested and headless,
-	// where nothing between gyro and the presentation has such a requirement.
-	Duration LatchLead{};
-
 	// How far clear of the longest period the panel admits the servo stays, so that low-framerate
 	// compensation never engages underneath a period gyro commanded.
 	Duration RangeClearance{};
@@ -180,7 +176,6 @@ public:
 
 	constexpr explicit FrameClock(FrameClockPolicy policy) noexcept : m_Policy{ policy }
 	{
-		m_Policy.LatchLead = std::max(m_Policy.LatchLead, Duration::zero());
 		m_Policy.RangeClearance = std::max(m_Policy.RangeClearance, Duration::zero());
 		m_Policy.ServoStepDivisor = std::max<std::int64_t>(m_Policy.ServoStepDivisor, 1);
 	}
@@ -197,6 +192,13 @@ public:
 	constexpr void Configure(const OutputConfiguration& configuration) noexcept
 	{
 		const Duration nominal = Positive(configuration.Period);
+
+		// **Read here rather than held as policy, because it is a fact about this output.** It is the
+		// panel's blanking interval plus the driver's commit path, so it changes when the mode does and
+		// two outputs on one machine do not have to share one — which a policy field could not express
+		// and which measurement says they do not: 303 us of blanking on one mode against 800 on another
+		// of the same panel.
+		m_LatchLead = std::max(configuration.LatchLead, Duration::zero());
 
 		m_Range = configuration.Refresh;
 		m_Observed = nominal;
@@ -327,7 +329,7 @@ public:
 			return Unscheduled;
 		}
 
-		return Advanced(presentation, -m_Policy.LatchLead);
+		return Advanced(presentation, -m_LatchLead);
 	}
 
 	// When work reserving `reserve` must start to make that frame — `deadline - renderBudget -
@@ -363,7 +365,7 @@ public:
 			return NoSequence;
 		}
 
-		const Duration ahead = Elapsed(Advanced(m_AnchoredAt, -m_Policy.LatchLead), notBefore);
+		const Duration ahead = Elapsed(Advanced(m_AnchoredAt, -m_LatchLead), notBefore);
 		const std::int64_t steps =
 			std::max<std::int64_t>(Detail::CeilDivide(ahead.count(), PredictedPeriod().count()), 1);
 		const std::uint64_t advance = static_cast<std::uint64_t>(steps);
@@ -494,6 +496,11 @@ private:
 
 	FrameClockPolicy m_Policy{};
 
+	// What this output's own configuration said, which is the mode's arithmetic rather than a number
+	// chosen for every panel at once. Survives an invalidation: a stale anchor is a fact that expired,
+	// and the blanking interval is one that did not.
+	Duration m_LatchLead{};
+
 	// The anchor, and the whole of what an invalidation drops.
 	Instant m_AnchoredAt{};
 	std::uint64_t m_Sequence = NoSequence;
@@ -557,8 +564,9 @@ static_assert(FrameClock{}.SequenceAfter(Monotonic::FromNanoseconds(1'000'000'00
 // Prediction is arithmetic on the anchor, and the deadline is the presentation less the latch lead.
 static_assert(
 	[] {
-		FrameClock clock{ FrameClockPolicy{ .LatchLead = std::chrono::microseconds{ 400 } } };
-		OutputConfiguration configuration{ .Period = PeriodFromHertz(100.0) };
+		FrameClock clock;
+		OutputConfiguration configuration{ .Period = PeriodFromHertz(100.0),
+		                                   .LatchLead = std::chrono::microseconds{ 400 } };
 		clock.Configure(configuration);
 		clock.Observe(
 			{ .PresentedAt = Monotonic::FromNanoseconds(1'000'000'000),

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <format>
@@ -19,6 +20,28 @@
 
 namespace Drm
 {
+namespace
+{
+// What the driver's own commit path costs on top of the mode's blanking interval: the time from the
+// composite's fence signalling to the register write that arms the flip, plus the guard the driver
+// keeps clear of the vblank it is writing before.
+//
+// **Measured rather than read**, which is the one figure in this file that is. Across five modes of
+// two panels on one i915 — blanking from 303 to 806 microseconds, composites from 0.7 to 2.1
+// milliseconds, twenty-five thousand commits — the latch threshold sits at the blanking interval plus
+// 288 to 387 microseconds, with no dependence on the connector or the mode. i915's own
+// `VBLANK_EVASION_TIME_US` is 100 of those and the rest is the commit worker being scheduled, which is
+// why this is a figure and not a constant of the hardware.
+//
+// **Half a millisecond rather than the 387 that was seen**, because the two directions are not the
+// same shape. The part that is scheduling latency grows under load, and below the threshold the
+// failure is total — every commit measured under it missed, in every mode — while above it the cost is
+// one microsecond of pointer lag per microsecond of overstatement. Being early is linear; being late
+// is a cliff. It wants to become a ratchet that starts here and steps up on a miss, which is
+// Docs/Open.md's entry rather than this line.
+constexpr Duration CommitPath = std::chrono::microseconds{ 500 };
+} // namespace
+
 namespace
 {
 // How often a held commit asks to be looked at again. Nested/Output.cpp's figure and its reasoning:
@@ -115,6 +138,7 @@ Result<void> DrmOutput::Open(const OutputConfiguration& wanted)
 	m_Configuration = wanted;
 	m_Configuration.Resolution = PixelSize<DeviceSpace>{ m_Mode.hdisplay, m_Mode.vdisplay };
 	m_Configuration.Period = PeriodOf(m_Mode);
+	m_Configuration.LatchLead = BlankingOf(m_Mode) + CommitPath;
 
 	// The refresh range is *learned* rather than requested — Seam/OutputConfiguration.h — and nothing
 	// here learns one yet: `VRR_ENABLED` is a property this pipeline may carry, but the range behind it

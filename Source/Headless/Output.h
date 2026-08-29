@@ -72,10 +72,10 @@ struct HeadlessOutputPolicy
 
 	// How early a commit must be programmed to make the vblank it is aiming at.
 	//
-	// Zero by default because Frame/FrameClock.h's `FrameClockPolicy::LatchLead` documents headless as
-	// having no such requirement — nothing sits between gyro and the presentation. It is settable
-	// because a non-zero lead is how a sweep injects the miss that correct scheduling cannot prevent:
-	// the commit was on time by the arithmetic and the panel took it a frame later anyway.
+	// Zero by default because nothing sits between gyro and the presentation on a simulated panel. It
+	// is settable because a non-zero lead is how a sweep asks what a real one costs, and `Resolve`
+	// reports it as the achieved configuration's `LatchLead` so the frame clock predicts against the
+	// same number this output enforces.
 	Duration LatchLead{};
 
 	// How long a transition takes to complete. Docs/Architecture.md puts a mode set and a DPMS
@@ -381,6 +381,12 @@ private:
 		// achieved configuration fills in and the wanted one leaves alone, and a panel with no range to
 		// report says so by leaving variable refresh off however it was asked.
 		achieved.Refresh = wanted.Refresh.Enabled && m_PanelRange.Enabled ? m_PanelRange : VariableRefresh{};
+
+		// The simulated hardware's own requirement, reported the same way and for the same reason. It
+		// was already the number `Latch` holds a commit against, and until it crossed here the sweep was
+		// injecting a miss the frame clock had no way to have predicted — which made the one instrument
+		// for *correct scheduling still misses* indistinguishable from a scheduler that was simply wrong.
+		achieved.LatchLead = m_Policy.LatchLead;
 
 		return achieved;
 	}

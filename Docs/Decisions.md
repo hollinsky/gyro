@@ -12106,3 +12106,79 @@ could ask for the good allocation. That puts a hardware question in front of an 
 answer it, and the wrong answer is silent: an author that forgets is a subtree that quietly stops
 promoting on the one machine where it mattered.
 
+### 159. The latch lead is the mode's blanking interval plus the driver's commit path, and it belongs to the output rather than to policy
+
+*(Decided 2026-08-29. `LatchLead` is the field on
+[`Seam/OutputConfiguration.h`](../Source/Seam/OutputConfiguration.h); `BlankingOf` is the arithmetic in
+[`Drm/Catalog.h`](../Source/Drm/Catalog.h); `CommitPath` is the measured figure in
+[`Drm/Output.cpp`](../Source/Drm/Output.cpp). It answers the latch-lead half of Open.md's *scheduling
+policy constants*, which deferred the whole set until there was hardware in front of it.)*
+
+**`FrameClockPolicy::LatchLead` existed, was documented as exactly this quantity, was honoured by
+`Headless`, and was never set by any real backend.** The composition root has never constructed a
+`FrameClockPolicy`, so on a panel the lead was zero and `DeadlineAt(S)` returned `PresentationAt(S)`
+itself — gyro's deadline for a frame was the moment its pixels were already on the glass. What hid it
+is that `Reserve` plans for the budget rather than for the work, so a composite finishing sooner than
+its budget left slack that happened to cover the requirement: at a policy arming lead of 0.25 ms the
+*achieved* commit lead was 1.1 to 2.3 ms, none of which the policy chose. That slack is the thing
+tightening the budget is meant to remove, which is why this had to land first — otherwise the frame
+drops arrive on every panel at once and look like the budget change.
+
+**The number has two terms with different provenance, and the reason one constant never transferred is
+that only one of them is a constant.** The presentation timestamp gyro anchors every prediction on is
+not the vblank: `drm_calc_vbltimestamp_from_scanoutpos` computes it as the *end* of vblank, the start
+of scanout of the first active line, and `drm_mode_set_crtcinfo` puts the boundary a commit must beat
+at `crtc_vblank_start = min(vsync_start, vdisplay)`. So the anchor sits one whole blanking interval
+after the last instant a commit could still have made that frame — `(vtotal - vdisplay) * htotal /
+clock`, exact on any panel, and 303 microseconds on one mode of a monitor against 806 on another mode
+of the same one. On top of that is the driver's own path from the composite's fence signalling to the
+register write, of which i915's `VBLANK_EVASION_TIME_US` is 100 microseconds and the rest is a commit
+worker being scheduled.
+
+**Measured, and the measurement is the part worth keeping.** A commit either latches on the vblank it
+was aimed at or lands a refresh late, and the trace already says which — the glass row carries the
+refresh that showed a frame beside the frame's own number, so a miss is a subtraction. Sweeping the
+arming lead spreads the commits across the threshold and the latch rate against distance-to-anchor is
+a dose response with a 50% crossing. Across two panels, five modes, blanking from 303 to 806
+microseconds, composites from 0.7 to 2.1 milliseconds and twenty-five thousand commits, the crossing
+tracks the blanking interval with a slope of one and leaves a residual of 288 to 387 microseconds that
+depends on neither the mode nor the connector.
+
+Two wrong readings on the way there, both instructive. Measuring from the atomic commit rather than
+from the fence put gyro's *own GPU work* inside the interval, because the commit goes out with an
+`IN_FENCE_FD` and the kernel waits on it — so the residual looked like a millisecond and tracked the
+composite's cost. And the back porch, `(vtotal - vsync_end) * htotal / clock`, agreed with a 60 Hz
+panel to within five microseconds and was out by a factor of two on a 40 Hz mode of the same panel:
+one mode cannot separate two quantities that are proportional in it, and the cheap way to break that
+is a second mode with a different pixel clock, which most panels advertise. That is the technique the
+rest of the `// SPEC:` set should be retired with, and it is what turned "a bench with panels on it"
+into an afternoon.
+
+**On the output rather than on policy, because it is a fact about a mode.** A policy field cannot say
+that one output wants 0.65 ms and the one beside it wants 1.3, and it cannot follow a mode set. So
+`FrameClockPolicy::LatchLead` is gone and the achieved `OutputConfiguration` carries the number, which
+gets invalidation and the generation for free — `Configure` already drops the anchor on every
+reconfiguration. It is *learned* rather than requested, so `SatisfiedBy` does not compare it, for the
+reason the variable-refresh range beside it is not compared. `Headless` reports the lead it was already
+simulating, which it had been enforcing without ever telling the clock — the sweep was injecting a miss
+that correct scheduling had no way to predict, making the one instrument for *correct scheduling still
+misses* indistinguishable from a scheduler that was simply wrong.
+
+**Half a millisecond where 387 microseconds was the worst seen, and a ratchet later.** The two
+directions are not the same shape: overstating costs one microsecond of pointer lag per microsecond,
+and understating costs every frame — under the threshold the latch rate is 0.0% in every mode, not
+merely worse. The remaining term is a scheduling latency and therefore grows under load, so the figure
+wants to be a one-way ratchet that starts high and steps up on a miss, never a servo: the threshold is
+only observable by failing, and locating it here cost hundreds of dropped frames.
+
+Not tuning `TimingPolicy::Lead` instead, which is what the symptom asked for — at 500 microseconds the
+internal panel dropped 39% of its frames and 1.0 ms made that zero. That figure is a wakeup margin, and
+putting a blanking interval inside it encodes one panel's timings into a number about scheduling
+latency: wasted lag on a short-blank part, still dropping frames on a long-blank one. Nor moving the
+anchor, which would make the arithmetic right and the meaning wrong — `PresentationAt` is what a
+`wp_presentation` feedback reports and what an animation is evaluated at, and the start of active video
+is the honest answer to *when did this reach a person*.
+
+**What a person gets** is the internal panel of a laptop running at 60 rather than at 36. At the
+default arming lead it dropped 54% of its commits a refresh late; it now drops none, and neither does a
+3440x1440 ultrawide on the same machine.

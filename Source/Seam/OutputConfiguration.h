@@ -92,6 +92,22 @@ struct OutputConfiguration
 	PixelSize<DeviceSpace> Resolution{};
 	Duration Period{};
 
+	// How far ahead of the instant `PresentationInfo::PresentedAt` names a commit must have landed to
+	// be shown by it. Zero where nothing between gyro and the picture has such a requirement.
+	//
+	// **The presentation timestamp is the start of active video, and a commit latches before the
+	// vblank in front of it** — `drm_calc_vbltimestamp_from_scanoutpos` says its result is the "end of
+	// vblank", so the anchor every prediction is built on sits one whole blanking interval *after* the
+	// last instant a commit could still have made that frame. A deadline that did not carry this was
+	// the moment the pixels were already on the glass, and the only thing hiding it was a reserve
+	// planning for more work than the composite did — which is a slack that closes the day the budget
+	// gets tighter, on every panel at once.
+	//
+	// **Learned rather than asked for, which is why `SatisfiedBy` does not compare it.** It is the
+	// panel's timings and the driver's commit path, and a caller has no more business requesting one
+	// than it has requesting the variable-refresh range beside it.
+	Duration LatchLead{};
+
 	// Enabling variable refresh is set when a mode is set rather than per frame, which is why it is
 	// here and not on `Present`. Once it is active the effective interval is carried entirely by when
 	// the flip is submitted, and that is the clock's business.
@@ -172,6 +188,14 @@ struct std::formatter<OutputConfiguration>
 		if (configuration.Refresh.Enabled)
 		{
 			out = std::format_to(out, " vrr[{}, {}]", configuration.Refresh.Shortest, configuration.Refresh.Longest);
+		}
+
+		// Only where there is one, so the backends that have no such requirement keep the line they had.
+		// It is worth a person seeing because it is subtracted from every deadline this output predicts
+		// and a run that got it wrong looks like a run that is merely slow.
+		if (configuration.LatchLead > Duration::zero())
+		{
+			out = std::format_to(out, " latch {}", configuration.LatchLead);
 		}
 
 		return std::format_to(
