@@ -464,6 +464,11 @@ private:
 	// arrive.
 	void Discard() noexcept
 	{
+		// **Instrumented because it is a silent reset of the very number a refused commit is read
+		// against.** Tagged with what it is dropping: a non-zero here is a commit the panel may still be
+		// holding, forgotten by the only party that was counting it.
+		TraceMark("queue discarded", m_Trace, TraceTag(m_InFlight));
+
 		// **Closed here rather than left to the writer, because these are the one unbalanced end that is
 		// not the window's fault.** A truncated span at either edge of the ring is the last thirty
 		// seconds honestly reported; a flight lane whose frame was dropped by a mode set is a claim that

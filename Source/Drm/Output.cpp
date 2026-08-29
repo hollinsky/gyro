@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "Core/Clock.h"
+#include "Core/Trace.h"
 
 namespace Drm
 {
@@ -363,6 +364,10 @@ void DrmOutput::DropTargets() noexcept
 		m_Descriptions[index] = RenderTarget{};
 	}
 
+	// **Tagged with what was in flight when it ran**, because this clears `m_Flipping` with no event
+	// behind it: a one here is a commit the kernel is still holding and this output has forgotten.
+	TraceMark("targets dropped", TraceThread, TraceTag(m_Flipping ? 1 : 0));
+
 	m_TargetCount = 0;
 	m_Next = 0;
 	m_ScanoutMask = 0;
@@ -458,6 +463,12 @@ Result<void> DrmOutput::Present(std::span<const PresentLayer> layers)
 		// **Held whole rather than per layer.** A partition is one picture, and committing the layers
 		// that happen to be ready would put a promoted window on the screen a frame before the composite
 		// that draws the rest of it.
+		// **Instrumentation, and the one record that says the lane is lying.** The loop is about to be
+		// told this present succeeded and will open a flight lane for it, but no ioctl has been issued —
+		// so the distance from here to `flip issued` is a frame the trace draws as in the panel's hands
+		// and which is in fact still in gyro's.
+		TraceMark("commit held", TraceThread, TraceTag(layers.size()));
+
 		m_Pending = Pending{ .Count = static_cast<std::uint32_t>(layers.size()), .Waiting = true };
 		std::ranges::copy(layers, m_Pending.Layers.begin());
 		++m_HeldCommits;
@@ -665,6 +676,10 @@ Result<void> DrmOutput::Flip(std::span<const PresentLayer> layers, std::span<con
 		return committed;
 	}
 
+	// **When the kernel actually took it**, which is the number every ordering question below turns on:
+	// `present` on the loop's row is when the frame was handed over, and this is when it was committed.
+	TraceMark("flip issued", TraceThread, TraceTag(Commits));
+
 	m_InFlightMask = 0;
 
 	for (const PresentLayer& layer : layers)
@@ -792,13 +807,31 @@ void DrmOutput::Settle()
 		// output no longer owns, and a promoted layer's framebuffer can be removed by the same wait. The
 		// whole partition is abandoned in that case: the images it named went with the ring, so there is
 		// nothing to hand back, and the loop's next iteration draws the frame again.
-		if (const Result<void> expressible = Expressible(held); expressible)
+		const Result<void> expressible = Expressible(held);
+
+		if (!expressible)
+		{
+			// The other silent exit from a held commit: the ring went out from under it. The loop was
+			// told this frame was presented and it never will be.
+			TraceMark(
+				"held commit abandoned", TraceThread, TraceTag(static_cast<std::uint64_t>(expressible.error().Code()))
+			);
+		}
+
+		if (expressible)
 		{
 			// A commit that fails here has nowhere to report to — the frame loop has already been told the
 			// present was accepted — so the images go back to the ring and the output stays flip-idle, which
 			// the loop's next iteration serves as an ordinary frame.
 			if (const Result<void> flipped = Flip(held, {}); !flipped)
 			{
+				// The comment below says this has nowhere to report to. It has the ring.
+				TraceMark(
+					flipped.error().Sentence(),
+					TraceThread,
+					TraceTag(static_cast<std::uint64_t>(flipped.error().Code()))
+				);
+
 				for (std::uint32_t index = 0; index < count; ++index)
 				{
 					if (!layers[index].Target.IsTexture())
@@ -840,11 +873,18 @@ void DrmOutput::OnPresented(Instant at, std::uint32_t sequence, bool hardwareClo
 {
 	if (!m_Flipping)
 	{
+		// **Instrumented because it is one of the readings this is meant to separate.** A completion
+		// arriving for a commit this output does not believe it made is either a duplicate the kernel
+		// sent or a flip whose bookkeeping was cleared under it, and both are silent today.
+		TraceMark("flip event unclaimed", TraceThread, TraceTag(sequence));
+
 		// A completion for a commit this output did not make. It happens across a teardown and is worth
 		// dropping rather than crediting: an observation with no frame behind it is a prediction built on
 		// a frame that never happened.
 		return;
 	}
+
+	TraceMark("flip event", TraceThread, TraceTag(sequence));
 
 	const std::uint32_t flipped = m_InFlightMask;
 	m_InFlightMask = 0;
