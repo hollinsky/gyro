@@ -216,6 +216,49 @@ This is the entry most likely to be the real-world cost, ahead of the modeset st
 it compounds with it at the one moment both occur. The AUX/DDC-over-DisplayPort paths were not
 measured and the 50 ms figure is i915 GMBUS-specific.
 
+### The commit that must beat the vblank runs at a priority gyro cannot raise
+
+A non-blocking atomic commit returns from the ioctl having queued the work rather than done it.
+`intel_atomic_commit` hands the state to a worker — `INIT_WORK(&state->base.commit_work,
+intel_atomic_commit_work)` at
+[`intel_display.c:7889`](https://git.kernel.org/linus/4477a78374a5) and `queue_work(display->wq.flip,
+&state->base.commit_work)` at line 7894 — and that worker is what waits on the in-fence, evades the
+vblank, and writes the registers that arm the flip. `wq.flip` is `alloc_workqueue("i915_flip",
+WQ_HIGHPRI | ...)` at [`intel_display_driver.c:254`](https://git.kernel.org/linus/4477a78374a5).
+
+`WQ_HIGHPRI` is nice -20. It is not a real-time priority, and there is no interface that would make
+it one. So **gyro's real-time guarantee ends at the ioctl boundary**: the frame thread is `SCHED_FIFO`
+with `RLIMIT_RTTIME` and `mlockall`, and the last few hundred microseconds of work standing between a
+composited frame and the glass are done by a `SCHED_OTHER` kworker competing with everything else on
+the machine. gyro has no way to raise it, no way to pin it, and no way to ask how late it was.
+
+The inversion is worse than it first reads. A `SCHED_FIFO` thread *always* preempts a nice -20
+kworker, so on a machine short of a runnable CPU gyro can delay the very worker that arms its own
+flip — a compositor's real-time priority working against the compositor.
+
+**Measured.** On an i915 Tiger Lake laptop the commit path costs 288 to 387 microseconds on an idle
+machine, and gyro budgets 500 for it
+([decision 159](Decisions.md#159-the-latch-lead-is-the-modes-blanking-interval-plus-the-drivers-commit-path-and-it-belongs-to-the-output-rather-than-to-policy)).
+Under a parallel kernel build on the same machine, 2.67% of commits missed the vblank they were aimed
+at, in bursts, with the composite's fence signalled 1.6 to 2.6 milliseconds ahead of the deadline —
+four to seven times the idle cost of the path, and time gyro had already spent waiting for. On a
+compositor that is the system's only one, "the machine is compiling" is Tuesday rather than a stress
+test, and what a person sees is a pointer that stutters whenever they build something.
+
+**What would let gyro delete code.** Any of three, weakest first. A way to read how long the path
+actually took, so the figure below could be measured rather than inferred from failures. A way to ask
+that the commit worker inherit the committing thread's scheduling class, which is the ordinary answer
+to priority inversion and which the kernel already does for mutexes. Or a commit that does the work on
+the caller's thread when it asks — the caller is already `SCHED_FIFO`, already has its own deadline,
+and already pays for the wait; handing the work to a lower-priority thread on its behalf is the one
+part of this it did not choose.
+
+**What gyro does meanwhile.** Budgets a fixed 500 microseconds for the path and, because that is a
+figure about someone else's load, ratchets it upward on an observed miss — Open.md's *the latch lead
+wants to be a ratchet*. That is a compositor inferring a scheduling latency from dropped frames,
+which is the shape this entry exists to record: the workaround is the only instrument available, and
+it costs a person pointer latency for as long as the machine stays busy.
+
 ## What the modesetting entries add up to for gyro's own shape
 
 The design forced by today's kernel and the design wanted against an ideal one **agree**, which is

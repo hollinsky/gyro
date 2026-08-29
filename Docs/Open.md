@@ -564,12 +564,34 @@ nothing only proves the grep.
 - **The latch lead wants to be a ratchet.** Decision 159 leaves `Drm/Output.cpp`'s `CommitPath` a
   compiled-in 500 microseconds against a measurement of 288 to 387, and the part it is covering is a
   commit worker being scheduled — which grows under load, on a machine whose load gyro does not
-  control. The shape is settled and the mechanism is not built: start high, step up on a miss, and
-  come down only on an invalidation. Never a servo, because the threshold is observable only by
-  failing and the failure is every frame rather than a worse one. What it needs from the trace is
-  already there — a commit's distance to the anchor it was aimed at, and whether the refresh that
-  showed it was the one it named — and what it needs from the loop is a place to keep a per-output
-  figure that a mode set drops, which is where the number already lives.
+  control. The shape is settled and the mechanism is not built: start high, step up on a miss. Never
+  a servo, because the threshold is observable only by failing and the failure is every frame rather
+  than a worse one. What it needs from the trace is already there — a commit's distance to the anchor
+  it was aimed at, and whether the refresh that showed it was the one it named — and what it needs
+  from the loop is a place to keep a per-output figure that a mode set drops, which is where the
+  number already lives.
+
+  **Coming down only on an invalidation is wrong, and measuring it is what showed why.** Decision 159
+  proposed that, on the reading that the figure describes a panel. It does not: on a quiet machine
+  the default misses 0 of 1449 commits at 60 Hz and 1 of 1426 at 40, while under a parallel build the
+  same panel missed 2.67% in bursts — so what the ratchet tracks is *the machine's load*, by way of a
+  kernel worker gyro cannot raise
+  ([KernelWishlist.md](KernelWishlist.md#the-commit-that-must-beat-the-vblank-runs-at-a-priority-gyro-cannot-raise)).
+  A disturbance lasting as long as a build must not cost a person pointer latency until the next mode
+  set, which on a compositor that is a boot service may be days. So it wants a decay on the timescale
+  of the disturbance rather than of the session, and choosing that timescale is the part that is
+  actually open: too fast and it saws against a steady load, too slow and it is the invalidation rule
+  again wearing a clock.
+- **A miss that margin does not explain, at roughly one frame in fifteen hundred.** Distinct from the
+  ratchet above and not answered by it: at an arming lead of 2.5 ms — a full millisecond past the
+  point where every other commit in the capture latched — one frame of 1448 still landed a refresh
+  late, with its composite's fence signalled 3.6 ms before the deadline. An earlier capture saw the
+  same at 1 in 1923. Being unmoved by margin is what makes it a different defect, and what makes more
+  lead the wrong instrument for it. The candidates worth separating are a vblank the kernel skipped, a
+  completion delivered twice, and gyro's own sequence bookkeeping across a flip that reported nothing;
+  the first two are visible in a capture recording the kernel's sequence against gyro's own on every
+  event, which the ring now does. So this wants an accumulation of long quiet captures rather than an
+  argument.
 - **The snapshot atlas multiple.** Decision 46 denominates capacity in output render-target
   equivalents and declines to guess the number. The derivation to check it against is the largest
   *legitimate* simultaneous retirement — closing an application with a menu open is a window plus
