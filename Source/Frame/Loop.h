@@ -1099,8 +1099,7 @@ private:
 		// case, and the fix is to acquire after evaluating rather than before; it is in Open.md.
 		if (!partition.NeedsComposite() && partition.Count != 0)
 		{
-			--partition.Count;
-			++partition.Composited;
+			partition.Demote();
 		}
 
 		if (partition != output.m_Partition)
@@ -1131,7 +1130,8 @@ private:
 
 		for (std::uint32_t promoted = 0; promoted < partition.Count; ++promoted)
 		{
-			layers[count++] = Promoted(list.Items[partition.Items[promoted]], output.m_Configuration.Color);
+			layers[count++] =
+				Promoted(list.Items[partition.ItemIndexForPromoted(promoted)], output.m_Configuration.Color);
 		}
 
 		// **Asked only where something would be promoted**, so a machine that promotes nothing pays no

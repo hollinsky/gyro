@@ -50,7 +50,7 @@ GYRO_TEST(FrameAssign, PromotesTheStillPlainTopOfTheList)
 	const Partition partition = Assign(items, 4);
 
 	GYRO_REQUIRE(partition.Count == 1);
-	GYRO_CHECK(partition.Items[0] == 1);
+	GYRO_CHECK(partition.ItemIndexForPromoted(0) == 1);
 	GYRO_CHECK(partition.Composited == 1);
 	GYRO_CHECK(partition.NeedsComposite());
 	GYRO_CHECK(partition.Layers() == 2);
@@ -80,8 +80,8 @@ GYRO_TEST(FrameAssign, LeavesNoCompositeWhereEverythingPromoted)
 	const Partition partition = Assign(items, 2);
 
 	GYRO_REQUIRE(partition.Count == 2);
-	GYRO_CHECK(partition.Items[0] == 0);
-	GYRO_CHECK(partition.Items[1] == 1);
+	GYRO_CHECK(partition.ItemIndexForPromoted(0) == 0);
+	GYRO_CHECK(partition.ItemIndexForPromoted(1) == 1);
 	GYRO_CHECK(partition.Composited == 0);
 	GYRO_CHECK(!partition.NeedsComposite());
 	GYRO_CHECK(partition.Layers() == 2);
@@ -96,7 +96,7 @@ GYRO_TEST(FrameAssign, KeepsAPlaneForTheComposite)
 	const Partition partition = Assign(items, 2);
 
 	GYRO_REQUIRE(partition.Count == 1);
-	GYRO_CHECK(partition.Items[0] == 2);
+	GYRO_CHECK(partition.ItemIndexForPromoted(0) == 2);
 	GYRO_CHECK(partition.Composited == 2);
 	GYRO_CHECK(partition.Layers() == 2);
 }

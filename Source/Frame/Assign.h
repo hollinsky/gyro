@@ -1,6 +1,5 @@
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <span>
 #include <variant>
@@ -29,9 +28,10 @@
 // Both are real and neither is needed for the arrangement that pays: a fullscreen window under nothing,
 // and a pointer over everything.
 //
-// **The frame thread runs this and it allocates nothing.** Fixed arrays sized from `MaxLayers`, one
-// pass over the list from the top, and no ioctl — asking the hardware is `IPresenter::TestLayers` and
-// is the caller's business, because it is the expensive half and the one worth caching.
+// **The frame thread runs this and it allocates nothing.** A partition is three scalars — the suffix
+// rule means the promoted set needs no array to name it — one pass over the list from the top, and no
+// ioctl, because asking the hardware is `IPresenter::TestLayers` and is the caller's business: it is
+// the expensive half and the one worth caching.
 
 // Why an item stayed in the composite, which is the half of the partition a plane count cannot report.
 //
@@ -84,9 +84,13 @@ enum class PromotionRefusal : std::uint8_t
 // What one frame's draw list was split into.
 struct Partition
 {
-	// The draw items promoted onto planes, bottom-first, as indices into the list handed in. This is a
-	// suffix of that list in the same order, so `Items[0]` is the lowest promoted item.
-	std::array<std::uint32_t, MaxLayers> Items{};
+	// How many draw items were promoted onto planes.
+	//
+	// **Which ones is not stored, because the suffix rule leaves nothing to store.** The promoted set is
+	// the top `Count` of the list in the same order, so the index of every one of them is `Composited`
+	// plus its position — see `ItemIndexForPromoted`. An array of those indices was here and held, in
+	// every reachable state, exactly that sum; what it bought was a second copy of the boundary to get
+	// out of step with the first, which is what `Demote` did.
 	std::uint32_t Count = 0;
 
 	// How many items are left for the GPU: the prefix `[0, Composited)` of the list.
@@ -100,6 +104,35 @@ struct Partition
 	// promoted layer lands on the primary plane in that case, which is what keeps the CRTC showing
 	// something.
 	[[nodiscard]] constexpr bool NeedsComposite() const noexcept { return Composited != 0; }
+
+	// Which draw item the `slot`'th promoted layer is, bottom-first, as an index into the list that was
+	// handed to `Assign`. `slot` is below `Count`.
+	//
+	// **A named verb for a `+` because the addition is only obvious once you already know the suffix
+	// rule.** The one caller reads `list.Items[partition.ItemIndexForPromoted(slot)]`, and the thing that
+	// spelling refuses is the plausible `list.Items[slot]` — which on a screen with one window and a
+	// pointer over it hands the plane the window and never commits the pointer at all.
+	[[nodiscard]] constexpr std::uint32_t ItemIndexForPromoted(std::uint32_t slot) const noexcept
+	{
+		return Composited + slot;
+	}
+
+	// Hand the bottom promoted layer back to the composite.
+	//
+	// **A verb because the two counters are one boundary and moving one of them is always a bug.** An
+	// item does not leave the promoted set so much as cross from one side of `Composited` to the other,
+	// so both numbers move or neither does: `--Count` alone drops a layer off the top of the screen, and
+	// `++Composited` alone draws the bottom one twice, once by the GPU and once on a plane over it.
+	constexpr void Demote() noexcept
+	{
+		if (Count == 0)
+		{
+			return;
+		}
+
+		--Count;
+		++Composited;
+	}
 
 	// The layers a presenter is handed: the composite where there is one, then the promoted items.
 	[[nodiscard]] constexpr std::uint32_t Layers() const noexcept { return Count + (NeedsComposite() ? 1U : 0U); }
@@ -116,7 +149,7 @@ struct Partition
 
 	friend constexpr bool operator==(const Partition& left, const Partition& right) noexcept
 	{
-		return left.Items == right.Items && left.Count == right.Count && left.Composited == right.Composited;
+		return left.Count == right.Count && left.Composited == right.Composited;
 	}
 };
 
@@ -269,11 +302,6 @@ struct Partition
 
 	partition.Count = taken;
 	partition.Composited = static_cast<std::uint32_t>(items.size()) - taken;
-
-	for (std::uint32_t slot = 0; slot < taken; ++slot)
-	{
-		partition.Items[slot] = partition.Composited + slot;
-	}
 
 	return partition;
 }

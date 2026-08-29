@@ -1788,3 +1788,32 @@ GYRO_TEST(FrameLoop, AllPromotableStillLeavesTheGpuOneItem)
 	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 1 });
 	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 1 });
 }
+
+// **The demotion above with something under it, which is where it used to lose a layer.** Two
+// promotable items — a window with the pointer over it — promote whole, so the composite is handed the
+// bottom one back. The promoted set is a suffix addressed from where the composite ends, so moving that
+// boundary without rebuilding the indices promoted the *window* a second time and dropped the pointer
+// on the floor: a person opens a calculator and their cursor disappears. It is asserted as which item
+// reached the plane rather than as a count, because both spellings of the bug keep the count at one.
+GYRO_TEST(FrameLoop, TheDemotedLayerIsTheBottomOneAndTheRestKeepTheirIndices)
+{
+	Harness harness;
+	const std::array<DrawItem, 2> items{ Promotable({ {}, { 2560, 1440 } }), Promotable({ { 100, 100 }, { 24, 24 } }) };
+
+	harness.Presenter.Planes = 2;
+	harness.Evaluator.Items = items;
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	// The window is the composite and the pointer is the plane, which is the whole arrangement: one item
+	// recorded, one layer promoted, and the promoted one is the item on top.
+	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 1 });
+	GYRO_REQUIRE_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(
+		harness.Presenter.PresentedLayers[1].Destination, (PixelRect<DeviceSpace>{ { 100, 100 }, { 24, 24 } })
+	);
+}
