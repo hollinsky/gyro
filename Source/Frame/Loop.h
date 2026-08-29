@@ -1138,13 +1138,28 @@ private:
 		// ioctl. A refusal is ordinary rather than a fault: a plane's format, its bandwidth, or a scaler
 		// it shares with another pipe are all things only the driver knows, and the answer is that this
 		// frame composites — which is decision 35's one frame and is why the fallback is silent.
-		if (partition.Count != 0 && !output.m_Presenter->TestLayers({ layers.data(), count }))
+		const Result<void> testable =
+			partition.Count != 0 ? output.m_Presenter->TestLayers({ layers.data(), count }) : Result<void>{};
+
+		if (!testable)
 		{
 			// **Silent until now, and that was the gap worth closing.** A driver refusing every proposal —
 			// a format the plane will not take, bandwidth it does not have, a scaler shared with another
 			// pipe — reads exactly like a compositor that never tried, because both leave the count at
 			// zero. The fallback stays silent to the *user*; it must not be silent to the instrument.
-			TraceMark("planes refused", output.m_Trace);
+			//
+			// **And the words rather than the fact, for the reason the two sites below it take them.** A
+			// bare *planes refused* cannot tell the two halves of this call apart, and they are opposite
+			// stories: a backend refuses a partition it cannot express *before* it asks the hardware —
+			// an id that never imported for scanout, more layers than the output has planes — so a
+			// capture full of that mark reads as *the driver will not take these planes* when what
+			// happened is that gyro never issued the ioctl. The first is a machine to give up promoting
+			// on and the second is a bug upstream of here, and only the sentence separates them.
+			TraceMark(
+				testable.error().Sentence(),
+				output.m_Trace,
+				TraceTag(static_cast<std::uint64_t>(testable.error().Code()))
+			);
 
 			partition = Partition{ .Composited = static_cast<std::uint32_t>(list.Items.size()) };
 			count = 1;
@@ -1200,10 +1215,25 @@ private:
 			// literal with static storage, so the ring takes the pointer and copies nothing — legal
 			// inside the frame section for the same reason every other mark is.
 			//
-			// The errno is deliberately not printed beside it. A label is the number a slice is *about* —
-			// the frame, the scene — and a reader who has the sentence has strictly more than `16` was
-			// going to tell them.
-			TraceMark(submission.error().Sentence(), output.m_Trace);
+			// **And the code beside it, because a sentence does not always choose one.** The first version
+			// left the errno out on the argument that a reader holding the words has more than a number
+			// would tell them, which is true of every refusal gyro authors — those sentences name their
+			// own branch and the code is redundant. It is false of a refusal that is a *syscall's*: the
+			// sentence names the call and the code names the failure, so `committing a page flip` reads
+			// identically whether the kernel meant *the previous flip is still retiring, come back* or
+			// *this atomic request is malformed*. Those are opposite stories, and a capture with
+			// twenty-seven of them in it could not tell them apart.
+			//
+			// A `TraceTag` rather than a `TraceAttribute`: an attribute binds to the slice open on its row
+			// and Trace/Perfetto.cpp's walk ends that eligibility at anything which is not a `Begin`, so
+			// one emitted beside a mark binds to nothing and is dropped. The tag is printed into the name
+			// and joined to nothing, which is what a code wants — it is read at a glance rather than
+			// clicked, and it is not an identity anything else in the picture counts by.
+			TraceMark(
+				submission.error().Sentence(),
+				output.m_Trace,
+				TraceTag(static_cast<std::uint64_t>(submission.error().Code()))
+			);
 
 			// Seam/Renderer.h's *an item the renderer cannot express* arriving: the draw list held
 			// something this backend refuses to draw wrong, so it drew none of it. The reason is the
@@ -1229,12 +1259,18 @@ private:
 
 			if (const Result<void> presented = output.m_Presenter->Present({ layers.data(), count }); !presented)
 			{
-				// The presenter's own words, for the reason the record refusal above gives — and this is the
-				// site that wanted them. A composite that reaches here has already been paid for in full and
-				// is discarded, so a run with a standing refusal burns a whole frame's GPU work per refresh
-				// and draws the same refresh twice on the ruler. Which backend condition is doing that is a
-				// sentence apart in every case and was a word the trace threw away.
-				TraceMark(presented.error().Sentence(), output.m_Trace);
+				// The presenter's own words and its code, for the reason the record refusal above gives — and
+				// this is the site that wanted both. A composite that reaches here has already been paid for
+				// in full and is discarded, so a run with a standing refusal burns a whole frame's GPU work
+				// per refresh and draws the same refresh two and three times on the ruler. It is also where
+				// the sentence is least likely to be gyro's own: Drm/Output.h hands back what the atomic
+				// ioctl said, and *which* errno that was is the difference between a race to back off from
+				// and a request to fix.
+				TraceMark(
+					presented.error().Sentence(),
+					output.m_Trace,
+					TraceTag(static_cast<std::uint64_t>(presented.error().Code()))
+				);
 				output.Refuse(presented.error());
 
 				return;

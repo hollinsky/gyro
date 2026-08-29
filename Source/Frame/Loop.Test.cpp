@@ -1285,6 +1285,68 @@ GYRO_TEST(FrameLoop, TheGlassRowOpensWhereThePanelScannedOutAndNamesTheFrame)
 	GYRO_CHECK_EQ(arguments[2].second, std::uint64_t{ 10'000'000 });
 }
 
+// A refusal names itself and carries its code. The mark used to be the word `refused` for every way a
+// frame can be thrown away, which on a real capture meant twenty-seven discarded composites that a
+// reader could not tell apart — and the code matters beside the words wherever the sentence belongs to
+// a syscall rather than to gyro, because there the sentence names the call and only the code names the
+// failure.
+GYRO_TEST(FrameLoop, ARefusalIsMarkedWithItsSentenceAndItsCode)
+{
+	Harness harness;
+
+	std::array<TraceRecord, 256> records{};
+	TraceBuffer trace;
+
+	trace.Arm(records, harness.Clock);
+	harness.Anchor();
+
+	EnrollTracing(&trace);
+
+	// The renderer refuses first, then the presenter, so both sites are exercised against one ring and
+	// the two marks have to be distinguishable from each other rather than merely present.
+	harness.Renderer.Refuse = true;
+	harness.Renderer.Code = ENOSPC;
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	harness.Renderer.Refuse = false;
+	harness.Presenter.Refuse = true;
+	harness.Clock.Set(At(1012));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	EnrollTracing(nullptr);
+
+	std::array<TraceEvent, 128> events{};
+	const std::size_t count = trace.Copy(events);
+
+	std::vector<std::pair<std::string_view, std::uint64_t>> marks;
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		const TraceEvent& event = events[index];
+
+		if (event.Scope != TraceOutput(0) || event.Kind != TraceKind::Mark)
+		{
+			continue;
+		}
+
+		// A tag rather than a flow. An errno is the number the record is *about* and nothing else in the
+		// picture counts by one, so drawing an arrow through every refusal that shared a code would join
+		// unrelated frames across the whole capture.
+		GYRO_CHECK(!event.Arrow);
+
+		marks.emplace_back(std::string_view{ event.Name }, event.Payload);
+	}
+
+	GYRO_REQUIRE_EQ(marks.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(marks[0].first, std::string_view{ "fake renderer refuses" });
+	GYRO_CHECK_EQ(marks[0].second, static_cast<std::uint64_t>(ENOSPC));
+	GYRO_CHECK_EQ(marks[1].first, std::string_view{ "fake presenter refuses" });
+	GYRO_CHECK_EQ(marks[1].second, static_cast<std::uint64_t>(EBUSY));
+}
+
 // A second flip from the same publication is a different picture and has to be drawn as one. The row
 // used to merge on the scene, so an animation running from one snapshot came out as a single wide
 // block claiming the screen had been frozen — which is exactly the shape a stutter has, reported on a
