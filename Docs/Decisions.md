@@ -10792,9 +10792,39 @@ above: `intel_rps_park` writes the hardware minimum rather than this softlimit, 
 to RPn between frames whatever the floor says, and a five-millisecond composite run at full clock
 finishes sooner and parks sooner. Race to idle is the cheaper shape here, not the more expensive one.
 
+**The operating point is a pair, because the actual clock reads zero while the part is gated.**
+*(Revised 2026-08-28.)* This entry took `gt_act_freq_mhz` reading 350 as the number a cost span is
+filed against, and on the frame path that reading is usually not 350 — it is 0. A frame is a few
+hundred microseconds of compositing and then most of a refresh parked, which is the ratchet the
+paragraphs above are about, so the clock sampled anywhere gyro can sample it is very often the clock
+of a sleeping GPU: measured on the same Tiger Lake, idle, `gt_act_freq_mhz` reads 0 against a
+`gt_cur_freq_mhz` of 1150. A window told only the first reads a parked sample as the cheapest frame
+it ever saw, which is the same fault this entry opened with in a new place. So `GpuCost` carries both
+— the actual point and the commanded one — and the gap between them is what says *asleep* rather than
+*slow*. Two numbers that agree low is a part running slowly; a zero beside a high one is a part that
+had not woken up yet.
+
+**Rejected: bracketing the span with a read at each end.** `CollectCosts` runs at the top of a later
+frame's iteration, after the GPU has parked through the gap, so the closing read is another sample of
+the idle clock rather than the one the work finished at — two readings of the outside of a span,
+presented as its ends. There is no instant on gyro's frame path that lands *inside* a composite,
+because the whole design is not to wait for the batch, and that is a property to accept rather than
+one to fake with a second timestamp.
+
+**And the rate limit went with it.** *(Revised 2026-08-28.)* One sysfs read per ten milliseconds
+answered a staleness budget against a frame period of sixteen, so it skipped a read on almost no frame
+at 60 Hz; against a pair it is worse than useless, since a cached half beside a fresh one is two
+instants presented as one operating point. What it was protecting is also smaller than it looked: the
+pair costs about 1.3 microseconds of the frame thread, measured at 1.0 for the actual attribute and
+0.3 for the commanded one, mean over two thousand reads, worst 8.5. The one real hazard is that i915
+takes a runtime-PM wakeref for the actual attribute, so a read against a runtime-suspended part
+resumes it — but `autosuspend_delay_ms` is ten seconds and a compositor drawing frames never lets it
+fire.
+
 **A clock reader is needed on both arms, so the platform object exists either way.** Attaching the
-operating point to `GpuCost` stands whatever is decided about governing — `gt_act_freq_mhz` on i915,
-`device/tile0/gt0/freq0/act_freq` on xe, different again on amdgpu. So what this decision settles is
+operating point to `GpuCost` stands whatever is decided about governing — `gt_act_freq_mhz` and
+`gt_cur_freq_mhz` on i915, `act_freq` and `cur_freq` under `device/tile0/gt0/freq0` on xe, devfreq's
+`cur_freq` and `target_freq` — opposite names for the same pair — on msm, different again on amdgpu. So what this decision settles is
 not *whether to build a governor* but whether the per-driver object gyro needs anyway also carries a
 write verb. That is a much smaller commitment, and it is what makes the probe cheap: the reader it
 needs is already there.

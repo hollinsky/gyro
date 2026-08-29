@@ -1,23 +1,20 @@
 #include "Render/GpuClock.h"
 
-#include <chrono>
-#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <string_view>
 
-#include "Core/Time.h"
 #include "Testing/Test.h"
 
 // The clock reader's logic, without a `/sys` to read it from.
 //
 // **What is testable here is the two halves that run without hardware**: the per-driver mapping from a
-// driver name and a DRM minor to a sysfs path, and the read path itself — parse, rate-limit, divisor,
-// and what a bad read does — driven against a plain file the test wrote. The parts that genuinely need
-// a machine — reading the bound driver off the DRM node's symlink, and scanning msm's devfreq — are
-// the composition `Open` does over these, and are covered by decision 142's hardware bring-up rather
-// than here, where there is no `i915` to bind.
+// driver name and a DRM minor to a pair of sysfs paths, and the read path itself — parse, divisor, the
+// two halves against each other, and what a bad read does — driven against plain files the test wrote.
+// The parts that genuinely need a machine — reading the bound driver off the DRM node's symlink, and
+// scanning msm's devfreq — are the composition `Open` does over these, and are covered by decision
+// 142's hardware bring-up rather than here, where there is no `i915` to bind.
 
 namespace
 {
@@ -41,8 +38,21 @@ GYRO_TEST(GpuClock, I915ResolvesBothNodesInMhz)
 
 	GYRO_REQUIRE(source.Count == 2);
 	GYRO_CHECK(source.Divisor == 1);
-	GYRO_CHECK(source.Candidates[0] == "/sys/dev/char/226:0/gt_act_freq_mhz");
-	GYRO_CHECK(source.Candidates[1] == "/sys/dev/char/226:0/gt/gt0/rps_act_freq_mhz");
+	GYRO_CHECK(source.Actual[0] == "/sys/dev/char/226:0/gt_act_freq_mhz");
+	GYRO_CHECK(source.Actual[1] == "/sys/dev/char/226:0/gt/gt0/rps_act_freq_mhz");
+}
+
+// The commanded point comes from the same generation of node as the actual one it sits at the index of
+// — a kernel that moved `gt_act_freq_mhz` under `gt/gt0` moved `gt_cur_freq_mhz` with it, and reading a
+// legacy actual against a per-`gt` requested would be two parts' numbers presented as one operating
+// point.
+GYRO_TEST(GpuClock, I915PairsEachActualNodeWithItsRequestedOne)
+{
+	const GpuClock::Source source = GpuClock::Resolve("i915", 0);
+
+	GYRO_REQUIRE(source.Count == 2);
+	GYRO_CHECK(source.Requested[0] == "/sys/dev/char/226:0/gt_cur_freq_mhz");
+	GYRO_CHECK(source.Requested[1] == "/sys/dev/char/226:0/gt/gt0/rps_cur_freq_mhz");
 }
 
 // xe reports MHz too, at its own node, and the minor is threaded into the path so the right GPU's
@@ -53,7 +63,8 @@ GYRO_TEST(GpuClock, XeResolvesOneNodeUnderItsMinor)
 
 	GYRO_REQUIRE(source.Count == 1);
 	GYRO_CHECK(source.Divisor == 1);
-	GYRO_CHECK(source.Candidates[0] == "/sys/dev/char/226:1/device/tile0/gt0/freq0/act_freq");
+	GYRO_CHECK(source.Actual[0] == "/sys/dev/char/226:1/device/tile0/gt0/freq0/act_freq");
+	GYRO_CHECK(source.Requested[0] == "/sys/dev/char/226:1/device/tile0/gt0/freq0/cur_freq");
 }
 
 // msm reports Hz through devfreq, so it carries the divisor but no fixed candidate — the node name is
@@ -90,92 +101,135 @@ GYRO_TEST(GpuClock, AnUnknownDriverResolvesToNothing)
 	GYRO_CHECK(GpuClock::Resolve("", 0).Count == 0);
 }
 
-// An invalid clock — every device gyro cannot read one off — answers zero forever.
-GYRO_TEST(GpuClock, AnInvalidClockSamplesZero)
+// An invalid clock — every device gyro cannot read one off — answers zeros forever.
+GYRO_TEST(GpuClock, AnInvalidClockReadsZero)
 {
 	GpuClock clock;
 
 	GYRO_CHECK(!clock.IsValid());
-	GYRO_CHECK(clock.Sample(Monotonic::FromMicroseconds(100'000)) == 0);
+	GYRO_CHECK(clock.Read() == GpuClock::Reading{});
 }
 
 // A node that does not open leaves the clock invalid rather than throwing.
 GYRO_TEST(GpuClock, AMissingNodeIsInvalid)
 {
-	GpuClock clock = GpuClock::OpenPath("/sys/dev/char/226:0/this-node-does-not-exist", 1);
+	GpuClock clock =
+		GpuClock::OpenPath("/sys/dev/char/226:0/this-node-does-not-exist", "/sys/dev/char/226:0/nor-this", 1);
 
 	GYRO_CHECK(!clock.IsValid());
-	GYRO_CHECK(clock.Sample(Monotonic::FromMicroseconds(100'000)) == 0);
+	GYRO_CHECK(clock.Read() == GpuClock::Reading{});
 }
 
-// The read path against a file the test wrote: a plain MHz value comes back as itself.
-GYRO_TEST(GpuClock, ReadsAValueInMhz)
+// The read path against files the test wrote: plain MHz values come back as themselves, and the two
+// halves come back as the halves they were opened as rather than as one number twice.
+GYRO_TEST(GpuClock, ReadsBothValuesInMhz)
 {
-	const std::filesystem::path path = Scratch("gyro-gpuclock-mhz");
-	Put(path, "350\n");
+	const std::filesystem::path actual = Scratch("gyro-gpuclock-act");
+	const std::filesystem::path requested = Scratch("gyro-gpuclock-cur");
+	Put(actual, "350\n");
+	Put(requested, "1150\n");
 
-	GpuClock clock = GpuClock::OpenPath(path.c_str(), 1);
+	GpuClock clock = GpuClock::OpenPath(actual.c_str(), requested.c_str(), 1);
 	GYRO_REQUIRE(clock.IsValid());
 
-	GYRO_CHECK(clock.Sample(Monotonic::FromMicroseconds(100'000)) == 350);
+	GYRO_CHECK(clock.Read() == GpuClock::Reading{ .ActualMhz = 350, .RequestedMhz = 1150 });
 
-	std::filesystem::remove(path);
+	std::filesystem::remove(actual);
+	std::filesystem::remove(requested);
 }
 
-// devfreq's Hz is divided down to MHz, which is the whole of what the divisor is for.
+// **The case the pair exists for**: a parked part reports an actual of zero against a commanded point
+// the governor is still holding. One number would make that the cheapest frame the cost window ever
+// saw; two say it was asleep.
+GYRO_TEST(GpuClock, AParkedPartReadsZeroAgainstItsCommandedPoint)
+{
+	const std::filesystem::path actual = Scratch("gyro-gpuclock-parked-act");
+	const std::filesystem::path requested = Scratch("gyro-gpuclock-parked-cur");
+	Put(actual, "0\n");
+	Put(requested, "1150\n");
+
+	GpuClock clock = GpuClock::OpenPath(actual.c_str(), requested.c_str(), 1);
+	GYRO_REQUIRE(clock.IsValid());
+
+	GYRO_CHECK(clock.Read() == GpuClock::Reading{ .ActualMhz = 0, .RequestedMhz = 1150 });
+
+	std::filesystem::remove(actual);
+	std::filesystem::remove(requested);
+}
+
+// There is no rate limit: a value that changed underneath is seen by the very next read. This is what
+// makes the pair one instant's reading rather than a fresh half beside a cached one.
+GYRO_TEST(GpuClock, EveryReadIsFresh)
+{
+	const std::filesystem::path actual = Scratch("gyro-gpuclock-fresh-act");
+	const std::filesystem::path requested = Scratch("gyro-gpuclock-fresh-cur");
+	Put(actual, "350\n");
+	Put(requested, "350\n");
+
+	GpuClock clock = GpuClock::OpenPath(actual.c_str(), requested.c_str(), 1);
+	GYRO_REQUIRE(clock.IsValid());
+
+	GYRO_CHECK(clock.Read() == GpuClock::Reading{ .ActualMhz = 350, .RequestedMhz = 350 });
+
+	Put(actual, "700\n");
+	Put(requested, "1150\n");
+	GYRO_CHECK(clock.Read() == GpuClock::Reading{ .ActualMhz = 700, .RequestedMhz = 1150 });
+
+	std::filesystem::remove(actual);
+	std::filesystem::remove(requested);
+}
+
+// An absent commanded node does not take the clock down with it — the actual half is what a cost span
+// is filed against, and the other one is context.
+GYRO_TEST(GpuClock, AMissingRequestedNodeLeavesTheClockValid)
+{
+	const std::filesystem::path actual = Scratch("gyro-gpuclock-lonely");
+	Put(actual, "350\n");
+
+	GpuClock clock = GpuClock::OpenPath(actual.c_str(), "/sys/dev/char/226:0/this-node-does-not-exist", 1);
+	GYRO_REQUIRE(clock.IsValid());
+
+	GYRO_CHECK(clock.Read() == GpuClock::Reading{ .ActualMhz = 350, .RequestedMhz = 0 });
+
+	std::filesystem::remove(actual);
+}
+
+// devfreq's Hz is divided down to MHz on both halves, which is the whole of what the divisor is for.
 GYRO_TEST(GpuClock, DividesHzToMhz)
 {
-	const std::filesystem::path path = Scratch("gyro-gpuclock-hz");
-	Put(path, "500000000\n");
+	const std::filesystem::path actual = Scratch("gyro-gpuclock-hz-act");
+	const std::filesystem::path requested = Scratch("gyro-gpuclock-hz-cur");
+	Put(actual, "500000000\n");
+	Put(requested, "800000000\n");
 
-	GpuClock clock = GpuClock::OpenPath(path.c_str(), 1'000'000);
+	GpuClock clock = GpuClock::OpenPath(actual.c_str(), requested.c_str(), 1'000'000);
 	GYRO_REQUIRE(clock.IsValid());
 
-	GYRO_CHECK(clock.Sample(Monotonic::FromMicroseconds(100'000)) == 500);
+	GYRO_CHECK(clock.Read() == GpuClock::Reading{ .ActualMhz = 500, .RequestedMhz = 800 });
 
-	std::filesystem::remove(path);
-}
-
-// The rate limit: a second sample inside the refresh interval answers from the cache without re-reading
-// — so a value that changed underneath is not seen until the interval has passed. This is the property
-// that lets the frame thread call `Sample` every frame.
-GYRO_TEST(GpuClock, RateLimitsReadsToTheRefreshInterval)
-{
-	const std::filesystem::path path = Scratch("gyro-gpuclock-ratelimit");
-	Put(path, "350\n");
-
-	GpuClock clock = GpuClock::OpenPath(path.c_str(), 1);
-	GYRO_REQUIRE(clock.IsValid());
-
-	const Instant base = Monotonic::FromMicroseconds(100'000);
-	GYRO_CHECK(clock.Sample(base) == 350);
-
-	// Changed underneath, but a sample one millisecond later is inside the ten-millisecond interval and
-	// still reports the cached value.
-	Put(path, "700\n");
-	GYRO_CHECK(clock.Sample(Advanced(base, std::chrono::milliseconds{ 1 })) == 350);
-
-	// Past the interval, the new value is read.
-	GYRO_CHECK(clock.Sample(Advanced(base, std::chrono::milliseconds{ 11 })) == 700);
-
-	std::filesystem::remove(path);
+	std::filesystem::remove(actual);
+	std::filesystem::remove(requested);
 }
 
 // A read that fails to parse keeps the last good value rather than reporting a spurious zero the cost
-// window would have to tell apart from a device that genuinely measures none.
+// window would have to tell apart from a device that genuinely measures none — and it keeps it per
+// half, so one unreadable attribute does not discard the other's fresh value.
 GYRO_TEST(GpuClock, AnUnparseableReadKeepsTheLastValue)
 {
-	const std::filesystem::path path = Scratch("gyro-gpuclock-garbage");
-	Put(path, "350\n");
+	const std::filesystem::path actual = Scratch("gyro-gpuclock-garbage-act");
+	const std::filesystem::path requested = Scratch("gyro-gpuclock-garbage-cur");
+	Put(actual, "350\n");
+	Put(requested, "1150\n");
 
-	GpuClock clock = GpuClock::OpenPath(path.c_str(), 1);
+	GpuClock clock = GpuClock::OpenPath(actual.c_str(), requested.c_str(), 1);
 	GYRO_REQUIRE(clock.IsValid());
 
-	const Instant base = Monotonic::FromMicroseconds(100'000);
-	GYRO_CHECK(clock.Sample(base) == 350);
+	GYRO_CHECK(clock.Read() == GpuClock::Reading{ .ActualMhz = 350, .RequestedMhz = 1150 });
 
-	Put(path, "not-a-number\n");
-	GYRO_CHECK(clock.Sample(Advanced(base, std::chrono::milliseconds{ 11 })) == 350);
+	Put(actual, "not-a-number\n");
+	Put(requested, "700\n");
+	GYRO_CHECK(clock.Read() == GpuClock::Reading{ .ActualMhz = 350, .RequestedMhz = 700 });
 
-	std::filesystem::remove(path);
+	std::filesystem::remove(actual);
+	std::filesystem::remove(requested);
 }

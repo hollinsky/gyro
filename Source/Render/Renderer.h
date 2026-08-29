@@ -251,11 +251,20 @@ private:
 		std::uint32_t Generation = 0;
 		RenderMode Mode = RenderMode::Planned;
 
-		// The GPU's core clock when this submission was recorded, in MHz, sampled at submit rather than
-		// at collection for the same reason the mode and generation are copied here: by the time the
-		// timestamps resolve the clock has moved, so the operating point the span was measured at is only
-		// knowable near the work that produced it. Zero where the device has no clock reader.
+		// The GPU's clock pair when this submission was recorded, in MHz — the actual point and the
+		// commanded one — read at submit rather than at collection for the same reason the mode and the
+		// generation are copied here: by the time the timestamps resolve the clock has moved, so the
+		// operating point the span was measured at is only knowable near the work that produced it.
+		//
+		// **And collection is not the other end of the span, which is why there is no closing read.**
+		// `CollectCosts` runs at the top of a later frame's iteration, after the GPU has been parked
+		// through the gap, so a second sample there would be another reading of the idle clock rather
+		// than the one the work finished at. Nothing on this path is ever inside the span — the whole
+		// design is not to wait for the batch — so the pair is taken once, near the submission, and
+		// `RequestedMhz` is what carries what a parked `ClockMhz` could not say. Zero where the device
+		// has no clock reader.
 		std::uint32_t ClockMhz = 0;
+		std::uint32_t RequestedMhz = 0;
 
 		// Which GPU track this submission's spans belong on, copied off the request for the same
 		// reason as the two fields above: by the time the timestamps resolve, this renderer has drawn

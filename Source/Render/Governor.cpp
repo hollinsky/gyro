@@ -100,8 +100,8 @@ struct Run
 //
 // The poll is a spin because that is what the frame loop does, and `IRenderer::IsComplete` is a
 // counter read rather than a wait for exactly that reason. The clock read inside it is a `pread` of a
-// small sysfs file, which is why `GpuClock::Read` exists beside the rate-limited `Sample` the frame
-// thread uses.
+// small sysfs file, and the actual half is the only one this wants: what the probe is asking is what
+// the part *reached* while a batch ran, and the commanded point is the thing it is trying to move.
 [[nodiscard]] Run Once(
 	const IClock& clock,
 	VulkanRenderer& renderer,
@@ -129,7 +129,7 @@ struct Run
 
 	while (!renderer.IsComplete(submission->Point))
 	{
-		run.PeakMhz = std::max(run.PeakMhz, frequency.Read());
+		run.PeakMhz = std::max(run.PeakMhz, frequency.Read().ActualMhz);
 	}
 
 	run.Elapsed = Elapsed(started, clock.Now());

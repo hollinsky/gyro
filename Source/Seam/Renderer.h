@@ -470,7 +470,8 @@ struct GpuCost
 	std::uint32_t Generation = 0;
 	RenderMode Mode = RenderMode::Planned;
 
-	// The GPU's core clock while this composite ran, in MHz, or zero where gyro could not read it.
+	// The GPU's core clock when this composite was submitted, in MHz, or zero where gyro could not read
+	// it.
 	//
 	// **A span in seconds is meaningless without the operating point it was taken at**, which is
 	// decision 142: the part this was measured on sits parked at a quarter of its clock because the
@@ -479,6 +480,17 @@ struct GpuCost
 	// lives beside the device; zero is the same honest nothing `Blit` and a device with no timestamp
 	// support already report for `Cost` itself.
 	std::uint32_t ClockMhz = 0;
+
+	// What the part had been *told* to run at when this composite was submitted, in MHz, or zero where
+	// gyro could not read it.
+	//
+	// **Because `ClockMhz` alone cannot tell a slow part from a sleeping one.** A frame is a few hundred
+	// microseconds of compositing and then most of a refresh parked, so the actual clock read anywhere
+	// on the frame path is very often the clock of a gated GPU — zero on i915, against a commanded point
+	// the governor is still holding. Two numbers that agree low is a part running slowly; a zero beside
+	// a high one is a part that had not woken up yet, and a window told only the first would read the
+	// second as the cheapest frame it ever saw.
+	std::uint32_t RequestedMhz = 0;
 
 	friend constexpr bool operator==(GpuCost, GpuCost) noexcept = default;
 };

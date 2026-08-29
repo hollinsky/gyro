@@ -671,16 +671,15 @@ public:
 	// advance and the reason a caller that checks it will never see this.
 	[[nodiscard]] Result<GpuCalibration> Calibrate() const;
 
-	// The GPU's core clock while the caller's most recent submission ran, in MHz, or zero where it
-	// could not be read — decision 142's operating point, the number a `GpuCost` span in seconds is
-	// meaningless without.
+	// The GPU's clock pair now — what the part is doing and what it has been told to do, in MHz, or zero
+	// for a half that could not be read. Decision 142's operating point, the number a `GpuCost` span in
+	// seconds is meaningless without, and its companion the parked case cannot be told apart without.
 	//
-	// **Rate-limited inside Render/GpuClock.h, so `Record` calls it every frame and it enters the
-	// kernel at most once every few milliseconds** — the clock it reports moves no faster than that, so
-	// per-frame precision would buy nothing the frame thread should pay a syscall for. Not `const`
-	// because the cached reading is state; unlike `Calibrate`, this does not gate on a description bit,
+	// **Two `pread`s of small sysfs attributes, so `Record` calls it every frame and pays about a
+	// microsecond and a half for it.** Not `const` because the last good value per half is state kept
+	// across a momentarily failing read; unlike `Calibrate`, this does not gate on a description bit,
 	// because an unreadable clock is a zero rather than an error a caller acts on.
-	[[nodiscard]] std::uint32_t SampleClockMhz(Instant now) noexcept { return m_GpuClock.Sample(now); }
+	[[nodiscard]] GpuClock::Reading ReadClock() noexcept { return m_GpuClock.Read(); }
 
 	// A timeline semaphore this device signals, exported as a DRM syncobj descriptor.
 	//
@@ -724,7 +723,7 @@ private:
 
 	// The per-driver frequency reader, resolved from `m_Description.PrimaryMinor` at `Open`. Invalid on
 	// a device gyro cannot read a clock off — `Blit`'s never gets one, since `Blit` is not a
-	// `VulkanDevice` — and then `SampleClockMhz` answers zero.
+	// `VulkanDevice` — and then `ReadClock` answers zeros.
 	GpuClock m_GpuClock;
 };
 

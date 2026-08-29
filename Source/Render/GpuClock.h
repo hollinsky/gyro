@@ -6,10 +6,9 @@
 #include <string_view>
 
 #include "Core/Fd.h"
-#include "Core/Time.h"
 
-// The GPU's core clock, read off sysfs, so a cost span in seconds knows the operating point it was
-// measured at.
+// The GPU's core clock, read off sysfs as a pair — what the part is doing and what it has been told to
+// do — so a cost span in seconds knows the operating point it was measured at.
 //
 // **This is decision 142's measurement half and nothing more.** Every GPU cost figure gyro records is
 // an elapsed time, and an elapsed time is meaningless without the clock the work ran at — the part
@@ -26,15 +25,30 @@
 // share is the per-driver node resolution, which is why `NodeBase` and `BoundDriver` below are
 // public.
 //
-// **The read is a `pread` of one small sysfs attribute and it is rate-limited, because the clock it
-// reports moves no faster than the governor's evaluation interval — tens of milliseconds — while a
-// composite is measured in hundreds of microseconds.** So `Sample` may be called every frame on the
-// frame thread and re-enters the kernel at most once every `RefreshInterval`; the rest of the time it
-// answers from the last value. A dedicated off-thread sampler was rejected for this: it is a whole
-// thread, its own lifetime and a cross-thread hand-off, to read a number that is very nearly constant.
+// **Two attributes rather than one, because the actual clock reads zero while the part is gated.**
+// *(Revised 2026-08-28.)* A frame is a few hundred microseconds of compositing and then most of a
+// refresh parked, which is the shape Render/Governor.h reproduces on purpose — so the actual clock
+// sampled anywhere on the frame path is very often a reading of the GPU asleep. Measured on the Tiger
+// Lake decision 142 was written against: idle, `gt_act_freq_mhz` reads 0 while `gt_cur_freq_mhz` reads
+// 1150. One number cannot tell a window whether a long span was a slow part or a parked one, and the
+// requested point is the better estimate of what a composite that has not started yet will run at.
+// So a `Reading` carries both, and a cost window that sees `Actual` of zero beside a `Requested` of
+// 1150 knows exactly which it is looking at.
 //
-// **Which attribute is a per-driver fact, discovered rather than configured.** The kernel driver bound
-// to the DRM node names the path — i915 and xe carry it in MHz under different nodes, msm reports Hz
+// **There is no rate limit, and there was one.** *(Revised 2026-08-28.)* The rate limit answered a
+// staleness budget of ten milliseconds against a frame period of sixteen, so it skipped a read on
+// almost no frame at 60 Hz and bought its complexity nothing; and against a pair it is actively wrong,
+// since a cached half and a fresh one are two samples of different instants presented as one operating
+// point. What it was protecting against is also smaller than it looks: the pair costs 1.3 microseconds
+// of the frame thread, measured at 1.0 for the actual attribute and 0.3 for the requested one, mean
+// over two thousand reads, worst 8.5. The one real hazard is that i915 takes a runtime-PM wakeref to
+// read the actual clock, so a read against a runtime-suspended part resumes it — but `autosuspend_delay
+// _ms` is ten seconds and a compositor drawing frames never lets it fire. A dedicated off-thread
+// sampler is still rejected: a whole thread, its own lifetime and a cross-thread hand-off, to save
+// a microsecond.
+//
+// **Which attributes are a per-driver fact, discovered rather than configured.** The kernel driver
+// bound to the DRM node names the paths — i915 and xe carry it in MHz under different nodes, msm reports Hz
 // through devfreq — and a driver gyro does not recognise reads back zero after a warning, which is the
 // same honest nothing `Blit` and a device with no timestamp support already report for `Cost` itself.
 class GpuClock
@@ -42,42 +56,56 @@ class GpuClock
 public:
 	GpuClock() = default;
 
+	// The pair, in MHz. Zero for either half gyro cannot read.
+	//
+	// **`Actual` is what the part is doing and `Requested` is what it has been told to do**, and the gap
+	// between them is the whole reason both are here: a parked GPU reports an `Actual` of zero against a
+	// `Requested` the governor is still holding, and a slow one reports two numbers that agree low.
+	struct Reading
+	{
+		std::uint32_t ActualMhz = 0;
+		std::uint32_t RequestedMhz = 0;
+
+		friend constexpr bool operator==(Reading, Reading) noexcept = default;
+	};
+
 	// Open the clock for the device behind this DRM primary minor, or come up invalid.
 	//
 	// The minor is `VK_EXT_physical_device_drm`'s answer for the physical device Vulkan chose, which is
 	// what makes this the *right* GPU's clock on a machine with more than one. A negative minor — the
 	// extension did not answer — an unrecognised driver, or a node that will not open all leave the
-	// clock invalid and `Sample` answering zero, each after a warning naming which it was.
+	// clock invalid and `Read` answering zero, each after a warning naming which it was.
 	[[nodiscard]] static GpuClock Open(std::int64_t primaryMinor);
 
-	// Open a specific node directly, dividing raw reads by `divisor` to reach MHz. The seam `Open`
-	// resolves onto, and the one a test drives against a file it wrote.
-	[[nodiscard]] static GpuClock OpenPath(const char* path, std::uint32_t divisor);
+	// Open a specific pair of nodes directly, dividing raw reads by `divisor` to reach MHz. The seam
+	// `Open` resolves onto, and the one a test drives against files it wrote.
+	//
+	// A null or unopenable `requested` is not a failure: the clock is valid on the actual node alone and
+	// reports a `RequestedMhz` of zero, which is the same honest nothing every other unreadable number
+	// here reports. A missing `actual` leaves the whole clock invalid, because that is the half a cost
+	// span is filed against.
+	[[nodiscard]] static GpuClock OpenPath(const char* actual, const char* requested, std::uint32_t divisor);
 
 	[[nodiscard]] bool IsValid() const noexcept { return m_Fd.Get() >= 0; }
 
-	// The GPU's core clock in MHz as of `now`, rate-limited to one sysfs read per `RefreshInterval`.
-	// Zero on an invalid clock, and the last good value where a read momentarily fails rather than a
-	// spurious zero the cost window would have to filter back out.
-	[[nodiscard]] std::uint32_t Sample(Instant now);
-
-	// The clock now, with no rate limit and therefore a syscall every call.
+	// The pair now: two `pread`s and no cache. Zero on an invalid clock, and the last good value for a
+	// half whose read momentarily fails rather than a spurious zero the cost window would have to filter
+	// back out.
 	//
-	// **For a caller that is off the frame thread and is watching the number move.** `Sample` above
-	// exists because the frame thread reads a value that changes far more slowly than a frame, and a
-	// startup probe wants the opposite: it submits one batch of work and polls until the queue drains,
-	// asking what the clock reached while it did. Ten milliseconds of staleness there is most of the
-	// measurement. Nothing on the frame path may call this, which is why the rate limit stayed on
-	// `Sample` rather than being lifted to a policy the caller states.
-	[[nodiscard]] std::uint32_t Read() noexcept;
+	// **Callable from the frame thread**, which is what the rate limit above used to be for: it
+	// allocates nothing, locks nothing, and costs a microsecond and change.
+	[[nodiscard]] Reading Read() noexcept;
 
-	// One driver's frequency node, resolved from its name and the DRM minor. Pure and public for the
+	// One driver's frequency nodes, resolved from its name and the DRM minor. Pure and public for the
 	// mapping to be tested without a `/sys` to read: `Count` candidates in preference order — i915
-	// carries a legacy node and a newer one, everything else a single path — and the divisor that turns
-	// a raw read into MHz. `Count` of zero is an unrecognised driver.
+	// carries a legacy pair and a newer one, everything else a single pair — with the actual and the
+	// requested node at the same index, because a kernel that moved one moved both. That is
+	// Render/GpuFloor.h's `Nodes` shape, for the same reason it has it. `Count` of zero is an
+	// unrecognised driver, and the divisor turns a raw read into MHz.
 	struct Source
 	{
-		std::array<std::string, 2> Candidates{};
+		std::array<std::string, 2> Actual{};
+		std::array<std::string, 2> Requested{};
 		std::uint32_t Count = 0;
 		std::uint32_t Divisor = 1;
 	};
@@ -106,18 +134,13 @@ public:
 	// pair of nodes off the same directory.
 	[[nodiscard]] static std::string MsmDevfreqDirectory();
 
-	// How stale a reading is allowed to be before the next `Sample` re-enters the kernel. Ten
-	// milliseconds is well under a refresh and well over how fast the governor moves the clock, so a
-	// sample is at most a frame or two old and the frame thread pays a syscall at most once per handful
-	// of frames.
-	static constexpr Duration RefreshInterval = std::chrono::milliseconds{ 10 };
-
 private:
-	Fd m_Fd;
-	std::uint32_t m_Divisor = 1;
-	std::uint32_t m_LastMhz = 0;
+	// One half of the pair read through, keeping `last` where the read or the parse failed.
+	static void ReadInto(const Fd& fd, std::uint32_t divisor, std::uint32_t& last) noexcept;
 
-	// The wall time of the last read, or the epoch where none has happened — which no `Now()` returns,
-	// so it doubles as "never sampled" and forces the first `Sample` to read.
-	Instant m_Sampled{};
+	Fd m_Fd;
+	Fd m_Requested;
+	std::uint32_t m_Divisor = 1;
+	std::uint32_t m_LastActualMhz = 0;
+	std::uint32_t m_LastRequestedMhz = 0;
 };

@@ -18,6 +18,7 @@
 #include "Core/Result.h"
 #include "Core/Time.h"
 #include "Geometry/Region.h"
+#include "Render/GpuClock.h"
 #include "Render/Pipeline.h"
 #include "Render/Vulkan.h"
 #include "Seam/Dressing.h"
@@ -1468,10 +1469,13 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		pending.Trace = request.Trace;
 		pending.Frame = request.Frame;
 
-		// Sampled here, near the work, rather than at collection frames later where the clock has moved.
-		// `started` is this record's `Now()`, a few hundred microseconds stale against a reading that is
-		// rate-limited to milliseconds — so the operating point filed with the span is the one it ran at.
-		pending.ClockMhz = m_Device->SampleClockMhz(started);
+		// Read here, near the work, rather than at collection frames later where the clock has moved and
+		// the part has parked again. Both halves: on the frame path the actual clock is very often a
+		// reading of a gated GPU, and the commanded point beside it is what tells that apart from a part
+		// genuinely running slowly.
+		const GpuClock::Reading reading = m_Device->ReadClock();
+		pending.ClockMhz = reading.ActualMhz;
+		pending.RequestedMhz = reading.RequestedMhz;
 	}
 
 	// **Decision 108 in five lines.** A device that cannot export a timeline has no descriptor to put
@@ -2342,7 +2346,8 @@ std::size_t VulkanRenderer::CollectCosts(std::span<GpuCost> into)
 		into[written] = GpuCost{ .Cost = description.TimestampSpan(stamps[0], stamps[pending.Stamps - 1]),
 			                     .Generation = pending.Generation,
 			                     .Mode = pending.Mode,
-			                     .ClockMhz = pending.ClockMhz };
+			                     .ClockMhz = pending.ClockMhz,
+			                     .RequestedMhz = pending.RequestedMhz };
 		++written;
 
 		Report(pending, std::span{ stamps.data(), pending.Stamps }, target);
@@ -2432,7 +2437,13 @@ void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uin
 	// without leaving the trace — decision 142's number, and the one that turns the fragment rate below
 	// from a slow part into a parked one. Emitted whether or not the device counts fragments, because it
 	// answers a question the timestamps alone cannot: whether a long span was work or a low clock.
+	//
+	// **Both halves, because one of them is routinely zero.** A row that dropped to zero every frame
+	// and said nothing else would read as a broken instrument; the commanded point beside it is what
+	// makes the same picture legible as a part that parks between composites, which is the behaviour
+	// decision 142 exists to act on and the one a reader most needs to see happening.
 	TraceCountAt("clock (MHz)", closed, static_cast<std::int64_t>(pending.ClockMhz), pending.Trace);
+	TraceCountAt("clock requested (MHz)", closed, static_cast<std::int64_t>(pending.RequestedMhz), pending.Trace);
 
 	if (m_Statistics == VK_NULL_HANDLE)
 	{

@@ -106,24 +106,29 @@ GpuClock::Source GpuClock::Resolve(std::string_view driver, std::int64_t primary
 
 	if (driver == "i915")
 	{
-		// The legacy single-tile attribute first, then the per-`gt` one newer multi-tile kernels moved
-		// it to. Both are MHz. A part with more than one tile is not one gyro composites across, so the
-		// first tile is the one that matters.
-		source.Candidates[0] = base + "/gt_act_freq_mhz";
-		source.Candidates[1] = base + "/gt/gt0/rps_act_freq_mhz";
+		// The legacy single-tile attributes first, then the per-`gt` ones newer multi-tile kernels moved
+		// them to. All four are MHz. A part with more than one tile is not one gyro composites across, so
+		// the first tile is the one that matters. `act` is what the part is running at and `cur` is the
+		// point RPS has been commanded to — the two i915 fields the parked case is told apart by.
+		source.Actual[0] = base + "/gt_act_freq_mhz";
+		source.Requested[0] = base + "/gt_cur_freq_mhz";
+		source.Actual[1] = base + "/gt/gt0/rps_act_freq_mhz";
+		source.Requested[1] = base + "/gt/gt0/rps_cur_freq_mhz";
 		source.Count = 2;
 		source.Divisor = 1;
 	}
 	else if (driver == "xe")
 	{
-		source.Candidates[0] = base + "/device/tile0/gt0/freq0/act_freq";
+		// xe names the same pair `act_freq` and `cur_freq` under the tile's `freq0` directory.
+		source.Actual[0] = base + "/device/tile0/gt0/freq0/act_freq";
+		source.Requested[0] = base + "/device/tile0/gt0/freq0/cur_freq";
 		source.Count = 1;
 		source.Divisor = 1;
 	}
 	else if (IsMsmDriver(driver))
 	{
 		// devfreq reports Hz, and the node name is dynamic — resolved at `Open`, not here, so this
-		// leaves the candidate empty and only carries the unit.
+		// leaves the candidates empty and only carries the unit.
 		source.Count = 0;
 		source.Divisor = 1'000'000;
 	}
@@ -131,11 +136,20 @@ GpuClock::Source GpuClock::Resolve(std::string_view driver, std::int64_t primary
 	return source;
 }
 
-GpuClock GpuClock::OpenPath(const char* path, std::uint32_t divisor)
+GpuClock GpuClock::OpenPath(const char* actual, const char* requested, std::uint32_t divisor)
 {
 	GpuClock clock;
 	clock.m_Divisor = divisor == 0 ? 1 : divisor;
-	clock.m_Fd = Fd{ open(path, O_RDONLY | O_CLOEXEC) };
+	clock.m_Fd = Fd{ open(actual, O_RDONLY | O_CLOEXEC) };
+
+	// The requested half is allowed to be absent without taking the clock down with it. A kernel that
+	// carries the actual attribute and not the commanded one is unlikely, but the failure it would
+	// otherwise produce is losing every cost figure's operating point over the half that is only
+	// context.
+	if (requested != nullptr)
+	{
+		clock.m_Requested = Fd{ open(requested, O_RDONLY | O_CLOEXEC) };
+	}
 
 	return clock;
 }
@@ -157,7 +171,11 @@ GpuClock GpuClock::Open(std::int64_t primaryMinor)
 	{
 		if (const std::string directory = MsmDevfreqDirectory(); !directory.empty())
 		{
-			if (GpuClock clock = OpenPath((directory + "/cur_freq").c_str(), 1'000'000); clock.IsValid())
+			// devfreq's `cur_freq` goes through the driver's own `get_cur_freq`, so it is the actual one;
+			// `target_freq` is what the governor last asked for. Opposite names to i915's, same pair.
+			if (GpuClock clock =
+			        OpenPath((directory + "/cur_freq").c_str(), (directory + "/target_freq").c_str(), 1'000'000);
+			    clock.IsValid())
 			{
 				return clock;
 			}
@@ -178,7 +196,7 @@ GpuClock GpuClock::Open(std::int64_t primaryMinor)
 		// amdgpu the reader does not yet cover, above all — says so once at startup rather than quietly
 		// filing zeros a cost window then has to make sense of.
 		spdlog::warn(
-			"no GPU clock: driver '{}' behind DRM {} has no frequency reader; GpuCost.ClockMhz will be 0",
+			"no GPU clock: driver '{}' behind DRM {} has no frequency reader; GpuCost's clocks will be 0",
 			driver.empty() ? "unknown" : driver,
 			primaryMinor
 		);
@@ -188,7 +206,8 @@ GpuClock GpuClock::Open(std::int64_t primaryMinor)
 
 	for (std::uint32_t index = 0; index < source.Count; ++index)
 	{
-		if (GpuClock clock = OpenPath(source.Candidates[index].c_str(), source.Divisor); clock.IsValid())
+		if (GpuClock clock = OpenPath(source.Actual[index].c_str(), source.Requested[index].c_str(), source.Divisor);
+		    clock.IsValid())
 		{
 			return clock;
 		}
@@ -199,53 +218,44 @@ GpuClock GpuClock::Open(std::int64_t primaryMinor)
 	return {};
 }
 
-std::uint32_t GpuClock::Read() noexcept
+void GpuClock::ReadInto(const Fd& fd, std::uint32_t divisor, std::uint32_t& last) noexcept
 {
-	if (!IsValid())
+	if (fd.Get() < 0)
 	{
-		return 0;
+		return;
 	}
 
 	// sysfs regenerates the attribute on a read from offset zero, so a `pread` at zero is a fresh value
 	// every time without an `lseek`. A small stack buffer — the value is a handful of digits and a
 	// newline — and no allocation, because this runs on the frame thread.
 	std::array<char, 32> buffer{};
-	const ssize_t length = pread(m_Fd.Get(), buffer.data(), buffer.size() - 1, 0);
+	const ssize_t length = pread(fd.Get(), buffer.data(), buffer.size() - 1, 0);
 
 	if (length <= 0)
 	{
 		// A momentary failure keeps the last good reading rather than reporting a zero the cost window
 		// would have to recognise as "unread" separately from a device that genuinely reports none.
-		return m_LastMhz;
+		return;
 	}
 
 	std::uint32_t raw = 0;
-	const std::from_chars_result parsed = std::from_chars(buffer.data(), buffer.data() + length, raw);
 
-	if (parsed.ec == std::errc{})
+	if (const std::from_chars_result parsed = std::from_chars(buffer.data(), buffer.data() + length, raw);
+	    parsed.ec == std::errc{})
 	{
-		m_LastMhz = raw / m_Divisor;
+		last = raw / divisor;
 	}
-
-	return m_LastMhz;
 }
 
-std::uint32_t GpuClock::Sample(Instant now)
+GpuClock::Reading GpuClock::Read() noexcept
 {
 	if (!IsValid())
 	{
-		return 0;
+		return {};
 	}
 
-	// The rate limit, and the reason the frame thread can call this every frame: a read that is younger
-	// than a governor evaluation interval cannot have moved, so it is answered from the last value with
-	// no syscall. The epoch sentinel forces the first call to read.
-	if (m_Sampled != Instant{} && Elapsed(m_Sampled, now) < RefreshInterval)
-	{
-		return m_LastMhz;
-	}
+	ReadInto(m_Fd, m_Divisor, m_LastActualMhz);
+	ReadInto(m_Requested, m_Divisor, m_LastRequestedMhz);
 
-	m_Sampled = now;
-
-	return Read();
+	return { .ActualMhz = m_LastActualMhz, .RequestedMhz = m_LastRequestedMhz };
 }
