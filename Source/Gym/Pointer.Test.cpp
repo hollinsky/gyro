@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstddef>
 #include <vector>
 
@@ -12,6 +13,7 @@
 #include "Scene/Output.h"
 #include "Scene/Store.h"
 #include "Testing/Test.h"
+#include "World/Content.h"
 #include "World/Elevation.h"
 #include "World/Material.h"
 #include "World/Node.h"
@@ -54,8 +56,14 @@ struct Part
 	double Top = 0.0;
 	double Width = 0.0;
 	double Height = 0.0;
+	double Alpha = 1.0;
+
+	// The fill's red component, which is all that is needed to tell the two passes apart: the body is
+	// white and the outline is black, so this is *which pass* without a field saying so.
+	double Fill = 0.0;
 
 	[[nodiscard]] double Right() const noexcept { return Left + Width; }
+	[[nodiscard]] double Bottom() const noexcept { return Top + Height; }
 };
 
 // The rectangles under `root`, in the order the store holds them. A glyph is one flat sibling list by
@@ -72,7 +80,10 @@ struct Part
 			Part{ .Left = entity->Translation.Model().X,
 		          .Top = entity->Translation.Model().Y,
 		          .Width = static_cast<double>(entity->Extent.Width),
-		          .Height = static_cast<double>(entity->Extent.Height) }
+		          .Height = static_cast<double>(entity->Extent.Height),
+		          .Alpha = static_cast<double>(entity->Opacity.Model()),
+		          .Fill =
+		              entity->Kind == NodeKind::Solid ? static_cast<double>(store.Solids()[entity->Content].Red) : 0.0 }
 		);
 
 		child = entity->NextSibling;
@@ -249,4 +260,186 @@ GYRO_TEST(GymPointer, BracketIsTheSameFourNodesAtEverySize)
 
 	GYRO_CHECK(Parts(fixture.Store, *small).size() == 4);
 	GYRO_CHECK(Parts(fixture.Store, *large).size() == 4);
+}
+
+// The refusal that keeps the two constructions from being confused for each other: one takes a step
+// count and the other a density, and a caller who hands the wrong one over has asked for a shape
+// nobody can compute rather than for a coarser version of the same one.
+GYRO_TEST(GymPointer, ExactGlyphIsNotReachedThroughTheStepCount)
+{
+	Fixture fixture;
+
+	const Result<EntityId> glyph = AuthorGlyph(fixture.Store, {}, Glyph::Exact, 24.0, 16);
+
+	GYRO_REQUIRE(!glyph);
+	GYRO_CHECK(glyph.error().Code() == EINVAL);
+}
+
+// The property that makes the exact construction correct rather than merely finer, and it is the
+// negation of `NoSeamRunsThroughTheGlyph` rather than a stronger form of it.
+//
+// A staircase avoids the seam by *overlapping*, because two opaque quads sharing a device pixel
+// composite to less than either. This one avoids it by never sharing a pixel at all: every rectangle
+// is one device pixel tall, its edges land on whole device pixels, and within a pass no two of them
+// meet. So the coverage a pixel is written with is the one that was computed for it, once.
+GYRO_TEST(GymPointer, ExactGlyphPartitionsTheDeviceGrid)
+{
+	Fixture fixture;
+
+	const Result<EntityId> glyph = AuthorExactGlyph(fixture.Store, {}, 48.0, Scale::FromInteger(1));
+
+	GYRO_REQUIRE(glyph.has_value());
+
+	const std::vector<Part> parts = Parts(fixture.Store, *glyph);
+
+	GYRO_REQUIRE(!parts.empty());
+
+	for (const Part& part : parts)
+	{
+		GYRO_CHECK(part.Height == 1.0);
+		GYRO_CHECK(part.Left == std::floor(part.Left));
+		GYRO_CHECK(part.Top == std::floor(part.Top));
+		GYRO_CHECK(part.Width == std::floor(part.Width));
+		GYRO_CHECK(part.Width > 0.0);
+	}
+
+	// The two passes are consecutive runs of one sibling list — the outline whole, then the body whole
+	// — so a pair that overlaps is either two rectangles of one pass or the body over the outline,
+	// which is the composite the conditional coverage was derived for. The pass a rectangle belongs to
+	// is not recorded on it, so the check is that no *row* carries two overlapping rectangles more than
+	// twice over: at every pixel the outline may be under the body and nothing else.
+	for (const Part& part : parts)
+	{
+		for (double column = part.Left; column < part.Right(); column += 1.0)
+		{
+			std::size_t writers = 0;
+
+			for (const Part& other : parts)
+			{
+				const bool sameRow = other.Top == part.Top;
+				const bool covers = other.Left <= column && other.Right() > column;
+
+				writers += static_cast<std::size_t>(sameRow && covers);
+			}
+
+			GYRO_CHECK(writers <= 2);
+		}
+	}
+}
+
+// The claim the word *exact* is carrying, checked as a claim about areas rather than about pixels.
+//
+// Coverage that is really an area integrates to the shape's area. So the body pass's opacities, each
+// weighted by the size of the rectangle carrying it, sum to the arrow's own area — and dividing by the
+// square of the glyph's height makes that a number the *shape* has and the sampling does not. Taking
+// it at three densities is what separates the two: a construction that sampled the shape rather than
+// integrating it would answer differently at each, and by more the coarser the grid.
+GYRO_TEST(GymPointer, ExactCoverageIntegratesToTheSameAreaAtEveryDensity)
+{
+	Fixture fixture;
+
+	const auto areaOf = [&](Scale density) -> double {
+		const Result<EntityId> glyph = AuthorExactGlyph(fixture.Store, {}, 32.0, density);
+
+		if (!glyph)
+		{
+			return 0.0;
+		}
+
+		double covered = 0.0;
+
+		for (const Part& part : Parts(fixture.Store, *glyph))
+		{
+			// The body only. The outline's alpha is a *conditional* coverage — what it needs given that
+			// the body did not already take the pixel — so it is not an area and summing it would be
+			// asserting something that is not true of it.
+			if (part.Fill > 0.5)
+			{
+				covered += part.Alpha * part.Width * part.Height;
+			}
+		}
+
+		return covered / (32.0 * 32.0);
+	};
+
+	const double one = areaOf(Scale::FromInteger(1));
+	const double two = areaOf(Scale::FromInteger(2));
+	const double three = areaOf(Scale::FromInteger(3));
+
+	// A thousandth, which is a real assertion rather than a shrug: the areas are the same integral
+	// taken over three different partitions of the same plane, and the only thing between them is
+	// double-precision arithmetic and the runs the merge folded together.
+	GYRO_CHECK(std::abs(two - one) < 0.001);
+	GYRO_CHECK(std::abs(three - one) < 0.001);
+}
+
+// The exact glyph is snapped for the staircase's reason and one of its own: the coverage was computed
+// for the shape sitting on the device grid, so a fractional position draws one alignment's answer at
+// another's.
+GYRO_TEST(GymPointer, ExactGlyphTakesTheGridAtItsRoot)
+{
+	Fixture fixture;
+
+	const Result<EntityId> glyph = AuthorExactGlyph(fixture.Store, {}, 24.0, Scale::FromInteger(1));
+
+	GYRO_REQUIRE(glyph.has_value());
+
+	GYRO_CHECK((fixture.Store.Find(*glyph)->Flags & Node::Snap) != 0);
+
+	for (EntityId child = fixture.Store.Find(*glyph)->FirstChild; !child.IsNull();)
+	{
+		const Entity* const entity = fixture.Store.Find(child);
+
+		GYRO_CHECK((entity->Flags & Node::Snap) == 0);
+
+		child = entity->NextSibling;
+	}
+}
+
+// The bound doing its job: a glyph authored at a panel's height is a mistake about scale, and it
+// arrives as a sentence naming the glyph rather than as a frame the renderer refuses whole.
+GYRO_TEST(GymPointer, ExactGlyphRefusesAHeightThatWillNotDecompose)
+{
+	Fixture fixture;
+
+	const Result<EntityId> glyph = AuthorExactGlyph(fixture.Store, {}, PanelHeight, Scale::FromInteger(2));
+
+	GYRO_REQUIRE(!glyph);
+	GYRO_CHECK(glyph.error().Code() == E2BIG);
+}
+
+// The outline reaches above and to the left of the hotspot here too, which is `AuthorGlyph`'s property
+// arrived at by a different construction — and it is worth checking separately because a mitred offset
+// that turned the wrong way would produce a glyph entirely inside its own box and nobody would see it
+// until the cursor's point was in the wrong place.
+GYRO_TEST(GymPointer, ExactGlyphHangsItsOutlineOutsideTheHotspot)
+{
+	Fixture fixture;
+
+	const Result<EntityId> glyph = AuthorExactGlyph(fixture.Store, {}, 48.0, Scale::FromInteger(1));
+
+	GYRO_REQUIRE(glyph.has_value());
+
+	const std::vector<Part> parts = Parts(fixture.Store, *glyph);
+
+	GYRO_REQUIRE(!parts.empty());
+
+	double left = parts.front().Left;
+	double top = parts.front().Top;
+	double bottom = parts.front().Bottom();
+
+	for (const Part& part : parts)
+	{
+		left = std::min(left, part.Left);
+		top = std::min(top, part.Top);
+		bottom = std::max(bottom, part.Bottom());
+	}
+
+	GYRO_CHECK(left < 0.0);
+	GYRO_CHECK(top < 0.0);
+
+	// And the whole glyph is about as tall as it was asked to be, which is what catches an offset that
+	// grew by the wrong unit — the mistake that drew a black rectangle around the first staircase.
+	GYRO_CHECK(bottom - top > 48.0);
+	GYRO_CHECK(bottom - top < 48.0 * 1.5);
 }

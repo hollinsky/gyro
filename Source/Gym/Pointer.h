@@ -4,6 +4,7 @@
 
 #include "Core/Result.h"
 #include "Geometry/NodeTransform.h"
+#include "Geometry/Scale.h"
 #include "Scene/Store.h"
 
 // The pointer glyph, drawn as scene nodes, at several step counts and several sizes at once.
@@ -55,6 +56,42 @@
 // simply translates, which is what the sliding pair is now the demonstration of rather than the
 // symptom.
 //
+// **`Exact` is the third construction, and it owes the staircase nothing either.** `Blit` already
+// weights a solid by the *exact* area of its rectangle inside each device pixel — `Overlap` in
+// `Blit/Blit.cpp` is a product of two one-dimensional overlaps and says so — so a quad one device pixel
+// tall and one wide, carrying an opacity, is an exact coverage sample rather than an approximation of
+// one. That is enough to draw the diagonal properly: clip the glyph's polygon to each device pixel,
+// take the area, and emit it. The result is the box-filtered analytic coverage of the shape, which is
+// the exact prefiltered answer and not a blur — a blur is a *wider* filter, and this is the narrowest
+// one that integrates rather than samples.
+//
+// **What makes it correct where the staircase is not is that it partitions the pixels instead of
+// overlapping them.** The seam above is two quads sharing a pixel and compositing `over`. Here every
+// quad's edges land on device pixel boundaries by construction, so no pixel is ever written twice
+// within a pass, and there is no join to bridge and no floor under the step count.
+//
+// **The outline is a second pass and its alpha is not its coverage**, which is the one piece of
+// arithmetic in the construction. Let `d` be the dark silhouette's area in a pixel and `l` the light
+// body's, with the dark shape containing the light one. Drawing dark at `p` and then light at `q` over
+// a background `B` leaves `q·W + (1−q)(1−p)·B`, and what is wanted is `l·W + (d−l)·0 + (1−d)·B`. So
+// `q = l` and `p = (d−l)/(1−l)` — the outline's *conditional* coverage, given that the body did not
+// already take the pixel. Emitting `d` and `l` as two plain coverages would blend the outline through
+// the body and grey the glyph's inside edge, which is the seam again wearing a different hat.
+//
+// **It is authored against a scale and snapped, exactly as the staircase is.** Coverage is computed
+// for one alignment of the shape to the grid, so the glyph is right at that alignment and nowhere else
+// — which decision 156's `Node::Snap` is what guarantees, by landing the subtree's origin on a device
+// pixel whenever it is drawn. The consequence is worth stating plainly: this makes the glyph's *shape*
+// exact, not its motion. A pointer still advances a whole device pixel at a time, and authoring
+// coverage per sub-pixel phase is a different change than this one.
+//
+// **The cost is nodes, and it is not cheap.** Roughly six to eight rectangles per device pixel row —
+// an opaque run and a partial pixel at each end, twice over for the two passes — so a 24-unit glyph on
+// an unscaled panel is under two hundred nodes against a 56-step staircase's two hundred and twenty
+// with its bridges, and a 96-unit one is several times that. That is the trade this row is in the grid
+// to be looked at rather than argued about, and `MaxParts` is the refusal that keeps a mistaken
+// density from authoring a scene nobody can draw.
+//
 // **`Bracket` is the alternative that owes the staircase nothing.** Two arms of a corner, upright by
 // construction, exact at every scale, and directional without a diagonal. It is here because a
 // designed glyph does not have to be the arrow everybody ships (decision 152 says so in as many
@@ -68,6 +105,10 @@ enum class Glyph : std::uint8_t
 
 	// A corner bracket. No diagonal, so no approximation and no step count.
 	Bracket,
+
+	// The same arrow, decomposed into exact per-device-pixel coverage. No step count either, and a
+	// density instead — see `AuthorExactGlyph`.
+	Exact,
 };
 
 // The nominal heights the specimens are drawn at, in the output's own units. A cursor is around the
@@ -83,6 +124,14 @@ inline constexpr std::int32_t SpecimenSteps[3]{ 8, 20, 56 };
 
 inline constexpr std::size_t SpecimenRows = 3;
 
+// How many rectangles one exactly covered glyph may decompose into. Six to eight per device pixel row,
+// so this is comfortably past the largest specimen in the grid on a 2x panel and well short of
+// `Blit`'s four thousand item ceiling, which the whole scene has to fit inside rather than one glyph.
+//
+// A bound for Core/SlotAllocator.h's reason rather than an estimate of a working set: it turns
+// "authored at the wrong scale" from a frame the renderer refuses into a sentence naming the glyph.
+inline constexpr std::size_t MaxParts = 2048;
+
 // The scene: a grid of specimens, plus two that move.
 struct PointerScene
 {
@@ -94,8 +143,11 @@ struct PointerScene
 	// pointer is in over a real desktop.
 	EntityId Backdrop{};
 
-	// The still grid: `SpecimenRows` arrows by `SpecimenSizes`, then the bracket at the same sizes.
+	// The still grid: `SpecimenRows` arrows by `SpecimenSizes`, then the exactly covered arrow and the
+	// bracket at the same sizes. The exact row is read against the staircases directly above it, which
+	// is the comparison the grid is laid out to make.
 	EntityId Arrows[SpecimenRows][SpecimenSizes]{};
+	EntityId ExactArrows[SpecimenSizes]{};
 	EntityId Brackets[SpecimenSizes]{};
 
 	// The carriage that translates, at the size a cursor actually is, and the bracket riding beside it
@@ -106,6 +158,7 @@ struct PointerScene
 	// are at the same sub-pixel offset in every frame and the comparison is between the glyphs.
 	EntityId MovingArrow{};
 	EntityId MovingBracket{};
+	EntityId MovingExact{};
 
 	// Where the two moving specimens sit at each end of their travel, in the stage's space. Derived
 	// from what was authored rather than from the fractions it came from, for `LaneScene`'s reason.
@@ -127,3 +180,14 @@ struct PointerScene
 // diagonal to approximate.
 [[nodiscard]] Result<EntityId>
 AuthorGlyph(SceneStore& scene, EntityId parent, Glyph glyph, double height, std::int32_t steps);
+
+// The arrow as exact per-device-pixel coverage, as a subtree under `parent`, hotspot at the origin.
+//
+// `density` is the output's own scale, and it is a parameter rather than a lookup because the glyph
+// does not know which output it is on and the answer has to be the one the pixels are: coverage
+// computed against the wrong grid is a shape that is neither exact nor a staircase.
+//
+// Refused with a sentence where the height or the resulting part count is out of range, which is the
+// one place a caller can get this wrong — a glyph authored at a panel's height would decompose into
+// more rectangles than any renderer will take.
+[[nodiscard]] Result<EntityId> AuthorExactGlyph(SceneStore& scene, EntityId parent, double height, Scale density);

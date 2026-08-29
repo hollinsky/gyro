@@ -74,7 +74,8 @@ enum class GymKind : std::uint8_t
 	// the store.
 	Card,
 
-	// The pointer glyph, specimened at three step counts and three sizes, with two of them moving.
+	// The pointer glyph, specimened at three step counts and at exact per-pixel coverage, three sizes
+	// each, with three of them moving.
 	// Decision 152 leaves the shape to somebody; this is what they look at while deciding. Draws under
 	// the CPU renderer by construction rather than by luck — see Gym/Pointer.h.
 	Pointer,
@@ -142,7 +143,7 @@ static_assert([] {
 		case GymKind::Card:
 			return "a test card imported and drawn four ways, its buffer swapped forever";
 		case GymKind::Pointer:
-			return "candidate cursor glyphs, three step counts by three sizes, two of them sliding";
+			return "candidate cursor glyphs, three step counts and exact coverage, three sizes, three sliding";
 	}
 
 	return "unknown";
