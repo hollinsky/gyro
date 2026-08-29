@@ -49,7 +49,11 @@
 // answer the same everywhere.
 
 // A candidate glyph, as nodes.
-enum class Glyph : std::uint8_t
+//
+// `PointerGlyph` rather than `Glyph`, because `Text/Font.h` has the other one and it is the general
+// term: a font's glyph is what the console and every label are made of, and this is two shapes an
+// instrument in one gym draws. The two collided the first time one translation unit included both.
+enum class PointerGlyph : std::uint8_t
 {
 	// The classic pointing arrow, approximated by upright columns.
 	Arrow,
@@ -62,7 +66,7 @@ enum class Glyph : std::uint8_t
 //
 // `steps` is ignored for `Bracket`, which has no diagonal to approximate.
 [[nodiscard]] Result<EntityId>
-AuthorGlyph(SceneStore& scene, EntityId parent, Glyph glyph, double height, std::int32_t steps);
+AuthorGlyph(SceneStore& scene, EntityId parent, PointerGlyph glyph, double height, std::int32_t steps);
 
 // The nominal heights the specimens are drawn at, in the output's own units. A cursor is around the
 // first of these and the others are the same glyph under a scaled output — which is the axis the step

@@ -79,14 +79,19 @@ enum class GymKind : std::uint8_t
 	// Decision 152 leaves the shape to somebody; this is what they look at while deciding. Draws under
 	// the CPU renderer by construction rather than by luck — see Gym/Pointer.h.
 	Pointer,
+
+	// Every rung of the font ladder, the face three row counts would pick on this panel, and the same
+	// string drawn off its own size. Still, and the second gym that folds to idle.
+	Console,
 };
 
-inline constexpr std::size_t GymCount = 6;
+inline constexpr std::size_t GymCount = 7;
 
-static_assert(static_cast<std::size_t>(GymKind::Pointer) + 1 == GymCount);
+static_assert(static_cast<std::size_t>(GymKind::Console) + 1 == GymCount);
 
 inline constexpr std::array<GymKind, GymCount> AllGyms{
-	GymKind::Lanes, GymKind::Settle, GymKind::Turn, GymKind::Materials, GymKind::Card, GymKind::Pointer,
+	GymKind::Lanes, GymKind::Settle,  GymKind::Turn,    GymKind::Materials,
+	GymKind::Card,  GymKind::Pointer, GymKind::Console,
 };
 
 // The list is the enumeration in order, so a sweep over it is a sweep over the enum. The size is fixed
@@ -122,6 +127,8 @@ static_assert([] {
 			return "card";
 		case GymKind::Pointer:
 			return "pointer";
+		case GymKind::Console:
+			return "console";
 	}
 
 	return "unknown";
@@ -144,6 +151,8 @@ static_assert([] {
 			return "a test card imported and drawn four ways, its buffer swapped forever";
 		case GymKind::Pointer:
 			return "candidate cursor glyphs, three step counts and exact coverage, three sizes, three sliding";
+		case GymKind::Console:
+			return "the font ladder, the face three row counts pick here, and a specimen off its own size";
 	}
 
 	return "unknown";
@@ -176,6 +185,13 @@ static_assert([] {
 		case GymKind::Card:
 			return true;
 
+		// A label is a texture and nothing else — no material, no elevation, no rotation and no corner
+		// radius — so this is true for `Card`'s reason and is the gym the recovery console's typography
+		// has to be looked at on. The console runs when there is no GPU; an instrument for it that
+		// needed one would be answering a question nobody is asking at the time.
+		case GymKind::Console:
+			return true;
+
 		// Refused by `Blit::Classify` on the quad: the corners of a rotated chain are not bit-identical
 		// in pairs, and the comparison is exact float equality deliberately — a tolerance there would
 		// draw a rotated logo unrotated and be invisible until somebody measured the picture.
@@ -194,7 +210,7 @@ static_assert([] {
 // codebase otherwise refuses — it is here because the fixed interface below answers in names rather
 // than in kinds, and the assertion underneath is what keeps the two from drifting.
 inline constexpr std::array<std::string_view, GymCount> AllGymNames{
-	"lanes", "settle", "turn", "materials", "card", "pointer",
+	"lanes", "settle", "turn", "materials", "card", "pointer", "console",
 };
 
 static_assert([] {

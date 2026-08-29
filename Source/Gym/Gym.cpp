@@ -18,6 +18,7 @@
 #include "Geometry/NodeTransform.h"
 #include "Gym/Card.h"
 #include "Gym/Cards.h"
+#include "Gym/Console.h"
 #include "Gym/Lanes.h"
 #include "Gym/Pointer.h"
 #include "Scene/Commit.h"
@@ -700,6 +701,37 @@ private:
 	bool m_Far = false;
 	bool m_Driving = true;
 };
+
+// The font ladder, specimened.
+//
+// **The only gym with no motion at all, and the absence is the measurement.** `SettleGym` authors a
+// motion and lets it finish, which is *this world stops costing anything once it stops moving*; this
+// one never starts, which is the stronger claim and the one the recovery console rests on — a screen
+// full of text that is not being animated should wake nothing, ever. A console gym that keeps the loop
+// turning is a wake somebody authored by accident, and here there is nothing else in the frame it
+// could be attributed to.
+//
+// It holds no state past `Open` for the same reason: there is no channel to retarget, no buffer to
+// swap and no carriage to reverse, so there is nothing for `Advance` to be handed that it would read.
+class ConsoleGym final : public ISceneAuthor
+{
+public:
+	[[nodiscard]] std::string_view Name() const noexcept override { return ::Name(GymKind::Console); }
+
+	[[nodiscard]] Result<void> Open(SceneStore& scene, ITextures& textures) override
+	{
+		const Result<ConsoleScene> console = AuthorConsole(scene, textures);
+
+		if (!console)
+		{
+			return std::unexpected{ console.error() };
+		}
+
+		return {};
+	}
+
+	[[nodiscard]] Wake Advance(SceneStore&, ITextures&, Instant) override { return Wake::Never(); }
+};
 } // namespace
 
 Result<std::unique_ptr<ISceneAuthor>> MakeGym(std::string_view name)
@@ -711,7 +743,7 @@ Result<std::unique_ptr<ISceneAuthor>> MakeGym(std::string_view name)
 		return Failure(EINVAL, "--gym is not one of the scenes --help lists");
 	}
 
-	// A switch with no default label, so a sixth enumerator is a build failure here rather than a name
+	// A switch with no default label, so a seventh enumerator is a build failure here rather than a name
 	// that parses and constructs nothing.
 	switch (*kind)
 	{
@@ -727,6 +759,8 @@ Result<std::unique_ptr<ISceneAuthor>> MakeGym(std::string_view name)
 			return std::make_unique<CardGym>();
 		case GymKind::Pointer:
 			return std::make_unique<PointerGym>();
+		case GymKind::Console:
+			return std::make_unique<ConsoleGym>();
 	}
 
 	return Failure(EINVAL, "--gym is not one of the scenes --help lists");

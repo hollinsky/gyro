@@ -78,11 +78,20 @@ public:
 	// `EINVAL` rather than a partial bind, per Seam/Renderer.h: half a set is a numbering with holes in
 	// it.
 
-	// The most images held at once. Decision 110 names both consumers — the firmware logo the splash
-	// continues and the console's own text grid — and this is well clear of them, for
+	// The most images held at once. Decision 110 names two consumers — the firmware logo the splash
+	// continues and the console's own text grid — and eight was well clear of them, for
 	// Core/SlotAllocator.h's reason: a bound exists to turn unbounded growth into a stated refusal
 	// rather than to estimate a working set.
-	static constexpr std::size_t MaxImages = 8;
+	//
+	// **Sixteen since `Gym/Console.h`, which is the third consumer and the one that counts strings
+	// rather than screens.** Both of the original two are a *single* panel-sized image, and a bound
+	// sized against them is one a debug label overruns the first time somebody draws a handful: the
+	// console gym holds eleven at once — a rung per baked face, a specimen per candidate row count, and
+	// the layout block with its status line — and refusing the twelfth is a dark output with a sentence
+	// in a log nobody has open. `Text/Label.h` is one texture per string by design, so the count here
+	// tracks how many strings are on screen, which the entry above did not account for. An entry is a
+	// pointer and an extent, so this is tens of bytes rather than a working set.
+	static constexpr std::size_t MaxImages = 16;
 
 	// How long a draw list this will take, which is `Frame/Evaluator.h`'s arena capacity arrived at
 	// independently — this module may not name that one, and a bound that has to be guessed is better

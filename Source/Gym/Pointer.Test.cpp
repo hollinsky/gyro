@@ -195,7 +195,7 @@ GYRO_TEST(GymPointer, NoSeamRunsThroughTheStaircase)
 {
 	Fixture fixture;
 
-	const Result<EntityId> glyph = AuthorGlyph(fixture.Store, {}, Glyph::Arrow, 96.0, 24);
+	const Result<EntityId> glyph = AuthorGlyph(fixture.Store, {}, PointerGlyph::Arrow, 96.0, 24);
 
 	GYRO_REQUIRE(glyph.has_value());
 
@@ -240,7 +240,7 @@ GYRO_TEST(GymPointer, TheStaircaseHangsItsOutlineOutsideTheHotspot)
 {
 	Fixture fixture;
 
-	const Result<EntityId> glyph = AuthorGlyph(fixture.Store, {}, Glyph::Arrow, 24.0, 16);
+	const Result<EntityId> glyph = AuthorGlyph(fixture.Store, {}, PointerGlyph::Arrow, 24.0, 16);
 
 	GYRO_REQUIRE(glyph.has_value());
 
@@ -261,7 +261,7 @@ GYRO_TEST(GymPointer, TheGridIsTakenAtTheGlyphRootAndNowhereBelowIt)
 {
 	Fixture fixture;
 
-	const Result<EntityId> glyph = AuthorGlyph(fixture.Store, {}, Glyph::Arrow, 24.0, 16);
+	const Result<EntityId> glyph = AuthorGlyph(fixture.Store, {}, PointerGlyph::Arrow, 24.0, 16);
 
 	GYRO_REQUIRE(glyph.has_value());
 
@@ -283,8 +283,8 @@ GYRO_TEST(GymPointer, BracketIsTheSameFourNodesAtEverySize)
 {
 	Fixture fixture;
 
-	const Result<EntityId> small = AuthorGlyph(fixture.Store, {}, Glyph::Bracket, 24.0, 0);
-	const Result<EntityId> large = AuthorGlyph(fixture.Store, {}, Glyph::Bracket, 96.0, 0);
+	const Result<EntityId> small = AuthorGlyph(fixture.Store, {}, PointerGlyph::Bracket, 24.0, 0);
+	const Result<EntityId> large = AuthorGlyph(fixture.Store, {}, PointerGlyph::Bracket, 96.0, 0);
 
 	GYRO_REQUIRE(small.has_value() && large.has_value());
 

@@ -291,6 +291,30 @@ GYRO_TEST(Gym, TheSettlingGymAuthorsOnceAndThenAsksForNothing)
 	GYRO_CHECK_EQ((*gym)->Advance(fixture.Store, textures, fixture.Reach(WellPast)), Wake::Never());
 }
 
+// The console gym, which is the same claim without the springs and is therefore the stronger one:
+// `settle` starts a motion and lets it finish, so a wake it asks for is at worst early; this one never
+// starts anything, so any wake at all is a contributor somebody authored by accident. A screen full of
+// text that is not being animated has to cost nothing, because that is what the recovery console is —
+// and there is nothing else in this frame a stray wake could be attributed to.
+GYRO_TEST(Gym, TheConsoleGymNeverMovesAndNeverAsksForAnything)
+{
+	CountingTextures textures;
+
+	Fixture fixture;
+
+	const Result<std::unique_ptr<ISceneAuthor>> gym = MakeGym(Name(GymKind::Console));
+
+	GYRO_REQUIRE(gym);
+	GYRO_REQUIRE((*gym)->Open(fixture.Store, textures));
+
+	GYRO_CHECK(!AnythingMoving(fixture.Store));
+
+	GYRO_CHECK_EQ((*gym)->Advance(fixture.Store, textures, fixture.Clock.Now()), Wake::Never());
+	GYRO_CHECK_EQ((*gym)->Advance(fixture.Store, textures, fixture.Reach(WellPast)), Wake::Never());
+
+	GYRO_CHECK(!AnythingMoving(fixture.Store));
+}
+
 // The card gym's swap, which is a client's buffer cycle with no client: a new id every period, the
 // previous one given up, and every copy in the scene naming the new one before the old is released.
 //

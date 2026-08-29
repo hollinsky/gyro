@@ -202,14 +202,14 @@ void Arms(Builder& builder, EntityId parent, double height, double grow, const S
 }
 } // namespace
 
-Result<EntityId> AuthorGlyph(SceneStore& scene, EntityId parent, Glyph glyph, double height, std::int32_t steps)
+Result<EntityId> AuthorGlyph(SceneStore& scene, EntityId parent, PointerGlyph glyph, double height, std::int32_t steps)
 {
 	if (height <= 0.0)
 	{
 		return Failure(EINVAL, "a glyph is authored at a height, and this one has none");
 	}
 
-	if (glyph == Glyph::Arrow && steps <= 0)
+	if (glyph == PointerGlyph::Arrow && steps <= 0)
 	{
 		return Failure(EINVAL, "an arrow is approximated by columns, and this one asks for none");
 	}
@@ -230,7 +230,7 @@ Result<EntityId> AuthorGlyph(SceneStore& scene, EntityId parent, Glyph glyph, do
 
 	// The outline first and the body over it, which is the whole of the z-order here — decision 55
 	// makes it the list order, so the two staircases are one sibling pair rather than a group.
-	if (glyph == Glyph::Arrow)
+	if (glyph == PointerGlyph::Arrow)
 	{
 		Columns(builder, root, height, steps, ArrowOutline * ArrowHeight, Edge);
 		Columns(builder, root, height, steps, 0.0, Body);
@@ -303,8 +303,9 @@ Result<PointerScene> AuthorPointers(SceneStore& scene, ITextures& textures)
 	{
 		for (std::size_t column = 0; column < SpecimenSizes; ++column)
 		{
-			const Result<EntityId> glyph =
-				AuthorGlyph(scene, place(row, column), Glyph::Arrow, SpecimenHeights[column], SpecimenSteps[row]);
+			const Result<EntityId> glyph = AuthorGlyph(
+				scene, place(row, column), PointerGlyph::Arrow, SpecimenHeights[column], SpecimenSteps[row]
+			);
 
 			if (!glyph)
 			{
@@ -334,7 +335,7 @@ Result<PointerScene> AuthorPointers(SceneStore& scene, ITextures& textures)
 	for (std::size_t column = 0; column < SpecimenSizes; ++column)
 	{
 		const Result<EntityId> glyph =
-			AuthorGlyph(scene, place(SpecimenRows + 1, column), Glyph::Bracket, SpecimenHeights[column], 0);
+			AuthorGlyph(scene, place(SpecimenRows + 1, column), PointerGlyph::Bracket, SpecimenHeights[column], 0);
 
 		if (!glyph)
 		{
@@ -350,7 +351,7 @@ Result<PointerScene> AuthorPointers(SceneStore& scene, ITextures& textures)
 		const EntityId carriage = builder.Container(pointers.Stage, { .Position = At(0.0, height * 0.80) });
 
 		const Result<EntityId> arrow =
-			AuthorGlyph(scene, carriage, Glyph::Arrow, SpecimenHeights[0], SpecimenSteps[SpecimenRows - 1]);
+			AuthorGlyph(scene, carriage, PointerGlyph::Arrow, SpecimenHeights[0], SpecimenSteps[SpecimenRows - 1]);
 
 		if (!arrow)
 		{
@@ -368,7 +369,7 @@ Result<PointerScene> AuthorPointers(SceneStore& scene, ITextures& textures)
 
 		const EntityId beside = builder.Container(carriage, { .Position = At(SpecimenHeights[0] * 4.0, 0.0) });
 
-		const Result<EntityId> bracket = AuthorGlyph(scene, beside, Glyph::Bracket, SpecimenHeights[0], 0);
+		const Result<EntityId> bracket = AuthorGlyph(scene, beside, PointerGlyph::Bracket, SpecimenHeights[0], 0);
 
 		if (!bracket)
 		{

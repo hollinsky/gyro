@@ -460,25 +460,29 @@ gyro_add_module(Scene PORTABLE DISPATCH
 #
 # DEPENDS is what the code has. `Scene` for the store and the commit, `Animation` for the named motions
 # a lane is driven under, `World` for the fills a solid carries and the dressings the materials gym
-# adds, `Geometry` for the output rectangle a layout is a fraction of, and `Core` for the result, the
-# clock and the wake. `Publication` is deliberately absent — a gym authors and never publishes, which
-# is the composition root's half of the loop around it.
+# adds, `Geometry` for the output rectangle a layout is a fraction of, `Text` for the faces and the
+# labels the console gym specimens, and `Core` for the result, the clock and the wake. `Publication` is
+# deliberately absent — a gym authors and never publishes, which is the composition root's half of the
+# loop around it.
 gyro_add_module(Gym PORTABLE DISPATCH
 	DEPENDS
 		Core
 		Geometry
 		World
+		Text
 		Animation
 		Scene
 	SOURCES
 		Card.cpp
 		Cards.cpp
+		Console.cpp
 		Gym.cpp
 		Lanes.cpp
 		Pointer.cpp
 	TESTS
 		Card.Test.cpp
 		Cards.Test.cpp
+		Console.Test.cpp
 		Gym.Test.cpp
 		Lanes.Test.cpp
 		Pointer.Test.cpp
