@@ -18,6 +18,7 @@
 #include "Publication/Reader/Reader.h"
 #include "Publication/Return.h"
 #include "Publication/Ring.h"
+#include "Scene/Entity.h"
 #include "Scene/Output.h"
 #include "Seam/Importer.h"
 #include "Seam/Input.h"
@@ -507,4 +508,51 @@ GYRO_TEST(DispatchLoop, AContactHidesTheCursorWithoutMovingIt)
 	input.Push(1.0, 0.0);
 
 	GYRO_CHECK(fixture.Loop.Store().Pointer().IsVisible());
+}
+
+// The loop draws the pointer rather than the author, which is the whole reason it is stepped here: a
+// gym never asked for a cursor and the recovery console will not either, and both are machines
+// somebody has to be able to point at.
+GYRO_TEST(DispatchLoop, TheLoopDrawsTheCursorTheAuthorNeverAuthored)
+{
+	// The importing fixture, because a glyph is an image and an image needs a renderer that can sample
+	// it — the same reason `--gym=card` refuses to open without one.
+	ImportingFixture fixture;
+	ScriptedInput input;
+
+	GYRO_REQUIRE(fixture.Open());
+
+	fixture.Loop.Observe(input);
+
+	static_cast<void>(fixture.Step(true));
+
+	GYRO_CHECK(fixture.Loop.Cursor().Container().IsNull());
+
+	input.Push(30.0, 20.0);
+
+	static_cast<void>(fixture.Step(true));
+
+	const EntityId container = fixture.Loop.Cursor().Container();
+
+	GYRO_REQUIRE(!container.IsNull());
+
+	// A root, and the last one — decision 55 makes the sibling list the z order, so the cursor being
+	// authored after every author's `Open` is what puts it over everything a person is looking at.
+	const Entity* const entity = fixture.Loop.Store().Find(container);
+
+	GYRO_REQUIRE(entity != nullptr);
+	GYRO_CHECK(entity->Parent.IsNull());
+	GYRO_CHECK(entity->NextSibling.IsNull());
+	GYRO_CHECK_EQ(entity->Translation.Model().X, 30.0);
+	GYRO_CHECK_EQ(entity->Translation.Model().Y, 20.0);
+
+	// And a finger takes it away again, which is the node going rather than fading: nothing in the
+	// frame walk culls a transparent quad, so a cursor left in would be composited over the whole
+	// screen for as long as somebody uses the touchscreen.
+	input.Contact();
+
+	static_cast<void>(fixture.Step(true));
+
+	GYRO_CHECK(fixture.Loop.Cursor().Container().IsNull());
+	GYRO_CHECK(fixture.Loop.Store().Find(container) == nullptr);
 }

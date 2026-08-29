@@ -12,7 +12,9 @@
 #include "Geometry/Scale.h"
 #include "Geometry/Space.h"
 #include "Scene/Output.h"
+#include "Scene/Serializer.h"
 #include "Scene/Store.h"
+#include "Scene/Textures.h"
 #include "Testing/Test.h"
 #include "World/Node.h"
 
@@ -298,4 +300,240 @@ GYRO_TEST(SceneCursor, RefusesAGlyphWithNoHeight)
 
 	GYRO_REQUIRE(!image);
 	GYRO_CHECK(image.error().Code() == EINVAL);
+}
+
+namespace
+{
+// A texture space that counts both directions, because what the cursor promises is that it gives an
+// image back — a pointer taken away or carried onto a panel of another scale that kept its old texture
+// is a leak at the rate somebody uses their machine.
+class CountingTextures final : public ITextures
+{
+public:
+	using ITextures::Adopt;
+
+	[[nodiscard]] Result<TextureId>
+	Adopt(PixelSize<BufferSpace>, std::uint32_t, std::span<const std::byte> pixels, TextureAlpha) override
+	{
+		if (pixels.empty())
+		{
+			return Failure(EINVAL, "an image with no pixels");
+		}
+
+		++Adopted;
+
+		return TextureId{ Adopted, 1 };
+	}
+
+	void Retire(TextureId) noexcept override { ++Retired; }
+
+	std::uint32_t Adopted = 0;
+	std::uint32_t Retired = 0;
+};
+
+// A texture space with nothing behind it that can sample, which is a machine with no renderer and is
+// what `--gym=card` refuses to open against.
+class RefusingTextures final : public ITextures
+{
+public:
+	using ITextures::Adopt;
+
+	[[nodiscard]] Result<TextureId>
+	Adopt(PixelSize<BufferSpace>, std::uint32_t, std::span<const std::byte>, TextureAlpha) override
+	{
+		++Asked;
+
+		return Failure(ENODEV, "no renderer can sample this");
+	}
+
+	void Retire(TextureId) noexcept override {}
+
+	std::uint32_t Asked = 0;
+};
+
+// Two panels of different scales side by side, which is the desk the glyph has to be re-baked on.
+struct MixedFixture
+{
+	ManualClock Clock{ Monotonic::FromNanoseconds(1'000'000'000) };
+	SceneStore Store{ Clock };
+
+	MixedFixture()
+	{
+		const SceneOutput outputs[] = { { .Id = OutputId{ 1, 1 },
+			                              .Bounds = { {}, { 1920.0, PanelHeight } },
+			                              .Density = Scale::FromInteger(1),
+			                              .Grid = { 1920, 1080 } },
+			                            { .Id = OutputId{ 2, 1 },
+			                              .Bounds = { { 1920.0, 0.0 }, { 1920.0, PanelHeight } },
+			                              .Density = Scale::FromInteger(2),
+			                              .Grid = { 3840, 2160 } } };
+
+		Store.SetOutputs(outputs);
+	}
+};
+
+// The model translation of an entity, which is where the cursor logically is rather than where any one
+// output would draw it.
+[[nodiscard]] Vector3<double> Where(const SceneStore& store, EntityId id) noexcept
+{
+	return store.Find(id)->Translation.Model();
+}
+} // namespace
+
+// Nothing is drawn until a device moves the pointer, which is what makes the cursor the last root and
+// therefore the frontmost node: every author that creates a root does so before the first event.
+GYRO_TEST(SceneCursor, DrawsNothingUntilThePointerIsVisible)
+{
+	Fixture fixture;
+	CountingTextures textures;
+	SceneCursor cursor;
+
+	cursor.Step(fixture.Store, textures);
+
+	GYRO_CHECK(cursor.Container().IsNull());
+	GYRO_CHECK(textures.Adopted == 0);
+	GYRO_CHECK(fixture.Store.Count() == 0);
+}
+
+// One motion and there is a pointer on screen, at the position the device put it and nowhere else.
+GYRO_TEST(SceneCursor, AuthorsTheGlyphAtThePointer)
+{
+	Fixture fixture;
+	CountingTextures textures;
+	SceneCursor cursor;
+
+	static_cast<void>(fixture.Store.Pointer().Move({ 400.0, 300.0 }, fixture.Store.Outputs()));
+
+	cursor.Step(fixture.Store, textures);
+
+	GYRO_REQUIRE(!cursor.Container().IsNull());
+	GYRO_CHECK(textures.Adopted == 1);
+	GYRO_CHECK(fixture.Store.FirstRoot() == cursor.Container());
+
+	const Vector3<double> at = Where(fixture.Store, cursor.Container());
+
+	GYRO_CHECK(std::abs(at.X - 400.0) < 1e-9);
+	GYRO_CHECK(std::abs(at.Y - 300.0) < 1e-9);
+
+	// The glyph hangs under the container rather than being it, so what moves at input rate is one
+	// translation and the hotspot offset is stated once.
+	GYRO_CHECK(!fixture.Store.Find(cursor.Container())->FirstChild.IsNull());
+}
+
+// The position is written every iteration and the image is not, which is the difference between a
+// pointer that keeps up with a hand and one that re-bakes an arrow at a thousand hertz.
+GYRO_TEST(SceneCursor, FollowsThePointerWithoutRebaking)
+{
+	Fixture fixture;
+	CountingTextures textures;
+	SceneCursor cursor;
+
+	static_cast<void>(fixture.Store.Pointer().Move({ 100.0, 100.0 }, fixture.Store.Outputs()));
+
+	cursor.Step(fixture.Store, textures);
+
+	const EntityId container = cursor.Container();
+
+	for (int step = 0; step < 8; ++step)
+	{
+		static_cast<void>(fixture.Store.Pointer().Move({ 1.5, 0.5 }, fixture.Store.Outputs()));
+
+		cursor.Step(fixture.Store, textures);
+	}
+
+	GYRO_CHECK(cursor.Container() == container);
+	GYRO_CHECK(textures.Adopted == 1);
+	GYRO_CHECK(textures.Retired == 0);
+
+	const Vector3<double> at = Where(fixture.Store, container);
+
+	GYRO_CHECK(std::abs(at.X - 112.0) < 1e-9);
+	GYRO_CHECK(std::abs(at.Y - 104.0) < 1e-9);
+}
+
+// A finger on the screen and the cursor is gone from the world rather than faded out in it — the
+// serialisation that follows the step is what sweeps it, so the scene published on that pass is the
+// first without it.
+GYRO_TEST(SceneCursor, WithdrawsTheGlyphWhenATouchHidesThePointer)
+{
+	Fixture fixture;
+	CountingTextures textures;
+	SceneCursor cursor;
+	SceneSerializer serializer;
+
+	static_cast<void>(fixture.Store.Pointer().Move({ 400.0, 300.0 }, fixture.Store.Outputs()));
+
+	cursor.Step(fixture.Store, textures);
+
+	GYRO_REQUIRE(fixture.Store.Count() == 2);
+
+	fixture.Store.Pointer().Hide();
+
+	cursor.Step(fixture.Store, textures);
+
+	GYRO_CHECK(cursor.Container().IsNull());
+	GYRO_CHECK(textures.Retired == 1);
+
+	static_cast<void>(serializer.Serialize(fixture.Store));
+
+	GYRO_CHECK(fixture.Store.Count() == 0);
+
+	// And it comes back on the next motion, which is a person reaching for the mouse again.
+	static_cast<void>(fixture.Store.Pointer().Move({ 1.0, 0.0 }, fixture.Store.Outputs()));
+
+	cursor.Step(fixture.Store, textures);
+
+	GYRO_CHECK(!cursor.Container().IsNull());
+	GYRO_CHECK(textures.Adopted == 2);
+}
+
+// Coverage is taken against one device grid, so a pointer dragged onto a panel of another scale gets a
+// glyph baked for that one. Without it the arrow is half the size it should be on the second monitor,
+// and soft, because the sampling stops being a copy.
+GYRO_TEST(SceneCursor, RebakesTheGlyphOnAPanelOfAnotherDensity)
+{
+	MixedFixture fixture;
+	CountingTextures textures;
+	SceneCursor cursor;
+
+	static_cast<void>(fixture.Store.Pointer().Move({ 400.0, 300.0 }, fixture.Store.Outputs()));
+
+	cursor.Step(fixture.Store, textures);
+
+	const float width = fixture.Store.Find(fixture.Store.Find(cursor.Container())->FirstChild)->Extent.Width;
+
+	static_cast<void>(fixture.Store.Pointer().Move({ 2000.0, 0.0 }, fixture.Store.Outputs()));
+
+	cursor.Step(fixture.Store, textures);
+
+	GYRO_CHECK(textures.Adopted == 2);
+	GYRO_CHECK(textures.Retired == 1);
+
+	// The glyph is the same size in the output's own units on both panels — twice the texels on the
+	// scaled one, and a pointer that does not change size as a person drags it across the gap. The
+	// tolerance is one unit because the polygon is bounded outward onto two different grids, which is a
+	// texel of the coarser panel and is the whole of the difference a rebake can make.
+	const float second = fixture.Store.Find(fixture.Store.Find(cursor.Container())->FirstChild)->Extent.Width;
+
+	GYRO_CHECK(std::abs(static_cast<double>(second - width)) < 1.0);
+}
+
+// A texture space with no renderer behind it is a compositor that keeps running without a pointer drawn
+// on it, and it asks once rather than once per motion.
+GYRO_TEST(SceneCursor, AsksOnceWhereTheTextureSpaceRefuses)
+{
+	Fixture fixture;
+	RefusingTextures textures;
+	SceneCursor cursor;
+
+	for (int step = 0; step < 8; ++step)
+	{
+		static_cast<void>(fixture.Store.Pointer().Move({ 1.0, 1.0 }, fixture.Store.Outputs()));
+
+		cursor.Step(fixture.Store, textures);
+	}
+
+	GYRO_CHECK(cursor.Container().IsNull());
+	GYRO_CHECK(textures.Asked == 1);
+	GYRO_CHECK(fixture.Store.Count() == 0);
 }

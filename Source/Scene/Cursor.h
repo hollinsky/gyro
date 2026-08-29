@@ -10,6 +10,7 @@
 #include "Geometry/Scale.h"
 #include "Geometry/Space.h"
 #include "Scene/Store.h"
+#include "Scene/Textures.h"
 
 // The pointer glyph, drawn once into an image.
 //
@@ -66,9 +67,12 @@
 // texture per sub-pixel phase is a different change than this one.
 //
 // **A density is a parameter and not a lookup**, because the glyph does not know which output it is on
-// and coverage taken against the wrong grid is a shape that is neither exact nor a staircase. An image
-// per density is what a second panel costs, and picking between them per output is Docs/Open.md's
-// business rather than this file's — the construction that authored nodes had exactly the same defect
+// and coverage taken against the wrong grid is a shape that is neither exact nor a staircase. Who
+// answers it is `SceneCursor` below: the density of the output the pointer is on, re-baked when the
+// pointer crosses onto a panel of another one. That is one image rather than an image per output held
+// forever, and what it costs is a bake at the moment somebody drags the cursor between monitors —
+// against a glyph that would otherwise arrive on the second screen at half the size and soft, because
+// the sampling stops being a copy. The construction that authored nodes had exactly the same defect
 // and no way to fix it either.
 
 // The arrow's design box, one unit wide by `ArrowHeight` tall, with the hotspot at its top-left
@@ -180,3 +184,71 @@ private:
 // else; there is nothing under it.
 [[nodiscard]] Result<EntityId>
 AuthorCursor(SceneStore& scene, EntityId parent, TextureId texture, const CursorImage& image);
+
+// SPEC: the arrow's design height, in an output's own units.
+//
+// Twenty-four is what every desktop ships and is a size rather than a policy — a person who wants a
+// larger pointer is asking for a setting nothing in the tree holds yet, and the day that arrives this
+// is what it writes. It is stated here rather than at the call site because two of the three things
+// that draw a cursor are the splash and the recovery console, and a console whose pointer is a
+// different size from the session's would read as a different machine.
+inline constexpr double CursorHeight = 24.0;
+
+// The pointer as something on screen, kept on `ScenePointer` by the dispatch loop.
+//
+// **It is the loop's rather than an author's, and that is the whole reason it exists.** A gym, the
+// boot splash, the recovery console and the client host all want the same cursor, and an author that
+// had to remember to draw one is an author that forgets — the console being the machine where a
+// missing pointer is worst, because it is the machine somebody is already unhappy to be looking at.
+// So the loop steps this after the author has run and before the scene is serialised, and no author
+// names it.
+//
+// **The glyph is authored on first use rather than at startup**, which is what makes it the last root
+// and therefore the frontmost node (55): the authors that create roots do so in `Open`, and the
+// pointer becomes visible when a device first moves it. Nothing today creates a root after that — a
+// client's window is parented into `Protocol/Floor.h`'s container, which is itself a root authored at
+// startup — and the day something does, the cursor needs raising rather than a different home.
+//
+// **A hidden pointer has no node at all rather than a transparent one.** Nothing in the frame walk
+// culls a fully faded node, so a cursor faded out is a quad composited over the whole screen's worth
+// of a person's work for as long as they are using a touchscreen. Taking it away costs one entity on
+// the transition between touching the screen and reaching for the mouse, which is a rate a person
+// sets with their hands.
+class SceneCursor
+{
+public:
+	// One dispatch iteration: author the glyph where there is a pointer to draw, keep it under the
+	// position, and take it away where there is not.
+	//
+	// Silent about failure by design — an image that would not bake or would not adopt is a compositor
+	// that keeps running without a pointer drawn on it, and there is nobody on this call to tell. It is
+	// not retried per iteration: the refusal is remembered against the density it was made at, so a
+	// texture space with no renderer that can sample does not re-bake an arrow at input rate.
+	void Step(SceneStore& scene, ITextures& textures);
+
+	// The container the glyph hangs under, or null while there is none. For a test, and for the day
+	// hit-testing has to know which node is not a window.
+	[[nodiscard]] EntityId Container() const noexcept { return m_Container; }
+
+	[[nodiscard]] TextureId Texture() const noexcept { return m_Texture; }
+
+private:
+	[[nodiscard]] bool Author(SceneStore& scene, ITextures& textures, Scale density);
+
+	void Withdraw(SceneStore& scene, ITextures& textures) noexcept;
+
+	EntityId m_Container{};
+	TextureId m_Texture{};
+
+	// The density the live image was baked against, and what a pointer crossing onto a screen of
+	// another one is compared with. Coverage is taken against one device grid, so a glyph carried onto
+	// a panel of a different scale is a shape drawn at the wrong size through a filter — which is worth
+	// one re-bake at the moment a person drags the pointer between monitors and is not worth an image
+	// per output held forever.
+	Scale m_Density{};
+
+	// Whether the bake or the adopt was refused at `m_Density`. Cleared by a density that is not that
+	// one, because the refusal that matters — a texture space that takes no bytes — is not the only one
+	// there is: `E2BIG` is a function of the height and the scale together.
+	bool m_Refused = false;
+};

@@ -17,6 +17,7 @@
 #include "Publication/Return.h"
 #include "Publication/Ring.h"
 #include "Scene/Author.h"
+#include "Scene/Cursor.h"
 #include "Scene/Output.h"
 #include "Scene/Return.h"
 #include "Scene/Serializer.h"
@@ -193,6 +194,18 @@ public:
 
 		advance.Close();
 
+		// **The cursor is stepped here rather than authored**, and it is between the author and the
+		// serialisation because both sides are its business: the author may have changed the world the
+		// pointer is over, and the scene about to cross has to carry the glyph where the last input
+		// event put it. `Scene/Cursor.h` carries why it is not an author's job — the splash, the
+		// recovery console, a gym and the client host all want the same pointer, and one that each of
+		// them had to remember to draw is one the console is without.
+		//
+		// **Before the seal and not after**, for the same reason the seal is where it is: a pointer
+		// that just went away retires its image in here, and the scene about to be published is the
+		// first that does not name it.
+		m_Cursor.Step(m_Store, m_Textures);
+
 		// **Before the publish and not after**, because the number has to be the sequence this step's
 		// snapshot will carry: the author gave those textures up during the `Advance` above, so the
 		// scene about to go out is the first that does not name them.
@@ -325,6 +338,10 @@ public:
 		m_Touch.ConnectTo<&DispatchLoop::OnTouch>(input.Touch, *this);
 	}
 
+	// The pointer as something on screen, so a test can ask whether there is one rather than count
+	// nodes. Nothing in the design reads it.
+	[[nodiscard]] const SceneCursor& Cursor() const noexcept { return m_Cursor; }
+
 	[[nodiscard]] SceneReturn& Return() noexcept { return m_Return; }
 
 	[[nodiscard]] const SceneReturn& Return() const noexcept { return m_Return; }
@@ -383,6 +400,12 @@ private:
 	TextureRegistry m_Textures;
 
 	std::unique_ptr<ISceneAuthor> m_Author;
+
+	// The pointer as something on screen, kept on `ScenePointer` by the step above. Held here rather
+	// than in the store beside the position it follows, because drawing it needs the texture space and
+	// the store has none — and because an author handed the world would then be handed a cursor it
+	// could retire.
+	SceneCursor m_Cursor{};
 
 	// The devices' link to where the pointer is. Held rather than fired and forgotten, because a device
 	// set that goes away while this loop is alive has to be able to drop the observer.

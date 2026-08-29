@@ -11,8 +11,12 @@
 #include <span>
 #include <vector>
 
+#include "Animation/Author/Bundle.h"
 #include "Core/ColorState.h"
 #include "Core/Transfer.h"
+#include "Scene/Commit.h"
+#include "Scene/Output.h"
+#include "Scene/Pointer.h"
 #include "World/Content.h"
 #include "World/Node.h"
 
@@ -409,4 +413,161 @@ Result<EntityId> AuthorCursor(SceneStore& scene, EntityId parent, TextureId text
 	}
 
 	return *node;
+}
+
+namespace
+{
+// The half of `Withdraw` that a half-built cursor needs: an entity nothing has drawn yet, put back.
+// Written as a commit for the reason `Withdraw` is — retirement is the only door out of the tree an
+// author has.
+void Discard(SceneStore& scene, EntityId container) noexcept
+{
+	SceneCommit commit{ scene, CommitAuthor::Compositor };
+
+	static_cast<void>(commit.Retire(container));
+}
+} // namespace
+
+void SceneCursor::Step(SceneStore& scene, ITextures& textures)
+{
+	const ScenePointer& pointer = scene.Pointer();
+	const std::span<const SceneOutput> outputs = scene.Outputs();
+
+	// No pointer to draw, or nowhere to draw it. The second is not a corner: a world with no outputs
+	// is one the dispatch loop refuses to open, and a world whose only monitor was unplugged passes
+	// through here before the next set arrives.
+	if (!pointer.IsVisible() || outputs.empty())
+	{
+		Withdraw(scene, textures);
+
+		return;
+	}
+
+	// The output the pointer is on, and the first one where it is on none — which happens for exactly
+	// as long as it takes `Reconfine` to pull it back onto the union, and is a scale to draw at rather
+	// than a claim about where the pointer is.
+	Scale density = outputs.front().Density;
+
+	const OutputId on = pointer.On(outputs);
+
+	for (const SceneOutput& output : outputs)
+	{
+		if (output.Id == on)
+		{
+			density = output.Density;
+		}
+	}
+
+	if (density != m_Density)
+	{
+		// The glyph in hand was baked for another panel's grid. Taken away rather than reused, which is
+		// the header's argument: a pointer that keeps one image across a mixed-density desk is one that
+		// changes size as it crosses, and does it through a filter.
+		Withdraw(scene, textures);
+
+		m_Density = density;
+		m_Refused = false;
+	}
+
+	if (m_Container.IsNull() && !m_Refused && !Author(scene, textures, density))
+	{
+		m_Refused = true;
+	}
+
+	if (m_Container.IsNull())
+	{
+		return;
+	}
+
+	const Point<GlobalSpace> at = pointer.Position();
+
+	// **Immediate, and it is the one node in the world for which that is not a shortcut.** The pointer
+	// is where a person's hand put it, so a spring between the device and the glyph would be lag by
+	// construction — the one place in a compositor where somebody notices a single frame. The position
+	// is written unrounded and `Node::Snap` on the glyph is what lands it on the panel's grid, which is
+	// decision 52 applied at the moment the cursor is drawn rather than at the moment it is moved.
+	//
+	// Written every iteration rather than on a change, because `SetImmediate` is a spring at rest at a
+	// value and re-stating one is the same coefficients — `Animation/Author/Animatable.h`'s point that
+	// an immediate write and *never animated* are one state and not two.
+	SceneCommit commit{ scene, CommitAuthor::Compositor };
+
+	static_cast<void>(commit.Move(m_Container, { at.X, at.Y, 0.0 }, Immediate()));
+}
+
+bool SceneCursor::Author(SceneStore& scene, ITextures& textures, Scale density)
+{
+	const Result<CursorImage> image = CursorImage::Draw(CursorHeight, density);
+
+	if (!image)
+	{
+		return false;
+	}
+
+	// The bytes are read during the call and the registry holds them afterwards, so the image is a
+	// local: Scene/Textures.h's contract, and the reason nothing here owns a pixel past this line.
+	const Result<TextureId> texture =
+		textures.Adopt(image->Size(), image->Stride(), image->Bytes(), TextureAlpha::Premultiplied);
+
+	if (!texture)
+	{
+		return false;
+	}
+
+	// A container at the top level and the glyph under it, so that what moves at input rate is one
+	// translation on one node and the hotspot offset is stated once. It carries no extent for
+	// `Protocol/Floor.h`'s reason: the cursor is where the glyph hangs rather than a rectangle
+	// anything draws.
+	const std::optional<EntityId> container = scene.CreateContainer(EntityId{}, {});
+
+	if (!container)
+	{
+		textures.Retire(*texture);
+
+		return false;
+	}
+
+	const Result<EntityId> glyph = AuthorCursor(scene, *container, *texture, *image);
+
+	if (!glyph)
+	{
+		Discard(scene, *container);
+		textures.Retire(*texture);
+
+		return false;
+	}
+
+	m_Container = *container;
+	m_Texture = *texture;
+	m_Density = density;
+
+	return true;
+}
+
+void SceneCursor::Withdraw(SceneStore& scene, ITextures& textures) noexcept
+{
+	if (m_Container.IsNull())
+	{
+		return;
+	}
+
+	// **Retired rather than destroyed, and it is gone on this pass anyway.** Decision 114 makes an
+	// entity leave the world in two steps — the author says it is over, and the serialiser sweeps the
+	// subtree once every channel in it has settled — and there is no other door: the store's `Destroy`
+	// is the sweep's. A cursor has no exit to play, so the sweep at the top of the serialisation this
+	// step is about to run destroys it before the walk that would have published it, which is the
+	// property that entry argues for in the case of a closing window and gets right for free here.
+	//
+	// The texture goes with it, and the registry is what waits for the watermark: the snapshots already
+	// out still name the id, and the frame thread is still reading from them.
+	{
+		SceneCommit commit{ scene, CommitAuthor::Compositor };
+
+		static_cast<void>(commit.Retire(m_Container));
+	}
+
+	textures.Retire(m_Texture);
+
+	m_Container = {};
+	m_Texture = {};
 }
