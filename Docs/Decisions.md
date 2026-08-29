@@ -12014,3 +12014,44 @@ transition that decision exists to make unobservable.
 case in the walk. The frame side does not know which node is the cursor and should not learn: decision
 86's boundary carries a scene, not a cast list. A flag is a fact the author states about a node, which
 is the same shape `Hidden` and `Group` already have.
+
+### 157. The frame loop acquires a target only where the partition says a composite happens
+
+*(Decided 2026-08-29, on a capture where two promotable items produced one plane and a full composite
+on every frame of a run.)*
+
+**This was filed in [Open.md](Open.md) as an optimization to do once a client could promote, and it
+was in fact the thing stopping one.** The loop took a render target out of the presenter's free set
+before it evaluated the scene, so a frame whose every item promoted was holding an image it had no use
+for and no verb to give back. Its answer was to demote the bottom promoted layer into the composite
+and draw it — a correct picture at the cost of the render pass, which is how the entry read it.
+
+**The cost was not the render pass. It was the measurement.** The promoted set is a suffix, so the
+bottom of it is the *lowest* item on the screen — the window, with the pointer above it. Demoting the
+bottom therefore removed the window from the layer set and left the cursor alone in it, and the cursor
+is a glyph gyro bakes into its own memory, which `DrmScanout::Adopt` refuses because there is no
+descriptor under it. Every capture said *planes refused* and every one of them was refusing a set the
+window was not in. The reorder is what made the real question askable.
+
+**So: evaluate, partition, then acquire, and only under `NeedsComposite()`.** A fully promoted frame
+takes no image, records nothing, submits nothing and commits what the assigner built. That is the
+arrangement [decision 152](#152-promotion-is-a-partition-of-the-draw-list-computed-every-frame-and-a-node-is-promotable-when-its-resample-is-a-no-op-and-it-carries-no-dressing-on-itself)
+exists for, and it is a whole composite per refresh saved on the panel that needed none of it.
+
+**Two things the entry did not see, and both are one-line bugs with a screen behind them.**
+`NeedsComposite` is `Composited != 0`, which an empty draw list answers exactly the way a fully
+promoted one does — and an empty list still owes the screen a clear, so skipping on that spelling
+leaves a panel showing whatever was on it when the last window closed. And a fully promoted frame that
+the driver *then* refuses has decided it does not want the GPU and found out it does, with no target in
+hand: it has to ask for one late. Taking one eagerly against that possibility is the cost this ordering
+exists to stop paying, and a free set with nothing in it means the output waits a frame rather than
+draws wrong.
+
+**The alternative was to give `IPresenter` a release verb** so the loop could hand back an image it
+turned out not to need. That is a verb on the waist to avoid reordering four lines in one loop, and
+every backend would have to implement it to serve a case that the reorder makes not arise.
+
+**`Partition::Demote` is deleted with its last caller.** It was written days ago and its entire
+justification was the acquire order — the comment on it said so — so keeping it would leave a verb
+whose only remaining property is that nothing may call it.
+

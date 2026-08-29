@@ -999,61 +999,6 @@ private:
 		TraceElapsed("cpu mark", output.m_Cost.PlannedCpu(), output.m_Trace);
 		TraceElapsed("gpu mark", output.m_Cost.PlannedGpu(), output.m_Trace);
 
-		// **Acquired once and held until it is presented, which is the whole of the fix and reads as an
-		// omission until you follow the other path out of here.** `AcquireTarget` is the loop taking a
-		// target *out* of the presenter's free set, and the only way one goes back is by being presented.
-		// So an iteration that acquires and then refuses has taken an image nobody can hand out again,
-		// and a standing refusal empties the set one frame at a time: on a triple-buffered output the
-		// third refusal is the last thing that output ever attempts. What that looks like on screen is a
-		// panel that goes black and stays black, and what it looks like in the log is a refusal count of
-		// three for a run of thousands — a number small enough to read as a hiccup.
-		//
-		// Holding it is not a workaround for a release verb `IPresenter` does not have. The loop *does*
-		// own this image, it will render into it on the next attempt, and the bug was only ever that it
-		// forgot. `Discard` drops it, because a target set that was invalidated took this index with it.
-		if (!output.m_Acquired)
-		{
-			output.m_Acquired = output.m_Presenter->AcquireTarget();
-		}
-
-		if (!output.m_Acquired)
-		{
-			// Decision 30's lead, bounded from the other side: an output with no free target cannot run
-			// ahead, so a double-buffered one cannot run ahead at all. Not an error, and not damage lost.
-			return;
-		}
-
-		const std::uint32_t target = *output.m_Acquired;
-		const std::span<const RenderTarget> targets = output.m_Presenter->Targets();
-
-		if (target >= targets.size())
-		{
-			// A presenter handing out an index outside the set it published is the one refusal here that is
-			// a defect rather than a limit, and it is the one that would otherwise be indistinguishable
-			// from an output that simply had nothing to draw.
-			//
-			// Dropped rather than held, unlike every refusal below it: those keep an index that is good and
-			// will be drawn into next time, and this one is an index that names nothing. Holding it would
-			// retry the same bad number forever and never ask the presenter again.
-			output.Refuse(Error{ ERANGE, "the presenter acquired a target outside the set it lists" });
-			output.m_Acquired.reset();
-
-			return;
-		}
-
-		if (target >= MaxTargets)
-		{
-			// A ring deeper than this loop carries a backlog for. Refused rather than drawn without one,
-			// because drawing it is the buffer-age bug arriving silently — a stale band on one target in
-			// the rotation, which reads as a renderer fault and is a capacity fault. Dropped for the same
-			// reason as above: the index is one this loop will never accept, so holding it retries it
-			// forever where releasing it lets the presenter offer one inside the set.
-			output.Refuse(Error{ ERANGE, "the presenter's target ring is deeper than the frame loop tracks" });
-			output.m_Acquired.reset();
-
-			return;
-		}
-
 		// Closed by hand rather than by a scope, because what the span measures is the walk and what the
 		// scope holds is its result.
 		TraceSpan evaluate{ "evaluate", output.m_Trace };
@@ -1072,10 +1017,6 @@ private:
 		(void)output.m_Cost.ObserveIrreducibleCpu(list.EvaluateCost);
 		output.m_Damage.Add(list.Damage);
 
-		// Recorded after the walk rather than before it, so an output that never reached here is still
-		// owed the frame it has not drawn.
-		output.m_Drawn = m_Held;
-
 		TraceCount("items", static_cast<std::int64_t>(list.Items.size()), output.m_Trace);
 
 		// **Decision 152's partition: which of these items the display engine draws and which the GPU
@@ -1091,17 +1032,6 @@ private:
 			TraceMark(Reason(partition.Stopped), output.m_Trace);
 		}
 
-		// **A composite always happens, and that is this loop's limitation rather than the assigner's.**
-		// A partition that promoted everything wants no render pass and no target at all, which is the
-		// arrangement the whole mechanism exists for — but the target was acquired above, before there was
-		// a list to evaluate, and `IPresenter` has no verb that gives one back. So the bottom promoted
-		// layer goes back into the composite and the GPU draws one item. What it costs is the sleeping-GPU
-		// case, and the fix is to acquire after evaluating rather than before; it is in Open.md.
-		if (!partition.NeedsComposite() && partition.Count != 0)
-		{
-			partition.Demote();
-		}
-
 		if (partition != output.m_Partition)
 		{
 			// The composite is responsible for a different part of the screen than it was last frame, and
@@ -1109,24 +1039,52 @@ private:
 			output.m_Damage.Add(PixelRect<DeviceSpace>{ {}, output.m_Configuration.Resolution });
 		}
 
+		// **The target, and only where the partition left something for the GPU to draw.** A frame whose
+		// every item promoted needs no render pass, no image out of the presenter's free set and no queue
+		// submission, which is the arrangement decision 152 exists for — see `Target` above for what this
+		// order replaced.
+		//
+		// **An empty list is not this case and the predicate has to say so.** `NeedsComposite` is
+		// `Composited != 0`, which a partition that promoted everything and a partition with nothing in it
+		// at all both answer false to — and the second still owes the screen a clear. Skipping on that
+		// spelling left a panel showing whatever was on it when the last window closed.
+		std::optional<std::uint32_t> composite{};
+
+		if (partition.NeedsComposite() || partition.Count == 0)
+		{
+			composite = Target(output);
+
+			if (!composite)
+			{
+				return;
+			}
+		}
+
 		// The layers this frame would commit, built before anything is recorded so that the hardware can
 		// be asked while there is still time to change the answer. The composite's geometry is known
 		// without drawing it — it is the whole target — and its acquire point is filled in below, after
 		// the record that produces one. A test consumes no fence, which is what makes that order legal.
-		const PixelSize<DeviceSpace> size = targets[target].Size;
-
+		//
+		// The composite goes first because the partition's promoted set is a suffix and gyro's own drawing
+		// is the bottom of it; where there is no composite the promoted layers start at zero and the
+		// lowest of them lands on the primary plane, which is what keeps the CRTC showing something.
 		std::array<PresentLayer, MaxLayers> layers{};
 		std::uint32_t count = 0;
 
-		layers[count++] = PresentLayer{
-			.Target = LayerSource{ target },
-			.Blend = BlendMode::Opaque,
-			.Acquire = SyncPoint::Immediate(),
-			.Source = { {}, { static_cast<float>(size.Width), static_cast<float>(size.Height) } },
-			.Destination = { {}, size },
-			.Damage = {},
-			.Color = output.m_Configuration.Color,
-		};
+		if (composite)
+		{
+			const PixelSize<DeviceSpace> size = output.m_Presenter->Targets()[*composite].Size;
+
+			layers[count++] = PresentLayer{
+				.Target = LayerSource{ *composite },
+				.Blend = BlendMode::Opaque,
+				.Acquire = SyncPoint::Immediate(),
+				.Source = { {}, { static_cast<float>(size.Width), static_cast<float>(size.Height) } },
+				.Destination = { {}, size },
+				.Damage = {},
+				.Color = output.m_Configuration.Color,
+			};
+		}
 
 		for (std::uint32_t promoted = 0; promoted < partition.Count; ++promoted)
 		{
@@ -1161,11 +1119,47 @@ private:
 				TraceTag(static_cast<std::uint64_t>(testable.error().Code()))
 			);
 
+			// **And the target the fallback needs, which the frame may not be holding.** A partition that
+			// promoted everything acquired nothing above, so a refusal here is the one path that discovers
+			// it wants the GPU after deciding it did not. Asked for now rather than kept in hand against
+			// the possibility: holding an image on every fully-promoted frame is the cost this order was
+			// changed to stop paying, and a free set with nothing in it means this output waits a frame
+			// rather than that it draws wrong.
+			if (!composite)
+			{
+				composite = Target(output);
+
+				if (!composite)
+				{
+					return;
+				}
+			}
+
 			partition = Partition{ .Composited = static_cast<std::uint32_t>(list.Items.size()) };
+
+			const PixelSize<DeviceSpace> size = output.m_Presenter->Targets()[*composite].Size;
+
+			layers[0] = PresentLayer{
+				.Target = LayerSource{ *composite },
+				.Blend = BlendMode::Opaque,
+				.Acquire = SyncPoint::Immediate(),
+				.Source = { {}, { static_cast<float>(size.Width), static_cast<float>(size.Height) } },
+				.Destination = { {}, size },
+				.Damage = {},
+				.Color = output.m_Configuration.Color,
+			};
+
 			count = 1;
 
 			output.m_Damage.Add(PixelRect<DeviceSpace>{ {}, output.m_Configuration.Resolution });
 		}
+
+		// **The scene this output has now drawn from**, recorded once the frame has everything it needs to
+		// draw. It sat beside the evaluator's walk while the target was taken before that walk, and it
+		// cannot stay there now: an iteration that evaluates and then finds no free image has drawn
+		// nothing, and saying otherwise leaves the output believing it is square with a scene it never
+		// put on the glass.
+		output.m_Drawn = m_Held;
 
 		output.m_Partition = partition;
 
@@ -1174,85 +1168,92 @@ private:
 		// one is a screen the GPU drew whole, and the interesting frame is the one where it climbs.
 		TraceCount("planes", static_cast<std::int64_t>(partition.Layers()), output.m_Trace);
 
-		// The buffer-age join, and it is built after the evaluator has contributed so that this frame's
-		// own damage is in it. A copy rather than a reference because `RecordRequest` takes the region by
-		// value and the loop must not hand a target's backlog somewhere it could be cleared from — and it
-		// is a fixed-size array of rectangles on the stack, which is what decision 36 asks of it.
-		Region<DeviceSpace> stale = output.m_Damage;
-		stale.Add(output.m_Backlog[target]);
-
-		const RecordRequest request{ .Target = target,
-			                         .Mode = decision.Mode(),
-			                         .Trace = output.m_TraceGpu,
-			                         .Frame = decision.Sequence,
-			                         .CostGeneration = output.m_Cost.Generation(),
-			                         // Decision 142's hint, and the translation of one sentinel into
-			                         // another: an unscheduled clock has no instant to name, and the
-			                         // seam says so as the epoch because Seam/Renderer.h may not reach
-			                         // in here for `FrameClock`'s spelling of the same nothing.
-			                         .Deadline =
-			                             decision.Deadline == FrameClock::Unscheduled ? Instant{} : decision.Deadline,
-			                         .Damage = stale,
-			                         // The prefix, which is the whole list wherever nothing was promoted.
-			                         // The suffix is on planes and the composite must not draw it twice — an
-			                         // item drawn under an opaque plane is invisible, and one drawn under a
-			                         // plane the driver later refuses is a window in two places.
-			                         .Items = list.Items.first(partition.Composited) };
-
-		TraceSpan record{ "record", output.m_Trace };
-
-		const Result<Submission> submission = output.m_Renderer->Record(request);
-
-		record.Close();
-
-		if (!submission)
+		// **The GPU's whole half, skipped where the display engine took every item.** No backlog join, no
+		// record and no submission: the promoted layers carry their own images and their own acquire points,
+		// so a fully-promoted frame commits what the assigner built and nothing draws. This is the branch
+		// decision 152 exists for, and what it saves is a composite per refresh on a panel that needed none.
+		if (composite)
 		{
-			// **Named by the refusal's own sentence rather than by the word `refused`**, which is a mark
-			// that says a frame was thrown away and never why. A capture with fifty of them in it left a
-			// reader to guess between every branch that can decline, and the guessing was the whole cost:
-			// a refusal is almost always a standing condition, so the one thing worth knowing is which
-			// one, and that is a word this frame already has in its hand. Core/Result.h's sentence is a
-			// literal with static storage, so the ring takes the pointer and copies nothing — legal
-			// inside the frame section for the same reason every other mark is.
-			//
-			// **And the code beside it, because a sentence does not always choose one.** The first version
-			// left the errno out on the argument that a reader holding the words has more than a number
-			// would tell them, which is true of every refusal gyro authors — those sentences name their
-			// own branch and the code is redundant. It is false of a refusal that is a *syscall's*: the
-			// sentence names the call and the code names the failure, so `committing a page flip` reads
-			// identically whether the kernel meant *the previous flip is still retiring, come back* or
-			// *this atomic request is malformed*. Those are opposite stories, and a capture with
-			// twenty-seven of them in it could not tell them apart.
-			//
-			// A `TraceTag` rather than a `TraceAttribute`: an attribute binds to the slice open on its row
-			// and Trace/Perfetto.cpp's walk ends that eligibility at anything which is not a `Begin`, so
-			// one emitted beside a mark binds to nothing and is dropped. The tag is printed into the name
-			// and joined to nothing, which is what a code wants — it is read at a glance rather than
-			// clicked, and it is not an identity anything else in the picture counts by.
-			TraceMark(
-				submission.error().Sentence(),
-				output.m_Trace,
-				TraceTag(static_cast<std::uint64_t>(submission.error().Code()))
-			);
+			// The buffer-age join, and it is built after the evaluator has contributed so that this frame's
+			// own damage is in it. A copy rather than a reference because `RecordRequest` takes the region by
+			// value and the loop must not hand a target's backlog somewhere it could be cleared from — and it
+			// is a fixed-size array of rectangles on the stack, which is what decision 36 asks of it.
+			Region<DeviceSpace> stale = output.m_Damage;
+			stale.Add(output.m_Backlog[*composite]);
 
-			// Seam/Renderer.h's *an item the renderer cannot express* arriving: the draw list held
-			// something this backend refuses to draw wrong, so it drew none of it. The reason is the
-			// renderer's own words and this is the only place they exist.
-			output.Refuse(submission.error());
+			const RecordRequest request{ .Target = *composite,
+				                         .Mode = decision.Mode(),
+				                         .Trace = output.m_TraceGpu,
+				                         .Frame = decision.Sequence,
+				                         .CostGeneration = output.m_Cost.Generation(),
+				                         // Decision 142's hint, and the translation of one sentinel into
+				                         // another: an unscheduled clock has no instant to name, and the
+				                         // seam says so as the epoch because Seam/Renderer.h may not reach
+				                         // in here for `FrameClock`'s spelling of the same nothing.
+				                         .Deadline = decision.Deadline == FrameClock::Unscheduled ? Instant{} :
+				                                                                                    decision.Deadline,
+				                         .Damage = stale,
+				                         // The prefix, which is the whole list wherever nothing was promoted.
+				                         // The suffix is on planes and the composite must not draw it twice — an
+				                         // item drawn under an opaque plane is invisible, and one drawn under a
+				                         // plane the driver later refuses is a window in two places.
+				                         .Items = list.Items.first(partition.Composited) };
 
-			return;
+			TraceSpan record{ "record", output.m_Trace };
+
+			const Result<Submission> submission = output.m_Renderer->Record(request);
+
+			record.Close();
+
+			if (!submission)
+			{
+				// **Named by the refusal's own sentence rather than by the word `refused`**, which is a mark
+				// that says a frame was thrown away and never why. A capture with fifty of them in it left a
+				// reader to guess between every branch that can decline, and the guessing was the whole cost:
+				// a refusal is almost always a standing condition, so the one thing worth knowing is which
+				// one, and that is a word this frame already has in its hand. Core/Result.h's sentence is a
+				// literal with static storage, so the ring takes the pointer and copies nothing — legal
+				// inside the frame section for the same reason every other mark is.
+				//
+				// **And the code beside it, because a sentence does not always choose one.** The first version
+				// left the errno out on the argument that a reader holding the words has more than a number
+				// would tell them, which is true of every refusal gyro authors — those sentences name their
+				// own branch and the code is redundant. It is false of a refusal that is a *syscall's*: the
+				// sentence names the call and the code names the failure, so `committing a page flip` reads
+				// identically whether the kernel meant *the previous flip is still retiring, come back* or
+				// *this atomic request is malformed*. Those are opposite stories, and a capture with
+				// twenty-seven of them in it could not tell them apart.
+				//
+				// A `TraceTag` rather than a `TraceAttribute`: an attribute binds to the slice open on its row
+				// and Trace/Perfetto.cpp's walk ends that eligibility at anything which is not a `Begin`, so
+				// one emitted beside a mark binds to nothing and is dropped. The tag is printed into the name
+				// and joined to nothing, which is what a code wants — it is read at a glance rather than
+				// clicked, and it is not an identity anything else in the picture counts by.
+				TraceMark(
+					submission.error().Sentence(),
+					output.m_Trace,
+					TraceTag(static_cast<std::uint64_t>(submission.error().Code()))
+				);
+
+				// Seam/Renderer.h's *an item the renderer cannot express* arriving: the draw list held
+				// something this backend refuses to draw wrong, so it drew none of it. The reason is the
+				// renderer's own words and this is the only place they exist.
+				output.Refuse(submission.error());
+
+				return;
+			}
+
+			// The device is busy from here whatever happens to the present, so the next output on this queue
+			// starts from the new figure even if the flip below is refused.
+			free = decision.DeviceFreeAt;
+			(void)output.m_Cost.ObserveCpu(decision.Mode(), submission->RecordCost);
+
+			// What the record produced, filled into the layer the test was run against rather than a second
+			// one built here: committing a partition assembled differently from the one the hardware accepted
+			// asks a different question of it.
+			layers[0].Acquire = submission->Point;
+			layers[0].Damage = output.m_Damage;
 		}
-
-		// The device is busy from here whatever happens to the present, so the next output on this queue
-		// starts from the new figure even if the flip below is refused.
-		free = decision.DeviceFreeAt;
-		(void)output.m_Cost.ObserveCpu(decision.Mode(), submission->RecordCost);
-
-		// What the record produced, filled into the layer the test was run against rather than a second
-		// one built here: committing a partition assembled differently from the one the hardware accepted
-		// asks a different question of it.
-		layers[0].Acquire = submission->Point;
-		layers[0].Damage = output.m_Damage;
 
 		{
 			const TraceSpan present{ "present", output.m_Trace };
@@ -1324,14 +1325,94 @@ private:
 		// it. Before the clear below, because the region being folded is the one being cleared.
 		for (std::size_t other = 0; other < MaxTargets; ++other)
 		{
-			if (other != target)
+			if (!composite || other != *composite)
 			{
 				output.m_Backlog[other].Add(output.m_Damage);
 			}
 		}
 
-		output.m_Backlog[target].Clear();
+		// **Every target owes this frame where none of them drew it.** A fully-promoted frame changed the
+		// screen without touching an image in the ring, so there is nothing to mark complete and the debt
+		// goes to all of them — which is what makes the composite that eventually happens repaint the part
+		// the planes had been covering.
+		if (composite)
+		{
+			output.m_Backlog[*composite].Clear();
+		}
+
 		output.m_Damage.Clear();
+	}
+
+	// The target this frame will composite into, taken from the presenter's free set.
+	//
+	// **Asked for only where a composite is going to happen, which is the whole of decision 152's
+	// sleeping-GPU case.** This used to run before the scene was evaluated, so a frame whose every item
+	// went on a plane was still holding an image it had no use for and no way to give back — and the
+	// loop's answer was to hand the bottom layer back to the composite and draw it. That cost the
+	// arrangement the mechanism exists for: a fullscreen window under nothing, or under a pointer, with
+	// the GPU asleep. It also hid the measurement, because the layer handed back is the bottom of the
+	// suffix and so the *window* never reached `IPresenter::TestLayers` at all.
+	//
+	// **Acquired once and held until it is presented, which reads as an omission until you follow the
+	// other path out of here.** This takes a target *out* of the presenter's free set, and the only way
+	// one goes back is by being presented. So an iteration that acquires and then refuses has taken an
+	// image nobody can hand out again, and a standing refusal empties the set one frame at a time: on a
+	// triple-buffered output the third refusal is the last thing that output ever attempts. What that
+	// looks like on screen is a panel that goes black and stays black, and what it looks like in the log
+	// is a refusal count of three for a run of thousands — a number small enough to read as a hiccup.
+	//
+	// Holding it is not a workaround for a release verb `IPresenter` does not have. The loop *does* own
+	// this image, it will render into it on the next attempt, and the bug was only ever that it forgot.
+	// `Discard` drops it, because a target set that was invalidated took this index with it.
+	//
+	// Nothing is an ordinary answer and the caller's response is to leave this output for the next
+	// iteration, which is why the two defects below are refused here rather than reported: all three
+	// exits mean the same thing to a step that cannot draw.
+	[[nodiscard]] std::optional<std::uint32_t> Target(FrameOutput& output) noexcept
+	{
+		if (!output.m_Acquired)
+		{
+			output.m_Acquired = output.m_Presenter->AcquireTarget();
+		}
+
+		if (!output.m_Acquired)
+		{
+			// Decision 30's lead, bounded from the other side: an output with no free target cannot run
+			// ahead, so a double-buffered one cannot run ahead at all. Not an error, and not damage lost.
+			return std::nullopt;
+		}
+
+		const std::uint32_t target = *output.m_Acquired;
+
+		if (target >= output.m_Presenter->Targets().size())
+		{
+			// A presenter handing out an index outside the set it published is the one refusal here that is
+			// a defect rather than a limit, and it is the one that would otherwise be indistinguishable
+			// from an output that simply had nothing to draw.
+			//
+			// Dropped rather than held, unlike every refusal below it: those keep an index that is good and
+			// will be drawn into next time, and this one is an index that names nothing. Holding it would
+			// retry the same bad number forever and never ask the presenter again.
+			output.Refuse(Error{ ERANGE, "the presenter acquired a target outside the set it lists" });
+			output.m_Acquired.reset();
+
+			return std::nullopt;
+		}
+
+		if (target >= MaxTargets)
+		{
+			// A ring deeper than this loop carries a backlog for. Refused rather than drawn without one,
+			// because drawing it is the buffer-age bug arriving silently — a stale band on one target in
+			// the rotation, which reads as a renderer fault and is a capacity fault. Dropped for the same
+			// reason as above: the index is one this loop will never accept, so holding it retries it
+			// forever where releasing it lets the presenter offer one inside the set.
+			output.Refuse(Error{ ERANGE, "the presenter's target ring is deeper than the frame loop tracks" });
+			output.m_Acquired.reset();
+
+			return std::nullopt;
+		}
+
+		return target;
 	}
 
 	// Whether this output is owed the frame `Assess` says it could make.

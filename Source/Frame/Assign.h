@@ -90,7 +90,7 @@ struct Partition
 	// the top `Count` of the list in the same order, so the index of every one of them is `Composited`
 	// plus its position — see `ItemIndexForPromoted`. An array of those indices was here and held, in
 	// every reachable state, exactly that sum; what it bought was a second copy of the boundary to get
-	// out of step with the first, which is what `Demote` did.
+	// out of step with the first, which is what the demotion this type used to carry did.
 	std::uint32_t Count = 0;
 
 	// How many items are left for the GPU: the prefix `[0, Composited)` of the list.
@@ -115,23 +115,6 @@ struct Partition
 	[[nodiscard]] constexpr std::uint32_t ItemIndexForPromoted(std::uint32_t slot) const noexcept
 	{
 		return Composited + slot;
-	}
-
-	// Hand the bottom promoted layer back to the composite.
-	//
-	// **A verb because the two counters are one boundary and moving one of them is always a bug.** An
-	// item does not leave the promoted set so much as cross from one side of `Composited` to the other,
-	// so both numbers move or neither does: `--Count` alone drops a layer off the top of the screen, and
-	// `++Composited` alone draws the bottom one twice, once by the GPU and once on a plane over it.
-	constexpr void Demote() noexcept
-	{
-		if (Count == 0)
-		{
-			return;
-		}
-
-		--Count;
-		++Composited;
 	}
 
 	// The layers a presenter is handed: the composite where there is one, then the promoted items.

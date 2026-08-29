@@ -1245,6 +1245,16 @@ rather than an oversight.
   a frame that turned out to need no target has already taken one. The fix is to evaluate first and
   acquire only where the partition says a composite happens, which moves the buffer-age join and the
   damage backlog with it — worth doing once there is a client that can actually promote.
+
+  **Answered by [decision 157](Decisions.md#157-the-frame-loop-acquires-a-target-only-where-the-partition-says-a-composite-happens),
+  and it turned out to be blocking rather than worth doing later.** *(2026-08-29.)* The demotion hands
+  back the *bottom* of the promoted suffix, which on a screen with one window and a pointer over it is
+  the window — so the window was never in a set `IPresenter::TestLayers` was asked about, and a trace
+  taken to find out why nothing promoted could only ever report on the cursor. The reorder is what the
+  entry said it was: evaluate, partition, and acquire under `NeedsComposite()`. What it did not
+  anticipate is that an empty draw list answers that predicate the same way a fully promoted one does
+  and still owes the screen a clear, and that a fully promoted frame the driver then refuses has to ask
+  for a target late.
 - **Damaging only what changed sides.** A partition that differs from the last frame's repaints the
   whole output, because a composite that stopped drawing a window has to repaint where it was and
   nothing in the *scene* says so. The tight answer is the union of the quads that crossed the

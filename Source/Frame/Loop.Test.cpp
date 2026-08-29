@@ -1829,7 +1829,12 @@ GYRO_TEST(FrameLoop, ARefusedPartitionCompositesTheWholeFrame)
 	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 1 });
 }
 
-GYRO_TEST(FrameLoop, AllPromotableStillLeavesTheGpuOneItem)
+// **The arrangement the whole mechanism exists for: every item on a plane and the GPU asleep.** The
+// loop could not take it for as long as it acquired a target before it had a list to partition — there
+// is no verb that hands one back, so the bottom promoted layer went into a composite nobody needed and
+// the render pass was paid for anyway. Asserted as *nothing recorded* rather than as a layer count,
+// because the layer count was right the whole time it was wrong.
+GYRO_TEST(FrameLoop, AllPromotableLeavesTheGpuAsleep)
 {
 	Harness harness;
 	const std::array<DrawItem, 1> items{ Promotable({ {}, { 2560, 1440 } }) };
@@ -1843,21 +1848,21 @@ GYRO_TEST(FrameLoop, AllPromotableStillLeavesTheGpuOneItem)
 
 	(void)harness.Loop.Step();
 
-	// The arrangement the mechanism exists for — every item on a plane and the GPU asleep — is the one
-	// this loop cannot take yet, because the target was acquired before there was a list to partition
-	// and no presenter can be handed one back. So the item is composited and the promotion is dropped,
-	// which is a correct picture at the cost of the render pass. See the comment beside `m_Partition`.
-	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 1 });
+	GYRO_CHECK_EQ(harness.Renderer.Records, 0);
 	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 1 });
+
+	// And no image was taken to draw into, which is the half a layer count cannot show: a frame that
+	// acquires a target it never records into is one the presenter cannot hand out again.
+	GYRO_CHECK_EQ(harness.Presenter.Held(), std::uint32_t{ 0 });
 }
 
-// **The demotion above with something under it, which is where it used to lose a layer.** Two
-// promotable items — a window with the pointer over it — promote whole, so the composite is handed the
-// bottom one back. The promoted set is a suffix addressed from where the composite ends, so moving that
-// boundary without rebuilding the indices promoted the *window* a second time and dropped the pointer
-// on the floor: a person opens a calculator and their cursor disappears. It is asserted as which item
-// reached the plane rather than as a count, because both spellings of the bug keep the count at one.
-GYRO_TEST(FrameLoop, TheDemotedLayerIsTheBottomOneAndTheRestKeepTheirIndices)
+// **The same with something under it, which is where the layer indices are load-bearing.** Two
+// promotable items — a window with the pointer over it — promote whole, and the promoted set is a
+// suffix addressed from where the composite ends, so reading it as `list.Items[slot]` hands the plane
+// the window twice and drops the pointer on the floor: a person opens a calculator and their cursor
+// disappears. Asserted as which item reached which plane rather than as a count, because both spellings
+// of that bug keep the count at two.
+GYRO_TEST(FrameLoop, EveryPromotedLayerKeepsItsPlaceInTheList)
 {
 	Harness harness;
 	const std::array<DrawItem, 2> items{ Promotable({ {}, { 2560, 1440 } }), Promotable({ { 100, 100 }, { 24, 24 } }) };
@@ -1871,11 +1876,34 @@ GYRO_TEST(FrameLoop, TheDemotedLayerIsTheBottomOneAndTheRestKeepTheirIndices)
 
 	(void)harness.Loop.Step();
 
-	// The window is the composite and the pointer is the plane, which is the whole arrangement: one item
-	// recorded, one layer promoted, and the promoted one is the item on top.
-	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 1 });
+	GYRO_CHECK_EQ(harness.Renderer.Records, 0);
 	GYRO_REQUIRE_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers[0].Destination, (PixelRect<DeviceSpace>{ {}, { 2560, 1440 } }));
 	GYRO_CHECK_EQ(
 		harness.Presenter.PresentedLayers[1].Destination, (PixelRect<DeviceSpace>{ { 100, 100 }, { 24, 24 } })
 	);
+}
+
+// **The one path this order created: a frame that decided it did not want the GPU and then found out it
+// did.** Nothing was acquired, because everything promoted — and then the driver refused the proposal,
+// so the fallback is a full composite with no image to draw it into. The target has to be asked for
+// late or the screen keeps whatever the last flip put on it. Held rather than eagerly taken on every
+// promoted frame, which is the cost this whole ordering exists to stop paying.
+GYRO_TEST(FrameLoop, AFullyPromotedFrameTheDriverRefusesStillFindsATarget)
+{
+	Harness harness;
+	const std::array<DrawItem, 1> items{ Promotable({ {}, { 2560, 1440 } }) };
+
+	harness.Presenter.Planes = 2;
+	harness.Presenter.RefuseTest = true;
+	harness.Evaluator.Items = items;
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 1 });
+	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 1 });
 }
