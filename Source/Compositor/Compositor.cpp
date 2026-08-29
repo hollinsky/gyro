@@ -25,6 +25,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "Blit/Blit.h"
 #include "Compositor/RealTime.h"
@@ -1061,13 +1062,97 @@ public:
 		return next;
 	}
 
+	// Which connector each request is about, resolved once against the card the run actually found.
+	//
+	// **Named requests claim their connector and the rest fill in around them**, which is the rule that
+	// leaves an ordinary run untouched: with nothing named this is the identity and the binding is the
+	// enumeration order it has always been. A named one is taken out of the pool first, so
+	// `--output=DP-7:...` alone drives the dock and leaves the lid dark, and a name the card does not
+	// have is refused here rather than silently falling back to whatever was next — a person who
+	// mistypes a connector wants to be told, not handed the wrong panel.
+	[[nodiscard]] Result<void> Select(std::span<const OutputRequest> requests)
+	{
+		const std::span<const Drm::Pipeline> pipelines = m_Card->Pipelines();
+
+		m_Order.assign(requests.size(), pipelines.size());
+
+		std::vector<bool> claimed(pipelines.size(), false);
+
+		for (std::size_t index = 0; index < requests.size(); ++index)
+		{
+			if (requests[index].Connector.empty())
+			{
+				continue;
+			}
+
+			const auto found = std::ranges::find(pipelines, requests[index].Connector, &Drm::Pipeline::Name);
+
+			if (found == pipelines.end())
+			{
+				std::string names;
+
+				for (const Drm::Pipeline& pipeline : pipelines)
+				{
+					names += names.empty() ? pipeline.Name : ", " + pipeline.Name;
+				}
+
+				spdlog::error(
+					"--output names {}, and this device has {}",
+					requests[index].Connector,
+					names.empty() ? std::string{ "nothing connected" } : names
+				);
+
+				return Failure(ENODEV, "--output names a connector this device does not have");
+			}
+
+			const std::size_t pipeline = static_cast<std::size_t>(found - pipelines.begin());
+
+			if (claimed[pipeline])
+			{
+				return Failure(EINVAL, "--output names one connector twice");
+			}
+
+			claimed[pipeline] = true;
+			m_Order[index] = pipeline;
+		}
+
+		// The unnamed ones, in order, over what is left. Positional among themselves for the reason the
+		// request field gives: one monitor should not have to be named to be driven.
+		std::size_t next = 0;
+
+		for (std::size_t index = 0; index < requests.size(); ++index)
+		{
+			if (m_Order[index] != pipelines.size())
+			{
+				continue;
+			}
+
+			while (next < pipelines.size() && claimed[next])
+			{
+				++next;
+			}
+
+			if (next == pipelines.size())
+			{
+				return Failure(ENOSPC, "more outputs than this device has connected");
+			}
+
+			claimed[next] = true;
+			m_Order[index] = next;
+		}
+
+		return {};
+	}
+
 	[[nodiscard]] Result<void>
 	Build(std::size_t index, const OutputConfiguration& wanted, const OutputPlan&, BoundOutput& into) override
 	{
-		if (index >= m_Card->Pipelines().size())
+		if (index >= m_Order.size() || m_Order[index] >= m_Card->Pipelines().size())
 		{
 			return Failure(ENOSPC, "more outputs than this device has connected");
 		}
+
+		const Drm::Pipeline& pipeline = m_Card->Pipelines()[m_Order[index]];
 
 		auto renderer = std::make_unique<VulkanRenderer>(*m_Clock, m_Device, *m_Textures);
 
@@ -1076,10 +1161,9 @@ public:
 		// one chosen for a negotiation that never happens.
 		const std::uint32_t code = wanted.Format.IsValid() ? wanted.Format.Code : FormatXrgb8888;
 		const std::array<IDmabufAllocator*, 2> chain{ &*m_Allocator, &*m_Dumb };
-		IDmabufAllocator& allocator =
-			ChooseAllocator(chain, code, Drm::ModifiersFor(m_Card->Pipelines()[index].Primary().Formats, code));
+		IDmabufAllocator& allocator = ChooseAllocator(chain, code, Drm::ModifiersFor(pipeline.Primary().Formats, code));
 
-		auto panel = std::make_unique<Drm::DrmOutput>(*m_Card, m_Card->Pipelines()[index], allocator, renderer.get());
+		auto panel = std::make_unique<Drm::DrmOutput>(*m_Card, pipeline, allocator, renderer.get());
 
 		if (const Result<void> opened = panel->Open(wanted); !opened)
 		{
@@ -1088,7 +1172,7 @@ public:
 
 		spdlog::info(
 			"  {}: {} on {}, targets from the {}",
-			m_Card->Pipelines()[index].Name,
+			pipeline.Name,
 			panel->Configuration(),
 			panel->IsExplicitlySynchronized() ? "an in-fence" : "a held commit",
 			allocator.Name()
@@ -1101,7 +1185,7 @@ public:
 		std::uint32_t overlays = 0;
 		std::uint32_t cursors = 0;
 
-		for (const Drm::Plane& plane : m_Card->Pipelines()[index].Planes)
+		for (const Drm::Plane& plane : pipeline.Planes)
 		{
 			switch (plane.Kind)
 			{
@@ -1119,7 +1203,7 @@ public:
 
 		spdlog::info(
 			"    holds {} plane(s): {} primary, {} overlay, {} cursor",
-			m_Card->Pipelines()[index].Planes.size(),
+			pipeline.Planes.size(),
 			primaries,
 			overlays,
 			cursors
@@ -1160,6 +1244,11 @@ private:
 	// Declared before the rendering device, so it is destroyed after it: an output holds framebuffers
 	// over descriptors the device exported, and `drmModeRmFB` has to run while both still exist.
 	std::unique_ptr<Drm::DrmDevice> m_Card;
+
+	// Output index to pipeline index, from `Select`. Empty until then, which `Build` reads as *nothing
+	// has been chosen* rather than as *the identity* — a backend built without the requests in hand has
+	// no business guessing which panel an output meant.
+	std::vector<std::size_t> m_Order;
 
 	VulkanDevice m_Device;
 	std::optional<VulkanAllocator> m_Allocator;
@@ -1803,6 +1892,14 @@ private:
 				if (const Result<void> opened = drm->Open(m_Options.Device); !opened)
 				{
 					return opened;
+				}
+
+				// After `Open` because it resolves names against the connectors the card actually has,
+				// and before anything is built because `Build` is handed an output index and this is what
+				// that index means.
+				if (const Result<void> chosen = drm->Select(m_Options.Requested()); !chosen)
+				{
+					return chosen;
 				}
 
 				m_Backend = std::move(drm);

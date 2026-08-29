@@ -61,6 +61,46 @@ GYRO_TEST(Options, AFullSpecNamesBothHalves)
 	GYRO_CHECK(options->Requested()[0].Refresh == 144.0);
 }
 
+// A connector names the panel a request is about, and the rest of the spec keeps working around it.
+// The empty name is load-bearing: it is what every request carried before the field existed, and the
+// backend reads it as *the next connector nothing has claimed*.
+GYRO_TEST(Options, AConnectorNamesWhichPanelARequestIsAbout)
+{
+	const Result<Options> full = Parse({ "--output=DP-7:2560x1440@144" });
+
+	GYRO_REQUIRE(full.has_value());
+	GYRO_CHECK_EQ(full->Requested()[0].Connector, std::string{ "DP-7" });
+	GYRO_CHECK_EQ(full->Requested()[0].Width, std::int64_t{ 2560 });
+	GYRO_CHECK(full->Requested()[0].Refresh == 144.0);
+
+	// A name on its own, which is the form somebody with a docked laptop types.
+	const Result<Options> bare = Parse({ "--output=eDP-1" });
+
+	GYRO_REQUIRE(bare.has_value());
+	GYRO_CHECK_EQ(bare->Requested()[0].Connector, std::string{ "eDP-1" });
+	GYRO_CHECK_EQ(bare->Requested()[0].Width, std::int64_t{ 1920 });
+
+	// A name with a refresh and no resolution, since both halves after the colon stay optional.
+	const Result<Options> rate = Parse({ "--output=HDMI-A-1:75" });
+
+	GYRO_REQUIRE(rate.has_value());
+	GYRO_CHECK_EQ(rate->Requested()[0].Connector, std::string{ "HDMI-A-1" });
+	GYRO_CHECK(rate->Requested()[0].Refresh == 75.0);
+
+	// Unnamed stays unnamed rather than acquiring a default, because the backend distinguishes them.
+	const Result<Options> unnamed = Parse({ "--output=144" });
+
+	GYRO_REQUIRE(unnamed.has_value());
+	GYRO_CHECK(unnamed->Requested()[0].Connector.empty());
+
+	GYRO_CHECK(!Parse({ "--output=:1920x1080" }).has_value());
+
+	// A hyphen is what makes it a name, which is what keeps `x900` a malformed spec rather than a panel.
+	GYRO_CHECK(!Parse({ "--output=x900" }).has_value());
+	GYRO_CHECK(!Parse({ "--output=nothyphenated:60" }).has_value());
+	GYRO_CHECK(!Parse({ "--output=DP-7:1920x" }).has_value());
+}
+
 GYRO_TEST(Options, BareOutputIsTheDefaultPanel)
 {
 	const Result<Options> options = Parse({ "--output", "--output" });

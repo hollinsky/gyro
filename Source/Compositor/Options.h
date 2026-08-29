@@ -61,6 +61,18 @@ enum class BackendKind : std::uint8_t
 // One output as the command line asked for it, before anything has been asked whether it can be had.
 struct OutputRequest
 {
+	// Which panel this is about, as the kernel names the connector — `eDP-1`, `DP-7`, `HDMI-A-1`.
+	// Empty is *the next one that nothing has claimed*, which is what every request was before this
+	// field existed and what an ordinary run still means.
+	//
+	// **A name because the position is the kernel's rather than a person's.** Requests bind to
+	// connectors in the order the card enumerates them, so on a laptop the internal panel is always
+	// first and there was no way to say *drive the dock and not the lid* — the one arrangement
+	// somebody with a docked laptop asks for by name. Positional order is kept for the requests that
+	// do not name anything, because a person with one monitor should not have to learn what it is
+	// called.
+	std::string Connector;
+
 	std::int64_t Width = 1920;
 	std::int64_t Height = 1080;
 
@@ -265,9 +277,24 @@ namespace Detail
 	return result.ec == std::errc{} && result.ptr == last;
 }
 
-// `WIDTHxHEIGHT@REFRESH`, with every part optional and the whole of it optional too. `--output` alone
-// is 1920x1080 at 60, `--output=144` is that resolution at 144 Hz, and `--output=2560x1440@144` is
-// what somebody with the panel in front of them writes.
+// `CONNECTOR:WIDTHxHEIGHT@REFRESH`, with every part optional and the whole of it optional too.
+// `--output` alone is 1920x1080 at 60, `--output=144` is that resolution at 144 Hz,
+// `--output=2560x1440@144` is what somebody with the panel in front of them writes, and
+// `--output=DP-7` is what somebody with two of them writes when only one is the subject.
+//
+// A connector as the kernel spells one: a type and an index joined by a hyphen. **The shape is the
+// test rather than the leading letter**, because the colon is optional — `--output=DP-7` names a
+// panel and says nothing else, so there is no separator to find, and a rule that took any leading
+// letter would read the malformed `x900` as a monitor nobody has instead of refusing it. This is
+// `Drm/Device.cpp`'s `ConnectorName` read backwards, which is the only definition either side has.
+[[nodiscard]] inline constexpr bool IsConnectorName(std::string_view text) noexcept
+{
+	const bool letter =
+		!text.empty() && ((text.front() >= 'a' && text.front() <= 'z') || (text.front() >= 'A' && text.front() <= 'Z'));
+
+	return letter && text.find('-') != std::string_view::npos;
+}
+
 [[nodiscard]] inline Result<OutputRequest> ParseOutput(std::string_view text)
 {
 	OutputRequest request{};
@@ -275,6 +302,31 @@ namespace Detail
 	if (text.empty())
 	{
 		return request;
+	}
+
+	const std::size_t colon = text.find(':');
+
+	if (IsConnectorName(text.substr(0, colon)))
+	{
+		request.Connector.assign(text.substr(0, colon));
+
+		// A name on its own is the whole request, and it means this connector at whatever mode the
+		// chooser settles on — which is the same answer a resolution the panel cannot offer already gets.
+		if (colon == std::string_view::npos)
+		{
+			return request;
+		}
+
+		text = text.substr(colon + 1);
+
+		if (text.empty())
+		{
+			return request;
+		}
+	}
+	else if (colon != std::string_view::npos)
+	{
+		return Failure(EINVAL, "--output wants a connector name as TYPE-N before the colon");
 	}
 
 	std::string_view geometry = text;
