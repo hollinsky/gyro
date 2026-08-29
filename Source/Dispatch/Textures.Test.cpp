@@ -13,6 +13,7 @@
 #include "Core/Texture.h"
 #include "Geometry/Space.h"
 #include "Scene/Textures.h"
+#include "Seam/Allocator.h"
 #include "Seam/Importer.h"
 #include "Seam/Scanout.h"
 #include "Testing/Test.h"
@@ -376,8 +377,10 @@ GYRO_TEST(Textures, AScanoutRefusalLeavesTheImageDrawableEverywhereElse)
 	GYRO_CHECK(importer.Holds(*adopted));
 }
 
-// A mapped buffer is never offered: there is nothing in gyro's own heap a display engine could scan
-// out of, and offering one would be an ioctl per `wl_shm` commit for an answer that is always no.
+// A mapped buffer is never offered *where there is nothing to put it in*: gyro's own heap holds
+// nothing a display engine could scan out of, and offering one would be an ioctl per `wl_shm` commit
+// for an answer that is always no. With an allocator behind it the bytes stop being mapped before they
+// get here, which is the test below.
 GYRO_TEST(Textures, MappedPixelsAreNeverOfferedToTheDisplayEngine)
 {
 	FakeImporter importer;
@@ -463,4 +466,167 @@ GYRO_TEST(Textures, AbandonDropsTheNotificationAndLeavesTheIdAlone)
 	registry.Reclaim(3);
 
 	GYRO_CHECK_EQ(registry.Live(), std::uint32_t{ 0 });
+}
+
+namespace
+{
+// A provider that maps what it allocates, standing in for the DRM dumb buffer — the one allocation on
+// a card whose purpose is software drawing that hardware scans out.
+//
+// The pitch is deliberately wider than the image. A real display engine fetches in a width of its own
+// choosing and a dumb buffer comes back with the pitch the kernel picked, so an authored image copied
+// row by row and one copied as a block differ on every machine but the developer's.
+class FakeAllocator final : public IDmabufAllocator
+{
+public:
+	[[nodiscard]] Result<DmabufBuffer>
+	Allocate(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t> modifiers) override
+	{
+		if (!FirstSupported(*this, code, modifiers).IsValid())
+		{
+			return Failure(EINVAL, "this provider does linear and nothing else");
+		}
+
+		Pitch = static_cast<std::uint32_t>(size.Width) * 4U + Padding;
+
+		const std::size_t length = static_cast<std::size_t>(Pitch) * static_cast<std::size_t>(size.Height);
+
+		Fd descriptor = MakeDescriptor(length);
+
+		if (!descriptor.IsValid())
+		{
+			return Failure(ENOMEM, "no memory for a fake allocation");
+		}
+
+		void* const pixels = ::mmap(nullptr, length, PROT_READ | PROT_WRITE, MAP_SHARED, descriptor.Borrow().Value, 0);
+
+		if (pixels == MAP_FAILED)
+		{
+			return Failure(ENOMEM, "a fake allocation that could not be mapped");
+		}
+
+		++Allocations;
+
+		// A second handle on the same pages, so a test can read back what was written into them after the
+		// registry has finished with the buffer and let it go.
+		Witness = Duplicate(descriptor.Borrow());
+		Length = length;
+
+		return DmabufBuffer{ std::move(descriptor),
+			                 size,
+			                 PixelFormat{ .Code = code, .Modifier = ModifierLinear },
+			                 Pitch,
+			                 Mapping{ static_cast<std::byte*>(pixels), length } };
+	}
+
+	[[nodiscard]] bool Supports(PixelFormat format) const noexcept override
+	{
+		return format.Modifier == ModifierLinear;
+	}
+
+	[[nodiscard]] std::string_view Name() const noexcept override { return "fake"; }
+
+	// What the allocation holds, read back through `Witness`. Empty where nothing was allocated.
+	[[nodiscard]] std::span<const std::byte> Wrote() const noexcept
+	{
+		if (!Witness.IsValid())
+		{
+			return {};
+		}
+
+		void* const pixels = ::mmap(nullptr, Length, PROT_READ, MAP_SHARED, Witness.Borrow().Value, 0);
+
+		return pixels == MAP_FAILED ? std::span<const std::byte>{} :
+		                              std::span<const std::byte>{ static_cast<const std::byte*>(pixels), Length };
+	}
+
+	std::uint32_t Padding = 64;
+	std::uint32_t Pitch = 0;
+	std::size_t Allocations = 0;
+	Fd Witness;
+	std::size_t Length = 0;
+};
+} // namespace
+
+// **The whole of the cursor's problem, and it is not the cursor's.** Everything gyro draws for itself
+// arrived as heap memory and so could never be scanned out, which on a screen with a pointer over a
+// window took the *window* off its plane too — the promoted set is a suffix, so an unscannable top
+// item refuses everything under it. An author still hands over bytes and says what the top one means;
+// where the machine has somewhere to put them, they land in an allocation a display engine can read.
+GYRO_TEST(Textures, AnAuthoredImageGoesWhereADisplayEngineCanReadIt)
+{
+	FakeImporter importer;
+	FakeScanout scanout;
+	FakeAllocator allocator;
+	std::array<ITextureImporter*, 1> importers{ &importer };
+	TextureRegistry registry{ importers, {}, &scanout, &allocator };
+
+	std::array<std::byte, 4U * 4U * 4U> pixels{};
+
+	pixels[0] = std::byte{ 0xAB };
+	// The first texel of the second row, which is where a copy that ignored the allocator's pitch would
+	// put the byte above instead.
+	pixels[16] = std::byte{ 0xCD };
+
+	const Result<TextureId> adopted =
+		registry.Adopt(PixelSize<BufferSpace>{ 4, 4 }, 16, pixels, TextureAlpha::Premultiplied);
+
+	GYRO_REQUIRE(adopted.has_value());
+	GYRO_CHECK_EQ(allocator.Allocations, std::size_t{ 1 });
+
+	// Offered and taken, which is the point: a mapped source is the one thing a scanout importer always
+	// refuses, and this one is a descriptor by the time it is offered.
+	GYRO_REQUIRE_EQ(scanout.Offered.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(scanout.Held.size(), std::size_t{ 1 });
+	GYRO_CHECK(importer.Holds(*adopted));
+
+	// **Row by row against the allocator's own pitch**, which is the half that fails quietly: a copy that
+	// took the author's stride for the destination's writes every row further left than the last, and
+	// what that draws is a pointer sheared diagonally across the screen.
+	const std::span<const std::byte> wrote = allocator.Wrote();
+
+	GYRO_REQUIRE(!wrote.empty());
+	GYRO_CHECK_EQ(wrote[0], std::byte{ 0xAB });
+	GYRO_CHECK_EQ(wrote[allocator.Pitch], std::byte{ 0xCD });
+}
+
+// **A refusal is ordinary and the image is composited, which is where it already was.** A provider that
+// allocates something the processor cannot write into is the failure worth naming separately: the
+// allocation succeeds, so a caller that trusted it would write a pointer glyph into nothing and put a
+// transparent rectangle on the screen where the pointer is.
+GYRO_TEST(Textures, AnImageThatCannotBeMappedStaysInGyrosOwnMemory)
+{
+	class Unmappable final : public IDmabufAllocator
+	{
+	public:
+		[[nodiscard]] Result<DmabufBuffer>
+		Allocate(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<const std::uint64_t>) override
+		{
+			Fd descriptor =
+				MakeDescriptor(static_cast<std::size_t>(size.Width) * static_cast<std::size_t>(size.Height) * 4U);
+
+			return DmabufBuffer{ std::move(descriptor),
+				                 size,
+				                 PixelFormat{ .Code = code, .Modifier = ModifierLinear },
+				                 static_cast<std::uint32_t>(size.Width) * 4U,
+				                 Mapping{} };
+		}
+
+		[[nodiscard]] bool Supports(PixelFormat) const noexcept override { return true; }
+		[[nodiscard]] std::string_view Name() const noexcept override { return "unmappable"; }
+	};
+
+	FakeImporter importer;
+	FakeScanout scanout;
+	Unmappable allocator;
+	std::array<ITextureImporter*, 1> importers{ &importer };
+	TextureRegistry registry{ importers, {}, &scanout, &allocator };
+
+	const std::array<std::byte, 4U * 4U * 4U> pixels{};
+	const Result<TextureId> adopted =
+		registry.Adopt(PixelSize<BufferSpace>{ 4, 4 }, 16, pixels, TextureAlpha::Premultiplied);
+
+	GYRO_REQUIRE(adopted.has_value());
+	GYRO_CHECK(scanout.Offered.empty());
+	GYRO_CHECK(importer.Holds(*adopted));
 }

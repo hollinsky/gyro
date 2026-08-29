@@ -90,9 +90,10 @@ public:
 		ReturnChannel& returns,
 		std::span<ITextureImporter* const> importers = {},
 		std::span<const TextureFormat> formats = {},
-		IScanoutImporter* scanout = nullptr
+		IScanoutImporter* scanout = nullptr,
+		IDmabufAllocator* allocator = nullptr
 	)
-		: m_Store{ clock }, m_Outbox{ ring, returns }, m_Textures{ importers, formats, scanout }
+		: m_Store{ clock }, m_Outbox{ ring, returns }, m_Textures{ importers, formats, scanout, allocator }
 	{}
 
 	// Neither copied nor moved, for `SnapshotOutbox`'s reason rather than a weaker one: the outbox is

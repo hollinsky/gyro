@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +15,7 @@
 #include "Core/Texture.h"
 #include "Geometry/Space.h"
 #include "Scene/Textures.h"
+#include "Seam/Allocator.h"
 #include "Seam/Importer.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/Scanout.h"
@@ -74,13 +77,20 @@ public:
 	// window that cannot be drawn; a *display engine* that will not take one is a window that is drawn
 	// by the GPU instead, which is what every window already is. So it is offered to and its answer is
 	// discarded, and what promotion costs when it is refused is a composite gyro was doing anyway.
+	//
+	// **The allocator is where gyro's own pixels come from, and it is optional for the same reason the
+	// scanout importer is.** An author hands over bytes; whether those bytes end up in a heap vector or
+	// in an allocation a display engine can read is not the author's question and not a second verb —
+	// see `Promote`. Where there is none, or where it refuses, the bytes stay in gyro's memory and the
+	// image is composited, which is what every one of them did before.
 	explicit TextureRegistry(
 		std::span<ITextureImporter* const> importers,
 		std::span<const TextureFormat> formats = {},
-		IScanoutImporter* scanout = nullptr
+		IScanoutImporter* scanout = nullptr,
+		IDmabufAllocator* allocator = nullptr
 	)
 		: m_Importers{ importers.begin(), importers.end() }, m_Formats{ formats.begin(), formats.end() },
-		  m_Scanout{ scanout }, m_Ids{ MaxTextures }
+		  m_Scanout{ scanout }, m_Allocator{ allocator }, m_Ids{ MaxTextures }
 	{}
 
 	TextureRegistry(const TextureRegistry&) = delete;
@@ -105,6 +115,16 @@ public:
 		if (m_Importers.empty())
 		{
 			return Failure(ENODEV, "no renderer to import an image into");
+		}
+
+		// **Written into an allocation a display engine can read, where the machine has one.** This is the
+		// whole of what makes a pointer, a splash or a line of console text promotable: a client's window
+		// arrives as a descriptor and is scannable, and everything gyro draws for itself arrived as heap
+		// memory and structurally was not — so a cursor over a fullscreen window forced the window off its
+		// plane too, the promoted set being a suffix. Nothing above here knows it happened.
+		if (Result<TextureId> promoted = Promote(size, stride, pixels, alpha); promoted)
+		{
+			return promoted;
 		}
 
 		const std::optional<TextureId> id = m_Ids.Allocate();
@@ -416,6 +436,77 @@ private:
 		bool Retired = false;
 	};
 
+	// gyro's own pixels in an allocation a display engine can scan out, or nothing.
+	//
+	// **A copy into a dmabuf rather than a second verb on `ISceneTextures`.** The author-facing question
+	// is *here are some bytes and here is what the top one means*, and it has exactly one honest answer
+	// on every machine; which memory those bytes land in is a property of the hardware underneath and
+	// changes when a card is swapped. So an author states the same thing it always did and this decides,
+	// which also means the splash, the recovery console, `Text/Label` and the gym cards get promotable
+	// without one of them being edited.
+	//
+	// **Every refusal is ordinary and the caller falls through to the heap.** No allocator, a provider
+	// that will not do linear, an allocation that failed, a buffer nothing can map: all of them mean the
+	// image is composited, which is where it already was. The mapping is the one worth naming — a
+	// provider may hand back a perfectly good scanout allocation that the CPU cannot write into, and
+	// pixels written into nothing is the failure this refuses to have.
+	//
+	// The row copy is the point of the stride: an allocator names its own pitch, because a display
+	// engine fetches in a width of its choosing, and an author's rows are packed to whatever it wrote.
+	[[nodiscard]] Result<TextureId>
+	Promote(PixelSize<BufferSpace> size, std::uint32_t stride, std::span<const std::byte> pixels, TextureAlpha alpha)
+	{
+		if (m_Allocator == nullptr)
+		{
+			return Failure(ENODEV, "no allocator to put an authored image in");
+		}
+
+		const std::uint32_t code = alpha == TextureAlpha::Premultiplied ? FormatArgb8888 : FormatXrgb8888;
+		const std::array<std::uint64_t, 1> linear{ ModifierLinear };
+
+		Result<DmabufBuffer> buffer = m_Allocator->Allocate({ size.Width, size.Height }, code, linear);
+
+		if (!buffer)
+		{
+			return std::unexpected{ buffer.error() };
+		}
+
+		const std::span<std::byte> destination = buffer->Pixels();
+
+		if (destination.empty())
+		{
+			return Failure(ENOTSUP, "an authored image needs an allocation the processor can write into");
+		}
+
+		const std::uint32_t pitch = buffer->Stride();
+		const std::size_t row = static_cast<std::size_t>(size.Width) * 4U;
+
+		if (destination.size() < static_cast<std::size_t>(pitch) * static_cast<std::size_t>(size.Height))
+		{
+			return Failure(ERANGE, "an allocation smaller than the image it was made for");
+		}
+
+		for (std::int32_t line = 0; line < size.Height; ++line)
+		{
+			const std::size_t source = static_cast<std::size_t>(line) * stride;
+
+			std::copy_n(
+				pixels.begin() + static_cast<std::ptrdiff_t>(source),
+				row,
+				destination.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(line) * pitch)
+			);
+		}
+
+		const std::array<TexturePlane, 1> planes{ TexturePlane{
+			.Descriptor = buffer->Descriptor(), .Offset = 0, .Stride = pitch } };
+
+		// Through the descriptor-taking adoption rather than beside it, so that the duplication, the
+		// import, the offer to the display engine and the reclaim are the one path a client's buffer
+		// already takes. The buffer dies at the end of this scope and the image does not: what the
+		// adoption keeps is a duplicate of the descriptor, which holds the pages on its own.
+		return Adopt(size, TextureFormat{ .Code = code, .Modifier = ModifierLinear }, planes, nullptr);
+	}
+
 	// The one place the format is named, which is Scene/Textures.h's whole division: an author writes
 	// bytes in a layout it states in words, and the party that can name `Seam` says which fourcc that
 	// is. Linear because these are the CPU's own pixels and there is no device that tiled them.
@@ -524,6 +615,10 @@ private:
 	std::vector<TextureFormat> m_Formats;
 
 	IScanoutImporter* m_Scanout = nullptr;
+
+	// Where an authored image is put so that a display engine can read it. Null on a machine with no
+	// provider that maps what it allocates, which is every one of them until `Promote` finds otherwise.
+	IDmabufAllocator* m_Allocator = nullptr;
 
 	SlotAllocator<TextureTag> m_Ids;
 

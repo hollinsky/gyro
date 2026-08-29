@@ -150,8 +150,15 @@ public:
 	// The planes in `described` borrow a descriptor the backing owns, which is why the backing is not
 	// optional here — a description whose planes name nothing that is kept alive is the defect this
 	// constructor exists to make unspellable.
-	DmabufBuffer(RenderTarget described, std::unique_ptr<IDmabufBacking> backing) noexcept
-		: m_Backing{ std::move(backing) }, m_Target{ described }
+	//
+	// **The mapping is optional and is not a description of the memory.** A provider that laid the
+	// image out may also be able to hand the CPU a pointer into it — a DRM dumb buffer is exactly that,
+	// an allocation whose whole purpose is to be drawn into by software and scanned out by hardware —
+	// and where it can, a caller with pixels in hand writes them straight in rather than copying into a
+	// staging image somebody else has to import. Where it cannot, `Pixels()` is empty and the caller
+	// finds out by asking rather than by writing into nothing.
+	DmabufBuffer(RenderTarget described, std::unique_ptr<IDmabufBacking> backing, Mapping mapping = {}) noexcept
+		: m_Mapping{ std::move(mapping) }, m_Backing{ std::move(backing) }, m_Target{ described }
 	{}
 
 	DmabufBuffer(const DmabufBuffer&) = delete;

@@ -12055,3 +12055,54 @@ every backend would have to implement it to serve a case that the reorder makes 
 justification was the acquire order — the comment on it said so — so keeping it would leave a verb
 whose only remaining property is that nothing may call it.
 
+### 158. Pixels gyro authors are allocated where a display engine can read them, and the cursor is not a case in that
+
+*(Decided 2026-08-29, on a capture where a window promoted alone and stopped promoting the moment the
+pointer appeared over it.)*
+
+**The cursor was never special and the fix must not make it so.** `Frame/Assign.h` treats a pointer as
+one more textured item with no dressing on it, which is exactly right and is why a capture with a
+cursor in it carries no `unpromotable` mark. What made it unpromotable was one layer down and had
+nothing to do with pointing at things: `Scene/Cursor.cpp` bakes its glyph into a `std::vector` and
+adopts it as mapped pixels, and `DrmScanout::Adopt` refuses a mapped source because there is no
+descriptor under it to make a framebuffer from.
+
+**That is a property of everything gyro draws for itself.** The splash, the recovery console,
+`Text/Label` and every gym card arrive the same way. A client's window comes in as a descriptor and is
+scannable; gyro's own pixels came off the heap and structurally were not — so the compositor's own
+drawing was second-class to its clients', and the cursor is only the first one that ever sat on top of
+a window worth promoting. Because
+[decision 152](#152-promotion-is-a-partition-of-the-draw-list-computed-every-frame-and-a-node-is-promotable-when-its-resample-is-a-no-op-and-it-carries-no-dressing-on-itself)'s
+promoted set is a suffix, an unscannable item on top refuses everything under it: the pointer cost the
+window its plane.
+
+**So `Dispatch/Textures.h` puts an authored image in a dmabuf where the machine has one, and the
+authoring interface does not change.** `ISceneTextures::Adopt` still means *here are some bytes and
+here is what the top one means*, which is the only question an author can answer on every machine;
+which memory those bytes land in is a fact about the hardware underneath and changes when a card is
+swapped. Nothing in `Scene`, `Gym` or `Text` is edited, and all of them become promotable at once.
+
+**The provider is the one that maps what it allocates, which on a card is the dumb buffer.** A
+presenter's targets are written by the GPU and want whatever the device tiles; an authored image is
+written by the processor and has to be a pointer it can store into. `Drm::DumbAllocator` was already
+here to produce targets where the Vulkan device will not export one, and a dumb buffer is precisely an
+allocation whose reason to exist is software drawing that hardware scans out — so it gained the
+`MAP_DUMB` and the `mmap` it should always have had, and `Seam/Buffer.h`'s backing constructor takes
+an optional mapping beside the description.
+
+**Every refusal on that path is ordinary and falls through to the heap.** No allocator, a provider that
+will not do linear, an allocation that failed — all of them mean the image is composited, which is
+where it already was. The one worth naming apart is a buffer that allocates and cannot be mapped: that
+call *succeeded*, and a caller that trusted it would write a pointer glyph into nothing and leave a
+transparent rectangle where the pointer is. It is checked and it has a test.
+
+**The alternative was the legacy cursor plane**, and it is the special case this entry exists to avoid.
+A dedicated cursor path means the compositor knows which node is the pointer, which is per-surface
+state of exactly the kind decision 152 was written to keep out — and it would do nothing for the
+splash, the console or a label.
+
+**The other alternative was a second authoring verb** — `AdoptScannable` beside `Adopt` — so a caller
+could ask for the good allocation. That puts a hardware question in front of an author that cannot
+answer it, and the wrong answer is silent: an author that forgets is a subtree that quietly stops
+promoting on the one machine where it mattered.
+

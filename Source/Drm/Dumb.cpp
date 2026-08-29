@@ -1,6 +1,7 @@
 #include "Drm/Dumb.h"
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -93,6 +94,33 @@ DumbAllocator::Allocate(PixelSize<DeviceSpace> size, std::uint32_t code, std::sp
 
 	auto backing = std::make_unique<DumbBacking>(m_Card, request.handle, Fd{ exported });
 
+	// **Mapped here, because a dumb buffer that nothing can write into is an allocation with no
+	// purpose.** This is the one provider whose product is meant to be drawn by software and scanned
+	// out by hardware in the same breath, which is what gyro's own pixels need — a pointer glyph, a
+	// splash, a line of console text — to reach a plane instead of being composited because they came
+	// off the heap. The kernel hands back an offset to mmap the card node at rather than the descriptor,
+	// which is why this is `MAP_DUMB` and not an `mmap` of `exported`.
+	//
+	// A failure is not one: the buffer is still a perfectly good scanout allocation and a caller with no
+	// pixels to write never asks. So the mapping is dropped and `Pixels()` answers empty, which is the
+	// question the caller was going to ask anyway.
+	Mapping mapping;
+
+	drm_mode_map_dumb offset{};
+	offset.handle = request.handle;
+
+	if (::drmIoctl(m_Card.Value, DRM_IOCTL_MODE_MAP_DUMB, &offset) == 0)
+	{
+		void* const pixels = ::mmap(
+			nullptr, request.size, PROT_READ | PROT_WRITE, MAP_SHARED, m_Card.Value, static_cast<::off_t>(offset.offset)
+		);
+
+		if (pixels != MAP_FAILED)
+		{
+			mapping = Mapping{ static_cast<std::byte*>(pixels), request.size };
+		}
+	}
+
 	DmabufImage image{};
 	image.PlaneCount = 1;
 	image.Planes[0] = DmabufPlane{ .Descriptor = backing->Descriptor(), .Offset = 0, .Stride = request.pitch };
@@ -101,6 +129,6 @@ DumbAllocator::Allocate(PixelSize<DeviceSpace> size, std::uint32_t code, std::sp
 
 	++Allocations;
 
-	return DmabufBuffer{ described, std::move(backing) };
+	return DmabufBuffer{ described, std::move(backing), std::move(mapping) };
 }
 } // namespace Drm

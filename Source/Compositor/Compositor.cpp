@@ -419,6 +419,18 @@ public:
 	// over the same id space. Only the KMS backend has one — a nested output's planes are the host's, a
 	// virtual output's consumer is a file, and a headless plane imports nothing.
 	[[nodiscard]] virtual IScanoutImporter* Scanout() noexcept { return nullptr; }
+
+	// Where gyro's *own* pixels go so that the display engine can read them, or null where nothing on
+	// this backend can produce such an allocation.
+	//
+	// **Not the allocator a presenter's targets come from, and the difference is the mapping.** A target
+	// is written by the GPU and wants whatever layout the device tiles; an authored image — a pointer
+	// glyph, a splash, a line of console text — is written by the processor and must be a pointer it can
+	// store into. So this is specifically a provider that maps what it allocates, which on a card is the
+	// dumb buffer: an allocation whose entire reason to exist is software drawing that hardware scans
+	// out. A backend that has none answers null and everything gyro draws for itself is composited,
+	// which is what all of it did before.
+	[[nodiscard]] virtual IDmabufAllocator* AuthoredImages() noexcept { return nullptr; }
 };
 
 // The sweep's instrument: simulated vblanks and a renderer that charges a cost and draws nothing.
@@ -1030,6 +1042,10 @@ public:
 	{
 		return m_Card != nullptr ? &m_Card->Scanout() : nullptr;
 	}
+
+	// The dumb allocator, which is already here to produce targets where the Vulkan device will not
+	// export one — and is the only provider on this backend that hands back a pointer to write into.
+	[[nodiscard]] IDmabufAllocator* AuthoredImages() noexcept override { return m_Dumb ? &*m_Dumb : nullptr; }
 
 	// The device's file is what wakes this backend, so the ordinary answer is never. What is not on the
 	// file is a composite a commit is waiting for, which is the held path saying when to look again.
@@ -1958,7 +1974,8 @@ private:
 			m_Returns,
 			std::span{ importers.data(), importing },
 			m_Backend->ClientFormats(),
-			m_Backend->Scanout()
+			m_Backend->Scanout(),
+			m_Backend->AuthoredImages()
 		);
 
 		// **Before `Open` and therefore before any client can have committed**, which is the only ordering
