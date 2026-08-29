@@ -640,9 +640,9 @@ class PointerGym final : public ISceneAuthor
 public:
 	[[nodiscard]] std::string_view Name() const noexcept override { return ::Name(GymKind::Pointer); }
 
-	[[nodiscard]] Result<void> Open(SceneStore& scene, ITextures&) override
+	[[nodiscard]] Result<void> Open(SceneStore& scene, ITextures& textures) override
 	{
-		const Result<PointerScene> pointers = AuthorPointers(scene);
+		const Result<PointerScene> pointers = AuthorPointers(scene, textures);
 
 		if (!pointers)
 		{

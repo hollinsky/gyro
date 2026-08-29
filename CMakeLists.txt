@@ -415,6 +415,12 @@ gyro_add_module(Publication PORTABLE
 # the output model needs Scale and the adapter; and the return drain needs Signal and the report record.
 # Seam is not among them and must not become one — CheckLayering denies what is not declared, and its
 # report would name the missing edge rather than decision 87.
+#
+# SOURCES is one file and it is the cursor's: decision 152 has gyro drawing its own pointer glyph, and
+# the glyph is a *drawing* rather than a rule about the world — a polygon, a sweep over the device
+# grid, and an image coming out. It is here because the splash, the recovery console and the client
+# host all draw the same cursor and none of them may name Gym/Pointer.h, which is the instrument the
+# shape was chosen with and now holds only the constructions that lost.
 gyro_add_module(Scene PORTABLE DISPATCH
 	DEPENDS
 		Core
@@ -422,8 +428,11 @@ gyro_add_module(Scene PORTABLE DISPATCH
 		World
 		Animation
 		Publication
+	SOURCES
+		Cursor.cpp
 	TESTS
 		Commit.Test.cpp
+		Cursor.Test.cpp
 		Entity.Test.cpp
 		Focus.Test.cpp
 		Output.Test.cpp

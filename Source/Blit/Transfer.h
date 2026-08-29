@@ -5,6 +5,7 @@
 
 #include "Core/ColorState.h"
 #include "Core/Result.h"
+#include "Core/Transfer.h"
 
 // The transfer function, in the two forms a CPU composite needs it in.
 //
@@ -28,9 +29,9 @@
 // damage region, where it cannot. The table below is the second, and `Transfer.Test.cpp` is what
 // holds it to the first.
 
-// The exact forms, in the algebra the sRGB specification is written in.
-[[nodiscard]] float SrgbToLinear(float encoded) noexcept;
-[[nodiscard]] float LinearToSrgb(float linear) noexcept;
+// The exact forms are Core/Transfer.h's, included above so that every caller of this header still
+// has them. They moved down when Scene/Cursor.h needed the encode direction to bake a coverage into
+// an image, which is a world-authoring module and may not name a renderer.
 
 // The per-pixel form: the encode direction, sampled and interpolated.
 //
