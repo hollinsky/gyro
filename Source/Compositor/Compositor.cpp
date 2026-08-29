@@ -1232,7 +1232,7 @@ public:
 			m_Snapshots,
 			m_Returns,
 			m_Evaluator,
-			Timing{ TimingPolicy{ .Margin = CompletionMargin, .Lead = ArmingLead } }
+			Timing{ TimingPolicy{ .Margin = CompletionMargin, .Lead = ArmingLead, .Composite = m_Options.Composite } }
 		);
 		m_Loop->Bind({ m_Outputs.data(), m_Count });
 		m_Loop->Listen({ m_Sources.data(), m_Sources.size() });

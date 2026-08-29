@@ -13,6 +13,7 @@
 #include "Core/Time.h"
 #include "Frame/Admission.h"
 #include "Gym/Gym.h"
+#include "Seam/Renderer.h"
 
 // What the composition root was asked to construct, parsed from the command line and nothing else.
 //
@@ -137,6 +138,20 @@ struct Options
 	// It says nothing about the *deadline*: that is one ioctl per submission, it is always right to
 	// send, and there is no configuration under which gyro declines to tell the driver what it knows.
 	bool Governor = true;
+
+	// Which composite every frame is drawn with, or nothing for the per-frame check that is what gyro
+	// actually does.
+	//
+	// **`--composite=planned` makes an overrun cost a frame rather than a rung**, which is the only way
+	// to watch a drop and the recovery after it: with the floor tier available the loop takes it, the
+	// picture gets simpler for one frame, and nothing is ever late. **`--composite=floor` pins the cheap
+	// composite whatever the deadline allowed**, which is the steady low load the frequency governor is
+	// measured against.
+	//
+	// Neither is a configuration to run a desktop under, and both are honest about it: the pin changes
+	// what is drawn and never what is admitted, so a frame that will not fit is still refused and the
+	// schedule the sweep measures is the same one.
+	std::optional<RenderMode> Composite{};
 
 	// What the simulated renderer charges per frame under the headless backend. This is decision 29's
 	// `C` supplied by hand, which is the only way it can be supplied before there is a renderer that
@@ -597,6 +612,28 @@ namespace Detail
 			}
 
 			options.Iterations = static_cast<std::uint64_t>(frames);
+
+			continue;
+		}
+
+		if (Detail::Matches(argument, "--composite", value))
+		{
+			if (value == "planned")
+			{
+				options.Composite = RenderMode::Planned;
+			}
+			else if (value == "floor")
+			{
+				options.Composite = RenderMode::Floor;
+			}
+			else if (value == "auto")
+			{
+				options.Composite.reset();
+			}
+			else
+			{
+				return Failure(EINVAL, "--composite is one of auto, planned, floor");
+			}
 
 			continue;
 		}

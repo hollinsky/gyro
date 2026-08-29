@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <format>
 #include <limits>
+#include <optional>
 #include <string_view>
 
 #include "Core/Time.h"
@@ -234,6 +235,27 @@ struct TimingPolicy
 	// instant the planned composite still fits and takes the floor composite whenever it is not early,
 	// where an overstated one pays latency on every frame forever.
 	Duration Lead{};
+
+	// Which composite to draw, when the answer is not to be worked out per frame.
+	//
+	// **Empty is the compositor**, and everything above this line describes it: the check picks the tier
+	// that reaches the frame owed, and a person sees the blur switch off for one frame rather than the
+	// window stopping. Set, the check still decides *whether* a frame is drawn and no longer decides
+	// what it is drawn with — so the two failures the ladder exists to hide become visible on purpose,
+	// which is what makes them observable at all.
+	//
+	// **Pinned to `Planned`, an overrun is a dropped frame instead of a cheaper one**, which is the
+	// only way to watch the recovery decision 35 prices at `ceil(overrun / P)` actually happen: with
+	// the floor tier available the loop almost never gets there. **Pinned to `Floor`, every frame is
+	// the cheap composite** whatever the deadline allowed, which is the fixed low load the frequency
+	// governor is read against — a device that idles between two identical frames says something about
+	// the clock that a device drawing a different picture every frame does not.
+	//
+	// It is a policy field rather than a switch in the loop because the loop asks this object one
+	// question per output per iteration and the answer to that question is the whole of what is being
+	// changed. `Arming` is deliberately not pinned: it stays the planned reserve, so a run pinned to the
+	// floor wakes as early as the compositor would and the pin changes what is drawn rather than when.
+	std::optional<RenderMode> Composite{};
 };
 
 namespace Detail
@@ -412,6 +434,11 @@ public:
 		Instant deviceFreeAt = Instant{}
 	) const noexcept
 	{
+		if (m_Policy.Composite)
+		{
+			return Pinned(clock, budget, now, committed, deviceFreeAt, *m_Policy.Composite);
+		}
+
 		const Projection planned = Project(now, deviceFreeAt, budget, RenderMode::Planned);
 
 		if (!clock.IsValid())
@@ -573,6 +600,46 @@ public:
 	[[nodiscard]] constexpr const TimingPolicy& Policy() const noexcept { return m_Policy; }
 
 private:
+	// `Assess` with the tier already chosen: one projection rather than two, and the only question left
+	// is whether the frame it reaches is one this output may still speak for.
+	//
+	// The three answers below are the general path's three answers with the tier held fixed — a reach
+	// at the frame owed is that frame, a reach past it is the frame after the ones that were missed, and
+	// a reach behind it is the loop awake early with nothing to record. What is gone is the fallback,
+	// which is the point: a planned composite that will not fit now costs a frame instead of a rung.
+	[[nodiscard]] constexpr FrameDecision Pinned(
+		const FrameClock& clock,
+		const Budget& budget,
+		Instant now,
+		std::uint64_t committed,
+		Instant deviceFreeAt,
+		RenderMode mode
+	) const noexcept
+	{
+		const Projection projected = Project(now, deviceFreeAt, budget, mode);
+		const Admission admission = mode == RenderMode::Planned ? Admission::Planned : Admission::Floor;
+
+		if (!clock.IsValid())
+		{
+			return { .Verdict = admission,
+				     .Sequence = FrameClock::NoSequence,
+				     .Presentation = projected.Finish,
+				     .Deadline = FrameClock::Unscheduled,
+				     .Finish = projected.Finish,
+				     .DeviceFreeAt = projected.DeviceFreeAt };
+		}
+
+		const std::uint64_t owed = Owed(clock, committed);
+		const std::uint64_t reach = clock.SequenceAfter(projected.Finish);
+
+		if (reach < owed)
+		{
+			return Decide(clock, Admission::Wait, owed, projected);
+		}
+
+		return Decide(clock, admission, reach, projected);
+	}
+
 	// The frame this output owes: one past the later of what has reached the glass and what has been
 	// spoken for. Saturating, because `SequenceAfter` answers the maximum on overflow and a floor
 	// derived from that answer must not wrap around behind it.

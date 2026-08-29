@@ -297,3 +297,26 @@ GYRO_TEST(Options, EveryGymNameRoundTrips)
 
 	GYRO_CHECK(!Parse({ "--gym=splines" }).has_value());
 }
+
+// The pin is absent by default, because the per-frame check is what gyro does and a run that quietly
+// drew one tier forever would be a compositor nobody asked for — which is this file's whole subject.
+GYRO_TEST(Options, TheCompositeIsChosenPerFrameUnlessPinned)
+{
+	const Result<Options> defaulted = Parse({});
+	const Result<Options> planned = Parse({ "--composite=planned" });
+	const Result<Options> floor = Parse({ "--composite=floor" });
+
+	GYRO_REQUIRE(defaulted.has_value());
+	GYRO_REQUIRE(planned.has_value());
+	GYRO_REQUIRE(floor.has_value());
+	GYRO_CHECK(!defaulted->Composite.has_value());
+	GYRO_CHECK(planned->Composite == RenderMode::Planned);
+	GYRO_CHECK(floor->Composite == RenderMode::Floor);
+	GYRO_CHECK(!Parse({ "--composite=floor", "--composite=auto" })->Composite.has_value());
+}
+
+GYRO_TEST(Options, ACompositeThatNamesNoTierIsRefused)
+{
+	GYRO_CHECK(!Parse({ "--composite=cheap" }).has_value());
+	GYRO_CHECK(!Parse({ "--composite" }).has_value());
+}

@@ -421,3 +421,68 @@ GYRO_TEST(Timing, ADecisionPrintsItsVerdictAndItsFrame)
 		std::string{ "planned unanchored" }
 	);
 }
+
+// `--composite=planned`. The same instant `FallsToTheFloorWhenThePlannedTierWillNotFit` runs at, with
+// the ladder taken away: the planned composite still finishes at 1011ms, frame 8 is gone, and what is
+// drawn is frame 9. That is a drop a person can see, which is the whole reason the flag exists — the
+// floor tier is what normally makes it not happen.
+GYRO_TEST(Timing, PinningThePlannedTierDropsTheFrameInsteadOfSteppingDown)
+{
+	const FrameClock clock = Anchored();
+	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
+	const Timing timing{ TimingPolicy{ .Composite = RenderMode::Planned } };
+
+	const FrameDecision decision = timing.Assess(clock, budget, At(1006), FrameClock::NoSequence);
+
+	GYRO_CHECK(decision.Verdict == Admission::Planned);
+	GYRO_CHECK(decision.Mode() == RenderMode::Planned);
+	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 9 });
+	GYRO_CHECK_EQ(decision.Deadline, At(1020));
+	GYRO_CHECK_EQ(decision.Finish, At(1011));
+}
+
+// `--composite=floor`. The planned tier fits with three milliseconds to spare and the cheap composite
+// is drawn regardless, which is the steady load the governor is read against.
+GYRO_TEST(Timing, PinningTheFloorTierDrawsItWhereThePlannedTierWouldHaveFit)
+{
+	const FrameClock clock = Anchored();
+	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
+	const Timing timing{ TimingPolicy{ .Composite = RenderMode::Floor } };
+
+	const FrameDecision decision = timing.Assess(clock, budget, At(1002), FrameClock::NoSequence);
+
+	GYRO_CHECK(decision.Verdict == Admission::Floor);
+	GYRO_CHECK(decision.Mode() == RenderMode::Floor);
+	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 8 });
+	GYRO_CHECK_EQ(decision.Finish, At(1004));
+}
+
+// A pin says what is drawn and never what is admitted. A frame already spoken for is still waited for,
+// and the arming is still the planned reserve — so a run under either pin wakes where the compositor
+// would and the schedule a sweep measures is unchanged.
+GYRO_TEST(Timing, APinChangesTheTierAndNotTheSchedule)
+{
+	const FrameClock clock = Anchored();
+	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
+	const Timing pinned{ TimingPolicy{ .Composite = RenderMode::Floor } };
+	const Timing adaptive;
+
+	GYRO_CHECK_EQ(pinned.Arming(budget), adaptive.Arming(budget));
+	GYRO_CHECK(pinned.Assess(clock, budget, At(1002), 8).Verdict == Admission::Wait);
+	GYRO_CHECK_EQ(pinned.WakeFor(clock, budget, At(1002), 8), adaptive.WakeFor(clock, budget, At(1002), 8));
+}
+
+// Decision 31's first frame after idle, under a pin: no anchor, so no deadline to measure against and
+// nothing to wait for — the pinned tier renders at once exactly as the planned one does.
+GYRO_TEST(Timing, APinnedUnanchoredOutputStillRendersOnDemand)
+{
+	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
+	const Timing timing{ TimingPolicy{ .Composite = RenderMode::Floor } };
+
+	const FrameDecision decision = timing.Assess(FrameClock{}, budget, At(1000), FrameClock::NoSequence);
+
+	GYRO_CHECK(decision.Verdict == Admission::Floor);
+	GYRO_CHECK_EQ(decision.Sequence, FrameClock::NoSequence);
+	GYRO_CHECK_EQ(decision.Presentation, At(1002));
+	GYRO_CHECK_EQ(decision.Deadline, FrameClock::Unscheduled);
+}
