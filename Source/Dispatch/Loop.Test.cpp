@@ -20,6 +20,7 @@
 #include "Publication/Ring.h"
 #include "Scene/Output.h"
 #include "Seam/Importer.h"
+#include "Seam/Input.h"
 #include "Testing/Test.h"
 #include "World/Node.h"
 
@@ -422,4 +423,88 @@ GYRO_TEST(DispatchLoop, ATextureTheAuthorGaveUpIsForgottenOnlyOnceTheFrameThread
 
 	GYRO_REQUIRE(steps < StepLimit);
 	GYRO_CHECK_EQ(fixture.Importer.Forgotten.front(), given);
+}
+
+// A device set the test drives by hand, so that the claims below are about what the loop does with a
+// displacement rather than about libinput.
+namespace
+{
+class ScriptedInput final : public IInput
+{
+public:
+	[[nodiscard]] RawFd Descriptor() const noexcept override { return RawFd{}; }
+
+	[[nodiscard]] Result<void> Drain() override { return {}; }
+
+	void Push(double dx, double dy) { Motion.Emit(PointerMotion{ .DeltaX = dx, .DeltaY = dy }); }
+
+	void Contact() { Touch.Emit(TouchEvent{}); }
+};
+} // namespace
+
+// The mice on the desk move the pointer the world holds, and nothing else does.
+GYRO_TEST(DispatchLoop, ADisplacementFromADeviceMovesTheWorldsPointer)
+{
+	Fixture fixture;
+	ScriptedInput input;
+
+	GYRO_REQUIRE(fixture.Open("lanes"));
+
+	fixture.Loop.Observe(input);
+
+	// Nothing has been touched, so there is nothing to draw — which is the state a machine driven by a
+	// touchscreen stays in for its whole life.
+	GYRO_CHECK(!fixture.Loop.Store().Pointer().IsVisible());
+
+	input.Push(30.0, 20.0);
+	input.Push(-10.0, 5.0);
+
+	// Accumulated rather than replaced: two devices pushing one cursor is what a seat means, and it is
+	// the same arithmetic when one device pushes twice.
+	GYRO_CHECK_EQ(fixture.Loop.Store().Pointer().Position().X, 20.0);
+	GYRO_CHECK_EQ(fixture.Loop.Store().Pointer().Position().Y, 25.0);
+	GYRO_CHECK(fixture.Loop.Store().Pointer().IsVisible());
+}
+
+// A push that leaves the panel is confined to it, which is the store's outputs being the ones the
+// loop was opened against rather than a set the observer brought with it.
+GYRO_TEST(DispatchLoop, APushOffTheEdgeStaysOnTheOutput)
+{
+	Fixture fixture;
+	ScriptedInput input;
+
+	GYRO_REQUIRE(fixture.Open("lanes"));
+
+	fixture.Loop.Observe(input);
+
+	input.Push(4000.0, 4000.0);
+
+	// One expressible step short of the far edge rather than on it, which is where `PointerEdge` puts a
+	// pointer that has been driven into a corner: still on the panel as far as everything downstream is
+	// concerned.
+	GYRO_CHECK_EQ(fixture.Loop.Store().Pointer().Position().X, 1920.0 - PointerEdge);
+	GYRO_CHECK_EQ(fixture.Loop.Store().Pointer().Position().Y, 1080.0 - PointerEdge);
+}
+
+// A finger takes the cursor off the screen and leaves the position where the mouse put it: a pointer
+// that jumps to wherever somebody tapped is the touchscreen-laptop bug this forbids.
+GYRO_TEST(DispatchLoop, AContactHidesTheCursorWithoutMovingIt)
+{
+	Fixture fixture;
+	ScriptedInput input;
+
+	GYRO_REQUIRE(fixture.Open("lanes"));
+
+	fixture.Loop.Observe(input);
+
+	input.Push(40.0, 40.0);
+	input.Contact();
+
+	GYRO_CHECK(!fixture.Loop.Store().Pointer().IsVisible());
+	GYRO_CHECK_EQ(fixture.Loop.Store().Pointer().Position().X, 40.0);
+
+	// And a hand back on the mouse brings it back, on the displacement rather than on a separate verb.
+	input.Push(1.0, 0.0);
+
+	GYRO_CHECK(fixture.Loop.Store().Pointer().IsVisible());
 }

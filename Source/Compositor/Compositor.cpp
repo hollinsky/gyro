@@ -1971,6 +1971,16 @@ private:
 			m_Clients->Observe(m_Dispatch->Return());
 		}
 
+		// **Where the pointer is, driven by the mice on the desk.** The other half of the same line: this
+		// root is the only party holding both the device set and the loop that owns the world. It is here
+		// rather than beside `OpenInput` because the loop does not exist yet at that point, and here is
+		// still ahead of the only thing that matters — the first `Drain`, which happens in `Pump` and is
+		// what any displacement arrives from.
+		if (m_Input)
+		{
+			m_Dispatch->Observe(*m_Input);
+		}
+
 		if (const Result<void> opened = m_Dispatch->Open(std::move(author), { outputs.data(), m_Count }); !opened)
 		{
 			return opened;

@@ -22,6 +22,7 @@
 #include "Scene/Serializer.h"
 #include "Scene/Store.h"
 #include "Seam/Importer.h"
+#include "Seam/Input.h"
 
 // The dispatch thread's iteration, with the wait left to whoever owns the thread.
 //
@@ -299,6 +300,31 @@ public:
 	// root's condition for waking this thread when one does. `Scene/Return.h` carries the argument.
 	[[nodiscard]] bool Owing() const noexcept { return m_Return.Owing(); }
 
+	// Let the devices drive where the pointer is. The root's to call once, before the first step, for
+	// `ClientHost::Observe`'s reason: it is the only party that holds both the device set and this loop.
+	//
+	// **The store is written from the signal rather than through a buffered displacement**, and the
+	// connection is legal because both ends are on this thread — `IInput` is drained by the composition
+	// root's dispatch iteration, immediately before `Step`, which is
+	// [Seam/Input.h](../Seam/Input.h)'s whole reason for being an `IEventSource` that dispatch pumps. A
+	// delta parked in the root and applied here would be a second encoding of one displacement, which is
+	// the shape decision 152 rejects one level up when it refuses a frame-side copy of the position.
+	//
+	// **Every device drives the one cursor**, so this connects the signal and not a device: two mice on
+	// a desk are one pointer that two hands can push, which [Scene/Pointer.h](../Scene/Pointer.h) states
+	// and `Move` is written to accumulate.
+	//
+	// **`IInput::Position` is deliberately not connected**, and the absence is a missing fact rather than
+	// an omission: it carries a fraction of a *device's* active area, and turning that into a place on a
+	// screen needs a tablet-to-output binding that nothing in the tree holds yet. Connecting it against
+	// the first output would put a stylus somewhere arbitrary on a two-monitor desk and look like a warp
+	// bug rather than like absent configuration.
+	void Observe(IInput& input)
+	{
+		m_Motion.ConnectTo<&DispatchLoop::OnMotion>(input.Motion, *this);
+		m_Touch.ConnectTo<&DispatchLoop::OnTouch>(input.Touch, *this);
+	}
+
 	[[nodiscard]] SceneReturn& Return() noexcept { return m_Return; }
 
 	[[nodiscard]] const SceneReturn& Return() const noexcept { return m_Return; }
@@ -313,6 +339,26 @@ private:
 	// property; `SceneReturn` takes what is left — decision 115's derivation, which is where a presented
 	// sequence becomes a frame callback and a hold becomes a `wl_buffer.release`. Both halves see every
 	// report, and neither can be advanced without the other running.
+	// A mouse, a touchpad or a trackpoint moved the seat's cursor.
+	//
+	// **The displacement has already been through the acceleration curve**, which is `Core/Input.h`'s
+	// rule and the reason nothing is summed before it arrives: the curve is nonlinear in velocity, so a
+	// coalesced displacement accelerated once is a pointer that feels mushy when it is eased. What is
+	// accumulated here is the accelerated result, which is what `ScenePointer` is for.
+	void OnMotion(const PointerMotion& motion)
+	{
+		static_cast<void>(m_Store.Pointer().Move({ motion.DeltaX, motion.DeltaY }, m_Store.Outputs()));
+	}
+
+	// A finger landed, so there is no cursor to draw.
+	//
+	// **A touchscreen has a position and no pointer**, and a cursor left parked in the middle of a kiosk
+	// panel is the visible form of getting that wrong. The position itself is left where the mouse put
+	// it rather than moved to the contact: `Scene/Pointer.h` forbids driving the seat's cursor from a
+	// touch, because a pointer that jumps to wherever a finger landed is the behaviour every
+	// touchscreen laptop that gets this wrong exhibits.
+	void OnTouch(const TouchEvent&) { m_Store.Pointer().Hide(); }
+
 	void Collect()
 	{
 		FrameReport report{};
@@ -337,6 +383,11 @@ private:
 	TextureRegistry m_Textures;
 
 	std::unique_ptr<ISceneAuthor> m_Author;
+
+	// The devices' link to where the pointer is. Held rather than fired and forgotten, because a device
+	// set that goes away while this loop is alive has to be able to drop the observer.
+	Connection<const PointerMotion&> m_Motion;
+	Connection<const TouchEvent&> m_Touch;
 
 	std::uint64_t m_Publications = 0;
 	std::uint64_t m_Deferrals = 0;
