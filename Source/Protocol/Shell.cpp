@@ -279,6 +279,14 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 	const Size<SurfaceSpace, float> extent{ static_cast<float>(state.ContentSize.Width / scale),
 		                                    static_cast<float>(state.ContentSize.Height / scale) };
 
+	// The texels behind that quad, which is the buffer undivided. Stated rather than left empty so that
+	// `Frame/Projection.h` can count them: a window whose buffer scale matches the panel it is on is
+	// texel for texel and can go on a plane, and a node that says nothing here can never be told apart
+	// from one that is being stretched. There is no viewport yet, so the whole buffer is the source.
+	const Rect<BufferSpace> source{
+		{}, { static_cast<float>(state.ContentSize.Width), static_cast<float>(state.ContentSize.Height) }
+	};
+
 	const bool mapping = m_Window.IsNull();
 
 	if (mapping)
@@ -300,7 +308,7 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 			*window,
 			{ .Position = { -static_cast<double>(m_Geometry.Origin.X), -static_cast<double>(m_Geometry.Origin.Y), 0.0 },
 		      .Extent = extent },
-			ImageContent{ .Texture = state.Content, .Source = {}, .Frame = {}, .Color = ColorState::Srgb() }
+			ImageContent{ .Texture = state.Content, .Source = source, .Frame = {}, .Color = ColorState::Srgb() }
 		);
 
 		if (!content)
@@ -341,7 +349,7 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		// origin. A client commit carries no timestamp and needs none — nothing here is a sprung channel.
 		SceneCommit commit{ *scene, CommitAuthor::Client };
 
-		static_cast<void>(commit.Attach(m_Content, state.Content));
+		static_cast<void>(commit.Attach(m_Content, state.Content, source));
 		static_cast<void>(commit.Resize(m_Content, extent));
 		static_cast<void>(commit.Resize(m_Window, natural));
 	}

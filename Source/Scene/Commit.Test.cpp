@@ -350,12 +350,12 @@ GYRO_TEST(SceneCommit, AttachReplacesThePixelsAndRefusesAnythingThatIsNotALiveIm
 		SceneCommit commit{ store, CommitAuthor::Client };
 
 		GYRO_REQUIRE(commit.IsOpen());
-		GYRO_CHECK(commit.Attach(image, next));
+		GYRO_CHECK(commit.Attach(image, next, {}));
 
 		// A container has no pixels, and the sentinel says so — writing through its content index would
 		// reach whatever the image run holds at position `NoContent`.
-		GYRO_CHECK(!commit.Attach(container, next));
-		GYRO_CHECK(!commit.Attach(EntityId{}, next));
+		GYRO_CHECK(!commit.Attach(container, next, {}));
+		GYRO_CHECK(!commit.Attach(EntityId{}, next, {}));
 	}
 
 	const Entity* const entity = store.Find(image);
@@ -373,7 +373,7 @@ GYRO_TEST(SceneCommit, AttachReplacesThePixelsAndRefusesAnythingThatIsNotALiveIm
 	SceneCommit nested{ store, CommitAuthor::Client };
 
 	GYRO_CHECK(!nested.IsOpen());
-	GYRO_CHECK(!nested.Attach(image, first));
+	GYRO_CHECK(!nested.Attach(image, first, {}));
 	GYRO_CHECK_EQ(store.Images()[entity->Content].Texture, next);
 }
 

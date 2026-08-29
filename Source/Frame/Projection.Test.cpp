@@ -283,3 +283,111 @@ GYRO_TEST(Projection, AnOutputWithNoModeDrawsNothing)
 
 	GYRO_CHECK(!screen.Project(Under(screen, NodeTransform{}, Size<SurfaceSpace>{}), Size<SurfaceSpace>{}).has_value());
 }
+
+// A view at a density, which is the arrangement the classification cases below actually turn on.
+[[nodiscard]] static OutputView Screen(double density)
+{
+	return OutputView{ AxisTransform<GlobalSpace, DeviceSpace>{ AxisOrientation::Normal, density, density, {} },
+		               { 1920, 1080 } };
+}
+
+// The whole of an image that many texels on a side.
+[[nodiscard]] static Rect<BufferSpace> Texels(float width, float height)
+{
+	return Rect<BufferSpace>{ {}, { width, height } };
+}
+
+// **The case the whole classification exists for: the pointer.** Its glyph is baked in device pixels
+// at the panel's density and its node is sized at one over that, so the chain magnifies by exactly the
+// factor the image carries and the two cancel. Classifying the chain alone would read the magnification
+// and refuse the one node on screen that is always exact — which is a person's pointer composited on
+// every frame it moves, on hardware that has a plane sitting idle for it.
+GYRO_TEST(Projection, AGlyphBakedAtAPanelsDensityIsExactAtEveryDensity)
+{
+	for (const double density : { 1.0, 2.0, 1.5 })
+	{
+		const OutputView view = Screen(density);
+
+		// Twenty-four device pixels of glyph, sized in the output's own units.
+		const Size<SurfaceSpace> extent{ static_cast<float>(24.0 / density), static_cast<float>(24.0 / density) };
+
+		const TransformClass sampling = Classify(Under(view, NodeTransform{}, extent), extent, Texels(24.0F, 24.0F));
+
+		GYRO_CHECK(sampling.IsResampleFree());
+		GYRO_CHECK(sampling.Upright);
+		GYRO_CHECK(sampling.IsPlaneExpressible());
+	}
+}
+
+// The other half of the same reading: a node the size of its own texels is exact only where the panel
+// shows a unit per pixel. A window whose buffer is one texel per output unit is being magnified on a
+// 2x panel, and that is a resample however sharp the source is.
+GYRO_TEST(Projection, ABufferThatDoesNotMatchThePanelIsAResample)
+{
+	const Size<SurfaceSpace> extent{ 256.0F, 256.0F };
+
+	GYRO_CHECK(Classify(Under(Screen(1.0), NodeTransform{}, extent), extent, Texels(256.0F, 256.0F)).IsResampleFree());
+	GYRO_CHECK(!Classify(Under(Screen(2.0), NodeTransform{}, extent), extent, Texels(256.0F, 256.0F)).IsResampleFree());
+
+	// And the same node scaled in the world, which is the gym's magnified copy: axis-aligned, on the
+	// grid, and not sharp.
+	const NodeTransform grown{ .Scale = { 2.0F, 2.0F, 1.0F } };
+	const TransformClass sampling = Classify(Under(Screen(1.0), grown, extent), extent, Texels(256.0F, 256.0F));
+
+	GYRO_CHECK(sampling.AxisAligned && sampling.IntegerOffset && sampling.Upright);
+	GYRO_CHECK(!sampling.UnitScale);
+}
+
+// A node between pixels is refused for promotion and is not called sharp, which is decision 152's
+// "a layer at a half-pixel offset cannot be handed to a plane without moving it".
+GYRO_TEST(Projection, AFractionalPositionIsNeitherOnTheGridNorSharp)
+{
+	const Size<SurfaceSpace> extent{ 24.0F, 24.0F };
+	const NodeTransform between{ .Translation = { 10.5, 4.0, 0.0 } };
+
+	const TransformClass sampling = Classify(Under(Screen(1.0), between, extent), extent, Texels(24.0F, 24.0F));
+
+	GYRO_CHECK(sampling.AxisAligned && sampling.UnitScale);
+	GYRO_CHECK(!sampling.IntegerOffset);
+	GYRO_CHECK(!sampling.IsResampleFree());
+}
+
+// **An unstated source is unclassified rather than assumed whole.** World/Content.h lets empty mean
+// the whole image and the walk cannot turn that into a texel count, so the honest report is the same
+// one a general affine gets: nothing is known, nothing promotes, and no resample is called free.
+GYRO_TEST(Projection, AnImageThatStatesNoTexelsClassifiesAsNothing)
+{
+	const Size<SurfaceSpace> extent{ 24.0F, 24.0F };
+
+	GYRO_CHECK_EQ(Classify(Under(Screen(1.0), NodeTransform{}, extent), extent, Rect<BufferSpace>{}), TransformClass{});
+}
+
+// A turn is axis-aligned when it is a right angle and nothing at all when it is not, and neither is
+// upright. The first is a permutation of texels a sampler can do and most planes cannot; the second
+// filters, so it is not a rung of the ladder.
+GYRO_TEST(Projection, AQuarterTurnReducesAndAnAngleDoesNot)
+{
+	const Size<SurfaceSpace> extent{ 24.0F, 48.0F };
+
+	const NodeTransform quarter{ .Rotation = Quaternion::FromAxisAngle({ 0.0F, 0.0F, 1.0F }, Radians(90.0F)) };
+	const TransformClass turned = Classify(Under(Screen(1.0), quarter, extent), extent, Texels(24.0F, 48.0F));
+
+	// The axes swap, so the classification is asked along the surface's own and still reads one to one.
+	GYRO_CHECK(turned.AxisAligned && turned.UnitScale);
+	GYRO_CHECK(!turned.Upright);
+
+	const NodeTransform tilted{ .Rotation = Quaternion::FromAxisAngle({ 0.0F, 0.0F, 1.0F }, Radians(30.0F)) };
+
+	GYRO_CHECK_EQ(Classify(Under(Screen(1.0), tilted, extent), extent, Texels(24.0F, 48.0F)), TransformClass{});
+}
+
+// Perspective has no one scale to report — the factor varies across the quad — so a node tilted out of
+// the plane reduces to nothing rather than to its value at the origin.
+GYRO_TEST(Projection, APerspectiveChainReducesToNothing)
+{
+	const Size<SurfaceSpace> extent{ 100.0F, 100.0F };
+	const NodeTransform leaning{ .Rotation = Quaternion::FromAxisAngle({ 0.0F, 1.0F, 0.0F }, Radians(20.0F)),
+		                         .Projection = Perspective::FromRadii(4.0F) };
+
+	GYRO_CHECK_EQ(Classify(Under(Screen(1.0), leaning, extent), extent, Texels(100.0F, 100.0F)), TransformClass{});
+}

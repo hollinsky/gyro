@@ -222,7 +222,15 @@ public:
 	//
 	// False for a scope that is not the open one and for an id that is not a live image, which is
 	// `SceneStore::MutableImage`'s refusal reaching the call site unchanged.
-	bool Attach(EntityId id, TextureId texture) noexcept
+	//
+	// **`source` is the texels this node samples, and it is stated on every attach rather than being
+	// sticky.** A buffer swap is where a window's pixel count changes — a resize is a new buffer, and
+	// nothing else is — so the rect belongs with the id it describes. Empty is World/Content.h's *the
+	// whole image* and is the honest answer for a caller that does not know its own texel count; what
+	// it costs is `Frame/Projection.h`'s classification, which cannot promote a node whose texels it
+	// cannot count. The dangerous spelling is the one this signature refuses: a stale rect from the
+	// last buffer, which claims a sharpness the new one does not have.
+	bool Attach(EntityId id, TextureId texture, Rect<BufferSpace> source) noexcept
 	{
 		ImageContent* const content = m_Open ? m_Scene->MutableImage(id) : nullptr;
 
@@ -232,6 +240,7 @@ public:
 		}
 
 		content->Texture = texture;
+		content->Source = source;
 
 		// **The attach is what puts this entity in decision 115's ledger**, and it is the whole of what
 		// `Protocol` needs to answer a `wl_surface.frame`: the client wants to know when these pixels

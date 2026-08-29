@@ -100,9 +100,10 @@ GYRO_TEST(GymCards, EveryCopyDrawsTheOneImageThatWasAdopted)
 		GYRO_REQUIRE(content != nullptr);
 		GYRO_CHECK_EQ(content->Texture, Adopted);
 
-		// Empty is the whole image and the whole extent, per World/Content.h. A viewport or a window
-		// geometry rect appearing here would make every copy a test of that instead.
-		GYRO_CHECK(content->Source.IsEmpty());
+		// The source is the card's texels, stated so that the frame walk can classify the sampling —
+		// a rect that is not the whole card would make every copy a test of a viewport instead. Empty
+		// is the whole extent, per World/Content.h: there is no window geometry here.
+		GYRO_CHECK_EQ(content->Source, (Rect<BufferSpace>{ {}, { CardTexels, CardTexels } }));
 		GYRO_CHECK(content->Frame.IsEmpty());
 	}
 }

@@ -45,13 +45,11 @@
 // declines to let an unbounded walk on a `SCHED_FIFO` thread be prevented by dispatch's good
 // behaviour alone.
 //
-// **What the walk does not do yet, named so that neither absence is read as an oversight.**
-// `DrawItem::Sampling` stays at its default: classifying the resample needs the buffer-to-surface
-// adapter composed with the node chain, and no such adapter is published yet, so a still window takes
-// the resampling path until the protocol layer supplies one. And a node's corner radius stays zero:
-// decision 96 rounds the *window geometry rect* rather than the node extent and zeroes the radius for
-// a window that is fullscreen or tiled edge to edge, which is layout state that has no carrier in the
-// published record — so the frame rect `ImageContent` already holds has nothing to bound yet.
+// **What the walk does not do yet, named so that the absence is not read as an oversight.** A node's
+// corner radius stays zero: decision 96 rounds the *window geometry rect* rather than the node
+// extent and zeroes the radius for a window that is fullscreen or tiled edge to edge, which is layout
+// state that has no carrier in the published record — so the frame rect `ImageContent` already holds
+// has nothing to bound yet.
 
 // SPEC: how many draw items one output's frame may hold, and therefore how much the arena costs.
 // Four thousand is far past any scene gyro has been pointed at — a busy desktop is a few hundred
@@ -628,6 +626,12 @@ private:
 
 			item.Content = DrawTexture{ .Texture = content.Texture, .Source = content.Source };
 			item.Color = content.Color;
+
+			// **The one kind that has texels, and therefore the only one this is asked of.** A solid, a
+			// group's offscreen and a bare dressing have no image to be sharp or soft, and decision 152
+			// refuses all three on their content before it ever reads this — so an unreduced class is
+			// the honest answer for them rather than an omission.
+			item.Sampling = Classify(chain, node.Extent, content.Source);
 		}
 		else if (node.Kind == NodeKind::Solid)
 		{

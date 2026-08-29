@@ -131,7 +131,7 @@ void Commit(SceneStore& store, EntityId content, std::uint32_t generation)
 {
 	SceneCommit commit{ store, CommitAuthor::Client };
 
-	static_cast<void>(commit.Attach(content, TextureId{ 1, generation }));
+	static_cast<void>(commit.Attach(content, TextureId{ 1, generation }, {}));
 }
 } // namespace
 

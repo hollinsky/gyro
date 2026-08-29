@@ -401,10 +401,18 @@ Result<EntityId> AuthorCursor(SceneStore& scene, EntityId parent, TextureId text
 		{ .Position = { -units(image.HotspotX()), -units(image.HotspotY()), 0.0 },
 	      .Extent = { static_cast<float>(units(image.Size().Width)), static_cast<float>(units(image.Size().Height)) },
 	      .Flags = Node::Snap },
-		// An empty source is the whole image and an empty frame is the whole extent, which is
-	    // World/Content.h's convention both times: the glyph is one texture with nothing cropped out of
-	    // it and no window geometry to round a corner against.
-		{ .Texture = texture, .Source = {}, .Frame = {}, .Color = ColorState::Srgb() }
+		// **The source is the whole image and is stated rather than left empty**, which is the one
+	    // place the two spellings of *everything* differ. World/Content.h lets empty mean the whole
+	    // texture, and the frame walk has no way to turn that back into a texel count — so a node that
+	    // says nothing here is a node whose sampling cannot be classified, and the pointer is exactly
+	    // the node that must be: it is baked at the panel's density and sized at one over it, so it
+	    // reaches the glass texel for texel and is the one thing on screen a display engine can always
+	    // scan out for itself. An empty frame stays empty: there is no window geometry to round a
+	    // corner against.
+		{ .Texture = texture,
+	      .Source = { {}, { static_cast<float>(image.Size().Width), static_cast<float>(image.Size().Height) } },
+	      .Frame = {},
+	      .Color = ColorState::Srgb() }
 	);
 
 	if (!node)

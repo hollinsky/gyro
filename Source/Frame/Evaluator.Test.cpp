@@ -10,6 +10,7 @@
 #include "Core/Clock.h"
 #include "Core/FrameSection.h"
 #include "Core/Time.h"
+#include "Frame/Assign.h"
 #include "Geometry/AxisTransform.h"
 #include "Geometry/NodeTransform.h"
 #include "Geometry/Space.h"
@@ -1062,4 +1063,59 @@ GYRO_TEST(Evaluator, TheWalkAllocatesNothing)
 	const DrawList list = evaluator.Evaluate(Frame(snapshot));
 
 	GYRO_CHECK(!list.Items.empty());
+}
+
+// **The pointer's frame, end to end: a node whose texels match its pixels goes on a plane.** This is
+// the walk's half of decision 152 — Frame/Assign.h refuses anything whose sampling did not classify,
+// so an evaluator that leaves it at the default is a compositor that promotes nothing however idle the
+// display engine is. The scene is the cursor's shape rather than a synthetic one: a glyph baked at the
+// panel's density, sized at one over it, sitting on the grid.
+GYRO_TEST(Evaluator, AnImageThatStatesItsTexelsIsClassifiedAndPromotes)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 640.0, 360.0, 24.0F, 24.0F) };
+
+	ImageContent glyph = Texel(3);
+	glyph.Source = { {}, { 24.0F, 24.0F } };
+
+	const std::array images{ glyph };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK(list.Items[0].Sampling.IsResampleFree());
+	GYRO_CHECK_EQ(WhyNotPromoted(list.Items[0]), PromotionRefusal::None);
+}
+
+// And the same node with nothing said about its texels, which is every image the walk cannot count:
+// unclassified, and therefore composited. The refusal is named so that a reader of the trace is told
+// *sampling* rather than being left to infer it from a plane count of zero.
+GYRO_TEST(Evaluator, AnImageThatStatesNoTexelsIsRefusedForSampling)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 640.0, 360.0, 24.0F, 24.0F) };
+	const std::array images{ Texel(3) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(WhyNotPromoted(list.Items[0]), PromotionRefusal::Sampling);
 }

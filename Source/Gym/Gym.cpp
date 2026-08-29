@@ -587,9 +587,13 @@ private:
 
 		m_Texture = *next;
 
+		// The same texel count every phase, because the two buffers are the same card drawn twice.
+		const Rect<BufferSpace> source{ {}, { static_cast<float>(CardTexels), static_cast<float>(CardTexels) } };
+
 		const bool attached = Tick(scene, m_Swap, [&](SceneCommit& commit) {
-			return commit.Attach(m_Scene.Still, m_Texture) && commit.Attach(m_Scene.Scaled, m_Texture) &&
-			       commit.Attach(m_Scene.Faded, m_Texture) && commit.Attach(m_Scene.Sliding, m_Texture);
+			return commit.Attach(m_Scene.Still, m_Texture, source) &&
+			       commit.Attach(m_Scene.Scaled, m_Texture, source) &&
+			       commit.Attach(m_Scene.Faded, m_Texture, source) && commit.Attach(m_Scene.Sliding, m_Texture, source);
 		});
 
 		// Only where every copy took it. A partial attach leaves nodes naming the old id, and retiring

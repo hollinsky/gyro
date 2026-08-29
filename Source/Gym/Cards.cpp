@@ -99,11 +99,17 @@ Result<CardScene> AuthorCards(SceneStore& scene, TextureId texture)
 	const double width = bounds.Extent.Width;
 	const double height = bounds.Extent.Height;
 
-	// **Empty source and empty frame, which are the whole image and the whole extent.** World/Content.h
-	// makes both sentinels mean *all of it*, and spelling them out is what a viewport or a client-drawn
-	// shadow would change — neither of which this scene has, and both of which are worth being able to
-	// see the absence of.
-	const ImageContent card{ .Texture = texture, .Source = {}, .Frame = {}, .Color = ColorState::Srgb() };
+	// **The source is the card's own texels and the frame is empty, which is the whole extent.**
+	// World/Content.h makes an empty rect mean *all of it* in both fields, and the reason the source is
+	// spelled out anyway is that the frame walk cannot count texels it is only handed an id for: an
+	// unstated source is a node whose sampling does not classify, and this scene exists to be looked at
+	// — the untouched copy is drawn at exactly this size, so it is the one card that should reach the
+	// glass texel for texel. The frame is what a viewport or a client-drawn shadow would change,
+	// neither of which this scene has.
+	const ImageContent card{ .Texture = texture,
+		                     .Source = { {}, { static_cast<float>(CardTexels), static_cast<float>(CardTexels) } },
+		                     .Frame = {},
+		                     .Color = ColorState::Srgb() };
 
 	CardScene cards{};
 	Builder builder{ scene };
