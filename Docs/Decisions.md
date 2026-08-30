@@ -12580,3 +12580,189 @@ costs, and a version constant somebody raises in a hurry must not put that back.
 still needs is `set_reactive` honoured, which is a mapped popup resolved again when its parent moves
 under it, and which buys nothing until something moves a window: the Floorplanner places one once and
 never again.
+
+### 164. Density is one angular preference and every output derives its scale from it; a setup supplies the distance that derivation needs
+
+*(Decided 2026-08-29, with one output on the machine and nowhere yet to store the answer, which is
+[AGENTS.md](../AGENTS.md#how-decisions-get-made)'s rule about writing the entry while the change is
+still cheap: `Compositor.cpp`'s `Layout` hardcodes a scale of one and has a single caller.)*
+
+**DPI is the wrong quantity.** What a person perceives is *angular size* — how much of the visual
+field a glyph occupies — and that is density multiplied by viewing distance. A 55-inch television at
+three metres and a 27-inch monitor at sixty centimetres can report identical millimetres per pixel
+and want scales two apart. So gyro stores no per-output scale. It stores **one angular preference,
+in logical pixels per degree of visual angle**, and every output derives its own scale from that and
+its own geometry.
+
+The reference falls out of the history the ecosystem already assumes. 96 DPI at 600 mm is a pitch of
+25.4 / 96 = 0.2646 mm; one degree at that distance spans 600 · tan 1° = 10.47 mm; so the reference is
+**39.6 logical pixels per degree**, or 1.52 arcminutes of arc per logical pixel. What the number
+buys is that it is *one* number for the machine rather than a table keyed by monitor: a person with a
+laptop and a television says how big text should be once, and both are right.
+
+| Panel | distance | px/degree | derived | taken |
+| --- | --- | --- | --- | --- |
+| 24" 1080p | 600 mm | 37.8 | 0.96 | **1** |
+| 27" 1440p | 600 mm | 44.9 | 1.13 | **1** |
+| 13.3" 2560×1600 | 500 mm | 78.0 | 1.97 | **2** |
+| 27" 4K | 600 mm | 67.3 | 1.70 | **1.70** |
+| 55" 4K | 2.5 m | 137.6 | 3.48 | **3.48** |
+
+That is the ladder every desktop ships as a hand-written table, derived instead — and the 27-inch 4K
+landing between two integers with no good answer either side is the whole reason fractional scaling
+exists.
+
+#### The distance is the missing term, and it is not a property of a display
+
+The same laptop panel, the same EDID, is at 350 mm on a lap, 550 mm docked below an external monitor,
+and 700 mm shoved aside as a third screen. Nothing readable off the connector distinguishes those,
+because the thing that varies is not on the display at all — it is the situation the person and their
+displays are in. That is also true of the arrangement, which is why the two belong in one record
+rather than two.
+
+A **setup** is that record: a named set of outputs, where they sit relative to each other, and one
+viewing distance per output. It is keyed on the set of connected displays and selected automatically,
+so docking takes no interaction; it is named and chosen by hand only to break a tie the machine cannot
+see, which is the case that motivates the whole idea — the same two monitors with the laptop on the
+left today and on the right tomorrow. Selecting one is a shell affordance and not gyro's: gyro holds
+setups and exposes the selection, and it must come up correctly with no shell at all, because the
+recovery console has nobody to ask and the splash runs before anything could pick.
+
+Lid-closed stops being a mode and becomes a setup in which the internal panel is absent, which is the
+first sign the axis is the right one — a pile of special cases collapsing into one mechanism is what
+that looks like from inside.
+
+**Because gyro is a boot service, the arrangement is right before anything logs in.** No flash of a
+wrong layout, no re-shuffle when a session comes up and a display manager finally reads its
+configuration. That is not available to a compositor whose display settings live in a session.
+
+#### Logical space is angular space, which is what makes this one decision rather than three
+
+[Decision 52](#52-coordinate-spaces-are-three-and-quantization-belongs-to-the-output) sets the basis
+of global space at one logical pixel at scale 1, chosen for wire compatibility and nothing else. Under
+this entry it acquires a meaning it did not have: if every output's scale is derived from one angular
+reference, a logical pixel is a **constant visual angle everywhere on the machine**. Two consequences
+fall out and neither needs code.
+
+*Placement takes no distance term.* An output's logical width is its device width over its scale,
+which is proportional to the angle it subtends — a closer screen gets a larger scale, hence more
+logical pixels, hence a larger footprint in the layout, which is correct, because it occupies more of
+the visual field. Take the desk this entry was written at: a 286 mm-wide 2560 panel at 400 mm subtends
+39.4° and lands at 1623 logical pixels; a 598 mm-wide 3840 panel at 700 mm subtends 46.2° and lands at
+1937. Both come to about 41.5 logical pixels per degree, agreeing to under 2%. So placing outputs edge
+to edge in logical space places them edge to edge in a person's visual field, and the arrangement in a
+setup is an arrangement in logical space like any other.
+
+The residual is the tangent: a 46° panel's central pixels subtend about 1.18 times what its edge
+pixels do, so the correspondence is linearised at each screen's centre. That is the same foreshortening
+a flat panel already has and nobody reads as a scale error, which is why it is recorded here rather
+than corrected.
+
+*The pointer stops changing speed when it crosses.* `Core/Input.h` carries a displacement in logical
+pixels at scale 1, and `Scene/Pointer.h` integrates it in global space. With every scale pinned at 1
+today, a logical pixel is a different physical size on every panel, so **a 4K panel beside a 1080p one
+runs the pointer 43% slower on the 4K** — the artefact everyone has felt and nobody attributes. It is
+in the tree now, and it needs no units change to fix: once a logical pixel is a constant angle, a hand
+movement is a constant angular sweep on whichever screen the pointer is over, and the residual error
+is exactly the snapping band below. `Core/Input.h`'s claim that logical-at-scale-1 is "the one thing
+about a displacement that does not need an output to be meaningful" is true only under this entry;
+before it, it is the source of the bug.
+
+#### Integers where they land, and the exact rational otherwise
+
+1× and 2× are the only scales that resample nothing.
+[Decision 54](#54-settled-geometry-snaps-to-the-outputs-device-grid) exists because half a device pixel
+of offset is the most reported complaint about fractional scaling anywhere, while a 15% error in
+angular size is not something a person can see at all. The asymmetry is enormous and a derivation that
+ignores it throws away the best outcome available. So a derived scale snaps to an integer where the
+resulting size lands inside a stated band, and takes the exact rational of
+[decision 53](#53-scale-is-an-exact-rational) where it does not.
+
+**There is no 1.25 / 1.5 / 1.75 ladder.** That ladder is an artefact of exposing scale in a settings
+dropdown, and gyro exposes distance instead; 120ths express the derived value exactly, and under
+[decision 56](#56-clients-render-at-the-ceiling-and-gyro-downscales) the client renders at the ceiling
+and gyro downscales regardless, so an awkward fraction costs nothing a round one does not.
+
+#### The setup is the seat's and the preference is the person's
+
+[Scene/Pointer.h](../Source/Scene/Pointer.h) already holds that where the pointer is is a fact about
+*the desk* and belongs to the seat, while an acceleration curve and a cursor glyph are the session's —
+which is why switching users must not move the cursor and
+[decision 43](#43-lock-and-greeter-are-one-ui-locking-is-an-output-reassignment)'s output reassignment
+does not teleport it. A setup is the same kind of fact and takes the same side: the monitors do not
+move when a different person sits down. The angular preference is on the other side of that line,
+because how big text should be is a fact about eyes.
+
+What that buys is not available anywhere today: **two people sharing one desk get their own text size
+on the same monitors**, without either of them touching the arrangement, and without the second one
+discovering that fixing their text size moved the first one's windows.
+
+#### Priors are how a setup starts, not how density is decided
+
+An unrecognised set of displays needs a setup before a person has said anything, so form factor seeds
+one: an internal panel at 500 mm, a connector carrying a diagonal over 40 inches at 2.5 m, anything
+else at 600 mm. Where EDID reports no physical size — which `Drm/Device.h` already notes is most
+projectors and every virtual connector — the seed falls back to a prior on resolution alone, which is
+defensible because people sit further from bigger screens, so distance roughly tracks diagonal and
+angular resolution ends up a function of pixel count. Both are priors and are labelled as such: they
+make a new dock usable immediately, wrong only in the one term a person can correct in a single
+gesture.
+
+Until a setup says otherwise the arrangement is a guess with no parameter in it, in
+[decision 141](#141-a-window-is-parented-into-gyros-floor-and-shown-when-placed-the-floorplanner-stands-in-for-an-absent-shell)'s
+sense, and two things make it a better guess than what is built. Outputs are aligned on their
+**centres** rather than their top edges, because people align monitors by eye height and a top-aligned
+guess is wrong for every pair of unequal panels. And an internal panel goes **below and centred**
+rather than beside, because a laptop in front of an external monitor is the most common multi-monitor
+arrangement on this platform and the current left-to-right rule never produces it.
+
+#### Rejected alternatives
+
+**Rejected: thresholds on DPI.** The obvious version, and it is what puts a television at 1× and a
+projector at 2× — it has to be manually overridden on precisely the displays that are not a desktop
+monitor, which is the population the derivation exists to serve.
+
+**Rejected: a scale stored per output.** What every desktop ships. It is the wrong axis twice: it makes
+a person re-derive the same preference once per monitor and keep the results in agreement by hand, and
+it has nowhere at all to put the fact that actually changed when they docked, which is how far away
+the screen is.
+
+**Rejected: a full 3D pose per output.** "Where the screens are in space" invites it, and the
+perceptual content is not there. Foreshortening is a cosine, worth a few percent for any screen a
+person has bothered to aim at their face, and self-correcting, because aiming it until it looks square
+is what people do. A pose costs a configuration model nobody can fill in and buys a rounding error.
+
+**Rejected: storing the arrangement in millimetres.** This was the position held for about an hour
+while writing this entry, on the reasoning that an arrangement expressed in logical pixels is
+scale-dependent — change the text size on the left monitor and the right one moves. The proportionality
+above kills it: once logical space is angular space, edge to edge in logical *is* edge to edge in the
+visual field, and a physical arrangement beside it would be a second copy of one fact to keep in
+agreement with the first.
+
+**Rejected: one setup per person.** The monitors do not move when a different person sits down, and two
+sessions holding two arrangements of one desk is a disagreement with no tiebreaker.
+
+**Rejected: inferring the arrangement from how a person corrects a failed crossing.** It is learnable —
+somebody who shoves the pointer at an edge where nothing appears will shove harder — and a compositor
+whose geometry moves while it is being used is worse than one that guesses wrong and holds still.
+
+**Rejected: exposing the correction as a scale.** *How far away is this screen* is a question a person
+can answer — arm's length, across the desk, across the room — where *what scale factor do you want* is
+an implementation detail that leaked into a settings panel. The objection is that distance is now
+load-bearing for three things, so somebody who lies about it to get larger text also moves their
+pointer feel and their layout. That is correct rather than a defect: if you tell gyro a screen is
+closer than it is, everything should behave as though it were.
+
+#### What is not built, and the hole that is known
+
+None of it. `Layout` hardcodes a scale of one and no backend reports a physical size — the DRM
+connector's millimetres stop at `DrmPipeline` and never cross the seam,
+[decision 87](#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam) leaves the
+composition root to fill `SceneOutput` in, and there is no store for a setup and no session agent whose
+job it would be. The near-term commit is the seeded default alone: physical size across the backend,
+a distance prior, centre alignment, internal panel below.
+
+The known hole is identity. A setup keys on the displays present, and two identical monitors that
+report no EDID serial are indistinguishable — so which of them is on the left is a coin flip a person
+fixes once and gyro cannot remember against anything except the port they happen to be plugged into.
+Connector name is the tiebreaker available, and it is wrong the day they are swapped.
