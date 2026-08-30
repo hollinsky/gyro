@@ -275,6 +275,21 @@ private:
 		// the timestamps resolve. See `RecordRequest::Frame`.
 		std::uint64_t Frame = 0;
 
+		// The host's clock immediately after `vkQueueSubmit`, and the anchor the run is drawn from on a
+		// device that cannot calibrate.
+		//
+		// **A bound rather than a guess, which is the whole of why it is honest to draw from.** The
+		// opening timestamp is written when the GPU *reaches* the batch, so the run cannot have begun
+		// before the submission that queued it — placing it here understates queue wait and never moves
+		// the work earlier than it truly ran. On a device driving one composite per refresh with the
+		// part otherwise idle that wait is a few microseconds, and the alternative was the row this
+		// left empty: a `.pftrace` from a turnip laptop carried eleven hundred `uncalibrated` marks and
+		// not one number, while the schedule those frames were being admitted against turned entirely
+		// on the cost none of them reported.
+		//
+		// Unused where `VK_EXT_calibrated_timestamps` answers, because a real anchor places both ends.
+		Instant SubmittedAt{};
+
 		// How many timestamps the submission actually wrote, and what each of them opens. `Stamps`
 		// is zero on a frame that was not being traced, one more than the number of spans otherwise —
 		// the last stamp closes the one before it and names nothing.

@@ -1469,6 +1469,11 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		pending.Trace = request.Trace;
 		pending.Frame = request.Frame;
 
+		// Taken here rather than before the submit, so that the instant is one the batch was certainly
+		// queued by. See `PendingCost::SubmittedAt` for why an anchor this loose is still one a run may
+		// be drawn from.
+		pending.SubmittedAt = m_Clock->Now();
+
 		// Read here, near the work, rather than at collection frames later where the clock has moved and
 		// the part has parked again. Both halves: on the frame path the actual clock is very often a
 		// reading of a gated GPU, and the commanded point beside it is what tells that apart from a part
@@ -2382,15 +2387,29 @@ void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uin
 		// **A mark per frame rather than silence, because the GPU row opens as a missing track on a
 		// device that cannot read its clock and the host's together.** The absence was the answer to
 		// *where did the GPU timings go* — a question the row itself can now answer.
+		//
+		// **It is a mark beside the run rather than instead of it now**, which is the correction. The
+		// return that used to stand here threw away every figure below, and only one of them needed a
+		// calibration to be true: the *durations* are differences between two stamps of one counter and
+		// are exact whatever the host clock is doing. What was missing was a place to put them, and a
+		// device with no calibration still has `PendingCost::SubmittedAt`. So the row draws from the
+		// submission and this mark is what says the placement is a bound rather than an observation.
 		TraceMark("uncalibrated", pending.Trace);
-
-		return;
 	}
 
 	const DeviceDescription& description = m_Device->Description();
 
-	const Instant opened = TimestampAt(description, m_Calibration, stamps[0]);
-	const Instant closed = TimestampAt(description, m_Calibration, stamps[pending.Stamps - 1]);
+	// Where a raw device stamp lands on the host's clock: the calibrated pairing where the device
+	// offers one, and otherwise the submission plus however much of the run precedes this stamp. Both
+	// preserve every interval exactly — the two differ only in where the run as a whole is put — which
+	// is what lets every emission below be written once.
+	const auto at = [&](std::uint64_t stamp) noexcept {
+		return m_Calibration.IsValid() ? TimestampAt(description, m_Calibration, stamp) :
+		                                 Advanced(pending.SubmittedAt, description.TimestampSpan(stamps[0], stamp));
+	};
+
+	const Instant opened = at(stamps[0]);
+	const Instant closed = at(stamps[pending.Stamps - 1]);
 
 	// **The batch is a slice and the passes are inside it, which is the whole of what this row was
 	// missing.** A frame's device work is a run — composite, extract, blur, resumed composite, and
@@ -2418,13 +2437,7 @@ void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uin
 			continue;
 		}
 
-		TraceSpanAt(
-			pending.Names[index],
-			TimestampAt(description, m_Calibration, stamps[index]),
-			TimestampAt(description, m_Calibration, stamps[index + 1]),
-			pending.Trace,
-			TraceTag(index)
-		);
+		TraceSpanAt(pending.Names[index], at(stamps[index]), at(stamps[index + 1]), pending.Trace, TraceTag(index));
 	}
 
 	// **What the frame actually cost on the device, beside what it was predicted to cost.** Frame/Loop.h
