@@ -2503,8 +2503,8 @@ private:
 				.Generation = achieved.Generation,
 				.Bounds = { origin, { output.Width, output.Height } },
 				.Density = output.Density,
-				.Grid = achieved.Resolution,
 				.Period = achieved.Period,
+				.Grid = achieved.Resolution,
 				.Orientation = Orientation(achieved.Transform),
 			};
 
