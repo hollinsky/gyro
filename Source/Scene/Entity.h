@@ -4,6 +4,7 @@
 
 #include "Animation/Author/Animatable.h"
 #include "Core/Handle.h"
+#include "Core/Session.h"
 #include "Geometry/NodeTransform.h"
 #include "Geometry/Space.h"
 #include "World/Elevation.h"
@@ -163,6 +164,19 @@ struct Entity
 	// the published runs are built by the walk that emits them, so the two numbers agree only by
 	// accident and the serializer translates.
 	std::uint32_t Content = NoContent;
+
+	// The session whose scene the subtree rooted here belongs to, read at the top level and nowhere
+	// else.
+	//
+	// **A session is a property of a root, and everything under one is in it by being under it.** That
+	// is what `World/Root.h` publishes and it is why this is not asked of a window: a client's entity is
+	// parented into its session's floor (141), so the floor answers for it and a second copy on every
+	// descendant would be a second thing to keep true. `SceneStore::SetSession` refuses an entity that
+	// has a parent for exactly that reason, rather than storing a value the serialiser would not read.
+	//
+	// `None` is gyro's own — the floor of a development run with no agent, and the splash and the
+	// console when they are authored — and it is drawn on every output rather than on none.
+	SessionId Session = SessionId::None;
 
 	// What a `Reference` presents, as an id rather than as an index.
 	//

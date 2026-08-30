@@ -111,14 +111,40 @@ public:
 	// Serve a session's clients on the listener its agent offered. The composition root's to call, on
 	// the dispatch thread, because it is the party holding both this host and the control socket the
 	// offer arrived on.
-	[[nodiscard]] Result<void> Adopt(Fd listener, std::uint32_t uid, SessionId session)
+	// **The floor is authored first and the listener is taken second**, so a window cannot arrive before
+	// the container it hangs under — and a session that could not be given a floor is not served at all,
+	// which is a failure the agent is told about rather than one a person meets as an application that
+	// starts and never appears.
+	[[nodiscard]] Result<void> Adopt(SceneStore& scene, Fd listener, std::uint32_t uid, SessionId session)
 	{
-		return m_Server.Adopt(std::move(listener), uid, session);
+		if (const Result<void> floor = m_Floors.Open(scene, session); !floor)
+		{
+			return floor;
+		}
+
+		Result<void> adopted = m_Server.Adopt(std::move(listener), uid, session);
+
+		if (!adopted)
+		{
+			m_Floors.Close(scene, session);
+		}
+
+		return adopted;
 	}
 
 	// The agent went away, so the session did. Ends every client that arrived on that listener, which
-	// retires their windows through the path a client exiting already takes.
-	void Release(SessionId session) noexcept { m_Server.Release(session); }
+	// retires their windows through the path a client exiting already takes — and then retires the floor
+	// they hung under, which is the same path one level up.
+	//
+	// **The clients go first and the floor second, and the order is what a person sees.** Retiring the
+	// floor first would retire every window with it and then retire each of them again as its client
+	// died, which decision 114 makes idempotent — so the order costs nothing to correctness and buys
+	// the windows their own exit rather than the floor's.
+	void Release(SceneStore& scene, SessionId session) noexcept
+	{
+		m_Server.Release(session);
+		m_Floors.Close(scene, session);
+	}
 
 	// Push everything owed back out to the clients. The root's to call, immediately before it sleeps.
 	void Flush() noexcept { m_Server.Flush(); }
@@ -211,21 +237,15 @@ private:
 	SeatGlobal m_Seat{ m_Context };
 	wl_global* m_SeatGlobal = nullptr;
 
-	// gyro's own node, authored before any client can reach the socket and outliving all of them.
-	SessionFloor m_Floor;
+	// One per session, each authored before its session's listener is taken and outliving every client
+	// on it. A development run has exactly one, whose session is `None`.
+	SessionFloors m_Floors;
+
+	// Which of the two shapes this run is, which is the whole of what the command line settles about a
+	// host and the one thing `Open` needs of it.
+	HostListener m_Listener = HostListener::Own;
 
 	Server m_Server;
-};
-
-// Bring up the server, or fail before anything else in the run is constructed. An empty `socket` under
-// `HostListener::Own` takes the first free `wayland-N`, which is what a client with nothing set finds;
-// under `HostListener::Handover` there is no socket yet and the argument is unread.
-//
-// **The socket is bound here rather than in `Open` above**, because a compositor that cannot offer
-// clients a socket should say so and stop rather than reach the point of laying out monitors — and
-// because the root needs `PollFd` to wire the wait, which is before the loop calls `Open` at all.
-[[nodiscard]] Result<std::unique_ptr<ClientHost>>
-MakeClientHost(HostListener listener = HostListener::Own, std::string_view socket = {});
 
 	// One global per output, kept in step with the world inside `Advance`.
 	//
@@ -241,3 +261,14 @@ MakeClientHost(HostListener listener = HostListener::Own, std::string_view socke
 	// here: the display outlives nothing else, so it is destroyed after every resource it owns has been
 	// cut loose from the output it named.
 	HostOutputs m_Outputs;
+};
+
+// Bring up the server, or fail before anything else in the run is constructed. An empty `socket` under
+// `HostListener::Own` takes the first free `wayland-N`, which is what a client with nothing set finds;
+// under `HostListener::Handover` there is no socket yet and the argument is unread.
+//
+// **The socket is bound here rather than in `Open` above**, because a compositor that cannot offer
+// clients a socket should say so and stop rather than reach the point of laying out monitors — and
+// because the root needs `PollFd` to wire the wait, which is before the loop calls `Open` at all.
+[[nodiscard]] Result<std::unique_ptr<ClientHost>>
+MakeClientHost(HostListener listener = HostListener::Own, std::string_view socket = {});

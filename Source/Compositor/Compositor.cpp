@@ -1887,11 +1887,19 @@ private:
 	// on a machine where it plainly is.
 	void AdoptOffers()
 	{
+		// Both for `ShowSession`'s reason one line down: an offer is now worth a floor as well as a
+		// listener, so the world has to be in hand before one can be taken rather than only afterwards.
+		if (m_Dispatch == nullptr || m_Clients == nullptr)
+		{
+			return;
+		}
+
 		while (std::optional<Session::AcceptedOffer> offer = m_Control->TakeOffer())
 		{
 			const SessionId id = offer->Id;
 
-			const Result<void> adopted = m_Clients->Adopt(std::move(offer->Listener), offer->Uid, id);
+			const Result<void> adopted =
+				m_Clients->Adopt(m_Dispatch->Store(), std::move(offer->Listener), offer->Uid, id);
 
 			if (!adopted)
 			{
@@ -1942,9 +1950,9 @@ private:
 	{
 		// Silent on the way through: Session/Control.h says the session ended, and this is what that
 		// costs the world rather than a second announcement of the same fact.
-		if (m_Clients != nullptr)
+		if (m_Clients != nullptr && m_Dispatch != nullptr)
 		{
-			m_Clients->Release(session);
+			m_Clients->Release(m_Dispatch->Store(), session);
 		}
 
 		// **The outputs go back to gyro rather than to the next session along.** Handing them to another

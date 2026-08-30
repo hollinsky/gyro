@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "Core/Clock.h"
+#include "Core/Session.h"
 #include "Geometry/Scale.h"
 #include "Geometry/Space.h"
 #include "Scene/Commit.h"
@@ -32,26 +33,168 @@ constexpr double PanelHeight = 1080.0;
 		     .Grid = { 1920, 1080 } };
 }
 
+// A development run's session, which is no session: `HostListener::Own` binds a socket with no agent
+// behind it, so a client belongs to nobody and its floor is gyro's own. Most of the arithmetic below
+// is indifferent to which session it is asked about and says so by using this one.
+constexpr SessionId Nobody = SessionId::None;
+
+// Two sessions, which is the arrangement everything about the partition needs and nothing about the
+// arithmetic does.
+constexpr auto First = static_cast<SessionId>(1);
+constexpr auto Second = static_cast<SessionId>(2);
+
 [[nodiscard]] Size<SurfaceSpace, float> Window(float width, float height) noexcept
 {
 	return { width, height };
 }
 } // namespace
 
-GYRO_TEST(Floor, TheFloorIsOneContainerAndOnlyEverOne)
+GYRO_TEST(Floor, AFloorIsOneContainerPerSessionAndOnlyEverOne)
 {
 	ManualClock clock{ Monotonic::FromNanoseconds(1) };
 	SceneStore scene{ clock };
 
-	SessionFloor floor;
-	GYRO_REQUIRE(floor.Open(scene).has_value());
-	GYRO_CHECK(!floor.Container().IsNull());
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, Nobody).has_value());
+	GYRO_CHECK(!floors.Container(Nobody).IsNull());
 	GYRO_CHECK_EQ(scene.Count(), std::uint32_t{ 1 });
 
-	// A second call is a wiring mistake rather than a state to serve, and the failure of letting it
-	// through is two floors with windows split between them and no way to tell which is on screen.
-	GYRO_CHECK(!floor.Open(scene).has_value());
+	// A second call for the same session is a wiring mistake rather than a state to serve, and the
+	// failure of letting it through is two floors with one person's windows split between them and no
+	// way to tell which is on screen.
+	GYRO_CHECK(!floors.Open(scene, Nobody).has_value());
 	GYRO_CHECK_EQ(scene.Count(), std::uint32_t{ 1 });
+
+	// A second *session* is two floors, which is decision 21's two people logged in at once.
+	GYRO_REQUIRE(floors.Open(scene, First).has_value());
+	GYRO_CHECK_EQ(scene.Count(), std::uint32_t{ 2 });
+	GYRO_CHECK(floors.Container(First) != floors.Container(Nobody));
+
+	// A session nobody has offered a listener for has no floor at all, which is also the answer a commit
+	// from a client whose session has already ended gets.
+	GYRO_CHECK(floors.Container(Second).IsNull());
+}
+
+// The partition as the frame thread reads it: a floor is a root and its session is on the root, never
+// on the windows under it. A window asked directly answers `None`, which is why nothing asks one — its
+// session is the floor's, by being under the floor.
+GYRO_TEST(Floor, AFloorIsARootCarryingItsSessionAndTheWindowsUnderItCarryNone)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, First).has_value());
+
+	const EntityId container = floors.Container(First);
+
+	GYRO_REQUIRE(scene.Find(container) != nullptr);
+	GYRO_CHECK(scene.Find(container)->Parent.IsNull());
+	GYRO_CHECK(scene.Find(container)->Session == First);
+
+	const std::optional<EntityId> window = scene.CreateContainer(container, {});
+	GYRO_REQUIRE(window.has_value());
+	GYRO_CHECK(scene.Find(*window)->Session == SessionId::None);
+
+	// Refused rather than stored, so there is one answer on the machine and not two that can disagree.
+	GYRO_CHECK(!scene.SetSession(*window, Second));
+	GYRO_CHECK(scene.Find(*window)->Session == SessionId::None);
+}
+
+// The session ended, which retires its floor and everything still hanging on it — the path a client
+// exiting already takes (114), one level up. Retired rather than freed, so a window that was closing
+// finishes closing rather than vanishing part-way through.
+GYRO_TEST(Floor, ClosingASessionRetiresItsFloorAndLeavesEveryOtherAlone)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, First).has_value());
+	GYRO_REQUIRE(floors.Open(scene, Second).has_value());
+
+	const EntityId leaving = floors.Container(First);
+	const EntityId staying = floors.Container(Second);
+
+	const std::optional<EntityId> window = scene.CreateContainer(leaving, {});
+	GYRO_REQUIRE(window.has_value());
+
+	floors.Close(scene, First);
+
+	GYRO_CHECK(scene.Find(leaving)->Retiring);
+	GYRO_CHECK(scene.Find(*window)->Retiring);
+	GYRO_CHECK(!scene.Find(staying)->Retiring);
+
+	// The record leaves at once even though the nodes linger, because a commit arriving from a client
+	// that has not been dropped yet must not find a floor whose session is over.
+	GYRO_CHECK(floors.Container(First).IsNull());
+	GYRO_CHECK(!floors.Container(Second).IsNull());
+
+	// Closing twice is a second EOF on a connection already gone, and changes nothing.
+	floors.Close(scene, First);
+	GYRO_CHECK(!floors.Container(Second).IsNull());
+}
+
+// The placement's half of the same fact. A window centred on `outputs.front()` regardless of who is
+// being shown there is an application a person launched, running and drawing, on a monitor they are
+// not looking at and cannot bring it to.
+GYRO_TEST(Floor, AWindowIsPlacedOnAnOutputShowingItsOwnSession)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	SceneOutput left = Panel();
+	left.Session = First;
+
+	SceneOutput right = Panel(PanelWidth, 0.0);
+	right.Id = OutputId{ 2, 1 };
+	right.Session = Second;
+
+	const std::array outputs{ left, right };
+	scene.SetOutputs(outputs);
+
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, Second).has_value());
+
+	const std::optional<EntityId> window = scene.CreateContainer(floors.Container(Second), {});
+	GYRO_REQUIRE(window.has_value());
+
+	{
+		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+
+		PlaceOnFloor(commit, scene, Second, *window, Window(800.0F, 600.0F));
+	}
+
+	GYRO_CHECK_EQ(scene.Find(*window)->Translation.Model().X, PanelWidth + (1920.0 - 800.0) / 2.0);
+}
+
+// And a session on no output at all, which is decision 21's *connected and not presented*: its clients
+// run and draw, and a window that opens there waits rather than landing on somebody else's screen.
+GYRO_TEST(Floor, AWindowOfASessionOnNoOutputIsNotPlaced)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	SceneOutput only = Panel();
+	only.Session = First;
+
+	const std::array outputs{ only };
+	scene.SetOutputs(outputs);
+
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, Second).has_value());
+
+	const std::optional<EntityId> window = scene.CreateContainer(floors.Container(Second), {});
+	GYRO_REQUIRE(window.has_value());
+
+	{
+		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+
+		PlaceOnFloor(commit, scene, Second, *window, Window(800.0F, 600.0F));
+	}
+
+	GYRO_CHECK_EQ(scene.Find(*window)->Translation.Model().X, 0.0);
+	GYRO_CHECK_EQ(scene.Find(*window)->Translation.Model().Y, 0.0);
 }
 
 GYRO_TEST(Floor, AWindowIsCentredOnTheOutputHoldingThePointer)
@@ -62,16 +205,16 @@ GYRO_TEST(Floor, AWindowIsCentredOnTheOutputHoldingThePointer)
 	const std::array outputs{ Panel() };
 	scene.SetOutputs(outputs);
 
-	SessionFloor floor;
-	GYRO_REQUIRE(floor.Open(scene).has_value());
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, Nobody).has_value());
 
-	const std::optional<EntityId> window = scene.CreateContainer(floor.Container(), {});
+	const std::optional<EntityId> window = scene.CreateContainer(floors.Container(Nobody), {});
 	GYRO_REQUIRE(window.has_value());
 
 	{
 		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
 
-		PlaceOnFloor(commit, scene, *window, Window(800.0F, 600.0F));
+		PlaceOnFloor(commit, scene, Nobody, *window, Window(800.0F, 600.0F));
 	}
 
 	const Entity* const placed = scene.Find(*window);
@@ -94,16 +237,16 @@ GYRO_TEST(Floor, ThePlacementIsInTheOutputsOwnCornerRatherThanTheWorldsOrigin)
 	const std::array outputs{ Panel(PanelWidth, 0.0) };
 	scene.SetOutputs(outputs);
 
-	SessionFloor floor;
-	GYRO_REQUIRE(floor.Open(scene).has_value());
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, Nobody).has_value());
 
-	const std::optional<EntityId> window = scene.CreateContainer(floor.Container(), {});
+	const std::optional<EntityId> window = scene.CreateContainer(floors.Container(Nobody), {});
 	GYRO_REQUIRE(window.has_value());
 
 	{
 		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
 
-		PlaceOnFloor(commit, scene, *window, Window(800.0F, 600.0F));
+		PlaceOnFloor(commit, scene, Nobody, *window, Window(800.0F, 600.0F));
 	}
 
 	GYRO_CHECK_EQ(scene.Find(*window)->Translation.Model().X, PanelWidth + (1920.0 - 800.0) / 2.0);
@@ -117,16 +260,16 @@ GYRO_TEST(Floor, AWindowLargerThanTheScreenHangsOffBothEdgesEqually)
 	const std::array outputs{ Panel() };
 	scene.SetOutputs(outputs);
 
-	SessionFloor floor;
-	GYRO_REQUIRE(floor.Open(scene).has_value());
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, Nobody).has_value());
 
-	const std::optional<EntityId> window = scene.CreateContainer(floor.Container(), {});
+	const std::optional<EntityId> window = scene.CreateContainer(floors.Container(Nobody), {});
 	GYRO_REQUIRE(window.has_value());
 
 	{
 		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
 
-		PlaceOnFloor(commit, scene, *window, Window(2400.0F, 1400.0F));
+		PlaceOnFloor(commit, scene, Nobody, *window, Window(2400.0F, 1400.0F));
 	}
 
 	// Negative, and deliberately not clamped: a window too big for the screen is centred on it, which
@@ -141,16 +284,16 @@ GYRO_TEST(Floor, APlacementWithNoOutputsChangesNothing)
 	ManualClock clock{ Monotonic::FromNanoseconds(1) };
 	SceneStore scene{ clock };
 
-	SessionFloor floor;
-	GYRO_REQUIRE(floor.Open(scene).has_value());
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, Nobody).has_value());
 
-	const std::optional<EntityId> window = scene.CreateContainer(floor.Container(), {});
+	const std::optional<EntityId> window = scene.CreateContainer(floors.Container(Nobody), {});
 	GYRO_REQUIRE(window.has_value());
 
 	{
 		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
 
-		PlaceOnFloor(commit, scene, *window, Window(800.0F, 600.0F));
+		PlaceOnFloor(commit, scene, Nobody, *window, Window(800.0F, 600.0F));
 	}
 
 	// There is no honest centre of nothing, and the window stays at the origin rather than being moved
@@ -169,9 +312,9 @@ struct Placed
 	EntityId Surface;
 };
 
-[[nodiscard]] Placed Add(SceneStore& scene, const SessionFloor& floor)
+[[nodiscard]] Placed Add(SceneStore& scene, const SessionFloors& floors)
 {
-	const EntityId frame = scene.CreateContainer(floor.Container(), { .Extent = { 400.0F, 300.0F } }).value();
+	const EntityId frame = scene.CreateContainer(floors.Container(Nobody), { .Extent = { 400.0F, 300.0F } }).value();
 	const EntityId surface = scene.CreateImage(frame, { .Extent = { 400.0F, 300.0F } }, ImageContent{}).value();
 
 	scene.Focus().Offer(frame);
@@ -190,22 +333,22 @@ GYRO_TEST(Floor, AClickFocusesTheWindowUnderItAndBringsItToTheFront)
 	const std::array outputs{ Panel() };
 	scene.SetOutputs(outputs);
 
-	SessionFloor floor;
-	GYRO_REQUIRE(floor.Open(scene).has_value());
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, Nobody).has_value());
 
-	const Placed below = Add(scene, floor);
-	const Placed above = Add(scene, floor);
+	const Placed below = Add(scene, floors);
+	const Placed above = Add(scene, floors);
 
 	// The newest window has both, which is the stack policy (141) and the append order (55) agreeing.
 	GYRO_REQUIRE(scene.Focus().Focused() == above.Frame);
-	GYRO_REQUIRE(scene.Find(floor.Container())->LastChild == above.Frame);
+	GYRO_REQUIRE(scene.Find(floors.Container(Nobody))->LastChild == above.Frame);
 
 	// The hit is the surface and never the container: the click is on the pixels.
 	FocusByClick(scene, below.Surface);
 
 	GYRO_CHECK(scene.Focus().Focused() == below.Frame);
-	GYRO_CHECK(scene.Find(floor.Container())->LastChild == below.Frame);
-	GYRO_CHECK(scene.Find(floor.Container())->FirstChild == above.Frame);
+	GYRO_CHECK(scene.Find(floors.Container(Nobody))->LastChild == below.Frame);
+	GYRO_CHECK(scene.Find(floors.Container(Nobody))->FirstChild == above.Frame);
 }
 
 // A click on the background, on the floor, or on anything gyro drew for itself. Focus stays where it
@@ -219,14 +362,14 @@ GYRO_TEST(Floor, AClickOnNothingLeavesFocusAndTheOrderAlone)
 	const std::array outputs{ Panel() };
 	scene.SetOutputs(outputs);
 
-	SessionFloor floor;
-	GYRO_REQUIRE(floor.Open(scene).has_value());
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, Nobody).has_value());
 
-	const Placed below = Add(scene, floor);
-	const Placed above = Add(scene, floor);
+	const Placed below = Add(scene, floors);
+	const Placed above = Add(scene, floors);
 
 	FocusByClick(scene, {});
-	FocusByClick(scene, floor.Container());
+	FocusByClick(scene, floors.Container(Nobody));
 
 	// A node gyro authored that is not under any window either — the cursor stands exactly here.
 	const EntityId glyph = scene.CreateContainer({}, {}).value();
@@ -234,6 +377,6 @@ GYRO_TEST(Floor, AClickOnNothingLeavesFocusAndTheOrderAlone)
 	FocusByClick(scene, glyph);
 
 	GYRO_CHECK(scene.Focus().Focused() == above.Frame);
-	GYRO_CHECK(scene.Find(floor.Container())->LastChild == above.Frame);
-	GYRO_CHECK(scene.Find(floor.Container())->FirstChild == below.Frame);
+	GYRO_CHECK(scene.Find(floors.Container(Nobody))->LastChild == above.Frame);
+	GYRO_CHECK(scene.Find(floors.Container(Nobody))->FirstChild == below.Frame);
 }

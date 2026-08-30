@@ -9,6 +9,7 @@
 #include "Animation/Author/Motion.h"
 #include "Core/Clock.h"
 #include "Core/Handle.h"
+#include "Core/Session.h"
 #include "Core/SlotAllocator.h"
 #include "Core/Time.h"
 #include "Scene/Entity.h"
@@ -317,6 +318,29 @@ public:
 	[[nodiscard]] std::span<const EntityId> Awaiting() const noexcept { return m_Awaiting; }
 
 	void ClearAwaiting() noexcept { m_Awaiting.clear(); }
+
+	// Say which session's scene a root's subtree is. Decision 21's partition, writer's side.
+	//
+	// **A root only, and the refusal is what keeps the fact single.** A session belongs to the top of a
+	// subtree — `World/Root.h` publishes it per root and the frame thread reads it at depth one — so an
+	// entity with a parent is already in whatever session its root is in, and accepting one here would
+	// store a number nothing reads and let two answers disagree. A window is therefore never asked: it
+	// is parented into its session's floor and the floor answers for it (141).
+	//
+	// False for an id that names nothing live, and for one that is not a root.
+	bool SetSession(EntityId id, SessionId session) noexcept
+	{
+		Entity* const root = Mutable(id);
+
+		if (root == nullptr || !root->Parent.IsNull())
+		{
+			return false;
+		}
+
+		root->Session = session;
+
+		return true;
+	}
 
 private:
 	friend class SceneCommit;

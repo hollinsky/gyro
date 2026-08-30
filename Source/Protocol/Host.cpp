@@ -12,16 +12,26 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 	// again on every `Advance`, which is where a request that needs it runs.
 	(void)textures;
 
-	// **The floor is authored before the socket can be reached rather than lazily at the first
-	// window.** A container created on demand is one whose failure lands in the middle of a client's
-	// commit, where the only answer left is to end that client for something gyro did; here it is a
-	// compositor that says so and does not start.
-	if (const Result<void> floor = m_Floor.Open(scene); !floor)
-	{
-		return floor;
-	}
+	m_Context.SetFloors(m_Floors, m_Server);
 
-	m_Context.SetFloor(m_Floor.Container());
+	// **A run that binds its own socket authors one floor now; a run under the handover authors one per
+	// session, when that session's listener is adopted.** The two are the same object doing the same
+	// job and not a branch in the world: a client on a socket gyro bound belongs to no session, and a
+	// floor of no session is gyro's own — drawn on every output, exactly as the splash and the pointer
+	// are. What the handover path must not do is author one here, because a floor nobody can reach is a
+	// root every walk pays for and no window ever hangs under.
+	//
+	// It is authored before the socket can be reached rather than lazily at the first window, for the
+	// reason `SessionFloors::Open` gives: a container created on demand is one whose failure lands in
+	// the middle of a client's commit, where the only answer left is to end that client for something
+	// gyro did.
+	if (m_Listener == HostListener::Own)
+	{
+		if (const Result<void> floor = m_Floors.Open(scene, SessionId::None); !floor)
+		{
+			return floor;
+		}
+	}
 
 	wl_display* const display = m_Server.Display();
 
@@ -149,16 +159,6 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// answer to no clients at all: author nothing and wait.
 	[[maybe_unused]] const Result<void> polled = m_Server.Poll();
 
-	// **After the requests**, because a window that mapped in this wakeup is one the pointer may already
-	// be sitting on: a person who clicks the instant an application opens is clicking on the window
-	// rather than through it.
-	m_Seat.SyncPointer(scene, now);
-
-	// **After the pointer, because the press this routed is one of the things that moves focus** (162),
-	// and after the requests for the reason that makes a window typeable in the wakeup it opened in: the
-	// commit that maps it is what offers it focus. Both writers run before the comparison, so one
-	// iteration sends one `enter` however many times focus changed inside it. See [Seat.h](Seat.h) for
-	// why the change is noticed by comparing rather than by a signal out of `Scene`, and for what the
 	// **Before the pointer and before anything reads a window's position**, because the outputs are what
 	// a position means: a client that has just bound `wl_output` is one whose first window is about to be
 	// placed, and the scale it lays out at comes from the entry below rather than from the bind.
@@ -173,6 +173,16 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 		SyncOutputEntry(m_Context, m_Outputs, scene);
 	}
 
+	// **After the requests**, because a window that mapped in this wakeup is one the pointer may already
+	// be sitting on: a person who clicks the instant an application opens is clicking on the window
+	// rather than through it.
+	m_Seat.SyncPointer(scene, now);
+
+	// **After the pointer, because the press this routed is one of the things that moves focus** (162),
+	// and after the requests for the reason that makes a window typeable in the wakeup it opened in: the
+	// commit that maps it is what offers it focus. Both writers run before the comparison, so one
+	// iteration sends one `enter` however many times focus changed inside it. See [Seat.h](Seat.h) for
+	// why the change is noticed by comparing rather than by a signal out of `Scene`, and for what the
 	// other order costs — a keystroke delivered to the window a person just clicked away from.
 	const EntityId focused = scene.Focus().Focused();
 
@@ -183,13 +193,17 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// state says which titlebar is lit, and a window that got one without the other is one a person can
 	// type into and cannot tell they are typing into. [Shell.h](Shell.h) has why a menu leaves its own
 	// window activated.
-	SyncActivation(m_Context, scene, focused);
+	SyncWindows(m_Context, scene, focused);
 
 	return Wake::Never();
 }
 
 Result<void> ClientHost::Listen(HostListener listener, std::string_view socket)
 {
+	// Remembered because `Open` below has to know whether there will ever be an agent to author a floor
+	// per session, or whether this run's clients belong to nobody and want the one floor gyro's own.
+	m_Listener = listener;
+
 	if (const Result<void> opened = m_Server.Open(); !opened)
 	{
 		return opened;

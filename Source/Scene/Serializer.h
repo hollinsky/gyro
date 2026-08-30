@@ -336,12 +336,10 @@ private:
 			// the position a root landed at in the node run is only known while the run is being built.
 			if (m_Open.empty())
 			{
-				// **Every root is gyro's until an entity can say otherwise**, which is the state of a
-				// machine that has authored a floor and adopted no listener. The partition is published
-				// from the first cut so that the frame thread's gate is exercised by every scene rather
-				// than by the first one that ever needs it; what fills this in is a session's own root
-				// container, which is the step this run exists to make cheap.
-				m_Roots.push_back(SceneRoot{ .Node = index, .Session = SessionId::None });
+				// The entity's own answer, and it is asked here rather than of every node because a
+				// session belongs to a root — `SceneStore::SetSession` refuses anything else, so a
+				// window's own field is never consulted and never has to be kept true.
+				m_Roots.push_back(SceneRoot{ .Node = index, .Session = entity->Session });
 			}
 
 			m_Nodes.push_back(Emit(*entity, store, index));

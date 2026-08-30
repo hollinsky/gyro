@@ -770,7 +770,9 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 	// moves with its parent for free, draws over it because the sibling list is the z order (55), and is
 	// hit-tested consistently with what is drawn, because neither the frame walk nor `Scene/Hit.h` clips
 	// a child to its parent.
-	EntityId container = m_Context->Floor();
+	wl_client* const client = Object().WireClient();
+
+	EntityId container = m_Context->Floor(client);
 
 	if (m_Popup != nullptr)
 	{
@@ -786,6 +788,15 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		}
 
 		container = anchor->Window();
+	}
+
+	// **A container of null is a session with no floor, and the window waits rather than hanging off
+	// nothing.** It is the gap between an agent's connection closing and libwayland dropping the clients
+	// that arrived on its listener: the session is over, and a window mapped now would be a root of its
+	// own drawn on every screen on the machine.
+	if (container.IsNull())
+	{
+		return;
 	}
 
 	if (mapping)
@@ -881,7 +892,7 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		// at. Commits do not nest, so the client's closes above before this opens.
 		SceneCommit placement{ *scene, CommitAuthor::Compositor, scene->Now() };
 
-		PlaceOnFloor(placement, *scene, m_Window, natural);
+		PlaceOnFloor(placement, *scene, m_Context->Session(client), m_Window, natural);
 	}
 
 	if (m_Popup != nullptr && (mapping || m_Popup->PlacementPending()))

@@ -6,9 +6,14 @@
 #include <vector>
 
 #include "Core/Handle.h"
+#include "Core/Session.h"
+#include "Protocol/Floor.h"
 #include "Protocol/Popup.h"
+#include "Protocol/Server.h"
 #include "Scene/Store.h"
 #include "Scene/Textures.h"
+
+struct wl_client;
 
 class ClientSurface;
 class ClientXdgSurface;
@@ -47,12 +52,42 @@ public:
 	// The texture space this step was handed, or null outside one.
 	[[nodiscard]] ITextures* Textures() const noexcept { return m_Textures; }
 
-	// What a window is parented into, per [Floor.h](Floor.h). Set once when the host opens, and
-	// unlike the two above it does not come and go — the floor is gyro's own node and outlives every
-	// client that hangs something under it.
-	[[nodiscard]] EntityId Floor() const noexcept { return m_Floor; }
+	// What a window of this client is parented into, per [Floor.h](Floor.h), or null where its session
+	// has none.
+	//
+	// **The client is the argument because the floor is per session and a request is not.** A
+	// `wl_surface.commit` says nothing about who is logged in; what says it is the connection the
+	// request arrived on, which `Server` attributed to a session when it admitted it and checked the
+	// peer's uid. Asking here rather than storing a session on every surface keeps one answer on the
+	// machine, so a session ending cannot leave a stale copy behind on an object that outlived it.
+	//
+	// Null is a real answer rather than a failure: a commit can arrive from a client whose session has
+	// just ended, in the window between the agent's connection closing and libwayland dropping the
+	// client. The caller tests it and does not parent the window, which is a window that is never shown
+	// rather than one hanging off nothing.
+	[[nodiscard]] EntityId Floor(wl_client* client) const noexcept
+	{
+		if (m_Floors == nullptr || m_Server == nullptr)
+		{
+			return {};
+		}
 
-	void SetFloor(EntityId floor) noexcept { m_Floor = floor; }
+		return m_Floors->Container(m_Server->SessionOf(client));
+	}
+
+	// Which session a client's requests belong to, for the two places that need the id itself rather
+	// than the floor: placing a window on an output that session is shown on, and nothing else yet.
+	[[nodiscard]] SessionId Session(wl_client* client) const noexcept
+	{
+		return m_Server == nullptr ? SessionId::None : m_Server->SessionOf(client);
+	}
+
+	// Wired once when the host opens, and both outlive every client.
+	void SetFloors(const SessionFloors& floors, const Server& server) noexcept
+	{
+		m_Floors = &floors;
+		m_Server = &server;
+	}
 
 	// The open menus, per [Popup.h](Popup.h). Beside the floor for the same reason: it is one per
 	// session rather than one per connection, it outlives every client that pushes onto it, and the
@@ -145,7 +180,8 @@ public:
 private:
 	SceneStore* m_Store = nullptr;
 	ITextures* m_Textures = nullptr;
-	EntityId m_Floor{};
+	const SessionFloors* m_Floors = nullptr;
+	const Server* m_Server = nullptr;
 	PopupStack m_Popups;
 
 	// The mapped toplevels. Borrowed, and each one takes itself out as it unmaps.

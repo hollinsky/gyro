@@ -156,6 +156,20 @@ public:
 
 	[[nodiscard]] bool IsOpen() const noexcept { return m_Display != nullptr; }
 
+	// Which session a client arrived under, or `None` for one that came in on a socket gyro bound
+	// itself — which under `HostListener::Own` is every client there is.
+	//
+	// **It is the accepted connection's attribution rather than the request's**, which is the whole
+	// value of keeping the map: a `wl_surface.commit` names no session and a handler two calls deep
+	// cannot ask the socket, so the answer has to have been recorded when the connection was admitted
+	// and the peer's uid checked.
+	[[nodiscard]] SessionId SessionOf(wl_client* client) const noexcept
+	{
+		const auto found = m_Watched.find(client);
+
+		return found == m_Watched.end() ? SessionId::None : found->second;
+	}
+
 	// How many clients are live across every session. For a test; nothing in the loop asks.
 	[[nodiscard]] std::size_t Clients() const noexcept { return m_Watched.size(); }
 

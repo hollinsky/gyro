@@ -1,7 +1,10 @@
 #pragma once
 
+#include <vector>
+
 #include "Core/Handle.h"
 #include "Core/Result.h"
+#include "Core/Session.h"
 #include "Geometry/Space.h"
 #include "Scene/Commit.h"
 #include "Scene/Store.h"
@@ -21,41 +24,73 @@
 // immediately — so there is no *is there a shell?* branch on the window and no second visibility
 // state, and the no-shell gap closes to nothing because the placer runs at once.
 //
-// **There is one floor here and it stands for a session.** Sessions have no model yet — no agent, no
-// per-session tree — so the host authors one floor at startup and every client's window goes under
-// it. The shape is the one 141 describes and the missing piece is above it rather than inside it.
+// **One floor per session, authored when its agent's listener is adopted and retired when the agent
+// goes away.** Decision 21 keeps every connected session alive at once, so *the floor* is not a thing
+// the machine has one of — two people logged in are two floors, two sets of windows, and one of them
+// on screen. The floor is the session's root, which is what `World/Root.h` names and the frame thread
+// gates on: a session nobody is showing costs one comparison per frame rather than one per window in
+// it.
+//
+// **The floor is the root rather than a container under one, and that is a refusal to build ahead.**
+// A session with a workspace and a panel in it wants more containers, and decision 141 has gyro
+// authoring them on the shell's declaration — but they will be *roots carrying the same session*,
+// which the run already represents, so there is nothing an extra node above the floor would buy today
+// beyond a node in every walk.
+//
+// **A development run has one floor and its session is `None`**, which is the same object doing the
+// same job: `HostListener::Own` binds a socket with no agent behind it and no session to attribute a
+// client to, and a root of no session is gyro's own and is drawn on every output. So the no-agent path
+// is not a branch here, it is the ordinary case with the ordinary answer.
 
-// The default container, authored once and outliving every client under it.
-class SessionFloor
+// Every session's floor, and the one lookup a commit does to find the right one.
+class SessionFloors
 {
 public:
-	// Author the container. Called once, from the host's `Open`, which is after the composition root
-	// has given the store its outputs and before any client can have committed anything.
-	[[nodiscard]] Result<void> Open(SceneStore& scene);
+	// Author a session's floor. Called when its listener is adopted, before that listener can have
+	// admitted a client, so that a window never arrives before the container it hangs under.
+	//
+	// **Before the socket rather than at the first window**, which is `ClientHost::Open`'s reason one
+	// session down: a container created on demand is one whose failure lands in the middle of a
+	// client's commit, where the only answer left is to end that client for something gyro did. Here a
+	// session that cannot be given a floor is a session that is not served at all, and the agent is
+	// told its offer failed.
+	//
+	// Refused for a session that already has one, which would be a second offer accepted for a uid that
+	// `Session/Control.h` allows only one of.
+	[[nodiscard]] Result<void> Open(SceneStore& scene, SessionId session);
 
-	// What a window is parented into. Null before `Open`.
-	[[nodiscard]] EntityId Container() const noexcept { return m_Container; }
+	// The session ended, so its floor does. Retires the subtree rather than destroying it, which is the
+	// path a client exiting already takes (114) — the windows on it animate out and are freed when they
+	// have settled, so logging out is a screen emptying rather than a frame with everything gone.
+	//
+	// Does nothing for a session that has no floor, which is every session under `HostListener::Own`
+	// except the one this authored for `None`.
+	void Close(SceneStore& scene, SessionId session) noexcept;
+
+	// What a window of this session is parented into, or null where the session has no floor. Null is
+	// the answer a commit from a client whose session has already ended gets, and it is why the caller
+	// tests rather than parenting into whatever came back.
+	[[nodiscard]] EntityId Container(SessionId session) const noexcept;
 
 private:
-	EntityId m_Container{};
+	// A session and its floor. A vector and a scan because the count is the people logged into this
+	// machine — a map would be a hash and an allocation to search two entries.
+	struct Floor
+	{
+		SessionId Session = SessionId::None;
+		EntityId Container{};
+	};
+
+	std::vector<Floor> m_Floors;
 };
 
-// Decision 141's Floorplanner: **centred on the output holding the pointer, at its natural size,
-// newest on top.**
-//
-// With no input devices the pointer is taken to be centred on the first output, which is the whole of
-// what *holding the pointer* can mean today. Newest on top costs nothing to honour because the store
-// appends — the sibling list is the z order (55), so the window just created is already the frontmost.
-//
-// **No cascade offset and no tiling, and the refusal is the guard doing its work.** A cascade needs a
-// number and a tile needs a rule, and either is gyro making the window-management decision that
-// belongs to a shell (51). Centre-on-pointer is the one placement that takes no parameter. Two windows
-// landing exactly on top of each other is acceptable and is honest signal that nothing is managing
-// them; in the two configurations this runs in — development with no session agent, and the gap while
-// a shell restarts — there are one or two windows anyway.
-//
-// Does nothing where the world has no outputs, which is a scene nothing is drawing in any case.
-void PlaceOnFloor(SceneCommit& commit, const SceneStore& scene, EntityId window, Size<SurfaceSpace, float> natural);
+void PlaceOnFloor(
+	SceneCommit& commit,
+	const SceneStore& scene,
+	SessionId session,
+	EntityId window,
+	Size<SurfaceSpace, float> natural
+);
 
 // Decision 162's click-to-focus: **the press that begins a gesture focuses the window under it and
 // brings it to the front.**
