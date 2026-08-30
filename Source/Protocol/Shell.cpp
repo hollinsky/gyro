@@ -762,11 +762,6 @@ void ClientXdgSurface::OnAckConfigure(std::uint32_t serial)
 	}
 
 	m_Acked = true;
-
-	// **The newest one wins even where an older one arrives after it**, which is a client acknowledging
-	// out of order and is not something the protocol forbids. What `Outstanding` asks is whether the
-	// client has caught up, so the answer has to be the furthest it has got.
-	m_Acknowledged = std::max(m_Acknowledged, serial);
 }
 
 void ClientXdgSurface::Configure()
@@ -1259,29 +1254,22 @@ void SyncWindows(HostContext& context, const SceneStore& scene, EntityId focused
 	{
 		bool owed = window->SetActivated(FocusRestsOn(scene, window->Window(), focused));
 
-		// **The size is asked only of a client that has answered the last thing it was told.** Everything
-		// this costs and buys is on `Outstanding`; what matters here is that the comparison is *skipped*
-		// rather than performed and discarded, because a `Set` that changed the record without sending
-		// the event would lose the change for good.
-		if (!window->Outstanding())
+		const bool resizing = drag.IsResizing() && drag.Window() == window->Window();
+
+		owed = window->SetResizing(resizing) || owed;
+
+		if (resizing)
 		{
-			const bool resizing = drag.IsResizing() && drag.Window() == window->Window();
+			// Rounded rather than truncated: the wire carries whole logical pixels and the pointer is
+			// subpixel (52), so truncating would make a window one pixel smaller than the hand asked for
+			// on average and never one larger.
+			const Size<SurfaceSpace, float> wanted = drag.Wanted();
 
-			owed = window->SetResizing(resizing) || owed;
-
-			if (resizing)
-			{
-				// Rounded rather than truncated: the wire carries whole logical pixels and the pointer is
-				// subpixel (52), so truncating would make a window one pixel smaller than the hand asked
-				// for on average and never one larger.
-				const Size<SurfaceSpace, float> wanted = drag.Wanted();
-
-				owed = window->SetSize(
-						   { static_cast<std::int32_t>(std::lround(wanted.Width)),
-				             static_cast<std::int32_t>(std::lround(wanted.Height)) }
-					   ) ||
-				       owed;
-			}
+			owed = window->SetSize(
+					   { static_cast<std::int32_t>(std::lround(wanted.Width)),
+			             static_cast<std::int32_t>(std::lround(wanted.Height)) }
+				   ) ||
+			       owed;
 		}
 
 		if (owed)

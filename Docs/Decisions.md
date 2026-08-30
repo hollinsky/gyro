@@ -12965,16 +12965,26 @@ arrived and the far edge is exact by construction, because the origin is `anchor
 extent now)` and the two terms cancel wherever the client lands. This is arithmetic rather than a
 policy, which is what makes it mechanism and therefore gyro's.
 
-**A configure per pointer event would make the window fall further behind the longer somebody
-dragged.** A mouse reports at a thousand hertz and a toolkit draws at sixty, so an ungated stream
-queues sizes in front of a client that will render every one of them in order and arrive at the
-newest last — which is precisely the rubber-banding decision 51 keeps this gesture in the compositor
-to avoid, reintroduced from the other end. So a size is asked for only when the last one has been
-acknowledged: the client is always working on the freshest number and is at most one round trip
-behind, and a window whose client has stopped answering stops resizing, which is the truth about it.
-The `activated` half of the same walk is deliberately *not* gated — a stale size costs nothing a
-person can see and a titlebar that stays grey behind a slow client is read as the compositor having
-lost track of them.
+**Every size the hand asks for goes out, and the coalescing is the client's because the protocol
+already says so.** *(Revised 2026-08-30 — the paragraph this replaces is kept below.)* A mouse
+reports at a thousand hertz and a toolkit draws at sixty, so it is tempting to have gyro hold sizes
+back. It must not: xdg-shell states outright that a client may ignore every configure but the most
+recent and acknowledge only that one, which is the coalescing, specified, on the side that knows when
+it can next draw. A compositor doing it a second time is duplicating a mechanism it cannot see the
+inputs to.
+
+**Rejected, having been built and shipped for a day: sending a size only once the previous configure
+was acknowledged.** *(Recorded 2026-08-30.)* The argument was the one above — the client is then
+always working on the freshest number and never more than one round trip behind — and it is wrong for
+a reason that has nothing to do with rates. **It makes gyro's progress conditional on a client
+answering, and a compositor may never be conditional on that.** The gesture's opening configure asks a
+window to be the size it already is, because it exists to carry `resizing`; a toolkit that treats a
+configure with no size change as nothing to redraw for is behaving reasonably, and under the gate that
+one unanswered event killed the whole drag. The symptom was the worst kind: the pointer moved, the
+window did not, the client was fine, and nothing anywhere logged a thing. It is worth keeping in mind
+whenever a comparison in this module grows a precondition — the `activated` half of the same walk was
+deliberately left ungated at the time, on the grounds that a grey titlebar is more visible than a
+stale size, which was the right instinct applied to the wrong half.
 
 **`resizing` is a promise about latency rather than a fact about geometry**, and it is the second
 state gyro has an answer to. It tells a toolkit more configures are coming, so the expensive paths —

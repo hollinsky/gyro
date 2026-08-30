@@ -466,16 +466,6 @@ public:
 
 	void BeginResize(Wayland::Server::WlSeat seat, std::uint32_t serial, ResizeEdges edges);
 
-	// Whether a configure has gone out that the client has not acknowledged.
-	//
-	// **What it is for is throttling a resize to the client's own rate, and only that.** A configure per
-	// pointer event would queue a thousand sizes a second in front of a toolkit that draws sixty, so the
-	// window would fall further behind the hand the longer a person dragged — the exact artefact
-	// decision 51 keeps this gesture in the compositor to avoid. Sending only when the last one has come
-	// back means the client is always working on the freshest size and is at most one round trip behind.
-	// A window whose client has stopped answering therefore stops resizing, which is the truth about it.
-	[[nodiscard]] bool Outstanding() const noexcept { return m_Configured && m_Acknowledged != m_Serial; }
-
 	// The three of `ClientXdgToplevel`'s comparisons reached through the surface, which is the object the
 	// window registry holds. False — nothing changed — for a surface whose role is not a toplevel.
 	bool SetActivated(bool activated) noexcept;
@@ -534,10 +524,6 @@ private:
 	std::uint32_t m_Serial = 0;
 	bool m_Configured = false;
 	bool m_Acked = false;
-
-	// The newest serial the client has acknowledged, against which `Outstanding` reads. Distinct from
-	// `m_Acked`, which is *has it ever* and is what makes a buffer before the first configure an error.
-	std::uint32_t m_Acknowledged = 0;
 };
 
 // One client's `xdg_wm_base`.
@@ -594,10 +580,11 @@ private:
 // place that could disagree with it. What it costs is that the first frame of a new window is drawn
 // unfocused; the configure that corrects it goes out in the same iteration the window mapped in.
 //
-// **The size half is skipped for a window with a configure still in flight and the focus half is not**,
-// which is `ClientXdgSurface::Outstanding`'s whole purpose: a stale size costs a person nothing they
-// can see, and a titlebar that stays grey until a slow client answers is the thing they read as the
-// compositor having lost track of them.
+// **Nothing here waits for the client to catch up, and decision 166 records why the version that did
+// was wrong.** xdg-shell already says a client may ignore every configure but the newest and
+// acknowledge only that one, so the coalescing a fast pointer needs is the client's and is specified;
+// a compositor that withheld sizes until the last was acknowledged would be doing it a second time,
+// and would stop dead against any client that declined to answer one.
 void SyncWindows(HostContext& context, const SceneStore& scene, EntityId focused);
 
 // The global itself, owned by whoever advertises it and outliving every client that binds it.

@@ -2906,3 +2906,67 @@ GYRO_TEST(ProtocolRoundTrip, AWindowIsNeverAskedToBeSmallerThanItSaidItCouldBe)
 	GYRO_CHECK_EQ(toplevel.WindowEvents.Width, Smallest);
 	GYRO_CHECK(!pair.Client.Fault().has_value());
 }
+
+// **A drag that keeps going while the client answers nothing.** This is the shape a compositor must
+// never depend on cooperation for, and the version of this file that gated a size on the last
+// acknowledgement got it wrong: the opening configure of a gesture asks a window to be the size it
+// already is, and a toolkit that treats that as nothing to redraw for is behaving reasonably. Under
+// the gate the drag was dead from that moment — the pointer moved, the window did not, and nothing
+// anywhere reported an error. See decision 166.
+//
+// The client here acknowledges nothing at all, which is stronger than any real toolkit and is the
+// point: xdg-shell lets a client ignore every configure but the newest, so the coalescing belongs on
+// its side and gyro's job is to keep telling it the truth.
+GYRO_TEST(ProtocolRoundTrip, ASilentClientIsStillToldEverySizeTheHandAsksFor)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-silent" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
+
+	Push(pair, middle.X, middle.Y);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	(*pair.Host)->OnPointerButton(Click(0x110, true, pair.Clock.Now()));
+
+	pair.Turn();
+
+	toplevel.Window.Resize(keyboard.Seat, pointer.Listener.ButtonSerial, Wayland::XdgToplevelResizeEdge::BottomRight);
+
+	pair.Turn();
+
+	// From here the client says nothing back — no acknowledgement, no buffer, no window geometry.
+	for (std::int32_t step = 1; step <= 4; ++step)
+	{
+		Push(pair, 10.0, 10.0);
+		(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+		pair.Turn();
+
+		GYRO_CHECK_EQ(toplevel.WindowEvents.Width, Width + (step * 10));
+		GYRO_CHECK_EQ(toplevel.WindowEvents.Height, Height + (step * 10));
+	}
+
+	GYRO_CHECK(toplevel.WindowEvents.Has(Wayland::XdgToplevelState::Resizing));
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
