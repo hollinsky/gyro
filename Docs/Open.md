@@ -1223,7 +1223,9 @@ is to do the work.
   arrangement out of a person's session. This would be the first configuration gyro persists at all,
   so what is open is not the format but whether a compositor that owns no filesystem policy should be
   reading and writing one, or whether the per-session agent hands it over the way it already hands over
-  a session lifetime. The angular preference sits on the other side and has the easier answer, being
+  a session lifetime. The units are not open: the arrangement is in logical pixels at the reference
+  preference, which is what makes one stored setup readable by two people who want different text
+  sizes. The angular preference sits on the other side and has the easier answer, being
   one scalar a session can supply.
 - **Whether a pointer crossing between outputs is geometric or topological.**
   [Scene/Pointer.h](../Source/Scene/Pointer.h) confines to the union of the output rectangles and
@@ -1233,17 +1235,21 @@ is to do the work.
   segments on the neighbour makes every crossing reversible and removes the dead stretches, at the cost
   of a pointer whose path is not a straight line in global space, which is visible if anything ever
   draws a trail behind it. It matters more here than elsewhere because there is no settings panel to
-  nudge an arrangement into alignment with, and decision 164's centre-aligned default guarantees the
-  offsets rather than avoiding them. Wants two panels of different heights and a person, not an
-  argument.
+  nudge an arrangement into alignment with, and decision 164 guarantees the offsets rather than
+  avoiding them — twice over, since its centre-aligned default produces one for every pair of unequal
+  panels and its snapping band produces a second by giving a snapped output a logical footprint that
+  is not quite the angle it subtends. A segment mapping is the only proposal here that absorbs either.
+  Wants two panels of different heights and a person, not an argument.
 - **The width of the band decision 164 snaps a scale to an integer inside.** The asymmetry is settled —
   a resample is visible and a 15% error in text size is not — and the number is not. Too narrow and a
   27-inch 1440p panel takes a fractional scale it does not need, which puts every window on the machine
   on the minification path
   [decision 56](Decisions.md#56-clients-render-at-the-ceiling-and-gyro-downscales) describes for no
   perceptible gain; too wide and a 4K laptop panel snaps to 2 from far enough away that text is
-  visibly large. It is one number, it is a person in front of two panels, and it cannot be read out of
-  anything.
+  visibly large. What widens the stakes past text size is that the same number bounds how far a
+  snapped output's placement departs from the angle it subtends, so it is also the alignment error two
+  panels sit at and feeds the crossing question above. It is one number, it is a person in front of
+  two panels, and it cannot be read out of anything.
 
 ## Keyboard sysrq, which the input grab takes away
 

@@ -12650,8 +12650,10 @@ logical pixels, hence a larger footprint in the layout, which is correct, becaus
 the visual field. Take the desk this entry was written at: a 286 mm-wide 2560 panel at 400 mm subtends
 39.4° and lands at 1623 logical pixels; a 598 mm-wide 3840 panel at 700 mm subtends 46.2° and lands at
 1937. Both come to about 41.5 logical pixels per degree, agreeing to under 2%. So placing outputs edge
-to edge in logical space places them edge to edge in a person's visual field, and the arrangement in a
-setup is an arrangement in logical space like any other.
+to edge in logical space places them edge to edge in a person's visual field. *(Revised 2026-08-29:
+this sentence went on to say "and the arrangement in a setup is an arrangement in logical space like
+any other", which the section on the seat and the person withdraws. Logical space is a person's and a
+setup is the seat's, so what a setup stores is the arrangement in the reference preference's units.)*
 
 The residual is the tangent: a 46° panel's central pixels subtend about 1.18 times what its edge
 pixels do, so the correspondence is linearised at each screen's centre. That is the same foreshortening
@@ -12668,6 +12670,17 @@ is exactly the snapping band below. `Core/Input.h`'s claim that logical-at-scale
 about a displacement that does not need an output to be meaningful" is true only under this entry;
 before it, it is the source of the bug.
 
+**The snapping band's residual is the second consequence's and the first's alike.** *(Revised
+2026-08-29.)* The paragraph above hands that error to the pointer and stops, and placement inherits
+the same one: an output taken to an integer has a logical footprint departing from the angle it
+subtends by up to the width of the band, so edge to edge in logical space is edge to edge in the
+visual field only to within it. Not a defect to correct — correcting it means not snapping, which
+trades a resample everybody can see for an alignment error nobody can — but it does mean centre
+alignment carries an offset of its own, on top of the ones two unequal panels already have
+geometrically. That is [Open.md](Open.md)'s question about whether a crossing between outputs is
+geometric or topological, arriving from a second direction: mapping edge *segments* to segments
+absorbs both offsets, and nothing else absorbs either.
+
 #### Integers where they land, and the exact rational otherwise
 
 1× and 2× are the only scales that resample nothing.
@@ -12679,9 +12692,28 @@ resulting size lands inside a stated band, and takes the exact rational of
 [decision 53](#53-scale-is-an-exact-rational) where it does not.
 
 **There is no 1.25 / 1.5 / 1.75 ladder.** That ladder is an artefact of exposing scale in a settings
-dropdown, and gyro exposes distance instead; 120ths express the derived value exactly, and under
+dropdown, and gyro exposes distance instead; under
 [decision 56](#56-clients-render-at-the-ceiling-and-gyro-downscales) the client renders at the ceiling
 and gyro downscales regardless, so an awkward fraction costs nothing a round one does not.
+
+**The derivation is exact in rationals, and the 120th is a rounding at the end of it.** *(Revised
+2026-08-29; this paragraph first claimed that "120ths express the derived value exactly", which is
+two errors in one clause.)* The reference's tangent cancels, which is worth having: a scale is an
+output's pixels per degree over the preference, and both carry the same `tan 1°`, leaving
+
+```
+scale = (distance / 600 mm) × (0.2646 mm / pitch) / k
+```
+
+where `k` is the preference as a multiple of the reference and `pitch` is EDID millimetres over a
+pixel count. A ratio of distances times a ratio of pitches, no transcendental left in it, so the
+derivation is integer arithmetic for the same reason [decision 53](#53-scale-is-an-exact-rational)
+wants scale to be. What it is *not* is a 120th: the denominator that falls out is a panel's
+millimetres times a person's distance, and nothing makes that divide 120. So the last step of the
+derivation is a rounding to the nearest 120th — half a step is 1/240, which is under 0.4% of angular
+size at any scale a fractional value is actually taken at, against the 15% the band above is willing
+to spend — and decision 53's exact rational is what comes *out* of that step rather than what goes
+into it.
 
 #### The setup is the seat's and the preference is the person's
 
@@ -12696,6 +12728,36 @@ because how big text should be is a fact about eyes.
 What that buys is not available anywhere today: **two people sharing one desk get their own text size
 on the same monitors**, without either of them touching the arrangement, and without the second one
 discovering that fixing their text size moved the first one's windows.
+
+**So the arrangement is stored in reference-preference units, because logical space belongs to a
+person and the desk does not.** *(Revised 2026-08-29.)* That last clause is the one the entry as first
+written could not deliver. An output's scale is derived from the person's preference, so its logical size is
+derived from the preference too, and an arrangement stored in logical pixels is held in a coordinate
+that moves when somebody changes their text size. Uniformly, which would be harmless — every extent
+scaling by one factor is the same arrangement in a different unit — except that the snap is not
+uniform: two preferences either side of a band edge put one panel on an integer scale for one person
+and on an exact rational for the other, so the two logical layouts of one desk differ in shape rather
+than in size. The seat's fact would be kept in the person's coordinate, which is the disagreement
+**one setup per person** is rejected below for having, arriving through the back door.
+
+A setup therefore holds its arrangement in **logical pixels at the reference preference** — 39.6 to
+the degree, which is to say in degrees of visual angle wearing a unit the rest of the system already
+speaks. That is person-invariant by construction, and it is the quantity placement is about rather
+than a proxy for it. Resolving a setup for a person is then a layout pass rather than a
+multiplication: their preference and an output's own geometry give a scale, the scale gives a snapped
+logical footprint, and the stored arrangement supplies which edges meet and how they align while the
+footprints supply the sizes. The two agree to within the snapping band and no closer, which is the
+residual recorded above.
+
+That is also what keeps [Scene/Pointer.h](../Source/Scene/Pointer.h) true. It rests the pointer on
+the seat by asserting that `GlobalSpace` "is the *machine's* output layout and reads the same to every
+session presented on it", which is what stops a cursor teleporting across
+[decision 43](#43-lock-and-greeter-are-one-ui-locking-is-an-output-reassignment)'s reassignment or
+across a user switch. A global space whose basis moved with a preference would falsify that sentence
+in exactly the two-people case this section sells. Pinning the basis to the reference preference
+leaves it standing: global space is angular and machine-wide, a session's own logical space is derived
+from it, and the two are the same space for a person who takes the reference — which is everybody
+until there is somewhere to keep a second preference at all.
 
 #### Priors are how a setup starts, not how density is decided
 
@@ -12734,10 +12796,17 @@ is what people do. A pose costs a configuration model nobody can fill in and buy
 
 **Rejected: storing the arrangement in millimetres.** This was the position held for about an hour
 while writing this entry, on the reasoning that an arrangement expressed in logical pixels is
-scale-dependent — change the text size on the left monitor and the right one moves. The proportionality
-above kills it: once logical space is angular space, edge to edge in logical *is* edge to edge in the
-visual field, and a physical arrangement beside it would be a second copy of one fact to keep in
-agreement with the first.
+scale-dependent — change the text size on the left monitor and the right one moves. *(Revised
+2026-08-29: the objection was right and the refutation given to it was not.)* The proportionality
+above was offered as the answer — once logical space is angular space, edge to edge in logical *is*
+edge to edge in the visual field — and that holds only while there is one preference on the machine,
+which is the assumption the section above withdraws. What actually settles it is that millimetres is
+the wrong invariant rather than a redundant one. A physical extent is not a perceptual quantity until
+a distance is applied to it, so two panels placed edge to edge in millimetres are edge to edge in
+nobody's visual field, and storing the arrangement that way puts the distance term back into the one
+operation this entry's whole argument is that it drops out of. Reference-preference units are the
+invariant that was wanted: person-independent the way millimetres are, angular the way the visual
+field is, and one form of one fact rather than a second copy to hold in agreement.
 
 **Rejected: one setup per person.** The monitors do not move when a different person sits down, and two
 sessions holding two arrangements of one desk is a disagreement with no tiebreaker.
@@ -12761,6 +12830,13 @@ connector's millimetres stop at `DrmPipeline` and never cross the seam,
 composition root to fill `SceneOutput` in, and there is no store for a setup and no session agent whose
 job it would be. The near-term commit is the seeded default alone: physical size across the backend,
 a distance prior, centre alignment, internal panel below.
+
+The units the store will want are settled ahead of the store, and are unexercised until there is one:
+with a single preference on the machine the reference-preference units and the session's logical
+pixels are the same numbers, so nothing built against the near-term commit can tell whether the
+distinction was honoured. Which is the argument for writing it down rather than against it — the
+first thing to read a setup back will be the first thing that could get it wrong, and by then the
+format is somebody's file on a disk.
 
 The known hole is identity. A setup keys on the displays present, and two identical monitors that
 report no EDID serial are indistinguishable — so which of them is on the left is a coin flip a person
