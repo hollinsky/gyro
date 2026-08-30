@@ -12,6 +12,41 @@
 #include "Protocol/Region.h"
 #include "Wayland/Server/Wayland.h"
 
+class ClientPresentationFeedback;
+
+// One frame reaching the glass, as much of it as a client is owed.
+//
+// **It is the panel's account rather than gyro's**, which is what separates it from the instant a
+// frame callback carries. `wl_surface.frame` answers *draw again* and needs only a stamp; a
+// `wp_presentation_feedback` is a client asking how good that stamp is — whether the flip was
+// synchronized, whether the time came from display hardware, which panel it happened on and how long
+// until the next one — and every field here exists because the protocol has a place for it and nothing
+// else in this module can obtain it. [Presentation.h](Presentation.h) carries the rest.
+struct SurfacePresentation
+{
+	// When the frame reached the glass, in the one timebase. The same instant a frame callback is
+	// stamped from, so the two events a commit produces never disagree about the frame they describe.
+	Instant At{};
+
+	// How long after `At` the next refresh is expected. The output's observed period where the backend
+	// measured one and the mode's nominal period otherwise, because the protocol's own answer for *no
+	// useful prediction* is zero and a mode gyro programmed is a better prediction than none.
+	Duration Refresh{};
+
+	// The panel's own retrace counter for this flip, or zero on an output that has no such thing. Never
+	// gyro's published sequence, which counts something else entirely.
+	std::uint64_t Vblank = 0;
+
+	// The output the flip happened on, as a resource in *this surface's client's* id space — invalid
+	// where that client never bound the global, which the protocol handles by simply not sending
+	// `sync_output`.
+	Wayland::Server::WlOutput Output{};
+
+	bool Vsync = false;
+	bool HardwareClock = false;
+	bool ZeroCopy = false;
+};
+
 // A `wl_surface`: the thing a client draws into, and the double buffering the protocol wraps around
 // it.
 //
@@ -243,7 +278,24 @@ public:
 	//
 	// **It is safe to call on a surface with nothing due**, which is the ordinary case: a window is
 	// presented on every frame the panel scans and asks to be told about the ones it drew for.
-	void Present(Instant at) noexcept;
+	//
+	// **The two events it answers are the same fact told to different depths**, and both are answered
+	// here so that neither can be sent for a frame the other was not: a client that received a
+	// `presented` and no callback would draw once and stop.
+	void Present(const SurfacePresentation& shown) noexcept;
+
+	// How many `wp_presentation_feedback` objects are waiting on a frame reaching the glass. Beside
+	// `DueCallbackCount` and for its reason — the only legitimate thing to do with one is answer it.
+	[[nodiscard]] std::size_t DueFeedbackCount() const noexcept { return m_DueFeedback.size(); }
+
+	// Stage a feedback against the next commit. `wp_presentation.feedback` is asked before the content
+	// update it is about, exactly as `wl_surface.frame` is.
+	void AdoptFeedback(ClientPresentationFeedback& feedback);
+
+	// Drop a feedback from whichever list holds it, without sending it anything. Called by the feedback
+	// itself as it goes away, which is the client having disconnected or having destroyed the surface
+	// under it — in both cases there is nobody left to tell.
+	void ForgetFeedback(const ClientPresentationFeedback& feedback) noexcept;
 
 	// The outputs this surface has been told it is on, as `Scene/Reach.h`'s mask over the world's output
 	// set. Held here rather than on the role because `wl_surface.enter` is the surface's event, and read
@@ -425,6 +477,16 @@ private:
 	// Drop a callback from whichever list holds it. Called by the callback itself as it goes away.
 	void Forget(const FrameCallback& callback) noexcept;
 
+	// Answer everything the last commit made due with a `presented`. `Present`'s other half, split out
+	// because the two events have different units and different rules about being superseded, and one
+	// function carrying both would be two unrelated derivations under one name.
+	void PresentFeedback(const SurfacePresentation& shown) noexcept;
+
+	// Discard what this commit superseded and make what the client staged due. Called from both commit
+	// paths, which is what keeps a synchronized subsurface's cached update landing at the parent's
+	// commit rather than at its own.
+	void StageFeedback();
+
 	// Pending becomes *cached* instead of current, which is a synchronized subsurface's commit: the
 	// client has stated an arrangement and the parent decides when the world sees it.
 	//
@@ -520,4 +582,18 @@ private:
 	// is a pointer to libwayland's object and reaching it is `Object()`.
 	std::vector<FrameCallback*> m_PendingCallbacks;
 	std::vector<FrameCallback*> m_DueCallbacks;
+
+	// The same two lists for `wp_presentation_feedback`, and they are separate lists rather than a
+	// second field on the callbacks because the two protocols disagree about what a second commit
+	// means.
+	//
+	// **A callback that was superseded is still owed and a feedback that was superseded is
+	// discarded.** `wl_surface.frame` answers *you may draw again*, which stays true however many
+	// commits a client made inside one refresh — so those merge, and `Apply` appends. A
+	// `wp_presentation_feedback` is about one specific content update, and a client that committed over
+	// it before the panel scanned is one whose pixels were never seen; telling it they were would put a
+	// timestamp on a frame that does not exist, which is the one lie this protocol is asked not to
+	// tell. So `Apply` discards what is due before staging what is pending.
+	std::vector<ClientPresentationFeedback*> m_PendingFeedback;
+	std::vector<ClientPresentationFeedback*> m_DueFeedback;
 };

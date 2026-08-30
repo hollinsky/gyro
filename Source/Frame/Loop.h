@@ -360,9 +360,20 @@ private:
 		// *the scene on the glass is 12*, held between samples and stepped at each flip — which is
 		// exactly what the slice above draws, with the number in the name and the duration as its
 		// width. Two spellings of one fact is the thing that made these charts hard to read.
+		// **The panel's own three ride along unchanged**, which is the whole of this side's part in
+		// serving `wp_presentation`: the retrace counter, the period the output was measured at and the
+		// flags saying how much of that was hardware. Copied rather than interpreted — a backend that
+		// left a field alone has said it does not know, and turning that into a plausible number here is
+		// exactly what `Seam/PresentationInfo.h` forbids.
 		if (scene >= m_Presented.Sequence)
 		{
-			m_Presented = { .Sequence = scene, .At = info.PresentedAt };
+			m_Presented = { .Sequence = scene,
+				            .At = info.PresentedAt,
+				            .Vblank = info.Sequence,
+				            .Period = info.Period,
+				            .Vsync = info.Vsync,
+				            .HardwareClock = info.HardwareClock,
+				            .ZeroCopy = info.ZeroCopy };
 		}
 
 		--m_InFlight;

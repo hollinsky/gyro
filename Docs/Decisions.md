@@ -13670,3 +13670,55 @@ composes the source with the buffer scale and stops, which is right for every cl
 rotate its own buffer and silently wrong for one that does. The honest version is one conversion
 carrying transform, scale and crop together, and it belongs with the adapter
 [Open.md](Open.md) already wants published so a renderer can classify a resample.
+
+### 172. gyro serves `wp_presentation`, and the return leg carries the panel's own account of the flip
+
+The Wayland server advertises `wp_presentation` at version 1. `Publication/Return.h`'s `PresentedFrame`
+grows three things beside the published sequence — the output's vertical retrace counter, the period
+the backend measured, and the vsync / hardware-clock / zero-copy flags — and `Scene/Return.h`'s
+`Reached` signal carries the output index and that record instead of a bare instant.
+
+**The trigger was that gyro could not be run nested inside gyro.** `Nested/Host.h` requires four
+globals of whatever it is a client of, and this was the one gyro itself did not serve, so the inner
+compositor failed its bind with *the wayland host does not offer an interface a nested output needs*
+and never opened a window. That is a development story rather than a user-facing one, and it is not
+the reason to serve the protocol — it is the reason nobody had noticed for as long as the daily driver
+was somebody else's desktop.
+
+**The reason is that a frame callback answers a different question.** `wl_callback.done` says *you may
+draw again* and carries truncated milliseconds; a person watching a video wants audio matched to when
+the picture was actually on the screen, and one refresh on a 144 Hz panel is seven milliseconds — a
+unit the callback cannot express and a moment it does not describe. Every toolkit that measures its own
+latency, every media player that holds sync, and gyro's own frame clock read this protocol and not that
+one. Decision 115 already derives the fact; this is a second consumer of it rather than a second
+mechanism.
+
+**The waist carries the panel's numbers now.** *Reverses the paragraph in `Publication/Return.h` that
+kept them out.* That paragraph's argument was that the vblank counter, the observed period and the
+honesty flags are the frame clock's inputs and that the dispatch side has no use for them — true when
+it was written, and false the moment a client can ask. The published sequence stays the *identifier*:
+it is the only number that turns back into the surfaces a frame contained, and the retrace counter
+beside it is forwarded rather than looked anything up by. *Rejected: sending zeroes.* The protocol
+permits a zero sequence only for an output with no concept of vertical retrace, and a compositor whose
+whole promise is hitting every frame claiming that is a lie; the nested case makes the cost concrete,
+since an inner gyro told the timestamp was not hardware-backed downgrades its own clock and stops
+trusting its latency figures. *Rejected: inventing a `refresh` from the published cadence.* A number
+that looks plausible and counts something else is worse than the zero the protocol has a meaning for —
+which is why the substitution that **is** made is the mode gyro programmed, a fact it holds, and only
+where the backend measured nothing.
+
+**A superseded content update is discarded, where a superseded frame callback is answered.** The two
+protocols genuinely disagree and both sides are right: *draw again* survives being asked twice, so
+callbacks accumulate across commits inside one refresh; a feedback is about one specific update, and a
+client that committed over it has pixels nothing ever showed. Timestamping those would hand a media
+player the latency of a frame it did not display, which is the one lie this protocol exists to refuse.
+
+**Version 1 rather than 2.** They differ only in what `refresh` may say on an output with no constant
+refresh rate — 2 lets a compositor pick a representative one — and `Scene/Output.h` carries the mode's
+nominal period and nothing else, the VRR servo commanding a period on the frame clock without ever
+writing one into the world. Claiming 2 would be claiming an answer to a question gyro cannot yet be
+asked. `Protocol/Compositor.h`'s rule holds: the number goes up in the commit that builds it.
+
+**What is still missing for nesting is not this.** gyro serves no `wp_linux_drm_syncobj_v1`, which is
+optional — an inner gyro warns, holds each commit until its composite lands, and says its pacing
+figures are not to be trusted. That is a real frame of latency and its own commit.

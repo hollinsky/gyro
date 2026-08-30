@@ -39,6 +39,7 @@
 #include "Scene/Textures.h"
 #include "Testing/Test.h"
 #include "Wayland/LinuxDmabufV1.h"
+#include "Wayland/PresentationTime.h"
 #include "Wayland/Viewporter.h"
 #include "Wayland/Wayland.h"
 #include "Wayland/XdgShell.h"
@@ -291,14 +292,23 @@ struct Pair
 	// The frame thread's half, with no frame thread: a report saying this sequence reached the glass on
 	// the one output, delivered the way `Dispatch/Loop.h` delivers one. `Seal` first, because the loop
 	// seals what the step's commits declared against the sequence about to carry them.
-	void Present(std::uint64_t sequence, Instant at)
+	// The panel's own account of the flip is defaulted away, because most of these cases are about
+	// whether a client heard anything at all and a backend that measured nothing is a state gyro has to
+	// work in. `wp_presentation` is where the three are given values.
+	void
+	Present(std::uint64_t sequence, Instant at, std::uint64_t vblank = 0, Duration period = {}, bool hardware = false)
 	{
 		Returns.Seal(sequence, Store);
 
 		FrameReport report{};
 		report.Watermark = sequence;
 		report.OutputCount = 1;
-		report.Presentations[0] = { .Sequence = sequence, .At = at };
+		report.Presentations[0] = { .Sequence = sequence,
+			                        .At = at,
+			                        .Vblank = vblank,
+			                        .Period = period,
+			                        .Vsync = hardware,
+			                        .HardwareClock = hardware };
 
 		Returns.Drain(report);
 	}
@@ -459,11 +469,21 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 	// window arrives at its buffer's pixel count. See Protocol/Viewporter.h.
 	GYRO_CHECK_EQ(viewporter->Version, std::uint32_t{ 1 });
 
-	// Exactly eight: three a window is built out of, one a toolkit demands before it will look for
+	const Registry::Global* const presentation = bound.Listener.Find(Wayland::WpPresentation::WireName);
+	GYRO_REQUIRE(presentation != nullptr);
+
+	// One rather than two: they differ only in what `refresh` may say on an output with no constant
+	// refresh rate, and gyro's world model carries the mode's nominal period and nothing else. See
+	// Protocol/Presentation.h.
+	GYRO_CHECK_EQ(presentation->Version, std::uint32_t{ 1 });
+
+	// Exactly nine: three a window is built out of, one a toolkit demands before it will look for
 	// them, the seat that makes the window typeable, the one that lets a client hand over a buffer a
 	// panel can scan out instead of pixels gyro has to copy, the one that lets it say how the parts of
-	// its own window are stacked, and the one that lets it say how big any of them is.
-	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 8 });
+	// its own window are stacked, the one that lets it say how big any of them is, and the one that
+	// tells it when what it drew was actually seen — which is also the one whose absence meant gyro
+	// could not be run nested inside gyro.
+	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 9 });
 }
 
 // What a GTK client actually does with the clipboard global before it has a seat, which is bind it,
@@ -1342,10 +1362,7 @@ GYRO_TEST(ProtocolRoundTrip, ASourceReachingPastTheBufferEndsTheClientAtTheCommi
 	// before it attaches the buffer that holds it, and refusing at `set_source` would end a client for
 	// a legal ordering.
 	viewport.SetSource(
-		Wire::Fixed::FromInt(0),
-		Wire::Fixed::FromInt(0),
-		Wire::Fixed::FromInt(Width * 2),
-		Wire::Fixed::FromInt(Height)
+		Wire::Fixed::FromInt(0), Wire::Fixed::FromInt(0), Wire::Fixed::FromInt(Width * 2), Wire::Fixed::FromInt(Height)
 	);
 
 	pair.Turn();
@@ -1388,10 +1405,7 @@ GYRO_TEST(ProtocolRoundTrip, AFractionalCropWithNothingToScaleItToEndsTheClient)
 	// pixels wide. The same rectangle with a destination beside it is legal, which is what makes this
 	// the *pair* being wrong rather than the number.
 	viewport.SetSource(
-		Wire::Fixed::FromInt(0),
-		Wire::Fixed::FromInt(0),
-		Wire::Fixed::FromDouble(8.5),
-		Wire::Fixed::FromInt(Height)
+		Wire::Fixed::FromInt(0), Wire::Fixed::FromInt(0), Wire::Fixed::FromDouble(8.5), Wire::Fixed::FromInt(Height)
 	);
 
 	drawn.Surface.Attach(drawn.Buffer, 0, 0);
@@ -1507,8 +1521,9 @@ GYRO_TEST(ProtocolRoundTrip, AnOutputCarriesTheCeilingOfADerivedScale)
 
 	// 144 Hz, in the thousandths the protocol states a rate in, and rounded rather than truncated: the
 	// period is 6'944'444 ns, which divides to 144'000.01 and reports a panel as 143.999 Hz to every
-	// client that prints one if the remainder is dropped. gyro serves no `wp_presentation`, so this is
-	// the only cadence figure a client can obtain — a zero here is a media player falling back to 60.
+	// client that prints one if the remainder is dropped. It is the only cadence figure a client has
+	// before it has drawn anything — `wp_presentation` answers after the first frame lands — and a zero
+	// here is a media player falling back to 60.
 	GYRO_CHECK_EQ(events.Refresh, 144'000);
 
 	// The physical size is zero by zero, which is a statement rather than a gap: decision 164's whole
@@ -1661,6 +1676,310 @@ GYRO_TEST(ProtocolRoundTrip, AMappedWindowIsToldWhenItsFrameReachedTheGlass)
 	pair.Present(3, Advanced(shown, std::chrono::milliseconds{ 32 }));
 	pair.Turn();
 
+	GYRO_CHECK_EQ(second.Fired, std::uint32_t{ 1 });
+}
+
+namespace
+{
+// A client's whole view of one content update.
+class Feedback final : public Wayland::WpPresentationFeedbackListener
+{
+public:
+	void OnSyncOutput(Wayland::WlOutput output) override { SyncedTo = output.Id(); }
+
+	void OnPresented(
+		std::uint32_t tvSecHi,
+		std::uint32_t tvSecLo,
+		std::uint32_t tvNsec,
+		std::uint32_t refresh,
+		std::uint32_t seqHi,
+		std::uint32_t seqLo,
+		Wayland::WpPresentationFeedbackKind flags
+	) override
+	{
+		++Presented;
+		Nanoseconds =
+			static_cast<std::int64_t>(((static_cast<std::uint64_t>(tvSecHi) << 32U) | tvSecLo) * 1'000'000'000U) +
+			tvNsec;
+		Refresh = refresh;
+		Vblank = (static_cast<std::uint64_t>(seqHi) << 32U) | seqLo;
+		Flags = flags;
+	}
+
+	void OnDiscarded() override { ++Discarded; }
+
+	std::uint32_t Presented = 0;
+	std::uint32_t Discarded = 0;
+	std::int64_t Nanoseconds = 0;
+	std::uint32_t Refresh = 0;
+	std::uint64_t Vblank = 0;
+	Wayland::WpPresentationFeedbackKind Flags{};
+	Wire::ObjectId SyncedTo{};
+};
+
+// `wp_presentation` itself, which says one thing and says it at bind.
+class PresentationEvents final : public Wayland::WpPresentationListener
+{
+public:
+	void OnClockId(std::uint32_t clkId) override { Clock = clkId; }
+
+	// A sentinel no `clockid_t` uses, so *not said yet* is distinguishable from `CLOCK_REALTIME`.
+	std::uint32_t Clock = 0xffffffffU;
+};
+
+[[nodiscard]] bool Has(Wayland::WpPresentationFeedbackKind flags, Wayland::WpPresentationFeedbackKind wanted) noexcept
+{
+	return (static_cast<std::uint32_t>(flags) & static_cast<std::uint32_t>(wanted)) != 0;
+}
+} // namespace
+
+// **What a frame callback cannot say.** `wl_callback.done` carries truncated milliseconds and answers
+// *you may draw again*; this answers *what you drew was seen, at this nanosecond, on that panel, and
+// here is how much the number is worth*. The difference is what a media player matches audio against
+// and what gyro's own nested backend builds its frame clock out of — `Nested/Host.h` requires this
+// global of whatever it is a client of, which is why gyro could not be run inside gyro without it.
+GYRO_TEST(ProtocolRoundTrip, AWindowLearnsWhenItsPixelsBecameLightAndOnWhichPanel)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-presentation" };
+	GYRO_REQUIRE(pair.Opened);
+
+	// 144 Hz, so the refresh figure that comes back is one no fallback would have produced.
+	const std::array outputs{ SceneOutput{ .Bounds = { {}, { 1920.0, 1080.0 } },
+		                                   .Density = Scale::FromInteger(1),
+		                                   .Period = std::chrono::nanoseconds{ 6'944'444 },
+		                                   .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	const Registry::Global* const advertised = bound.Listener.Find(Wayland::WpPresentation::WireName);
+	GYRO_REQUIRE(advertised != nullptr);
+
+	PresentationEvents events;
+	const Wayland::WpPresentation presentation =
+		bound.Listener.Object().Bind<Wayland::WpPresentation>(advertised->Name, advertised->Version, events);
+	GYRO_REQUIRE(presentation.IsValid());
+
+	// The client also binds the output, because `sync_output` names a resource rather than a panel and
+	// is simply not sent to a client that never bound the global it would have named.
+	const Registry::Global* const panel = bound.Listener.Find(Wayland::WlOutput::WireName);
+	GYRO_REQUIRE(panel != nullptr);
+
+	OutputEvents ignored;
+	const Wayland::WlOutput output =
+		bound.Listener.Object().Bind<Wayland::WlOutput>(panel->Name, panel->Version, ignored);
+	GYRO_REQUIRE(output.IsValid());
+
+	pair.Turn();
+
+	// **The clock is named before anything is asked**, and it is `CLOCK_MONOTONIC` because that is
+	// gyro's timebase throughout. A client must be able to read the same clock itself, which is what
+	// rules out a compositor-private domain.
+	GYRO_CHECK_EQ(events.Clock, static_cast<std::uint32_t>(CLOCK_MONOTONIC));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x76 }));
+
+	toplevel.Drawn.Surface.Commit();
+	pair.Turn();
+
+	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
+
+	Feedback feedback;
+
+	// Asked for before the pixels it is about, exactly as a frame callback is.
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	(void)presentation.Feedback(toplevel.Drawn.Surface, feedback);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.DamageBuffer(0, 0, Width, Height);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	// The commit has reached the world and the world has not reached a panel.
+	GYRO_CHECK_EQ(feedback.Presented, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(feedback.Discarded, std::uint32_t{ 0 });
+
+	const Instant shown = Advanced(pair.Clock.Now(), std::chrono::milliseconds{ 8 });
+
+	// A flip the backend measured properly: a retrace counter, a period, and a timestamp it says came
+	// from the display hardware.
+	pair.Present(1, shown, 4210, std::chrono::nanoseconds{ 6'944'444 }, true);
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	GYRO_REQUIRE_EQ(feedback.Presented, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(feedback.Discarded, std::uint32_t{ 0 });
+
+	// **Nanoseconds, unrounded**, which is the whole reason a client asks for one of these: the frame
+	// callback's millisecond cannot express a refresh boundary on a panel whose refresh is seven of
+	// them.
+	GYRO_CHECK_EQ(feedback.Nanoseconds, Monotonic::ToNanoseconds(shown));
+
+	// The panel's own counter, not gyro's published sequence — which was 1 for this same frame. The two
+	// count different things, and a client differencing them to find a dropped refresh would be reading
+	// how often gyro published rather than how often the screen refreshed.
+	GYRO_CHECK_EQ(feedback.Vblank, std::uint64_t{ 4210 });
+
+	// What the backend measured, in nanoseconds until the next refresh.
+	GYRO_CHECK_EQ(feedback.Refresh, std::uint32_t{ 6'944'444 });
+
+	// The honesty half, forwarded from the backend rather than assumed. `hw_completion` is deliberately
+	// absent: nothing gyro reads answers that question separately from `hw_clock`, and claiming it on
+	// the strength of another flag is the fabrication `Seam/PresentationInfo.h` exists to prevent.
+	GYRO_CHECK(Has(feedback.Flags, Wayland::WpPresentationFeedbackKind::Vsync));
+	GYRO_CHECK(Has(feedback.Flags, Wayland::WpPresentationFeedbackKind::HwClock));
+	GYRO_CHECK(!Has(feedback.Flags, Wayland::WpPresentationFeedbackKind::HwCompletion));
+
+	// And which panel it was, as the object this client bound.
+	GYRO_CHECK(feedback.SyncedTo == output.Id());
+}
+
+// **A backend that measured no period still owes the client a prediction**, and gyro has one: the mode
+// it programmed. Zero is the protocol's *no useful prediction*, and sending it where the mode is known
+// would have a client fall back to guessing at a number gyro is holding.
+GYRO_TEST(ProtocolRoundTrip, AnUnmeasuredFlipFallsBackToTheModeTheOutputIsRunning)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-refresh" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{ .Bounds = { {}, { 1920.0, 1080.0 } },
+		                                   .Density = Scale::FromInteger(1),
+		                                   .Period = std::chrono::nanoseconds{ 16'666'666 },
+		                                   .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	const Registry::Global* const advertised = bound.Listener.Find(Wayland::WpPresentation::WireName);
+	GYRO_REQUIRE(advertised != nullptr);
+
+	PresentationEvents events;
+	const Wayland::WpPresentation presentation =
+		bound.Listener.Object().Bind<Wayland::WpPresentation>(advertised->Name, advertised->Version, events);
+	GYRO_REQUIRE(presentation.IsValid());
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x77 }));
+
+	toplevel.Drawn.Surface.Commit();
+	pair.Turn();
+
+	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
+
+	Feedback feedback;
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	(void)presentation.Feedback(toplevel.Drawn.Surface, feedback);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	// A flip with nothing measured about it, which is the headless presenter and every backend that
+	// cannot get a hardware timestamp.
+	pair.Present(1, pair.Clock.Now());
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_REQUIRE_EQ(feedback.Presented, std::uint32_t{ 1 });
+
+	GYRO_CHECK_EQ(feedback.Refresh, std::uint32_t{ 16'666'666 });
+
+	// **And the flags say the number is not a measurement.** A client told the timestamp came from
+	// display hardware would treat it as exact, which on this path it is not.
+	GYRO_CHECK(!Has(feedback.Flags, Wayland::WpPresentationFeedbackKind::HwClock));
+
+	// The retrace counter is genuinely absent, and zero is what the protocol says to send for an output
+	// with no way to report one. Substituting the published sequence would be a plausible-looking number
+	// counting something else.
+	GYRO_CHECK_EQ(feedback.Vblank, std::uint64_t{ 0 });
+}
+
+// **The one thing this protocol must never do is timestamp a frame nobody saw.** A client that commits
+// twice before the panel scans has pixels from the first update that were superseded in the world and
+// never turned into light — and telling it otherwise is a media player measuring the latency of a frame
+// it did not display. `wl_surface.frame` behaves the opposite way in the same situation, because *you
+// may draw again* survives being asked twice, and that difference is deliberate on both sides.
+GYRO_TEST(ProtocolRoundTrip, AContentUpdateNothingShowedIsDiscardedRatherThanTimestamped)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-discarded" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	const Registry::Global* const advertised = bound.Listener.Find(Wayland::WpPresentation::WireName);
+	GYRO_REQUIRE(advertised != nullptr);
+
+	PresentationEvents events;
+	const Wayland::WpPresentation presentation =
+		bound.Listener.Object().Bind<Wayland::WpPresentation>(advertised->Name, advertised->Version, events);
+	GYRO_REQUIRE(presentation.IsValid());
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x78 }));
+
+	toplevel.Drawn.Surface.Commit();
+	pair.Turn();
+
+	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+
+	class Callback final : public Wayland::WlCallbackListener
+	{
+	public:
+		void OnDone(std::uint32_t) override { ++Fired; }
+
+		std::uint32_t Fired = 0;
+	} first;
+	Callback second;
+
+	Feedback superseded;
+	Feedback shown;
+
+	// Two content updates inside one refresh, each asking for both events.
+	(void)presentation.Feedback(toplevel.Drawn.Surface, superseded);
+	(void)toplevel.Drawn.Surface.Frame(first);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	(void)presentation.Feedback(toplevel.Drawn.Surface, shown);
+	(void)toplevel.Drawn.Surface.Frame(second);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+	pair.Present(1, pair.Clock.Now(), 9, std::chrono::nanoseconds{ 16'666'666 }, true);
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// The frame the panel actually scanned is the second, and it is the only one timestamped.
+	GYRO_CHECK_EQ(shown.Presented, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(shown.Discarded, std::uint32_t{ 0 });
+
+	GYRO_CHECK_EQ(superseded.Presented, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(superseded.Discarded, std::uint32_t{ 1 });
+
+	// **Both callbacks fire, and that is not an inconsistency.** They answer a different question, and a
+	// client owed two *draw again*s that received one would be a window drawing at half the rate it
+	// asked for.
+	GYRO_CHECK_EQ(first.Fired, std::uint32_t{ 1 });
 	GYRO_CHECK_EQ(second.Fired, std::uint32_t{ 1 });
 }
 

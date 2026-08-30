@@ -6,12 +6,33 @@
 #include <vector>
 
 #include "Protocol/Buffer.h"
+#include "Protocol/Presentation.h"
 #include "Protocol/Region.h"
 #include "Protocol/Subcompositor.h"
 #include "Protocol/Viewporter.h"
 
 namespace
 {
+// Tell every feedback in a list that what it was waiting on will never be seen, and free it.
+//
+// **Emptied first and sent out of a local**, which is `ClientSurface::Present`'s arrangement and is
+// there for the same hazard: `Destroy` runs the feedback's `OnGone`, which calls `ForgetFeedback` back
+// into the surface and erases from the list being walked.
+void Discard(std::vector<ClientPresentationFeedback*>& held) noexcept
+{
+	std::vector<ClientPresentationFeedback*> going;
+
+	going.swap(held);
+
+	for (ClientPresentationFeedback* const feedback : going)
+	{
+		// The event and then the destruction, in that order and both from here — `discarded` releases the
+		// object on the client's side, and the resource is still the server's to free.
+		feedback->Object().Discarded();
+		feedback->Object().Destroy();
+	}
+}
+
 // A damage rectangle as the wire spells one. Negative extents are clamped away for Region.h's reason:
 // nothing forbids a client sending one, and an inverted interval would make every containment test
 // downstream answer backwards.
@@ -270,10 +291,20 @@ ClientSurface::~ClientSurface()
 	{
 		callback->Object().Destroy();
 	}
+
+	// **Both feedback lists are discarded rather than dropped**, and that is the difference between the
+	// two protocols showing up at teardown: a frame callback that will never fire is simply destroyed,
+	// because a client whose surface is gone is not waiting to draw into it. A
+	// `wp_presentation_feedback` has an event for exactly this — the content update whose surface was
+	// destroyed was never displayed — and sending it costs nothing where the client has already gone.
+	Discard(m_PendingFeedback);
+	Discard(m_DueFeedback);
 }
 
-void ClientSurface::Present(Instant at) noexcept
+void ClientSurface::Present(const SurfacePresentation& shown) noexcept
 {
+	PresentFeedback(shown);
+
 	if (m_DueCallbacks.empty())
 	{
 		return;
@@ -289,7 +320,7 @@ void ClientSurface::Present(Instant at) noexcept
 	// decision 57 keeps that inside `Core/Time.h` — it converts once, at the edge, exactly where the
 	// protocol demands a unit gyro does not otherwise use.
 	const auto milliseconds =
-		static_cast<std::uint32_t>(static_cast<std::uint64_t>(Monotonic::ToNanoseconds(at) / 1'000'000));
+		static_cast<std::uint32_t>(static_cast<std::uint64_t>(Monotonic::ToNanoseconds(shown.At) / 1'000'000));
 
 	// Emptied first and sent out of a local, for the destructor's reason exactly: `Destroy` runs the
 	// callback's `OnGone`, which calls `Forget` back into this object and erases from the list being
@@ -307,6 +338,106 @@ void ClientSurface::Present(Instant at) noexcept
 		callback->Object().Done(milliseconds);
 		callback->Object().Destroy();
 	}
+}
+
+void ClientSurface::PresentFeedback(const SurfacePresentation& shown) noexcept
+{
+	if (m_DueFeedback.empty())
+	{
+		return;
+	}
+
+	// **Seconds and nanoseconds rather than the callback's truncated milliseconds**, which is the whole
+	// reason a client asks for one of these: the frame callback's unit cannot express a refresh
+	// boundary, and a media player matching audio to a 144 Hz panel is measuring at seven milliseconds a
+	// frame. Decision 57's conversion at the edge, at the resolution the protocol offers.
+	const std::int64_t nanoseconds = Monotonic::ToNanoseconds(shown.At);
+	const std::uint64_t seconds = static_cast<std::uint64_t>(nanoseconds) / 1'000'000'000U;
+	const auto remainder = static_cast<std::uint32_t>(static_cast<std::uint64_t>(nanoseconds) % 1'000'000'000U);
+
+	// The refresh is nanoseconds until the next one, and zero is the protocol's own *no useful
+	// prediction*. A negative period is not expressible and would be a backend reporting nonsense, so it
+	// lands as the same zero rather than as an enormous unsigned number.
+	const auto refresh = static_cast<std::uint32_t>(
+		shown.Refresh > Duration::zero() ? static_cast<std::uint64_t>(shown.Refresh.count()) : 0U
+	);
+
+	auto flags = static_cast<std::uint32_t>(0);
+
+	if (shown.Vsync)
+	{
+		flags |= static_cast<std::uint32_t>(Wayland::Server::WpPresentationFeedbackKind::Vsync);
+	}
+
+	if (shown.HardwareClock)
+	{
+		flags |= static_cast<std::uint32_t>(Wayland::Server::WpPresentationFeedbackKind::HwClock);
+	}
+
+	if (shown.ZeroCopy)
+	{
+		flags |= static_cast<std::uint32_t>(Wayland::Server::WpPresentationFeedbackKind::ZeroCopy);
+	}
+
+	// **`hw_completion` is deliberately not among them.** It says the display hardware signalled the
+	// start of the presentation as opposed to a timer having guessed, and nothing gyro reads answers
+	// that question separately from `hw_clock` — `Seam/PresentationInfo.h` has three flags because those
+	// are the three a backend can honestly fill in. Claiming a fourth from the strength of a third is
+	// the fabrication that whole type exists to prevent.
+
+	// Emptied first and sent out of a local, for `Present`'s reason exactly.
+	std::vector<ClientPresentationFeedback*> due;
+
+	due.swap(m_DueFeedback);
+
+	for (ClientPresentationFeedback* const feedback : due)
+	{
+		// **`sync_output` before `presented`, and only where the client bound that output**, which the
+		// protocol states both halves of: the event names a resource rather than an output, so a client
+		// that never bound the global gyro would have named simply does not hear which panel it was.
+		if (shown.Output.IsValid())
+		{
+			feedback->Object().SyncOutput(shown.Output);
+		}
+
+		feedback->Object().Presented(
+			static_cast<std::uint32_t>(seconds >> 32U),
+			static_cast<std::uint32_t>(seconds & 0xffffffffU),
+			remainder,
+			refresh,
+			static_cast<std::uint32_t>(shown.Vblank >> 32U),
+			static_cast<std::uint32_t>(shown.Vblank & 0xffffffffU),
+			static_cast<Wayland::Server::WpPresentationFeedbackKind>(flags)
+		);
+
+		feedback->Object().Destroy();
+	}
+}
+
+void ClientSurface::StageFeedback()
+{
+	// **What was already due is discarded, and this is the line the two protocols part on.** The
+	// callbacks above merged, because *you may draw again* survives being asked twice. A feedback is
+	// about one content update, and this commit is the update that superseded it — so the pixels it was
+	// waiting on are ones nobody will ever see, and the protocol has an event that says exactly that.
+	// Answering it later with this frame's timestamp would be a client measuring the latency of a frame
+	// it never drew.
+	Discard(m_DueFeedback);
+
+	m_DueFeedback.swap(m_PendingFeedback);
+}
+
+void ClientSurface::AdoptFeedback(ClientPresentationFeedback& feedback)
+{
+	m_PendingFeedback.push_back(&feedback);
+}
+
+void ClientSurface::ForgetFeedback(const ClientPresentationFeedback& feedback) noexcept
+{
+	const auto matches = [&feedback](const ClientPresentationFeedback* held) noexcept { return held == &feedback; };
+
+	std::erase_if(m_PendingFeedback, matches);
+	std::erase_if(m_DueFeedback, matches);
 }
 
 void ClientSurface::Forget(const FrameCallback& callback) noexcept
@@ -567,9 +698,12 @@ void ClientSurface::ApplyCached()
 
 	// The callbacks stayed pending while the state was cached, which is what makes a client that asked
 	// to be paced and was never applied go on waiting rather than being told about a frame its pixels
-	// were not in.
+	// were not in. So did the feedbacks, and they land the same way — the content update this parent is
+	// applying is the one the child described, however long ago it described it.
 	m_DueCallbacks.insert(m_DueCallbacks.end(), m_PendingCallbacks.begin(), m_PendingCallbacks.end());
 	m_PendingCallbacks.clear();
+
+	StageFeedback();
 
 	CommitChildren();
 }
@@ -750,6 +884,8 @@ void ClientSurface::Apply()
 	// inside one frame.
 	m_DueCallbacks.insert(m_DueCallbacks.end(), m_PendingCallbacks.begin(), m_PendingCallbacks.end());
 	m_PendingCallbacks.clear();
+
+	StageFeedback();
 
 	// **A commit that did not attach keeps the content it had**, which is the protocol's rule and the
 	// reason this is gated on the attach rather than on the buffer: a client committing a new input

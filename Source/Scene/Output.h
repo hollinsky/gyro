@@ -80,10 +80,9 @@ struct SceneOutput
 	//
 	// **The one field here that nothing in the world reads, and it is here because there is nowhere
 	// else it can be said from.** `wl_output.mode` carries a refresh rate and `Protocol` sees only this
-	// store, so the alternative is telling every client zero — which is not *we decline to answer*
-	// while gyro serves no `wp_presentation`, it is the only cadence figure a client can obtain,
-	// withheld. A media player reading zero falls back to 60 and judders on a 144 Hz panel, which is a
-	// wrong number rather than an absent one.
+	// store, so the alternative is telling every client zero — which is not *we decline to answer*, it
+	// is the only cadence figure a client has before it has drawn anything, withheld. A media player reading zero falls
+	// back to 60 and judders on a 144 Hz panel, which is a wrong number rather than an absent one.
 	//
 	// **Nominal rather than measured, which is what keeps it a fact rather than a prediction.**
 	// `Frame/FrameClock.h` learns what the panel is actually doing and that number belongs to the frame
@@ -91,6 +90,12 @@ struct SceneOutput
 	// it are, so it is one more echo rather than a second source of truth to hold in agreement. A
 	// client must not schedule against it in any case — the frame callback is the contract, and it is
 	// answered from what reached the glass.
+	//
+	// **It has a second reader now**, which is `wp_presentation_feedback.presented`: that event's
+	// `refresh` is a prediction of how long until the next one, and this is what
+	// [Protocol/Host.h](../Protocol/Host.h) substitutes where the backend measured nothing. The
+	// observed period wins wherever there is one, so this stays the mode's statement rather than
+	// becoming a measurement by being read.
 	Duration Period{};
 
 	// The device grid: what the panel actually scans out, in its own pixels. Decision 54's settled snap

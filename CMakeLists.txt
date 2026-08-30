@@ -986,6 +986,7 @@ gyro_add_module(Protocol DISPATCH
 		Output.cpp
 		Popup.cpp
 		Positioner.cpp
+		Presentation.cpp
 		Region.cpp
 		Sealed.cpp
 		Seat.cpp
@@ -1001,6 +1002,7 @@ gyro_add_module(Protocol DISPATCH
 		Floor.Test.cpp
 		Host.Test.cpp
 		Positioner.Test.cpp
+		Presentation.Test.cpp
 		Server.Test.cpp
 		Shell.Test.cpp
 		Shm.Test.cpp

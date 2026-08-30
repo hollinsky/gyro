@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <utility>
 
+#include "Protocol/Presentation.h"
 #include "Protocol/Shell.h"
 #include "Protocol/Surface.h"
 #include "Protocol/Viewporter.h"
@@ -75,6 +76,19 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		// output is a window twice as wide and twice as tall as the person asked for. [Viewporter.h]
 		// (Viewporter.h) has the shape of that, and it is Firefox.
 		return Failure(ENOMEM, "advertising wp_viewporter");
+	}
+
+	m_PresentationGlobal = Wayland::Server::WpPresentation::Advertise(*display, PresentationVersion, m_Presentation);
+
+	if (m_PresentationGlobal == nullptr)
+	{
+		// Fatal for `wl_compositor`'s reason, and one that is specific to this compositor: gyro's own
+		// nested backend requires this global of whatever it is a client of, so a run that came up
+		// without it is one gyro cannot be developed inside. A client that merely wants pixels on screen
+		// degrades — it paces off frame callbacks and cannot measure its own latency — but a compositor
+		// whose set of globals depends on which allocation succeeded at startup is the thing
+		// [Host.h](Host.h) refuses across the board.
+		return Failure(ENOMEM, "advertising wp_presentation");
 	}
 
 	m_ShmGlobal = Wayland::Server::WlShm::Advertise(*display, ShmVersion, m_Shm);
@@ -187,12 +201,52 @@ void ClientHost::OnDeviceGone(InputDeviceId device)
 	m_Seat.Forget(device);
 }
 
-void ClientHost::OnReached(EntityId entity, Instant at)
+void ClientHost::OnReached(EntityId entity, std::size_t output, const OutputPresentation& shown)
 {
-	if (ClientSurface* const surface = m_Context.SurfaceOf(entity); surface != nullptr)
+	ClientSurface* const surface = m_Context.SurfaceOf(entity);
+
+	if (surface == nullptr)
 	{
-		surface->Present(at);
+		return;
 	}
+
+	SurfacePresentation presented{ .At = shown.At,
+		                           .Refresh = shown.Period,
+		                           .Vblank = shown.Vblank,
+		                           .Vsync = shown.Vsync,
+		                           .HardwareClock = shown.HardwareClock,
+		                           .ZeroCopy = shown.ZeroCopy };
+
+	// **The index is a subscript into the advertised set, which is the world's order**, so a reach bit,
+	// a `SceneOutput` and a global are the same number — [Output.h](Output.h) states that and
+	// `HostOutputs::Sync` is what keeps it true. A report from before a hotplug can still name an index
+	// the set no longer has, which is why this is a bounds check rather than an assertion: the frame
+	// callback is answered either way, and what the client loses is knowing which panel showed it.
+	const std::span<const std::unique_ptr<HostOutput>> advertised = m_Outputs.All();
+
+	if (output < advertised.size())
+	{
+		const HostOutput& panel = *advertised[output];
+
+		// **The mode's own period where the backend measured nothing**, which is the one substitution
+		// here. Zero from a backend means *I do not know* and the protocol's zero means the same to a
+		// client — but gyro does know what mode it programmed, and a nominal period is a far better
+		// prediction of the next refresh than none. What it is not is a measurement, which is why the
+		// observed figure wins wherever there is one.
+		if (presented.Refresh <= Duration::zero())
+		{
+			presented.Refresh = panel.Facts().Period;
+		}
+
+		// Null on a stale resource, which is a surface whose client libwayland has already dropped. The
+		// event simply does not go out, exactly as it does not for a client that never bound the global.
+		if (const wl_client* const client = surface->Object().WireClient(); client != nullptr)
+		{
+			presented.Output = panel.ResourceFor(*client);
+		}
+	}
+
+	surface->Present(presented);
 }
 
 Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)

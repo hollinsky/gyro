@@ -45,7 +45,10 @@ class SceneStore;
 // what the mode is. What settles it is that gyro serves no `wp_presentation`, so zero here is not a
 // question answered elsewhere: it is the only cadence figure a client can obtain, withheld. A media
 // player reading it falls back to 60 and judders on a 144 Hz panel, which is worse than the truth by
-// exactly the amount a wrong number is worse than an absent one.
+// exactly the amount a wrong number is worse than an absent one. *(gyro serves `wp_presentation` now,
+// so this is no longer the only cadence figure a client can get — but it stays sent: a client reads
+// the mode before it has drawn anything, and the first feedback arrives a frame after the first
+// commit.)*
 inline constexpr std::uint32_t OutputVersion = 3;
 
 class HostOutput;

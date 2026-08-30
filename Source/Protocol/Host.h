@@ -18,6 +18,7 @@
 #include "Protocol/Dmabuf.h"
 #include "Protocol/Floor.h"
 #include "Protocol/Output.h"
+#include "Protocol/Presentation.h"
 #include "Protocol/Seat.h"
 #include "Protocol/Server.h"
 #include "Protocol/Shell.h"
@@ -62,9 +63,12 @@
 //
 // **A window redraws now, and what it redraws against is the return leg.** `Observe` connects this
 // host to the fact `Scene/Return.h` derives — *the pixels this entity committed reached the glass, at
-// this instant* — and a `wl_surface.frame` callback is what that fact is worth to a client. The
-// connection is the composition root's to make for decision 115's reason: `Scene` may not name
-// `Protocol`, so the signal carries an entity and this module is what knows which surface that is.
+// this instant, on this panel* — and two events are what that fact is worth to a client: a
+// `wl_surface.frame` callback, which says *draw again*, and a `wp_presentation_feedback`, which says
+// when what was drawn was seen and how much the number is worth. The connection is the composition
+// root's to make for decision 115's reason: `Scene` may not name `Protocol`, so the signal carries an
+// entity and this module is what knows which surface that is — and an output index, which this module
+// turns into the `wl_output` the client itself bound.
 //
 // **A window can now be typed into and pointed at.** `wl_seat` carries a keyboard and a pointer:
 // focus is `Scene`'s (`Scene/Focus.h`), what is under the pointer is `Scene/Hit.h`'s, the layout is
@@ -208,7 +212,7 @@ private:
 	// where the same callback at the bottom would give it the next one. It needs no store and no texture
 	// space — sending an event is not a change to the world — so the context being unset is correct
 	// rather than a gap.
-	void OnReached(EntityId entity, Instant at);
+	void OnReached(EntityId entity, std::size_t output, const OutputPresentation& shown);
 
 	// Bring up the display, and bind a socket where this run is the one making it. The factory's alone:
 	// what a host does at the dispatch loop's first step is advertise globals, and there is no second
@@ -228,7 +232,7 @@ private:
 	// The return leg's observer. Declared here so it is torn down with the host, which is before the
 	// dispatch loop that owns the signal — a link outliving its signal is what `Core/Signal.h` refuses
 	// to make possible, and the order is what keeps it from being asked.
-	Connection<EntityId, Instant> m_Reached;
+	Connection<EntityId, std::size_t, const OutputPresentation&> m_Reached;
 
 	CompositorGlobal m_Compositor{ m_Context };
 	wl_global* m_CompositorGlobal = nullptr;
@@ -238,6 +242,9 @@ private:
 
 	ViewporterGlobal m_Viewporter{ m_Context };
 	wl_global* m_ViewporterGlobal = nullptr;
+
+	PresentationGlobal m_Presentation{ m_Context };
+	wl_global* m_PresentationGlobal = nullptr;
 
 	ShmGlobal m_Shm;
 	wl_global* m_ShmGlobal = nullptr;

@@ -46,13 +46,22 @@
 // `OnPresented` is that producer for the first of the three, so it lands and the other two keep
 // waiting — a field nobody writes is still a field that is wrong in detail by the time somebody does.
 //
-// **What did not come with it is everything else `PresentationInfo` carries**, and that is the rule
+// **Then the panel's own three came with it too.** *(2026-08-30.)* This paragraph read *what did not
+// come with it is everything else `PresentationInfo` carries* — the vblank counter, the observed
+// period and the honesty flags being the frame clock's inputs and nothing the dispatch side could use
+// — and the premise was that nothing over there wanted them. Serving `wp_presentation` is what wanted
+// them: a client asking when its frame was seen is answered with a retrace counter, a refresh figure
+// and whether the timestamp came from hardware, and a compositor holding all three and sending zeroes
+// is one whose own nested backend then reports a clock it cannot trust. So they cross.
+//
+// **What is still not fused is what the numbers are *for*.** The published sequence stays the
+// identifier — it is the only number the dispatch side can turn back into the surfaces that were in
+// that frame, and the vblank counter beside it is a fact about the panel that gets *forwarded* rather
+// than looked anything up by. That is the rule
 // [Structure.md](../../Docs/Structure.md#region-is-in-geometry-and-reachability-is-why) states about
-// these two types being *near enough to fuse and the table says not to*. The vblank counter, the
-// observed period and the honesty flags are the frame clock's inputs; what crosses back is the
-// published sequence, which is the only number the dispatch side can turn into the surfaces that were
-// in that frame. A record that carried both would be `PresentationInfo` under another name, reaching a
-// module that must not depend on `Seam`.
+// these two types being *near enough to fuse and the table says not to*, holding on the axis it was
+// always about: no `Seam` type reaches this module, no target index, no discard case, and nothing here
+// is an input to a prediction.
 
 // How many holds one report can carry.
 //
@@ -83,11 +92,16 @@ static_assert((ReportQueueDepth & (ReportQueueDepth - 1)) == 0, "so the index is
 
 // One output's most recent frame on the glass.
 //
-// Decision 75's *S was presented at T*, as two numbers. `Sequence` is the **published** sequence the
-// frame was drawn from rather than the panel's vblank counter, and that is the whole content of the
-// type: the dispatch side authored that snapshot, so it is the one number it can turn back into the
-// surfaces the frame contained — a frame callback for each, `wp_presentation_feedback` at `At`, and
-// the client damage those surfaces had cleared by it.
+// Decision 75's *S was presented at T*, and then what the panel says about itself. `Sequence` is the
+// **published** sequence the frame was drawn from rather than the panel's vblank counter, and it is
+// the one field anything is looked up by: the dispatch side authored that snapshot, so it is the one
+// number it can turn back into the surfaces the frame contained — a frame callback for each,
+// `wp_presentation_feedback` at `At`, and the client damage those surfaces had cleared by it.
+//
+// **Everything after `At` is forwarded rather than read.** The retrace counter, the observed period
+// and the three honesty flags are what a client's `presented` event has to carry and what nothing on
+// this side of the boundary derives anything from — see the paragraph at the top of this file for why
+// they cross at all, which is a reversal rather than the original reading.
 //
 // **Zero is *no news* rather than *sequence zero*.** Publication/Ring.h begins at one for exactly this
 // reason, and an output that presented nothing since the last report says so by leaving this alone.
@@ -103,11 +117,39 @@ struct PresentedFrame
 	// not a copy of the `Seam` record the frame clock reads.
 	Instant At{};
 
+	// The panel's own frame counter for that flip — the vblank sequence on KMS, the host's feedback
+	// sequence nested. **It is not what identifies the frame and must never be used as though it were**:
+	// `Sequence` above is gyro's number and this is the display's, they count different things at
+	// different rates, and an output that has no such counter leaves it zero.
+	//
+	// It crosses because `wp_presentation_feedback.presented` carries one and there is nowhere else on
+	// this side of the boundary it could be obtained from. A client differences two of them to know
+	// whether it missed a refresh, which is a question about the panel rather than about gyro.
+	std::uint64_t Vblank = 0;
+
+	// The interval the output actually ran at, as the backend observed it. Zero where it genuinely does
+	// not know — the same meaning `Seam/PresentationInfo.h` gives the field, and the reason a client's
+	// `refresh` falls back to the mode's nominal period rather than to a guess.
+	Duration Period{};
+
+	// The honesty half, and it is here for the same reason it exists there: a fabricated timestamp is
+	// indistinguishable from a real one, so a backend that does not know says so. A client reads these
+	// to decide how much to trust the instant above, and gyro nested inside gyro is the client that
+	// reads them hardest — `Frame/FrameClock.h` turns `HardwareClock` into whether its own latency
+	// assertions mean anything.
+	bool Vsync = false;
+	bool HardwareClock = false;
+	bool ZeroCopy = false;
+
+	// Spelled, for the reason the record above is: decision 49 holds open a shared mapping, and
+	// uninitialised bytes crossing one are what that rules out.
+	std::uint8_t Reserved[5] = {};
+
 	friend constexpr bool operator==(PresentedFrame, PresentedFrame) noexcept = default;
 };
 
 static_assert(std::is_trivially_copyable_v<PresentedFrame> && std::is_standard_layout_v<PresentedFrame>);
-static_assert(sizeof(PresentedFrame) == 2 * sizeof(std::uint64_t), "No padding to leave uninitialised");
+static_assert(sizeof(PresentedFrame) == 5 * sizeof(std::uint64_t), "No padding to leave uninitialised");
 
 // What one frame tells the dispatch thread.
 //

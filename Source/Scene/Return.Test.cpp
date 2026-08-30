@@ -48,6 +48,7 @@ struct Watcher
 	struct Frame
 	{
 		EntityId Entity{};
+		std::size_t Output = 0;
 		Instant At{};
 	};
 
@@ -62,13 +63,16 @@ struct Watcher
 
 	void OnReleased(BufferId id) { Releases.push_back(id); }
 
-	void OnReached(EntityId entity, Instant at) { Frames.push_back({ .Entity = entity, .At = at }); }
+	void OnReached(EntityId entity, std::size_t output, const OutputPresentation& shown)
+	{
+		Frames.push_back({ .Entity = entity, .Output = output, .At = shown.At });
+	}
 
 	// Connections are members of the observer, which is Core/Signal.h's whole shape: connecting links
 	// two objects that already exist, and a watcher going out of scope unlinks itself.
 	Connection<std::size_t, std::uint64_t, Instant> Presented;
 	Connection<BufferId> Released;
-	Connection<EntityId, Instant> Reached;
+	Connection<EntityId, std::size_t, const OutputPresentation&> Reached;
 
 	void Watch(SceneReturn& drain)
 	{

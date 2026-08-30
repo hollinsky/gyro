@@ -44,11 +44,13 @@
 // the scan on the return path is over that list rather than over the world, which is the axis decision
 // 115 rejects a pull on.
 //
-// **Three consumers want it and only one of them exists today.** The frame callback is the one
-// `Protocol` connects to now. Decision 113's client damage clears against *every* output having shown
-// the sequence rather than the first, which is why `Owed` goes on clearing bits after the signal has
-// gone out. `wl_buffer.release` is the third and needs no ledger yet, because `Protocol/Shm.h` copies
-// at commit and releases in the same step — it lands with the dmabuf path, where the hold is real.
+// **Three consumers want it and two of them exist today.** The frame callback was the first, and
+// `wp_presentation_feedback` is the second — the same signal read for more of what it already carried,
+// which is why serving that protocol added an argument here rather than a channel. Decision 113's
+// client damage clears against *every* output having shown the sequence rather than the first, which
+// is why `Owed` goes on clearing bits after the signal has gone out. `wl_buffer.release` is the third and needs no
+// ledger yet, because `Protocol/Shm.h` copies at commit and releases in the same step — it lands with the dmabuf path,
+// where the hold is real.
 //
 // **What is still per output rather than per surface is `Presented` itself**, and it stays that way:
 // the boot splash and the recovery console present frames with nothing on the far end of them, so the
@@ -68,6 +70,17 @@ struct OutputPresentation
 
 	// When that frame reached the glass.
 	Instant At{};
+
+	// What the panel said about that flip, forwarded from `PresentedFrame` and read by exactly one
+	// party: [Protocol/Presentation.h](../Protocol/Presentation.h), which owes a client a retrace
+	// counter, a refresh figure and a statement about how much of the timestamp was hardware. Nothing
+	// in `Scene` derives anything from them, which is why they sit here as a group rather than beside
+	// the sequence the ledger is resolved against.
+	std::uint64_t Vblank = 0;
+	Duration Period{};
+	bool Vsync = false;
+	bool HardwareClock = false;
+	bool ZeroCopy = false;
 
 	[[nodiscard]] bool HasPresented() const noexcept { return Sequence != 0; }
 
@@ -104,9 +117,17 @@ public:
 	// drawing into pixels gyro is still sampling.
 	Signal<BufferId> Released;
 
-	// What this entity committed has been shown, at this instant. `wl_surface.frame` is `Protocol`'s to
-	// answer and this is the fact it answers on — decision 115's derivation, arriving as an entity
-	// rather than as a sequence because a sequence is a number no client has ever heard of.
+	// What this entity committed has been shown, on this output, in the state that output is now in.
+	// `wl_surface.frame` and `wp_presentation_feedback.presented` are `Protocol`'s to answer and this is
+	// the fact both of them answer on — decision 115's derivation, arriving as an entity rather than as
+	// a sequence because a sequence is a number no client has ever heard of.
+	//
+	// **The output index is the *fold's* answer rather than a second question**, which is why it is an
+	// argument here and not something the observer looks up. Decision 32 gives a surface the cadence of
+	// the fastest panel it touches, so *which* panel resolved the entry is already decided by the walk
+	// below — and `wp_presentation_feedback.sync_output` is a client asking exactly that. An observer
+	// re-deriving it from a window's geometry would answer *the outputs it is on* and pick one, which is
+	// a different question with a different answer whenever a window straddles two.
 	//
 	// **It fires on the *first* output to show the frame, which is decision 32's cadence.** A surface on
 	// two panels has one buffer and one callback queue, so per-output pacing is not expressible in the
@@ -117,8 +138,10 @@ public:
 	//
 	// **The instant is when the frame reached the glass**, not when it was drawn and not now. A client
 	// paces itself off this number, so handing it the moment gyro happened to drain the channel would
-	// put dispatch's own jitter into every animation a toolkit runs.
-	Signal<EntityId, Instant> Reached;
+	// put dispatch's own jitter into every animation a toolkit runs. The rest of the record is the
+	// panel's own account of that flip, forwarded rather than derived — a reference because it is the
+	// state this object already holds, and reading it is legal only for the duration of the emit.
+	Signal<EntityId, std::size_t, const OutputPresentation&> Reached;
 
 	// Take one report. Called at the top of the dispatch iteration, once per report, until the channel
 	// is empty.
@@ -267,11 +290,17 @@ private:
 			return;
 		}
 
-		m_Presentations[index] = { .Sequence = frame.Sequence, .At = frame.At };
+		m_Presentations[index] = { .Sequence = frame.Sequence,
+			                       .At = frame.At,
+			                       .Vblank = frame.Vblank,
+			                       .Period = frame.Period,
+			                       .Vsync = frame.Vsync,
+			                       .HardwareClock = frame.HardwareClock,
+			                       .ZeroCopy = frame.ZeroCopy };
 
 		Presented.Emit(index, frame.Sequence, frame.At);
 
-		Resolve(index, frame.Sequence, frame.At);
+		Resolve(index, frame.Sequence);
 	}
 
 	// One entity's entry, superseded rather than appended to.
@@ -318,7 +347,7 @@ private:
 	// The scan is over the windows with a frame in flight, which is what committed since the last
 	// presentation — a handful on a busy desktop and none at all on a still one. Decision 115 rejects a
 	// derivation whose cost is the size of the world, and this is that rule kept on the return path.
-	void Resolve(std::size_t index, std::uint64_t sequence, Instant at)
+	void Resolve(std::size_t index, std::uint64_t sequence)
 	{
 		const OutputReach bit = index < MaxReachableOutputs ? OutputReach{ 1 } << index : 0;
 
@@ -340,7 +369,7 @@ private:
 			{
 				entry.Reported = true;
 
-				Reached.Emit(entry.Entity, at);
+				Reached.Emit(entry.Entity, index, m_Presentations[index]);
 			}
 		}
 
