@@ -20,3 +20,6 @@
 # than a source dependency, and pinning a downloaded binary in git would make the tree carry a copy
 # of somebody else's build for every version it is bumped to.
 /tracebox
+
+# Gyro captures
+/gyro-captures
