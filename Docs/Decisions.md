@@ -13021,3 +13021,176 @@ larger than every screen, or dragged so its far edge leaves the desk — for the
 resizing is not: there is no protocol for a client to declare that it grows by whole cells, so a
 terminal's rounding shows up here as gyro asking for sizes it will not get, which the anchor rule
 above is exactly what makes harmless.
+
+### 167. An absolute device is bound to one output, and the fraction it reports lands on that output's grid rather than on its place in the layout
+
+*(Decided 2026-08-29, from wiring `wl_touch` and finding that the path stops one step short of the screen: `Input/Devices.cpp` has reported contacts since input landed, and nothing turns the fraction one carries into a place a person can point at.)*
+
+**A touchscreen says where a finger is on its own glass, as a fraction of that glass, and that is the
+whole of what it can honestly say.** [Core/Input.h](../Source/Core/Input.h) already refuses to carry a
+coordinate space for exactly this reason — an absolute device states a position on a surface, and
+turning that into a place on a screen is a question about outputs a device cannot answer. Two things
+finish the sentence: *which* output the glass is in front of, and how the fraction lands on it. This
+entry settles both, and it is not only touch's: `IInput::Position` — a tablet in absolute mode, a
+virtual pointer behind a remote session — has been declared and unwired since the same day, blocked on
+the same missing half.
+
+#### The binding is a fact about the machine, and it has three sources in a fixed order
+
+An absolute device is bound to exactly one output. The binding is resolved when the device arrives and
+again whenever the output set changes, from the first of these that answers:
+
+**A udev property gyro defines, `GYRO_OUTPUT`, naming a connector.** It always wins and it is the only
+source that is correct by construction rather than by inference. Device access is already a udev rule
+([decision 145](#145-the-drm-backend-takes-master-by-opening-the-node-and-libdrm-stops-at-the-frame-section)),
+so the file a person edits to let gyro *open* the touchscreen is the file they edit to say which panel
+it is glued to — one mechanism rather than a second configuration channel that would need somewhere to
+live, and there is nowhere to keep a preference until there is a session. It costs no dependency:
+libudev is already linked for the enumeration behind libinput, and `libinput_device_get_udev_device`
+is the door.
+
+**One output.** The ambiguity does not exist and no evidence is needed. This is the laptop, the tablet
+and the kiosk, which is to say almost every machine with a touchscreen on it.
+
+**A unique physical size match.** `libinput_device_get_size` gives a touchscreen's active area in
+millimetres and `Drm::Pipeline` already carries the panel's, from EDID, for the scale
+[decision 164](#164-density-is-one-angular-preference-and-every-output-derives-its-scale-from-it-a-setup-supplies-the-distance-that-derivation-needs)
+derives. The digitizer and the panel it is bonded to are the same piece of glass, so the two agree to
+within a few millimetres of bezel overlap.
+
+**The tolerance is ten millimetres per axis, and the number is EDID's rather than an engineering
+guess.** The format states an image size in two places — whole centimetres in the basic display block
+and millimetres in a detailed timing descriptor — so a panel that reports only the first arrives
+rounded to the nearest centimetre, and a tolerance tighter than that unit refuses matches that are
+correct. A device or a connector that reports zero is *no evidence* rather than a match against zero:
+`libinput_device_get_size` fails on a device without the data, and the connector says nothing on most
+projectors and every virtual output.
+
+**Uniqueness is required, and a tie leaves the device unbound.** Two panels of the same size — a pair
+of matched monitors, a laptop beside an external screen of its own diagonal — produce two candidates
+and no way to choose between them, and the entry below says what happens then.
+
+**The comparison is in the panel's own frame, so rotation never enters it.** A monitor turned
+portrait in its stand is the same glass with the same millimetres; how it is *mounted* is the
+coordinate question, which is the next section and a different one.
+
+#### An unbound device produces nothing, and says so once
+
+Where no source answers, the device is bound to nothing and its events are dropped — with one log line
+naming the device, the connectors it could not choose between, and the property that settles it.
+
+**A touch that goes nowhere is better than a touch on the wrong screen**, which is the whole of the
+argument and it is the reverse of what this project usually does with an ambiguous device. A press
+that lands on a monitor a person is not looking at operates controls they cannot see: it dismisses a
+dialog, it clicks a button in a window that is not in front of them, and nothing on screen indicates
+where the finger went. The failure is silent, it is destructive, and it cannot be attributed by the
+person experiencing it. An unresponsive touchscreen is none of those: it is immediately obvious, it is
+the first thing anyone reports, and the log line has the fix in it. The line is per device rather than
+per event, because the failure mode of the honest version is a message per finger per frame on the
+thread a keystroke travels.
+
+**Nothing else on the machine degrades**, and that is what makes the refusal affordable. The keyboard
+and the mouse are unaffected — a relative device needs no binding, since a displacement is meaningful
+without one — so the machine is still reachable and gyro's own escape chord still works.
+
+#### The fraction lands on the device grid, and is unprojected from there
+
+The coordinate is `fraction × SceneOutput::Grid`, read as a point in `DeviceSpace`, then carried into
+global space by `SceneOutput::Placement().Inverse()`.
+
+**Mapping the fraction onto `Bounds` instead is the tempting one-liner and it is wrong on any panel
+that is turned.** The glass rotates with the panel it is glued to, so the device's own axes are the
+device grid's axes and not the layout's — on a portrait-mounted monitor the two differ by a quarter
+turn, and a person touching the top of the screen would press the side of it. The scale factor is the
+same mistake one order smaller: on a 2x panel, the layout rectangle is half the grid, and a fraction
+stretched onto it is right only because the two errors are proportional — until the output is turned,
+when they are not.
+
+**The mechanism for this already exists and is exact.** `Placement()` is
+[decision 52](#52-coordinate-spaces-are-three-and-quantization-belongs-to-the-output)'s output
+adapter and `AxisTransform::Inverse` is exact for it by construction, so unprojecting is arithmetic
+gyro already trusts in the other direction every frame rather than a second mapping to keep in
+agreement with the first. That is
+[decision 16](#16-nodes-own-their-properties-the-active-set-is-mirrored) applied to a coordinate: the
+inverse is derived from the placement, never maintained beside it.
+
+**The fraction spans the whole grid — a touchscreen fills rather than fits.** There is no letterboxing
+because there is no aspect to preserve: the digitizer *is* the panel's surface, so the corners of one
+are the corners of the other. This is the property that makes the size match above evidence rather
+than coincidence, and it is exactly what does not hold for a tablet — see what is not decided, below.
+
+#### The binding lives in the composition root, and `IInput` grows the half it is missing
+
+`Input` depends on `Core` and `Seam` and may not name `Scene`, so it cannot see an output;
+`Scene` cannot see a libinput device. Neither half can resolve this alone, and the party that can is
+the composition root — which is the same argument [Scene/Output.h](../Source/Scene/Output.h) already
+makes for who fills a `SceneOutput` in, arriving a second time from the other side.
+
+**So `IInput` gains `Added`, which is `Removed` pointed the other way and does not exist today.** The
+interface reports a device leaving and has never reported one arriving, because until now nothing
+downstream needed to know anything about a device beyond the id on its events. What crosses is the
+device's own vocabulary and nothing else — an identity, the millimetres where it has them, the
+property where it is set — which keeps
+[decision 87](#87-a-type-both-halves-of-the-world-name-lives-below-both-waists-not-in-seam)'s rule
+intact: a device record carries no coordinate space, for the same reason `TouchEvent` does not.
+
+**The global point travels beside the event rather than inside it.** The root resolves the fraction
+and hands the seat a `TouchEvent` and a `Point<GlobalSpace>` as two arguments. A field on the event
+would put a coordinate space in the header whose opening paragraph forbids one, and it would be unset
+on every event that reaches an unbound device — which is a representable state saying *this finger is
+nowhere*.
+
+#### Rejected alternatives
+
+**Rejected: `libinput_device_get_output_name`.** It is the function that appears to answer this
+question and libinput's own header says not to use it — *"use of this function is discouraged. Its
+return value is not precisely defined and may not be understood by the caller or may be insufficient
+to map the device"* — and then names the two things to do instead, which are the two things above: a
+udev property the caller defines and understands, and monitor-to-device association heuristics the
+caller implements. Reading that header is what turned this from *find the API* into a decision, and it
+is worth recording that the API exists so the next person does not spend the afternoon finding it
+again.
+
+**Rejected: pushing the rotation into libinput's calibration matrix.**
+`libinput_device_config_calibration_set_matrix` would have the device report coordinates already
+turned, and the fraction could then go onto `Bounds` directly. It puts a copy of the output's
+orientation inside the input stack, which is a second source of truth for a fact that changes at
+pointer rate while somebody drags a monitor around a settings panel — the two disagree for as long as
+they are out of step, and the symptom is a touchscreen that is rotated wrongly until the next event.
+gyro already holds the exact transform; sending it somewhere else to be applied by a party that
+cannot be asked what it currently thinks is the trade
+[decision 16](#16-nodes-own-their-properties-the-active-set-is-mirrored) refuses.
+
+**Rejected: binding an internal device to the internal panel.**
+[Decision 164](#164-density-is-one-angular-preference-and-every-output-derives-its-scale-from-it-a-setup-supplies-the-distance-that-derivation-needs)
+already reads `Internal` off the connector, and *the built-in touchscreen goes on the built-in
+display* sounds like a rule with no parameter in it. It is not one, because the premise cannot be
+established: a touchscreen bonded to a laptop panel is frequently on USB and indistinguishable by bus
+from a touch monitor plugged into the side. So the rung would bind an external touchscreen to the
+internal panel with confidence, which is the wrong-screen failure the refusal above exists to avoid.
+Where it would be right it agrees with both rungs that are already there.
+
+**Rejected: the first output, the largest output, or the one holding the pointer.** Each is a way of
+always producing an answer, and an answer produced without evidence is the wrong-screen failure with
+the log line removed. *The output holding the pointer* is the most seductive and the worst: it is
+plausible on a desk and it makes a touchscreen's target depend on where somebody last left the mouse,
+so the same finger on the same glass lands in two different places a minute apart.
+
+#### What is deliberately not decided
+
+**A tablet fills or fits, and this entry does not say which.** A graphics tablet is a separate slab
+with its own aspect ratio, so stretching its fraction across a panel makes a circle drawn on it an
+ellipse on screen — the answer is almost certainly to preserve aspect and letterbox, and it belongs to
+the commit that builds a tablet protocol, where there is something to test it against. What is settled
+here is the binding, which is the half the two device classes share.
+
+**Per-device calibration is not here.** A digitizer that is a few millimetres off its panel, or
+mirrored, is a real thing on cheap hardware and the fix is a matrix somebody has to be able to author.
+There is nowhere to keep it until there is a session, and the udev property above is deliberately the
+smallest thing that is not a configuration system.
+
+**Nor is what happens to a live sequence when its output goes away.** A finger down on a monitor
+somebody unplugs produces no up and no cancel — the same shape [Seam/Input.h](../Source/Seam/Input.h)
+argues `Removed` into existence for, arriving from the output side instead of the device side. The
+answer is presumably a cancel, and it is the seat's to send, so it belongs with the `wl_touch` commit
+rather than with the mapping.
