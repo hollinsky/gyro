@@ -5,10 +5,16 @@
 
 #include "Protocol/Server.h"
 
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
 
+#include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <string>
+#include <utility>
 
 #include "Testing/Test.h"
 
@@ -73,6 +79,7 @@ GYRO_TEST(Server, OpensAndBindsARealSocket)
 	Server server;
 
 	GYRO_REQUIRE(server.Open().has_value());
+	GYRO_REQUIRE(server.Bind().has_value());
 	GYRO_CHECK(server.IsOpen());
 
 	// A name that names a file, not merely a string that came back. The socket is what a client
@@ -102,7 +109,8 @@ GYRO_TEST(Server, AnExplicitNameIsBoundVerbatim)
 {
 	Server server;
 
-	GYRO_REQUIRE(server.Open("gyro-explicit-0").has_value());
+	GYRO_REQUIRE(server.Open().has_value());
+	GYRO_REQUIRE(server.Bind("gyro-explicit-0").has_value());
 	GYRO_CHECK(server.SocketName() == "gyro-explicit-0");
 	GYRO_CHECK(SocketFileExists("gyro-explicit-0"));
 }
@@ -125,13 +133,163 @@ GYRO_TEST(Server, ATakenNameIsRefused)
 {
 	Server first;
 
-	GYRO_REQUIRE(first.Open("gyro-contended").has_value());
+	GYRO_REQUIRE(first.Open().has_value());
+	GYRO_REQUIRE(first.Bind("gyro-contended").has_value());
 
-	// The name is already bound by `first`, so the second server cannot have it — and comes back not
-	// open rather than half-constructed.
+	// The name is already bound by `first`, so the second server cannot have it — and comes back with
+	// no socket rather than half-bound.
 	Server second;
-	const Result<void> taken = second.Open("gyro-contended");
+
+	GYRO_REQUIRE(second.Open().has_value());
+
+	const Result<void> taken = second.Bind("gyro-contended");
 
 	GYRO_CHECK(!taken.has_value());
-	GYRO_CHECK(!second.IsOpen());
+	GYRO_CHECK(second.SocketName().empty());
+}
+
+// A listener of the shape a session agent offers: bound under the private runtime directory, listening,
+// and this process's own — which is the only uid a same-uid test can admit against.
+namespace
+{
+struct OfferedListener
+{
+	explicit OfferedListener(std::string_view name)
+	{
+		const char* const directory = ::getenv("XDG_RUNTIME_DIR");
+
+		if (directory == nullptr)
+		{
+			return;
+		}
+
+		Path = std::string{ directory } + "/" + std::string{ name };
+
+		Socket = Fd{ ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0) };
+
+		if (!Socket.IsValid())
+		{
+			return;
+		}
+
+		::sockaddr_un address{};
+		address.sun_family = AF_UNIX;
+		std::memcpy(address.sun_path, Path.c_str(), std::min(Path.size(), sizeof address.sun_path - 1));
+
+		::unlink(Path.c_str());
+
+		if (::bind(Socket.Get(), reinterpret_cast<const ::sockaddr*>(&address), sizeof address) != 0 ||
+		    ::listen(Socket.Get(), 4) != 0)
+		{
+			Socket.Reset();
+		}
+	}
+
+	~OfferedListener()
+	{
+		if (!Path.empty())
+		{
+			::unlink(Path.c_str());
+		}
+	}
+
+	OfferedListener(const OfferedListener&) = delete;
+	OfferedListener& operator=(const OfferedListener&) = delete;
+	OfferedListener(OfferedListener&&) = delete;
+	OfferedListener& operator=(OfferedListener&&) = delete;
+
+	std::string Path;
+	Fd Socket;
+};
+
+// Connect to a path the way a client does, and answer the descriptor or nothing. Deliberately not
+// `wl_display_connect`: what is being tested is whether gyro accepts at all, and a real client would
+// go on to demarshal a registry this test has no globals for.
+[[nodiscard]] Fd ConnectTo(const std::string& path)
+{
+	Fd socket{ ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0) };
+
+	if (!socket.IsValid())
+	{
+		return {};
+	}
+
+	::sockaddr_un address{};
+	address.sun_family = AF_UNIX;
+	std::memcpy(address.sun_path, path.c_str(), std::min(path.size(), sizeof address.sun_path - 1));
+
+	if (::connect(socket.Get(), reinterpret_cast<const ::sockaddr*>(&address), sizeof address) != 0)
+	{
+		return {};
+	}
+
+	return socket;
+}
+} // namespace
+
+GYRO_TEST(Server, AnAdoptedListenerServesClients)
+{
+	OfferedListener offered{ "gyro-adopted-0" };
+
+	GYRO_REQUIRE(offered.Socket.IsValid());
+
+	Server server;
+
+	GYRO_REQUIRE(server.Open().has_value());
+	GYRO_REQUIRE(server.Adopt(std::move(offered.Socket), ::getuid(), static_cast<Session::SessionId>(1)).has_value());
+
+	// No socket of gyro's own: everything this run serves arrived from an agent, which is what the
+	// composition root refuses to mix.
+	GYRO_CHECK(server.SocketName().empty());
+
+	const Fd client = ConnectTo(offered.Path);
+
+	GYRO_REQUIRE(client.IsValid());
+
+	// The accept runs inside the display's own loop, which is the loop the root already drives every
+	// step — so a connection is served by the same `Poll` a request is.
+	GYRO_REQUIRE(server.Poll().has_value());
+	GYRO_CHECK(server.Clients() == 1);
+}
+
+GYRO_TEST(Server, ReleasingASessionClosesItsListenerAndEndsItsClients)
+{
+	OfferedListener offered{ "gyro-adopted-1" };
+
+	GYRO_REQUIRE(offered.Socket.IsValid());
+
+	Server server;
+
+	GYRO_REQUIRE(server.Open().has_value());
+	GYRO_REQUIRE(server.Adopt(std::move(offered.Socket), ::getuid(), static_cast<Session::SessionId>(7)).has_value());
+
+	const Fd client = ConnectTo(offered.Path);
+
+	GYRO_REQUIRE(client.IsValid());
+	GYRO_REQUIRE(server.Poll().has_value());
+	GYRO_REQUIRE(server.Clients() == 1);
+
+	// The agent's connection closing is the session ending, and a session whose windows stayed on
+	// screen with nothing behind them would make that event advisory.
+	server.Release(static_cast<Session::SessionId>(7));
+
+	GYRO_CHECK(server.Clients() == 0);
+
+	// And nothing is listening on the path any more, so the next client is refused by the kernel rather
+	// than accepted into a session that has gone.
+	GYRO_CHECK(!ConnectTo(offered.Path).IsValid());
+}
+
+GYRO_TEST(Server, ReleasingAnUnknownSessionDoesNothing)
+{
+	Server server;
+
+	GYRO_REQUIRE(server.Open().has_value());
+	GYRO_REQUIRE(server.Bind("gyro-adopted-2").has_value());
+
+	// Every client under `Bind` belongs to no session, so this is the ordinary case rather than an edge:
+	// a run that never took an offer still has `Release` called on it by nothing at all.
+	server.Release(static_cast<Session::SessionId>(3));
+
+	GYRO_CHECK(server.SocketName() == "gyro-adopted-2");
 }

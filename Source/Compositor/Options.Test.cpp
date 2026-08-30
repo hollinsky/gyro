@@ -436,6 +436,57 @@ GYRO_TEST(Options, TheMissTriggerIsOffUntilAskedForAndTakesNoValue)
 // The third way a command line is wrong, from the comment at the top of this file: two figures that
 // parse individually and contradict each other. A hunt armed over a ring somebody switched off would
 // run for days and record nothing.
+GYRO_TEST(Options, ControlTakesEveryListenerFromAnAgent)
+{
+	const Result<Options> bare = Parse({ "--control" });
+
+	GYRO_REQUIRE(bare.has_value());
+	GYRO_CHECK(bare->Clients);
+	GYRO_CHECK(bare->ControlPath == DefaultControlPath);
+
+	const Result<Options> named = Parse({ "--control=/run/gyro/other" });
+
+	GYRO_REQUIRE(named.has_value());
+	GYRO_CHECK(named->ControlPath == "/run/gyro/other");
+
+	// Nothing is set by default, which is what keeps a bare run binding its own socket.
+	const Result<Options> none = Parse({});
+
+	GYRO_REQUIRE(none.has_value());
+	GYRO_CHECK(none->ControlPath.empty());
+}
+
+GYRO_TEST(Options, ControlBesideANamedSocketIsARefusal)
+{
+	// The third way a command line is wrong: two figures that parse individually and mean different
+	// things about the same run. A socket gyro bound itself admits every connection, because there is no
+	// uid to check one against — so a run doing both would be tracking sessions carefully on one path
+	// and leaving the other open beside it.
+	const Result<Options> both = Parse({ "--control", "--socket=gyro-1" });
+
+	GYRO_CHECK(!both.has_value());
+
+	// Bare `--socket` is the default said out loud rather than a name, so it is not the contradiction.
+	const Result<Options> bare = Parse({ "--control", "--socket" });
+
+	GYRO_CHECK(bare.has_value());
+
+	const Result<Options> gym = Parse({ "--control", "--gym" });
+
+	GYRO_CHECK(!gym.has_value());
+}
+
+GYRO_TEST(Options, NoSocketTakesTheRendezvousWithIt)
+{
+	// `--no-socket` is the floor case — no author, no dispatch thread — so a control socket left behind
+	// it would be a rendezvous on a run that could not serve what arrived at it.
+	const Result<Options> options = Parse({ "--control", "--no-socket" });
+
+	GYRO_REQUIRE(options.has_value());
+	GYRO_CHECK(!options->Clients);
+	GYRO_CHECK(options->ControlPath.empty());
+}
+
 GYRO_TEST(Options, TheMissTriggerOverNoRingIsAContradiction)
 {
 	GYRO_CHECK(Parse({ "--trace-on-miss", "--trace-buffer=1M" }).has_value());

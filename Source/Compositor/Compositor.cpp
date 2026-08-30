@@ -73,6 +73,7 @@
 #include "Seam/RenderTarget.h"
 #include "Seam/Renderer.h"
 #include "Seam/Scanout.h"
+#include "Session/Control.h"
 #include "Trace/Recorder.h"
 #include "Virtual/Device.h"
 #include "Virtual/Dump.h"
@@ -1731,6 +1732,31 @@ private:
 			// against a value taken afterwards would be comparing the count with itself.
 			const std::uint64_t shown = m_Shown.load();
 
+			// **Sessions before input, because a session arriving is what there is to route input to.**
+			// An offer taken here binds its listener into the same event loop the wait is already watching,
+			// so a client that connects on it is dispatched by the very next `Advance` — where an offer read
+			// after the step would leave the agent's first client waiting a whole iteration for a
+			// compositor that had already decided to sleep.
+			if (m_Control)
+			{
+				if (const Result<void> drained = m_Control->Drain(); !drained)
+				{
+					// **Released rather than flagged, which is the input path's rule with a difference the
+					// resource makes.** A device set that has stopped working is reported once and left alone
+					// because the descriptor is still the seat's; a rendezvous that has stopped is a file
+					// nothing will ever read again, and holding it open would leave agents connecting to a
+					// socket with nobody behind it. The sessions already established are untouched: their
+					// listeners are the host's now.
+					spdlog::error("the session control socket stopped: {}", drained.error());
+
+					m_Control.reset();
+				}
+				else
+				{
+					AdoptOffers();
+				}
+			}
+
 			// **Input first, before the step it may cause.** A key that arrives here becomes a retarget
 			// inside the author's `Advance` below, in the same iteration, which is what keeps the chain
 			// from a keystroke to the frame it changes one causal sequence rather than two — the same
@@ -1810,6 +1836,40 @@ private:
 		}
 
 		return {};
+	}
+
+	// Hand every listener a session agent offered to the host, so that its clients are served from the
+	// next step onwards.
+	//
+	// **A refused adoption ends the session rather than leaving it half-established.** The agent has
+	// been told its offer was accepted, so the alternative is a person whose `WAYLAND_DISPLAY` names a
+	// socket nothing is listening on — which every toolkit reports as *the compositor is not running*,
+	// on a machine where it plainly is.
+	void AdoptOffers()
+	{
+		while (std::optional<Session::AcceptedOffer> offer = m_Control->TakeOffer())
+		{
+			const Session::SessionId id = offer->Id;
+
+			const Result<void> adopted = m_Clients->Adopt(std::move(offer->Listener), offer->Uid, id);
+
+			if (!adopted)
+			{
+				spdlog::error("session {} could not be served: {}", static_cast<std::uint32_t>(id), adopted.error());
+			}
+		}
+	}
+
+	// A session agent's connection closed, which is that session ending — the whole reason the agent
+	// holds the connection open rather than offering and exiting.
+	void OnSessionEnded(Session::SessionId session)
+	{
+		// Silent on the way through: Session/Control.h says the session ended, and this is what that
+		// costs the world rather than a second announcement of the same fact.
+		if (m_Clients != nullptr)
+		{
+			m_Clients->Release(session);
+		}
 	}
 
 	// The wake dispatch answered, as an instant to sleep until.
@@ -2036,7 +2096,10 @@ private:
 		}
 		else if (m_Options.Clients)
 		{
-			Result<std::unique_ptr<ClientHost>> made = MakeClientHost(m_Options.Socket);
+			const bool handover = !m_Options.ControlPath.empty();
+
+			Result<std::unique_ptr<ClientHost>> made =
+				MakeClientHost(handover ? HostListener::Handover : HostListener::Own, m_Options.Socket);
 
 			if (!made)
 			{
@@ -2045,7 +2108,33 @@ private:
 
 			m_Clients = made->get();
 
-			spdlog::info("hosting clients on {}", m_Clients->SocketName());
+			if (handover)
+			{
+				// **Opened after the host and not before**, because the control socket appearing is what a
+				// session agent is waiting for: an agent that connected to a rendezvous gyro then failed to
+				// build a display behind would have exported `WAYLAND_DISPLAY` for a compositor that is not
+				// going to run.
+				Result<std::unique_ptr<Session::SessionControl>> control =
+					Session::SessionControl::Open(m_Options.ControlPath);
+
+				if (!control)
+				{
+					return std::unexpected{ control.error() };
+				}
+
+				m_Control = std::move(*control);
+				m_SessionEnded.ConnectTo<&Compositor::OnSessionEnded>(m_Control->Ended, *this);
+
+				spdlog::info(
+					"taking every listener from a session agent on {}; no Wayland socket is bound until one offers "
+					"and a machine whose agent never connects has no clients rather than a failure",
+					m_Options.ControlPath
+				);
+			}
+			else
+			{
+				spdlog::info("hosting clients on {}", m_Clients->SocketName());
+			}
 
 			// Four globals, which is a window and nothing a person can do to it. Said out loud because
 			// the alternative is somebody filing the silence as a bug: an application will open, appear
@@ -2076,6 +2165,14 @@ private:
 		if (m_Clients != nullptr)
 		{
 			m_DispatchWait.Watch(m_Clients->PollFd());
+		}
+
+		// The third and last, and Session/Control.h is what keeps it to one: a listener and a connection
+		// per agent are multiplexed behind an epoll descriptor of that module's own, so the wait grows by
+		// a file rather than by a registry and decision 126 stands.
+		if (m_Control)
+		{
+			m_DispatchWait.Watch(m_Control->Descriptor().Value);
 		}
 
 		if (const Result<void> opened = OpenInput(); !opened)
@@ -2447,6 +2544,13 @@ private:
 	// not carry — a gym would have to answer for a socket it does not have. Three jobs: the flush before
 	// each sleep, the descriptor the wait was given, and the keys the chord did not take.
 	ClientHost* m_Clients = nullptr;
+
+	// The rendezvous session agents offer their listeners on, where this run takes them that way. Null
+	// under a self-bound socket, and released where the socket has failed — which is reported once and
+	// then never again, for the input path's reason.
+	std::unique_ptr<Session::SessionControl> m_Control;
+
+	Connection<Session::SessionId> m_SessionEnded;
 
 	// The device set, the compositor's own keys, and the connection between them. Declared beside the
 	// host rather than with the backend because both are the dispatch thread's, and destroyed before

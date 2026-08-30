@@ -2381,8 +2381,16 @@ What the shape obliges:
   mistakes here present as "sometimes applications cannot find the display".
 - **The greeter has no user session**, so the privileged login agent performs the handover for the
   greeter's dedicated uid, making the login agent a hard dependency.
-- **Nested and headless bind their own listener** with no helper, consistent with the existing rule
-  that development backends are exempt from `SCHED_FIFO`, `mlockall`, and DRM master.
+- **Binding a listener directly is a flag rather than a backend's property.** *(Revised 2026-08-29.)*
+  This said nested and headless bind their own, consistent with development backends being exempt
+  from `SCHED_FIFO`, `mlockall`, and DRM master. That grouping is wrong: those three are properties
+  of the machine gyro is on, where the handover is a protocol, and exempting the daily driver would
+  mean the offer path only ever ran on the panel — the configuration that is restarted least often
+  and debugged least comfortably. So `--control` selects it under every backend and its absence is
+  the exemption, which is what a test wants rather than what nested wants. The two are refused
+  together: a socket gyro bound itself admits every connection, since there is no uid to check one
+  against and no agent whose going away ends it. See
+  [decision 165](Decisions.md#165-gyro-accepts-on-an-offered-listener-itself-a-session-ends-by-the-socket-closing-and-the-uid-is-checked-before-a-client-exists).
 
 ### The login agent
 

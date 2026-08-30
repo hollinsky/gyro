@@ -44,6 +44,8 @@ static void PrintUsage()
 			  << "                      bare is lanes\n"
 			  << "  --socket[=NAME]     Host clients on this Wayland socket; bare picks the first\n"
 			  << "                      free wayland-N. This is what a bare run already does\n"
+			  << "  --control[=PATH]    Take every listener from a session agent over this control\n"
+			  << "                      socket instead of binding one; bare is /run/gyro/control\n"
 			  << "  --no-socket         Host nothing and author nothing: no dispatch thread, and a\n"
 			  << "                      frame loop compositing an empty scene\n"
 			  << "  --cost=MS           What a planned composite is charged, in milliseconds\n"

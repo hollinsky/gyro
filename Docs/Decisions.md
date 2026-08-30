@@ -12842,3 +12842,64 @@ The known hole is identity. A setup keys on the displays present, and two identi
 report no EDID serial are indistinguishable — so which of them is on the left is a coin flip a person
 fixes once and gyro cannot remember against anything except the port they happen to be plugged into.
 Connector name is the tiebreaker available, and it is wrong the day they are swapped.
+
+
+### 165. gyro accepts on an offered listener itself; a session ends by the socket closing, and the uid is checked before a client exists
+
+*(Decided 2026-08-29, while wiring the listener handover into the composition root.
+[Decision 22](#22-gyro-runs-as-a-dedicated-unprivileged-uid-with-cap_sys_nice-and-nothing-else) refuses
+`CAP_CHOWN`, so [Architecture.md](Architecture.md#listener-handover) has the user's own agent create
+the Wayland socket and pass the descriptor in. What that section did not say is what gyro does with
+it.)*
+
+**gyro registers the offered listener with its own event loop and runs the `accept` itself.
+`wl_display_add_socket_fd` is not used.**
+
+**The reason is that libwayland cannot take a socket back.** A `wl_socket` is freed when the display
+is destroyed and there is no `wl_display_remove_socket` — the header has one direction only. So a
+display handed a user's listener accepts on that user's path for the life of the process, and the
+session-end event the whole handover is built around would become advisory: the agent is gone, the
+listener is not, and a client started afterwards is admitted to a session that no longer exists.
+Accepting in `Protocol/Server.h` makes ending a session `Release`, which closes a file.
+
+**The second reason is where the uid check lands, and it is the check that section calls load-bearing
+rather than defence in depth.** Because the *user* creates the socket, a user can create a permissive
+one — so a connection arriving through it must be attributed by `SO_PEERCRED` and not by the path it
+came in on. Checking on the accepted descriptor means no `wl_client` is ever constructed for a
+stranger. Under `wl_display_add_socket_fd` the earliest hook is `wl_display_add_client_created_listener`,
+which obliges gyro to build the client and then destroy it — a resource, an id space and a
+`create_client` signal spent on a peer it had already decided to refuse.
+
+**What is deliberately still libwayland's is the accept itself.** One connection per readable callback,
+on a blocking descriptor, which is `socket_data()` in `wayland-server.c` line for line: the event
+source is level-triggered, so the callback runs only with a connection already pending and the next is
+served on the next dispatch. The loop that would drain to empty is what would need `O_NONBLOCK`, and
+setting that would be visible to the *agent* — a descriptor passed by `SCM_RIGHTS` shares its open file
+description with the one that sent it. This is decision 2's line held in the small: gyro owns the
+policy around the codec and does not reimplement the codec.
+
+**A self-bound socket and a rendezvous are refused together, at the command line.** Every client on a
+socket gyro bound itself belongs to no session — there is no uid to admit it against and no agent whose
+going away ends it — which is exactly right as the whole of a development run and exactly wrong beside
+sessions being tracked properly. `--socket=NAME` with `--control` is a configuration somebody would
+believe was secure, so `ParseOptions` refuses it rather than serving both.
+
+**Rejected: one `wl_display` per session.** It answers the removal problem outright, and it is where
+per-session globals and [the trust tiers](Architecture.md#filtered-globals) eventually want to be. It
+is not this decision because it multiplies what the composition root holds by the number of users
+before there is a second user — the dispatch thread would poll a loop per session, `Scene`'s one store
+would have to be partitioned by display, and every global's advertisement would move. What this entry
+buys is that the shape stays reachable: the listener, the uid and the clients are already per session
+here, so the day a second display is worth it, it is a change to who owns the loop rather than a
+change to what a session is.
+
+#### What is not built
+
+The uid check has no test that exercises it, and cannot have one while gyro runs as the developer.
+Same-uid, `SO_PEERCRED` never refuses anything — so what the suite covers is that an adopted listener
+serves clients and that `Release` closes it and ends them, and the comparison itself is covered by
+being three lines beside a log message. The thing that makes it real is running gyro as its own uid,
+which is decision 22 finally taken literally and is a change to a udev rule rather than to this code.
+
+There is also no agent: nothing offers a listener except a test, so `--control` is a rendezvous a
+person has to speak to by hand. That is the next commit rather than a hole in this one.

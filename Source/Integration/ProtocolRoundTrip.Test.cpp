@@ -256,11 +256,11 @@ public:
 // descriptor between these steps; a test has both ends in one thread, so the only ordering that has
 // to be right is the one the root also honours — the host reads inside `Advance`, and the flush is
 // the last thing before the thread would have slept.
-struct Session
+struct Pair
 {
-	explicit Session(std::string_view socket)
+	explicit Pair(std::string_view socket)
 	{
-		Host = MakeClientHost(socket);
+		Host = MakeClientHost(HostListener::Own, socket);
 
 		if (!Host || *Host == nullptr)
 		{
@@ -332,9 +332,9 @@ struct BoundCompositor
 	Wayland::XdgWmBase Shell;
 };
 
-[[nodiscard]] bool Bind(Session& session, BoundCompositor& bound)
+[[nodiscard]] bool Bind(Pair& pair, BoundCompositor& bound)
 {
-	const Wayland::WlDisplay display{ session.Client, Wire::ObjectId::Display, Wayland::WlDisplay::WireVersion };
+	const Wayland::WlDisplay display{ pair.Client, Wire::ObjectId::Display, Wayland::WlDisplay::WireVersion };
 
 	(void)display.GetRegistry(bound.Listener);
 
@@ -343,8 +343,8 @@ struct BoundCompositor
 	// a source added during a dispatch is not itself dispatched in that round, so the request already
 	// sitting in the socket is read on the next one. The composition root never notices because its
 	// wait goes readable again immediately, which is one more turn of a loop that is running anyway.
-	session.Turn();
-	session.Turn();
+	pair.Turn();
+	pair.Turn();
 
 	const Registry::Global* const compositor = bound.Listener.Find(Wayland::WlCompositor::WireName);
 
@@ -381,11 +381,11 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-registry" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-registry" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	const Registry::Global* const compositor = bound.Listener.Find(Wayland::WlCompositor::WireName);
 	GYRO_REQUIRE(compositor != nullptr);
@@ -454,11 +454,11 @@ GYRO_TEST(ProtocolRoundTrip, ADataSourceIsCreatedAndOffersMimeTypesNobodyWillAsk
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-data" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-data" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	const Registry::Global* const data = bound.Listener.Find(Wayland::WlDataDeviceManager::WireName);
 	GYRO_REQUIRE(data != nullptr);
@@ -489,31 +489,31 @@ GYRO_TEST(ProtocolRoundTrip, ADataSourceIsCreatedAndOffersMimeTypesNobodyWillAsk
 	source.Offer("text/plain;charset=utf-8");
 	source.SetActions(Wayland::WlDataDeviceManagerDndAction::Copy);
 
-	session.Turn();
+	pair.Turn();
 
 	// Still connected is the whole of it: a client that offered a MIME type and was ended for it is
 	// one that never gets as far as drawing.
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 	GYRO_CHECK_EQ(events.Events, std::size_t{ 0 });
 
 	source.Destroy();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 }
 
 GYRO_TEST(ProtocolRoundTrip, BindingWlShmAnnouncesTheFormatsBeforeAnythingIsAsked)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-formats" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-formats" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
-	session.Turn();
+	pair.Turn();
 
 	// **The client asked nothing and is owed events anyway**, which is the whole of what `OnBound`
 	// exists for: `wl_shm`'s contract begins with the compositor telling a client what it may draw in.
@@ -527,11 +527,11 @@ GYRO_TEST(ProtocolRoundTrip, ASurfaceAndARegionSurviveAWholeCommit)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-commit" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-commit" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Wayland::WlSurfaceIgnoring events;
 	const Wayland::WlSurface surface = bound.Compositor.CreateSurface(events);
@@ -552,29 +552,29 @@ GYRO_TEST(ProtocolRoundTrip, ASurfaceAndARegionSurviveAWholeCommit)
 	surface.Offset(3, 4);
 	surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	// Every one of those requests carries arguments that could be transposed by the emitter without
 	// any structural check noticing. What says they were not is that libwayland demarshalled all of
 	// them against the interface description and gyro's handlers accepted every one — a wrong
 	// argument count or a wrong type is a protocol error and the connection would be gone.
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 
 	// One node, and it is gyro's own floor rather than anything the client authored — a surface with no
 	// role is not a window, and nothing about the requests above says it is one.
-	GYRO_CHECK_EQ(session.Store.Count(), std::uint32_t{ 1 });
-	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pair.Textures.Adopted, std::uint32_t{ 0 });
 }
 
 GYRO_TEST(ProtocolRoundTrip, AFrameCallbackIsAcceptedAndNotYetAnswered)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-frame" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-frame" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Wayland::WlSurfaceIgnoring events;
 	const Wayland::WlSurface surface = bound.Compositor.CreateSurface(events);
@@ -591,10 +591,10 @@ GYRO_TEST(ProtocolRoundTrip, AFrameCallbackIsAcceptedAndNotYetAnswered)
 	(void)surface.Frame(callback);
 	surface.Commit();
 
-	session.Turn();
-	session.Turn();
+	pair.Turn();
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 
 	// **Not fired, and it is the surface having no window rather than the callback being unanswered.**
 	// A frame callback is answered when the content this surface committed reaches the glass, and a
@@ -603,8 +603,8 @@ GYRO_TEST(ProtocolRoundTrip, AFrameCallbackIsAcceptedAndNotYetAnswered)
 	// `AMappedWindowIsToldWhenItsFrameReachedTheGlass` below.
 	GYRO_CHECK_EQ(callback.Fired, std::uint32_t{ 0 });
 
-	session.Present(1, session.Clock.Now());
-	session.Turn();
+	pair.Present(1, pair.Clock.Now());
+	pair.Turn();
 
 	GYRO_CHECK_EQ(callback.Fired, std::uint32_t{ 0 });
 }
@@ -613,11 +613,11 @@ GYRO_TEST(ProtocolRoundTrip, AZeroBufferScaleEndsTheClient)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-scale" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-scale" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Wayland::WlSurfaceIgnoring events;
 	const Wayland::WlSurface surface = bound.Compositor.CreateSurface(events);
@@ -626,24 +626,24 @@ GYRO_TEST(ProtocolRoundTrip, AZeroBufferScaleEndsTheClient)
 	surface.SetBufferScale(0);
 	surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	// A scale of zero is a division on the frame thread later, so it is refused where it arrives. The
 	// client is told which object and which code, because a toolkit that gets `invalid_scale` can fix
 	// itself and one that gets a dropped connection cannot.
-	GYRO_REQUIRE(session.Client.Fault().has_value());
-	GYRO_CHECK_EQ(session.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::WlSurfaceError::InvalidScale));
+	GYRO_REQUIRE(pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::WlSurfaceError::InvalidScale));
 }
 
 GYRO_TEST(ProtocolRoundTrip, AnOffsetOnAttachEndsAModernClient)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-offset" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-offset" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Wayland::WlSurfaceIgnoring events;
 	const Wayland::WlSurface surface = bound.Compositor.CreateSurface(events);
@@ -655,10 +655,10 @@ GYRO_TEST(ProtocolRoundTrip, AnOffsetOnAttachEndsAModernClient)
 	surface.Attach(Wayland::WlBuffer{}, 3, 4);
 	surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_REQUIRE(session.Client.Fault().has_value());
-	GYRO_CHECK_EQ(session.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::WlSurfaceError::InvalidOffset));
+	GYRO_REQUIRE(pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::WlSurfaceError::InvalidOffset));
 }
 
 namespace
@@ -710,11 +710,11 @@ GYRO_TEST(ProtocolRoundTrip, AnAttachedBufferReachesTheTextureSpaceAndComesStrai
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-shm" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-shm" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	DrawnSurface drawn;
 	GYRO_REQUIRE(Draw(bound, drawn, std::byte{ 0xC3 }));
@@ -723,20 +723,20 @@ GYRO_TEST(ProtocolRoundTrip, AnAttachedBufferReachesTheTextureSpaceAndComesStrai
 	drawn.Surface.DamageBuffer(0, 0, Width, Height);
 	drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 
 	// The pixels made it across a real socket, through a descriptor libwayland passed with
 	// `SCM_RIGHTS`, into a mapping gyro sealed, and out the far side as an id. The byte is what says
 	// the offset and stride arithmetic landed on the rows the client meant rather than on a page of
 	// zeroes next to them.
-	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 1 });
-	GYRO_CHECK(session.Textures.Size == (PixelSize<BufferSpace>{ Width, Height }));
-	GYRO_CHECK_EQ(session.Textures.Stride, static_cast<std::uint32_t>(Stride));
-	GYRO_CHECK(session.Textures.Alpha == TextureAlpha::Premultiplied);
-	GYRO_CHECK_EQ(session.Textures.Bytes, static_cast<std::size_t>(Stride) * static_cast<std::size_t>(Height));
-	GYRO_CHECK(session.Textures.First == std::byte{ 0xC3 });
+	GYRO_CHECK_EQ(pair.Textures.Adopted, std::uint32_t{ 1 });
+	GYRO_CHECK(pair.Textures.Size == (PixelSize<BufferSpace>{ Width, Height }));
+	GYRO_CHECK_EQ(pair.Textures.Stride, static_cast<std::uint32_t>(Stride));
+	GYRO_CHECK(pair.Textures.Alpha == TextureAlpha::Premultiplied);
+	GYRO_CHECK_EQ(pair.Textures.Bytes, static_cast<std::size_t>(Stride) * static_cast<std::size_t>(Height));
+	GYRO_CHECK(pair.Textures.First == std::byte{ 0xC3 });
 
 	// **Released in the same step it was committed in**, which is the point of copying rather than
 	// sampling the client's memory: a toolkit with one buffer can draw its next frame immediately,
@@ -748,11 +748,11 @@ GYRO_TEST(ProtocolRoundTrip, ACommitThatDidNotAttachKeepsTheContentItHad)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-keep" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-keep" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	DrawnSurface drawn;
 	GYRO_REQUIRE(Draw(bound, drawn, std::byte{ 0x40 }));
@@ -760,31 +760,31 @@ GYRO_TEST(ProtocolRoundTrip, ACommitThatDidNotAttachKeepsTheContentItHad)
 	drawn.Surface.Attach(drawn.Buffer, 0, 0);
 	drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_REQUIRE(session.Textures.Adopted == 1);
+	GYRO_REQUIRE(pair.Textures.Adopted == 1);
 
 	// A client that commits a new input region and nothing else must not lose its window, which is
 	// what makes this gated on the attach rather than on there being a buffer.
 	drawn.Surface.SetBufferScale(2);
 	drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
-	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 1 });
-	GYRO_CHECK_EQ(session.Textures.Retired, std::uint32_t{ 0 });
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Textures.Adopted, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pair.Textures.Retired, std::uint32_t{ 0 });
 }
 
 GYRO_TEST(ProtocolRoundTrip, EveryAttachedFrameIsANewIdAndRetiresTheOneItReplaces)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-redraw" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-redraw" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	DrawnSurface drawn;
 	GYRO_REQUIRE(Draw(bound, drawn, std::byte{ 0x08 }));
@@ -792,22 +792,22 @@ GYRO_TEST(ProtocolRoundTrip, EveryAttachedFrameIsANewIdAndRetiresTheOneItReplace
 	drawn.Surface.Attach(drawn.Buffer, 0, 0);
 	drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	// The same `wl_buffer` again, which is what a toolkit that reuses one buffer does on every frame.
 	drawn.Surface.Attach(drawn.Buffer, 0, 0);
 	drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 
 	// **A new id rather than an overwrite of the old one.** The frame thread may still be recording
 	// from a snapshot that names the previous id, so writing over its pixels would tear a window that
 	// is on screen right now; the old id stays drawable and retires when the watermark says nothing
 	// can still be reading it. Seam/Importer.h carries the argument.
-	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 2 });
-	GYRO_CHECK_EQ(session.Textures.Retired, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pair.Textures.Adopted, std::uint32_t{ 2 });
+	GYRO_CHECK_EQ(pair.Textures.Retired, std::uint32_t{ 1 });
 	GYRO_CHECK_EQ(drawn.Released.Released, std::uint32_t{ 2 });
 }
 
@@ -815,11 +815,11 @@ GYRO_TEST(ProtocolRoundTrip, AttachingNothingTakesTheContentAway)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-detach" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-detach" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	DrawnSurface drawn;
 	GYRO_REQUIRE(Draw(bound, drawn, std::byte{ 0x99 }));
@@ -827,20 +827,20 @@ GYRO_TEST(ProtocolRoundTrip, AttachingNothingTakesTheContentAway)
 	drawn.Surface.Attach(drawn.Buffer, 0, 0);
 	drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_REQUIRE(session.Textures.Adopted == 1);
+	GYRO_REQUIRE(pair.Textures.Adopted == 1);
 
 	// Attaching a null buffer is how a client takes its window off the screen without destroying
 	// anything, and it has to be told apart from a commit that simply did not attach.
 	drawn.Surface.Attach(Wayland::WlBuffer{}, 0, 0);
 	drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
-	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 1 });
-	GYRO_CHECK_EQ(session.Textures.Retired, std::uint32_t{ 1 });
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Textures.Adopted, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pair.Textures.Retired, std::uint32_t{ 1 });
 }
 
 namespace
@@ -1051,7 +1051,7 @@ struct Keyboard
 	Wayland::WlKeyboard Device;
 };
 
-[[nodiscard]] bool Listen(Session& session, BoundCompositor& bound, Keyboard& keyboard)
+[[nodiscard]] bool Listen(Pair& pair, BoundCompositor& bound, Keyboard& keyboard)
 {
 	const Registry::Global* const seat = bound.Listener.Find(Wayland::WlSeat::WireName);
 
@@ -1069,7 +1069,7 @@ struct Keyboard
 
 	keyboard.Device = keyboard.Seat.GetKeyboard(keyboard.Listener);
 
-	session.Turn();
+	pair.Turn();
 
 	return keyboard.Device.IsValid();
 }
@@ -1086,11 +1086,11 @@ GYRO_TEST(ProtocolRoundTrip, AToplevelIsConfiguredBeforeItIsAskedToDrawAnything)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-configure" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-configure" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Toplevel toplevel;
 	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x20 }));
@@ -1099,9 +1099,9 @@ GYRO_TEST(ProtocolRoundTrip, AToplevelIsConfiguredBeforeItIsAskedToDrawAnything)
 	// handshake rather than a courtesy: a toolkit will not draw a pixel until it has been answered.
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 	GYRO_CHECK_EQ(toplevel.WindowEvents.Configured, std::uint32_t{ 1 });
 	GYRO_CHECK_EQ(toplevel.SurfaceEvents.Configured, std::uint32_t{ 1 });
 	GYRO_CHECK(toplevel.SurfaceEvents.Serial != 0);
@@ -1115,29 +1115,29 @@ GYRO_TEST(ProtocolRoundTrip, AToplevelIsConfiguredBeforeItIsAskedToDrawAnything)
 	GYRO_CHECK(toplevel.WindowEvents.States.empty());
 
 	// Nothing is on screen: the client has been told it may draw and has not.
-	GYRO_CHECK_EQ(session.Store.Count(), std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 1 });
 }
 
 GYRO_TEST(ProtocolRoundTrip, AnAcknowledgedFrameBecomesAWindowCentredOnTheOutput)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-map" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-map" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Toplevel toplevel;
 	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x71 }));
 
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
 
@@ -1146,17 +1146,17 @@ GYRO_TEST(ProtocolRoundTrip, AnAcknowledgedFrameBecomesAWindowCentredOnTheOutput
 	toplevel.Drawn.Surface.DamageBuffer(0, 0, Width, Height);
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 
 	// The floor, the window, and the pixels under it. Two nodes per window rather than one, which is a
 	// toplevel as decision 111 describes it: a container holding its own surface and, one day, its
 	// subsurfaces.
-	GYRO_CHECK_EQ(session.Store.Count(), std::uint32_t{ 3 });
-	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 3 });
+	GYRO_CHECK_EQ(pair.Textures.Adopted, std::uint32_t{ 1 });
 
-	const Entity* const window = WindowNode(session.Store);
+	const Entity* const window = WindowNode(pair.Store);
 	GYRO_REQUIRE(window != nullptr);
 
 	// Centred, which with no shell and no pointer is the whole of gyro's placement policy — and it is
@@ -1164,7 +1164,7 @@ GYRO_TEST(ProtocolRoundTrip, AnAcknowledgedFrameBecomesAWindowCentredOnTheOutput
 	GYRO_CHECK_EQ(window->Translation.Model().X, (1920.0 - static_cast<double>(Width)) / 2.0);
 	GYRO_CHECK_EQ(window->Translation.Model().Y, (1080.0 - static_cast<double>(Height)) / 2.0);
 
-	const Entity* const content = session.Store.Find(window->FirstChild);
+	const Entity* const content = pair.Store.Find(window->FirstChild);
 	GYRO_REQUIRE(content != nullptr);
 	GYRO_CHECK(content->Kind == NodeKind::Image);
 	GYRO_CHECK_EQ(content->Extent.Width, static_cast<float>(Width));
@@ -1174,21 +1174,21 @@ GYRO_TEST(ProtocolRoundTrip, AMappedWindowIsToldWhenItsFrameReachedTheGlass)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-presented" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-presented" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Toplevel toplevel;
 	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x44 }));
 
 	toplevel.Drawn.Surface.Commit();
-	session.Turn();
+	pair.Turn();
 
 	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
 
@@ -1213,17 +1213,17 @@ GYRO_TEST(ProtocolRoundTrip, AMappedWindowIsToldWhenItsFrameReachedTheGlass)
 	toplevel.Drawn.Surface.DamageBuffer(0, 0, Width, Height);
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	// Nothing yet: the commit has reached the world, and the world has not reached a panel.
 	GYRO_CHECK_EQ(first.Fired, std::uint32_t{ 0 });
 
-	const Instant shown = Advanced(session.Clock.Now(), std::chrono::milliseconds{ 8 });
+	const Instant shown = Advanced(pair.Clock.Now(), std::chrono::milliseconds{ 8 });
 
-	session.Present(1, shown);
-	session.Turn();
+	pair.Present(1, shown);
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 
 	// **This is the frame the window was waiting for, and it is what makes an application redraw.** The
 	// timestamp is the instant the frame reached the glass rather than the moment gyro got round to
@@ -1233,8 +1233,8 @@ GYRO_TEST(ProtocolRoundTrip, AMappedWindowIsToldWhenItsFrameReachedTheGlass)
 
 	// And the next frame is not answered on the strength of the last one. A callback that fired again
 	// unasked would be a client drawing faster than it committed.
-	session.Present(2, Advanced(shown, std::chrono::milliseconds{ 16 }));
-	session.Turn();
+	pair.Present(2, Advanced(shown, std::chrono::milliseconds{ 16 }));
+	pair.Turn();
 
 	GYRO_CHECK_EQ(first.Fired, std::uint32_t{ 1 });
 
@@ -1246,9 +1246,9 @@ GYRO_TEST(ProtocolRoundTrip, AMappedWindowIsToldWhenItsFrameReachedTheGlass)
 	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
-	session.Present(3, Advanced(shown, std::chrono::milliseconds{ 32 }));
-	session.Turn();
+	pair.Turn();
+	pair.Present(3, Advanced(shown, std::chrono::milliseconds{ 32 }));
+	pair.Turn();
 
 	GYRO_CHECK_EQ(second.Fired, std::uint32_t{ 1 });
 }
@@ -1257,21 +1257,21 @@ GYRO_TEST(ProtocolRoundTrip, AWindowThatUnmappedIsNotToldAboutFramesItIsNotIn)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-unmapped" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-unmapped" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Toplevel toplevel;
 	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x55 }));
 
 	toplevel.Drawn.Surface.Commit();
-	session.Turn();
+	pair.Turn();
 
 	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
 
@@ -1279,7 +1279,7 @@ GYRO_TEST(ProtocolRoundTrip, AWindowThatUnmappedIsNotToldAboutFramesItIsNotIn)
 	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	class Callback final : public Wayland::WlCallbackListener
 	{
@@ -1297,11 +1297,11 @@ GYRO_TEST(ProtocolRoundTrip, AWindowThatUnmappedIsNotToldAboutFramesItIsNotIn)
 	toplevel.Drawn.Surface.Attach(Wayland::WlBuffer{}, 0, 0);
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
-	session.Present(1, session.Clock.Now());
-	session.Turn();
+	pair.Turn();
+	pair.Present(1, pair.Clock.Now());
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 	GYRO_CHECK_EQ(callback.Fired, std::uint32_t{ 0 });
 }
 
@@ -1309,76 +1309,74 @@ GYRO_TEST(ProtocolRoundTrip, ABufferCommittedBeforeTheConfigureIsAcknowledgedEnd
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-unconfigured" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-unconfigured" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Toplevel toplevel;
 	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x33 }));
 
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	// The ack is deliberately skipped. A compositor that accepted this would be showing a frame drawn
 	// for a size nobody agreed on, which is a window that appears at the wrong shape and then jumps.
 	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_REQUIRE(session.Client.Fault().has_value());
-	GYRO_CHECK_EQ(
-		session.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::XdgSurfaceError::UnconfiguredBuffer)
-	);
+	GYRO_REQUIRE(pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::XdgSurfaceError::UnconfiguredBuffer));
 
-	GYRO_CHECK_EQ(session.Store.Count(), std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 1 });
 }
 
 GYRO_TEST(ProtocolRoundTrip, DestroyingTheToplevelRetiresTheWindowRatherThanRemovingIt)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-unmap" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-unmap" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Toplevel toplevel;
 	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x55 }));
 
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
 	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_REQUIRE(session.Store.Count() == 3);
+	GYRO_REQUIRE(pair.Store.Count() == 3);
 
 	toplevel.Window.Destroy();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 
 	// **Still three, and still where it was.** A window that is closing is a window a person is still
 	// looking at, so the subtree keeps its links and its position and goes on being drawn until every
 	// channel on it has settled; the store frees it on the serialisation pass that finds it at rest.
 	// Freeing here instead is a window that vanishes rather than one that leaves.
-	GYRO_CHECK_EQ(session.Store.Count(), std::uint32_t{ 3 });
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 3 });
 
-	const Entity* const window = WindowNode(session.Store);
+	const Entity* const window = WindowNode(pair.Store);
 	GYRO_REQUIRE(window != nullptr);
 	GYRO_CHECK(window->Retiring);
 }
@@ -1389,14 +1387,14 @@ GYRO_TEST(ProtocolRoundTrip, ASeatOffersOneKeyboardAndHandsOverALayoutBeforeAnyt
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-seat" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-seat" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Keyboard keyboard;
-	GYRO_REQUIRE(Listen(session, bound, keyboard));
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
 
 	// A keyboard and a pointer, and no touch. A client told there is a capability gyro has not built
 	// would wait for an `enter` that cannot come, so the set is exactly what is routed.
@@ -1427,14 +1425,14 @@ GYRO_TEST(ProtocolRoundTrip, TheKeymapDescriptorIsATextKeymapAndCannotBeWritten)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-keymap" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-keymap" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Keyboard keyboard;
-	GYRO_REQUIRE(Listen(session, bound, keyboard));
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
 	GYRO_REQUIRE(keyboard.Listener.KeymapFd.IsValid());
 
 	void* const mapped = ::mmap(
@@ -1460,25 +1458,25 @@ GYRO_TEST(ProtocolRoundTrip, AWindowThatOpensTakesFocusAndTheKeysFollowIt)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-typing" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-typing" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Keyboard keyboard;
-	GYRO_REQUIRE(Listen(session, bound, keyboard));
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
 
 	// Nothing is focused before there is a window, and a key typed at that moment reaches nobody
 	// rather than the last thing that happened to be there.
-	(*session.Host)->OnKey(Press(30, true, session.Clock.Now()), false);
-	(*session.Host)->OnKey(Press(30, false, session.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(30, true, pair.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(30, false, pair.Clock.Now()), false);
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 0 });
 	GYRO_CHECK_EQ(keyboard.Listener.Keys, std::uint32_t{ 0 });
@@ -1488,13 +1486,13 @@ GYRO_TEST(ProtocolRoundTrip, AWindowThatOpensTakesFocusAndTheKeysFollowIt)
 
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
 	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	// **Focus in the wakeup the window opened in**, which is what the seat comparing after the
 	// dispatch buys: the commit that mapped it and the event that says so are one turn, so a person
@@ -1503,9 +1501,9 @@ GYRO_TEST(ProtocolRoundTrip, AWindowThatOpensTakesFocusAndTheKeysFollowIt)
 	GYRO_CHECK(keyboard.Listener.Focused.Id() == toplevel.Drawn.Surface.Id());
 	GYRO_CHECK_EQ(keyboard.Listener.HeldOnEnter, std::size_t{ 0 });
 
-	(*session.Host)->OnKey(Press(30, true, session.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(30, true, pair.Clock.Now()), false);
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(keyboard.Listener.Keys, std::uint32_t{ 1 });
 	GYRO_CHECK_EQ(keyboard.Listener.LastKey, std::uint32_t{ 30 });
@@ -1513,13 +1511,13 @@ GYRO_TEST(ProtocolRoundTrip, AWindowThatOpensTakesFocusAndTheKeysFollowIt)
 
 	// The kernel's numbering all the way to the client, which is what makes the eight XKB adds the
 	// client's own business.
-	(*session.Host)->OnKey(Press(30, false, session.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(30, false, pair.Clock.Now()), false);
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(keyboard.Listener.Keys, std::uint32_t{ 2 });
 	GYRO_CHECK(keyboard.Listener.LastState == Wayland::WlKeyboardKeyState::Released);
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 }
 
 // A key the compositor took for itself, which is the escape chord: the client hears nothing, and the
@@ -1528,43 +1526,43 @@ GYRO_TEST(ProtocolRoundTrip, AKeyTheCompositorTookNeverReachesTheWindow)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-chord" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-chord" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Keyboard keyboard;
-	GYRO_REQUIRE(Listen(session, bound, keyboard));
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
 
 	Toplevel toplevel;
 	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x41 }));
 
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
 	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_REQUIRE(keyboard.Listener.Entered == 1);
 
 	// Left Ctrl held: never consumed, because a person is holding it before anything knows a chord is
 	// coming, and a client told the Escape vanished but not the Ctrl can reconcile that state.
-	(*session.Host)->OnKey(Press(29, true, session.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(29, true, pair.Clock.Now()), false);
 
 	// And the verb, which gyro takes.
-	(*session.Host)->OnKey(Press(1, true, session.Clock.Now()), true);
-	(*session.Host)->OnKey(Press(1, false, session.Clock.Now()), true);
+	(*pair.Host)->OnKey(Press(1, true, pair.Clock.Now()), true);
+	(*pair.Host)->OnKey(Press(1, false, pair.Clock.Now()), true);
 
-	session.Turn();
+	pair.Turn();
 
 	// The modifier and nothing else.
 	GYRO_CHECK_EQ(keyboard.Listener.Keys, std::uint32_t{ 1 });
@@ -1580,33 +1578,33 @@ GYRO_TEST(ProtocolRoundTrip, AWindowThatTakesFocusIsToldWhatIsAlreadyHeldDown)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-held" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-held" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Keyboard keyboard;
-	GYRO_REQUIRE(Listen(session, bound, keyboard));
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
 
-	(*session.Host)->OnKey(Press(42, true, session.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(42, true, pair.Clock.Now()), false);
 
 	Toplevel toplevel;
 	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x42 }));
 
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
 	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 1 });
 	GYRO_CHECK_EQ(keyboard.Listener.HeldOnEnter, std::size_t{ 1 });
@@ -1619,48 +1617,48 @@ GYRO_TEST(ProtocolRoundTrip, AWindowThatClosedStopsReceivingKeys)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-closed" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-closed" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Keyboard keyboard;
-	GYRO_REQUIRE(Listen(session, bound, keyboard));
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
 
 	Toplevel toplevel;
 	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x43 }));
 
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
 	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_REQUIRE(keyboard.Listener.Entered == 1);
 
 	toplevel.Window.Destroy();
 
-	session.Turn();
+	pair.Turn();
 
-	const Entity* const window = WindowNode(session.Store);
+	const Entity* const window = WindowNode(pair.Store);
 	GYRO_REQUIRE(window != nullptr);
 	GYRO_CHECK(window->Retiring);
 
-	(*session.Host)->OnKey(Press(30, true, session.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(30, true, pair.Clock.Now()), false);
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(keyboard.Listener.Keys, std::uint32_t{ 0 });
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 }
 
 // Asking a keyboard-only seat for a pointer. The protocol has a name for it, and a client that is
@@ -1755,18 +1753,18 @@ struct Pointer
 	Wayland::WlPointer Device;
 };
 
-[[nodiscard]] bool Grip(Session& session, Keyboard& keyboard, Pointer& pointer)
+[[nodiscard]] bool Grip(Pair& pair, Keyboard& keyboard, Pointer& pointer)
 {
 	pointer.Device = keyboard.Seat.GetPointer(pointer.Listener);
 
-	session.Turn();
+	pair.Turn();
 
 	return pointer.Device.IsValid();
 }
 
 // A window on screen with the pointer somewhere definite, which is the state every case below starts
 // from: one panel, one mapped toplevel, and the pointer parked away from it.
-[[nodiscard]] bool Show(Session& session, BoundCompositor& bound, Toplevel& toplevel, std::byte fill)
+[[nodiscard]] bool Show(Pair& pair, BoundCompositor& bound, Toplevel& toplevel, std::byte fill)
 {
 	if (!Role(bound, toplevel, fill))
 	{
@@ -1775,13 +1773,13 @@ struct Pointer
 
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
 	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
 	toplevel.Drawn.Surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
 	return true;
 }
@@ -1801,18 +1799,18 @@ GYRO_TEST(ProtocolRoundTrip, AWindowIsToldItHasTheKeyboardAndTheOneItTookItFromI
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-activated" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-activated" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Toplevel first;
-	GYRO_REQUIRE(Show(session, bound, first, std::byte{ 0x40 }));
+	GYRO_REQUIRE(Show(pair, bound, first, std::byte{ 0x40 }));
 
 	// Two configures: the `0x0` that answered *what size should I be*, carrying no states because the
 	// window did not exist yet, and the one the mapping produced. They are one turn apart rather than
@@ -1822,12 +1820,12 @@ GYRO_TEST(ProtocolRoundTrip, AWindowIsToldItHasTheKeyboardAndTheOneItTookItFromI
 
 	// Nothing changed, so nothing is sent. A window that is being redrawn is not a window that is being
 	// reconfigured.
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(first.WindowEvents.Configured, std::uint32_t{ 2 });
 
 	Toplevel second;
-	GYRO_REQUIRE(Show(session, bound, second, std::byte{ 0x55 }));
+	GYRO_REQUIRE(Show(pair, bound, second, std::byte{ 0x55 }));
 
 	// Newest on top is `Scene/Focus.h`'s rule and this is a client reading it: the window that just
 	// opened has the keyboard, and the one behind it is told in the same turn.
@@ -1837,25 +1835,25 @@ GYRO_TEST(ProtocolRoundTrip, AWindowIsToldItHasTheKeyboardAndTheOneItTookItFromI
 
 	// And back, by the route that has nothing to do with the pointer: focus put where a shell or an
 	// alt-tab would put it.
-	const Entity* const floor = session.Store.Find(session.Store.FirstRoot());
+	const Entity* const floor = pair.Store.Find(pair.Store.FirstRoot());
 	GYRO_REQUIRE(floor != nullptr);
 
 	// The floor's first child is the window that opened first, since the store appends and the sibling
 	// list is the z order (55).
-	GYRO_REQUIRE(session.Store.Focus().Focus(floor->FirstChild));
+	GYRO_REQUIRE(pair.Store.Focus().Focus(floor->FirstChild));
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK(first.WindowEvents.Has(Wayland::XdgToplevelState::Activated));
 	GYRO_CHECK(!second.WindowEvents.Has(Wayland::XdgToplevelState::Activated));
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 }
 
 // The pointer, moved the way `Dispatch/Loop.h` moves it: a displacement against the outputs, with no
 // rounding anywhere on the way.
-void Push(Session& session, double x, double y)
+void Push(Pair& pair, double x, double y)
 {
-	static_cast<void>(session.Store.Pointer().Move({ x, y }, session.Store.Outputs()));
+	static_cast<void>(pair.Store.Pointer().Move({ x, y }, pair.Store.Outputs()));
 }
 
 // Where the window's pixels ended up, which is the Floorplanner's answer and not a number this file
@@ -1888,30 +1886,30 @@ GYRO_TEST(ProtocolRoundTrip, TheSeatOffersAPointerAndStillRefusesTouchByName)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-pointer" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-pointer" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Keyboard keyboard;
-	GYRO_REQUIRE(Listen(session, bound, keyboard));
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
 
 	GYRO_CHECK(
 		(keyboard.SeatListener.Capabilities & Wayland::WlSeatCapability::Pointer) == Wayland::WlSeatCapability::Pointer
 	);
 
 	Pointer pointer;
-	GYRO_REQUIRE(Grip(session, keyboard, pointer));
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 
 	Wayland::WlTouchIgnoring touch;
 	static_cast<void>(keyboard.Seat.GetTouch(touch));
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_REQUIRE(session.Client.Fault().has_value());
-	GYRO_CHECK_EQ(session.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::WlSeatError::MissingCapability));
+	GYRO_REQUIRE(pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::WlSeatError::MissingCapability));
 }
 
 // The pointer arriving on a window and moving across it. The coordinates are the surface's own, which
@@ -1921,36 +1919,36 @@ GYRO_TEST(ProtocolRoundTrip, APointerOverAWindowEntersItAndFollowsTheHand)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-pointing" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-pointing" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Keyboard keyboard;
-	GYRO_REQUIRE(Listen(session, bound, keyboard));
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
 
 	Pointer pointer;
-	GYRO_REQUIRE(Grip(session, keyboard, pointer));
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
 
 	Toplevel toplevel;
-	GYRO_REQUIRE(Show(session, bound, toplevel, std::byte{ 0x40 }));
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
 
 	// **Nothing yet, because nothing has moved a mouse.** A compositor that had sent an `enter` here
 	// would be one that draws a cursor on a machine driven by a touchscreen.
 	GYRO_CHECK_EQ(pointer.Listener.Entered, std::uint32_t{ 0 });
 
-	const Point<GlobalSpace> middle = MiddleOfTheWindow(session.Store);
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
 	GYRO_REQUIRE(middle.X > 0.0);
 
-	Push(session, middle.X, middle.Y);
-	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+	Push(pair, middle.X, middle.Y);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(pointer.Listener.Entered, std::uint32_t{ 1 });
 	GYRO_CHECK(pointer.Listener.On.Id() == toplevel.Drawn.Surface.Id());
@@ -1963,20 +1961,20 @@ GYRO_TEST(ProtocolRoundTrip, APointerOverAWindowEntersItAndFollowsTheHand)
 
 	// A second wakeup with the hand still on the desk sends nothing at all, which is what keeps a
 	// window animating under a resting pointer from telling its toolkit the hand is moving.
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(pointer.Listener.Motions, std::uint32_t{ 0 });
 	GYRO_CHECK_EQ(pointer.Listener.Entered, std::uint32_t{ 1 });
 
-	Push(session, 2.0, 1.0);
-	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+	Push(pair, 2.0, 1.0);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(pointer.Listener.Motions, std::uint32_t{ 1 });
 	GYRO_CHECK_EQ(pointer.Listener.X.ToInt(), std::int32_t{ 10 });
 	GYRO_CHECK_EQ(pointer.Listener.Y.ToInt(), std::int32_t{ 5 });
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 }
 
 // Sliding off the window, which is the event a toolkit un-highlights everything on.
@@ -1984,45 +1982,45 @@ GYRO_TEST(ProtocolRoundTrip, ThePointerLeavesAWindowItSlidOff)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-leaving" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-leaving" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Keyboard keyboard;
-	GYRO_REQUIRE(Listen(session, bound, keyboard));
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
 
 	Pointer pointer;
-	GYRO_REQUIRE(Grip(session, keyboard, pointer));
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
 
 	Toplevel toplevel;
-	GYRO_REQUIRE(Show(session, bound, toplevel, std::byte{ 0x40 }));
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
 
-	const Point<GlobalSpace> middle = MiddleOfTheWindow(session.Store);
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
 
-	Push(session, middle.X, middle.Y);
-	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+	Push(pair, middle.X, middle.Y);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(pointer.Listener.Entered, std::uint32_t{ 1 });
 
 	// Off the far side of it, onto gyro's own floor — which has no client behind it, so what the client
 	// hears is the leave and nothing after it.
-	Push(session, 600.0, 0.0);
-	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+	Push(pair, 600.0, 0.0);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(pointer.Listener.Left, std::uint32_t{ 1 });
 	GYRO_CHECK(pointer.Listener.LeftSurface.Id() == toplevel.Drawn.Surface.Id());
 	GYRO_CHECK_EQ(pointer.Listener.Entered, std::uint32_t{ 1 });
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 }
 
 // The implicit grab: a button held is a surface that keeps the pointer wherever the hand goes.
@@ -2034,39 +2032,39 @@ GYRO_TEST(ProtocolRoundTrip, AButtonHeldKeepsThePointerOnTheWindowItWasPressedOn
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-grab" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-grab" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Keyboard keyboard;
-	GYRO_REQUIRE(Listen(session, bound, keyboard));
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
 
 	Pointer pointer;
-	GYRO_REQUIRE(Grip(session, keyboard, pointer));
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
 
 	Toplevel toplevel;
-	GYRO_REQUIRE(Show(session, bound, toplevel, std::byte{ 0x40 }));
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
 
-	const Point<GlobalSpace> middle = MiddleOfTheWindow(session.Store);
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
 
-	Push(session, middle.X, middle.Y);
-	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+	Push(pair, middle.X, middle.Y);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(pointer.Listener.Entered, std::uint32_t{ 1 });
 
 	// `BTN_LEFT`, in the kernel's numbering all the way to the client — the same rule the keyboard is
 	// under, and the reason nothing in the middle has a button map.
-	(*session.Host)->OnPointerButton(Click(0x110, true, session.Clock.Now()));
+	(*pair.Host)->OnPointerButton(Click(0x110, true, pair.Clock.Now()));
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(pointer.Listener.Buttons, std::uint32_t{ 1 });
 	GYRO_CHECK_EQ(pointer.Listener.LastButton, std::uint32_t{ 0x110 });
@@ -2074,10 +2072,10 @@ GYRO_TEST(ProtocolRoundTrip, AButtonHeldKeepsThePointerOnTheWindowItWasPressedOn
 
 	// Off the window entirely, with the button still down. No leave, and the coordinates keep going —
 	// negative, because the hand is to the left of where the surface starts.
-	Push(session, -600.0, 0.0);
-	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+	Push(pair, -600.0, 0.0);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(pointer.Listener.Left, std::uint32_t{ 0 });
 	GYRO_CHECK(pointer.Listener.Motions > 0);
@@ -2086,14 +2084,14 @@ GYRO_TEST(ProtocolRoundTrip, AButtonHeldKeepsThePointerOnTheWindowItWasPressedOn
 	// The release goes to the window that took the press, and the leave follows it in the same wakeup:
 	// the hand is over gyro's floor by now, and the client would otherwise sit believing it still had
 	// the pointer until something else moved.
-	(*session.Host)->OnPointerButton(Click(0x110, false, session.Clock.Now()));
+	(*pair.Host)->OnPointerButton(Click(0x110, false, pair.Clock.Now()));
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(pointer.Listener.Buttons, std::uint32_t{ 2 });
 	GYRO_CHECK(pointer.Listener.LastState == Wayland::WlPointerButtonState::Released);
 	GYRO_CHECK_EQ(pointer.Listener.Left, std::uint32_t{ 1 });
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 }
 
 // Decision 162's click-to-focus, from the far end of the socket: a press on a window that does not
@@ -2108,71 +2106,71 @@ GYRO_TEST(ProtocolRoundTrip, AClickTakesTheKeyboardBackInTheWakeupTheButtonArriv
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-click" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-click" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Keyboard keyboard;
-	GYRO_REQUIRE(Listen(session, bound, keyboard));
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
 
 	Pointer pointer;
-	GYRO_REQUIRE(Grip(session, keyboard, pointer));
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
 
 	Toplevel toplevel;
-	GYRO_REQUIRE(Show(session, bound, toplevel, std::byte{ 0x40 }));
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
 
 	GYRO_REQUIRE_EQ(keyboard.Listener.Entered, std::uint32_t{ 1 });
 
-	const Point<GlobalSpace> middle = MiddleOfTheWindow(session.Store);
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
 
 	// Focus taken away by something with no client behind it, which is what the recovery console and
 	// the greeter are — and the cheapest way to say *this window is not the focused one* without a
 	// second connection.
-	const EntityId elsewhere = session.Store.CreateContainer({}, {}).value();
+	const EntityId elsewhere = pair.Store.CreateContainer({}, {}).value();
 
-	session.Store.Focus().Offer(elsewhere);
+	pair.Store.Focus().Offer(elsewhere);
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_REQUIRE_EQ(keyboard.Listener.Left, std::uint32_t{ 1 });
 
-	Push(session, middle.X, middle.Y);
-	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+	Push(pair, middle.X, middle.Y);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
 
-	session.Turn();
+	pair.Turn();
 
 	// The pointer being on the window is not focus: hovering changes nothing, because follows-mouse is
 	// a preference nobody has and this is not it.
 	GYRO_REQUIRE_EQ(pointer.Listener.Entered, std::uint32_t{ 1 });
 	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 1 });
 
-	(*session.Host)->OnPointerButton(Click(0x110, true, session.Clock.Now()));
+	(*pair.Host)->OnPointerButton(Click(0x110, true, pair.Clock.Now()));
 
-	session.Turn();
+	pair.Turn();
 
 	// One turn, and the client has both: the button it was clicked with and the keyboard it was
 	// clicked for.
 	GYRO_CHECK_EQ(pointer.Listener.Buttons, std::uint32_t{ 1 });
 	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 2 });
 	GYRO_CHECK(keyboard.Listener.Focused.Id() == toplevel.Drawn.Surface.Id());
-	GYRO_CHECK(session.Store.Focus().Focused() != elsewhere);
+	GYRO_CHECK(pair.Store.Focus().Focused() != elsewhere);
 
 	// Clicking about inside the window it is already in sends nothing further: focus that re-entered on
 	// every press would be a `leave`/`enter` pair per click, and a toolkit redraws on those.
-	(*session.Host)->OnPointerButton(Click(0x110, false, session.Clock.Now()));
-	(*session.Host)->OnPointerButton(Click(0x110, true, session.Clock.Now()));
+	(*pair.Host)->OnPointerButton(Click(0x110, false, pair.Clock.Now()));
+	(*pair.Host)->OnPointerButton(Click(0x110, true, pair.Clock.Now()));
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 2 });
 	GYRO_CHECK_EQ(keyboard.Listener.Left, std::uint32_t{ 1 });
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 }
 
 // A scroll, with the three events that say what did it. The source is the one that decides whether a
@@ -2181,44 +2179,44 @@ GYRO_TEST(ProtocolRoundTrip, AScrollCarriesWhatDidItBeforeItCarriesHowFar)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-scroll" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-scroll" };
+	GYRO_REQUIRE(pair.Opened);
 
 	const std::array outputs{ SceneOutput{
 		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
-	session.Store.SetOutputs(outputs);
+	pair.Store.SetOutputs(outputs);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	Keyboard keyboard;
-	GYRO_REQUIRE(Listen(session, bound, keyboard));
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
 
 	Pointer pointer;
-	GYRO_REQUIRE(Grip(session, keyboard, pointer));
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
 
 	Toplevel toplevel;
-	GYRO_REQUIRE(Show(session, bound, toplevel, std::byte{ 0x40 }));
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
 
-	const Point<GlobalSpace> middle = MiddleOfTheWindow(session.Store);
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
 
-	Push(session, middle.X, middle.Y);
-	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+	Push(pair, middle.X, middle.Y);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_REQUIRE(pointer.Listener.Entered == std::uint32_t{ 1 });
 
-	(*session.Host)
+	(*pair.Host)
 		->OnPointerScroll(
 			PointerScroll{ .Axis = ScrollAxis::Vertical,
 	                       .Source = ScrollSource::Wheel,
 	                       .Distance = 15.0,
 	                       .Clicks120 = 120.0,
-	                       .When = session.Clock.Now() }
+	                       .When = pair.Clock.Now() }
 		);
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(pointer.Listener.Sources, std::uint32_t{ 1 });
 	GYRO_CHECK(pointer.Listener.LastSource == Wayland::WlPointerAxisSource::Wheel);
@@ -2230,20 +2228,18 @@ GYRO_TEST(ProtocolRoundTrip, AScrollCarriesWhatDidItBeforeItCarriesHowFar)
 
 	// A touchpad that stopped, which is the event a flick decays from and the only one that carries no
 	// distance. A wheel never produces one, so nothing here would have made it up.
-	(*session.Host)
+	(*pair.Host)
 		->OnPointerScroll(
-			PointerScroll{ .Axis = ScrollAxis::Vertical,
-	                       .Source = ScrollSource::Finger,
-	                       .Stop = true,
-	                       .When = session.Clock.Now() }
+			PointerScroll{
+				.Axis = ScrollAxis::Vertical, .Source = ScrollSource::Finger, .Stop = true, .When = pair.Clock.Now() }
 		);
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(pointer.Listener.Stops, std::uint32_t{ 1 });
 	GYRO_CHECK_EQ(pointer.Listener.Axes, std::uint32_t{ 1 });
 	GYRO_CHECK(pointer.Listener.LastSource == Wayland::WlPointerAxisSource::Finger);
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 }
 
 // The dmabuf half: what a client is offered, what it does with a pair it was never offered, and the
@@ -2326,23 +2322,23 @@ GYRO_TEST(ProtocolRoundTrip, BindingTheDmabufGlobalAnnouncesEveryPairTheDeviceWi
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-dmabuf-formats" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-dmabuf-formats" };
+	GYRO_REQUIRE(pair.Opened);
 
 	// Two tilings of one format, which is the shape a real driver's answer has and the shape a
 	// linear-only list would hide: a client picks the tiled one and never allocates an untiled buffer.
-	session.Textures.Advertised = { TextureFormat{ .Code = Argb8888, .Modifier = 0 },
-		                            TextureFormat{ .Code = Argb8888, .Modifier = 0x0100000000000001ULL } };
+	pair.Textures.Advertised = { TextureFormat{ .Code = Argb8888, .Modifier = 0 },
+		                         TextureFormat{ .Code = Argb8888, .Modifier = 0x0100000000000001ULL } };
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	DmabufFormats formats;
 	GYRO_REQUIRE(BindDmabuf(bound, formats).IsValid());
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 
 	// One `format` per distinct fourcc and one `modifier` per pair. A client bound below version 3 has
 	// only the first list and reads it as *this format under whatever we work out*, which is linear.
@@ -2355,11 +2351,11 @@ GYRO_TEST(ProtocolRoundTrip, APairTheCompositorNeverOfferedComesBackAsFailedRath
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-dmabuf-refused" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-dmabuf-refused" };
+	GYRO_REQUIRE(pair.Opened);
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	DmabufFormats formats;
 	const Wayland::ZwpLinuxDmabufV1 dmabuf = BindDmabuf(bound, formats);
@@ -2376,12 +2372,12 @@ GYRO_TEST(ProtocolRoundTrip, APairTheCompositorNeverOfferedComesBackAsFailedRath
 	params.Add(std::move(descriptor), 0, 0, static_cast<std::uint32_t>(Stride), 0, 0);
 	params.Create(Width, Height, Argb8888, Wayland::ZwpLinuxBufferParamsV1Flags{});
 
-	session.Turn();
+	pair.Turn();
 
 	// **`failed` rather than a protocol error**, because a client cannot predict what a compositor's
 	// device will take and the protocol gives it a fallback path for exactly this. Ending the
 	// connection would turn a driver limitation into an application that will not start.
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 	GYRO_CHECK_EQ(events.Failed, std::uint32_t{ 1 });
 	GYRO_CHECK(!events.Created.IsValid());
 }
@@ -2390,13 +2386,13 @@ GYRO_TEST(ProtocolRoundTrip, ADescriptorBufferIsNotReleasedUntilNobodyIsReadingI
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
-	Session session{ "gyro-roundtrip-dmabuf-release" };
-	GYRO_REQUIRE(session.Opened);
+	Pair pair{ "gyro-roundtrip-dmabuf-release" };
+	GYRO_REQUIRE(pair.Opened);
 
-	session.Textures.Advertised = { TextureFormat{ .Code = Argb8888, .Modifier = 0 } };
+	pair.Textures.Advertised = { TextureFormat{ .Code = Argb8888, .Modifier = 0 } };
 
 	BoundCompositor bound;
-	GYRO_REQUIRE(Bind(session, bound));
+	GYRO_REQUIRE(Bind(pair, bound));
 
 	DmabufFormats formats;
 	const Wayland::ZwpLinuxDmabufV1 dmabuf = BindDmabuf(bound, formats);
@@ -2413,10 +2409,10 @@ GYRO_TEST(ProtocolRoundTrip, ADescriptorBufferIsNotReleasedUntilNobodyIsReadingI
 	params.Add(std::move(descriptor), 0, 0, static_cast<std::uint32_t>(Stride), 0, 0);
 	params.Create(Width, Height, Argb8888, Wayland::ZwpLinuxBufferParamsV1Flags{});
 
-	session.Turn();
-	session.Turn();
+	pair.Turn();
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 	GYRO_REQUIRE(events.Created.IsValid());
 
 	Wayland::WlSurfaceIgnoring surfaceEvents;
@@ -2427,26 +2423,26 @@ GYRO_TEST(ProtocolRoundTrip, ADescriptorBufferIsNotReleasedUntilNobodyIsReadingI
 	surface.DamageBuffer(0, 0, Width, Height);
 	surface.Commit();
 
-	session.Turn();
+	pair.Turn();
 
-	GYRO_CHECK(!session.Client.Fault().has_value());
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 
 	// The descriptors reached the texture space as one plane in the layout the client stated.
-	GYRO_CHECK_EQ(session.Textures.Adopted, std::uint32_t{ 1 });
-	GYRO_CHECK_EQ(session.Textures.Planes, std::size_t{ 1 });
-	GYRO_CHECK(session.Textures.Described == (TextureFormat{ .Code = Argb8888, .Modifier = 0 }));
+	GYRO_CHECK_EQ(pair.Textures.Adopted, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pair.Textures.Planes, std::size_t{ 1 });
+	GYRO_CHECK(pair.Textures.Described == (TextureFormat{ .Code = Argb8888, .Modifier = 0 }));
 
 	// **And no release, which is the assertion.** A frame drawn from this buffer may still be on
 	// screen; telling the client otherwise is what tears a window into itself.
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(released.Released, std::uint32_t{ 0 });
 
 	// The watermark moves past every snapshot that named the id, which is the only thing that can say
 	// nobody is reading.
-	session.Textures.ReleaseAll();
+	pair.Textures.ReleaseAll();
 
-	session.Turn();
+	pair.Turn();
 
 	GYRO_CHECK_EQ(released.Released, std::uint32_t{ 1 });
 }

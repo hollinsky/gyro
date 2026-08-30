@@ -174,11 +174,30 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	return Wake::Never();
 }
 
-Result<std::unique_ptr<ClientHost>> MakeClientHost(std::string_view socket)
+Result<void> ClientHost::Listen(HostListener listener, std::string_view socket)
+{
+	if (const Result<void> opened = m_Server.Open(); !opened)
+	{
+		return opened;
+	}
+
+	// **Nothing at all under the handover, and that is the run succeeding rather than a step skipped.**
+	// A machine whose session agent has not connected yet — or never will, which is an ordinary state
+	// of one — is a compositor with a screen, a frame loop and no clients, and it has to reach the
+	// dispatch loop to be able to take the offer when it arrives.
+	if (listener == HostListener::Handover)
+	{
+		return {};
+	}
+
+	return m_Server.Bind(socket);
+}
+
+Result<std::unique_ptr<ClientHost>> MakeClientHost(HostListener listener, std::string_view socket)
 {
 	auto host = std::make_unique<ClientHost>();
 
-	if (const Result<void> opened = host->Listen(socket); !opened)
+	if (const Result<void> opened = host->Listen(listener, socket); !opened)
 	{
 		return std::unexpected{ opened.error() };
 	}

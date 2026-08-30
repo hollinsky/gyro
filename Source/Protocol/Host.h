@@ -1,8 +1,11 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string_view>
+#include <utility>
 
+#include "Core/Fd.h"
 #include "Core/Input.h"
 #include "Core/Result.h"
 #include "Core/Signal.h"
@@ -19,6 +22,7 @@
 #include "Protocol/Shm.h"
 #include "Scene/Author.h"
 #include "Scene/Return.h"
+#include "Session/Handover.h"
 
 // The author with clients behind it: gyro's Wayland server standing where a gym stands.
 //
@@ -69,6 +73,23 @@
 // The global is a member rather than something the root passes in, because its lifetime is the
 // server's: `wl_compositor` exists for as long as there is a socket to reach it through, and unlike a
 // `wl_output` there is no event that should make it come or go.
+// Where this run's listeners come from, which is the one thing about a host the command line settles.
+//
+// **The two do not mix, and the composition root refuses a run that asks for both.** A socket gyro
+// bound itself has no uid to admit connections against and no agent whose going away ends it, so a
+// client on it belongs to no session — which is fine as the whole of a development run and is not
+// fine beside sessions that are being tracked properly.
+enum class HostListener : std::uint8_t
+{
+	// gyro binds `wayland-N` under its own `XDG_RUNTIME_DIR`. Every client is unattributed, and this is
+	// what the binary did before there was an agent to offer anything.
+	Own,
+
+	// Every listener arrives from a session agent over the control socket, and there may be none for as
+	// long as the run lasts. Docs/Architecture.md#listener-handover.
+	Handover,
+};
+
 class ClientHost final : public ISceneAuthor
 {
 public:
@@ -80,7 +101,23 @@ public:
 
 	// The one descriptor the composition root adds to the dispatch thread's wait. Borrowed from
 	// libwayland and valid for as long as this host is.
+	//
+	// **It is the event loop's rather than a socket's**, which is what lets a run under the handover
+	// wire its wait at startup and take listeners hours later: an offer arriving adds a file to *this*
+	// loop, behind this number, exactly as a client connecting does.
 	[[nodiscard]] int PollFd() const noexcept { return m_Server.PollFd(); }
+
+	// Serve a session's clients on the listener its agent offered. The composition root's to call, on
+	// the dispatch thread, because it is the party holding both this host and the control socket the
+	// offer arrived on.
+	[[nodiscard]] Result<void> Adopt(Fd listener, std::uint32_t uid, Session::SessionId session)
+	{
+		return m_Server.Adopt(std::move(listener), uid, session);
+	}
+
+	// The agent went away, so the session did. Ends every client that arrived on that listener, which
+	// retires their windows through the path a client exiting already takes.
+	void Release(Session::SessionId session) noexcept { m_Server.Release(session); }
 
 	// Push everything owed back out to the clients. The root's to call, immediately before it sleeps.
 	void Flush() noexcept { m_Server.Flush(); }
@@ -135,12 +172,12 @@ private:
 	// rather than a gap.
 	void OnReached(EntityId entity, Instant at);
 
-	// Bind the socket. The factory's alone — a host that reached the dispatch loop unbound would be one
-	// whose descriptor the root already put in its wait, so there is no second moment this could
-	// usefully happen at.
-	[[nodiscard]] Result<void> Listen(std::string_view socket) { return m_Server.Open(socket); }
+	// Bring up the display, and bind a socket where this run is the one making it. The factory's alone:
+	// what a host does at the dispatch loop's first step is advertise globals, and there is no second
+	// moment either of these could usefully happen at.
+	[[nodiscard]] Result<void> Listen(HostListener listener, std::string_view socket);
 
-	friend Result<std::unique_ptr<ClientHost>> MakeClientHost(std::string_view socket);
+	friend Result<std::unique_ptr<ClientHost>> MakeClientHost(HostListener listener, std::string_view socket);
 
 	// **Declared before the server, so that they are destroyed after it.** A binding is what libwayland
 	// calls to answer a bind, and the display is what can still be calling: `~Server` destroys the
@@ -179,10 +216,12 @@ private:
 	Server m_Server;
 };
 
-// Bring up the server and bind its socket, or fail before anything else in the run is constructed. An
-// empty `socket` takes the first free `wayland-N`, which is what a client with nothing set finds.
+// Bring up the server, or fail before anything else in the run is constructed. An empty `socket` under
+// `HostListener::Own` takes the first free `wayland-N`, which is what a client with nothing set finds;
+// under `HostListener::Handover` there is no socket yet and the argument is unread.
 //
 // **The socket is bound here rather than in `Open` above**, because a compositor that cannot offer
 // clients a socket should say so and stop rather than reach the point of laying out monitors — and
 // because the root needs `PollFd` to wire the wait, which is before the loop calls `Open` at all.
-[[nodiscard]] Result<std::unique_ptr<ClientHost>> MakeClientHost(std::string_view socket = {});
+[[nodiscard]] Result<std::unique_ptr<ClientHost>>
+MakeClientHost(HostListener listener = HostListener::Own, std::string_view socket = {});

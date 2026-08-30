@@ -920,6 +920,35 @@ target_link_libraries(Nested
 		spdlog::spdlog
 )
 
+# The listener handover, and today it is the ABI alone.
+#
+# **Not PORTABLE, and it is declared that way before it earns it.** What is here is a wire format with
+# no I/O in it, which the portable tier would accept; what arrives next is `SO_PEERCRED`, `SO_DOMAIN`
+# and an epoll set, none of which it would. A module that entered the tier and left again would say
+# something about the design that is not true — CMake/Module.cmake makes the keyword a build rule
+# rather than documentation, and the rule this module will live under is the platform one.
+#
+# DISPATCH because a listener arriving is a change to the world, and the world is written on the
+# dispatch thread. Nothing on the frame side has any business naming a session.
+gyro_add_module(Session DISPATCH
+	DEPENDS
+		Core
+	SOURCES
+		Control.cpp
+		Transport.cpp
+	TESTS
+		Control.Test.cpp
+		Handover.Test.cpp
+)
+
+# spdlog for the line naming each session established and each offer refused, which is the only way to
+# tell a machine whose agent never connected from one whose offer gyro would not take. PRIVATE: the
+# module's headers name nothing of it.
+target_link_libraries(Session
+	PRIVATE
+		spdlog::spdlog
+)
+
 # gyro's Wayland server, and the dispatch-side half of decision 2's split. It owns the display its
 # clients' objects live in, the loop they are demarshalled on, and the socket they reach it through —
 # the codec underneath is libwayland's. DISPATCH because a connection is pumped by one thread and that
@@ -936,6 +965,7 @@ gyro_add_module(Protocol DISPATCH
 		Core
 		Geometry
 		Scene
+		Session
 	SOURCES
 		Compositor.cpp
 		Data.cpp
@@ -971,6 +1001,15 @@ target_link_libraries(Protocol
 		PkgConfig::WAYLAND_SERVER
 		PkgConfig::xkbcommon
 		WaylandServerProtocols
+)
+
+# spdlog for the one thing that is otherwise silent at both ends: a client connection refused because
+# its uid is not the session's. The client sees its socket close with nothing on it, which every
+# toolkit reports as the compositor not running, and the person it happens to is by construction not
+# the person who owns the session. PRIVATE: the module's headers name nothing of it.
+target_link_libraries(Protocol
+	PRIVATE
+		spdlog::spdlog
 )
 
 
@@ -1054,35 +1093,6 @@ target_link_libraries(Input
 		spdlog::spdlog
 )
 
-# The listener handover, and today it is the ABI alone.
-#
-# **Not PORTABLE, and it is declared that way before it earns it.** What is here is a wire format with
-# no I/O in it, which the portable tier would accept; what arrives next is `SO_PEERCRED`, `SO_DOMAIN`
-# and an epoll set, none of which it would. A module that entered the tier and left again would say
-# something about the design that is not true — CMake/Module.cmake makes the keyword a build rule
-# rather than documentation, and the rule this module will live under is the platform one.
-#
-# DISPATCH because a listener arriving is a change to the world, and the world is written on the
-# dispatch thread. Nothing on the frame side has any business naming a session.
-gyro_add_module(Session DISPATCH
-	DEPENDS
-		Core
-	SOURCES
-		Control.cpp
-		Transport.cpp
-	TESTS
-		Control.Test.cpp
-		Handover.Test.cpp
-)
-
-# spdlog for the line naming each session established and each offer refused, which is the only way to
-# tell a machine whose agent never connected from one whose offer gyro would not take. PRIVATE: the
-# module's headers name nothing of it.
-target_link_libraries(Session
-	PRIVATE
-		spdlog::spdlog
-)
-
 gyro_add_module(Compositor
 	DEPENDS
 		Core
@@ -1099,6 +1109,7 @@ gyro_add_module(Compositor
 		Drm
 		Gym
 		Protocol
+		Session
 		Input
 		Dispatch
 		Trace

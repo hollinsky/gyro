@@ -91,6 +91,12 @@ inline constexpr std::string_view DefaultDumpDirectory = "gyro-frames";
 // directory a month from now needs the extension to tell them what to do with it.
 inline constexpr std::string_view DefaultTracePath = "gyro.pftrace";
 
+// Where session agents offer their listeners when the command line does not say. Absolute, because it
+// is a rendezvous two processes started by different parties have to find without agreeing on a
+// working directory — and under `/run` rather than a user's runtime directory because one gyro serves
+// every user on the machine. Docs/Architecture.md#the-login-agent has it in the boot diagram.
+inline constexpr std::string_view DefaultControlPath = "/run/gyro/control";
+
 struct Options
 {
 	BackendKind Backend = BackendKind::Auto;
@@ -248,7 +254,20 @@ struct Options
 	// The name to bind, or empty for the first free `wayland-N` under `XDG_RUNTIME_DIR` — which is what
 	// a client with nothing set finds. A name is for a second gyro on one machine, or for a test that
 	// wants to know where to connect without reading a log line.
+	//
+	// Unread where `ControlPath` is set, and the two are refused together below.
 	std::string Socket{};
+
+	// The control socket session agents offer their listeners on, or empty for a run that binds its own.
+	//
+	// **Set, gyro binds no Wayland socket at all.** Docs/Architecture.md#listener-handover inverts
+	// socket creation — the user's agent creates the listener in the user's own runtime directory,
+	// because gyro cannot `chown` one into place — so what this run offers instead is a rendezvous, and
+	// a machine whose agent never connects is a compositor with a screen and no clients rather than a
+	// failure. That is why it is a path rather than a boolean: `/run/gyro/control` is where a boot
+	// service puts one, and a development run puts it under its own runtime directory beside everything
+	// else it owns.
+	std::string ControlPath{};
 
 	// The outputs actually requested, which is the default single 1080p60 when the command line named
 	// none. Returning a span keeps the "none means one" rule in one place rather than at each reader.
@@ -542,10 +561,19 @@ namespace Detail
 			continue;
 		}
 
+		if (Detail::Matches(argument, "--control", value))
+		{
+			options.Clients = true;
+			options.ControlPath = value.empty() ? std::string{ DefaultControlPath } : std::string{ value };
+
+			continue;
+		}
+
 		if (argument == "--no-socket")
 		{
 			options.Clients = false;
 			options.Socket.clear();
+			options.ControlPath.clear();
 			socketNamed = false;
 
 			continue;
@@ -831,6 +859,20 @@ namespace Detail
 	if (options.Gym && socketNamed)
 	{
 		return Failure(EINVAL, "--gym authors the scene itself, so there is no socket for clients to reach");
+	}
+
+	if (options.Gym && !options.ControlPath.empty())
+	{
+		return Failure(EINVAL, "--gym authors the scene itself, so no session agent has anything to offer it");
+	}
+
+	// **Two ways to get a listener, and only one of them has a session behind it.** A socket gyro bound
+	// itself admits every connection, because there is no uid to check one against and no agent whose
+	// going away ends it — so a run doing both would be tracking sessions carefully on one path while
+	// leaving the other open beside it, which is the kind of configuration somebody believes is secure.
+	if (socketNamed && !options.ControlPath.empty())
+	{
+		return Failure(EINVAL, "--control takes every listener from a session agent, so there is no --socket to bind");
 	}
 
 	if (options.Gym)
