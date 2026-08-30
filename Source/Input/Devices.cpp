@@ -1,4 +1,5 @@
-// open() with O_CLOEXEC, which is POSIX, and libudev and the evdev ioctls, which are Linux's. Named here for
+// open() with O_CLOEXEC, stat() and getgrgid(), which are POSIX, and libudev and the evdev ioctls,
+// which are Linux's. Named here for
 // Compositor/Compositor.cpp's reason: what is wanted from the platform is stated rather than
 // inherited from a build flag.
 #define _POSIX_C_SOURCE 200809L
@@ -6,16 +7,19 @@
 #include "Input/Devices.h"
 
 #include <fcntl.h>
+#include <grp.h>
 #include <libinput.h>
 #include <libudev.h>
 #include <linux/input.h>
 #include <spdlog/spdlog.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <array>
 #include <cerrno>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <format>
@@ -73,9 +77,9 @@ namespace
 //
 // Failure is not fatal and not silent: a device somebody else already grabbed is one gyro reads
 // alongside them, which is worse than exclusive and much better than no keyboard at all.
-void Claim(const char* path, int descriptor)
+void Claim(const char* path, int descriptor, bool typist)
 {
-	if (!TypesLetters(descriptor))
+	if (!typist)
 	{
 		return;
 	}
@@ -86,23 +90,82 @@ void Claim(const char* path, int descriptor)
 	}
 }
 
+// **Said at error, here, one line per node, because there is no later.** libinput swallows a failed
+// open: the enumeration reports success, the device is dropped, and its own account of the drop goes
+// to a debug priority nothing is listening at. So a refusal that is not reported at the moment it
+// happens is never reported at all, and the machine boots to a compositor with no keyboard and
+// nothing said.
+//
+// **Named with the group that owns the node**, because a permission failure is answered by a group
+// and the errno alone sends a person looking for the rule rather than the membership. `stat` is what
+// says which; `getgrgid` may find nothing on a machine whose group is numeric only, and then the
+// number is what gets printed.
+void ReportRefusal(const char* path, int error)
+{
+	if (error != EACCES && error != EPERM)
+	{
+		spdlog::error("input: {} could not be opened: {}", path, std::strerror(error));
+
+		return;
+	}
+
+	struct ::stat node{};
+
+	if (::stat(path, &node) < 0)
+	{
+		spdlog::error("input: {} is not readable by this process: {}", path, std::strerror(error));
+
+		return;
+	}
+
+	const ::group* const owner = ::getgrgid(node.st_gid);
+
+	spdlog::error(
+		"input: {} is not readable by this process — it is mode {:04o} and group {}, which gyro's uid "
+		"is not in. This is a udev rule that has not been applied.",
+		path,
+		node.st_mode & 07777U,
+		owner != nullptr ? owner->gr_name : std::format("{}", node.st_gid)
+	);
+}
+
 // **The whole of the session story, and it is an `open`.** A seat manager's version of this hands
 // back a descriptor over D-Bus and can take it away again; gyro's does not exist, because there is no
 // VT to switch to and nothing to be revoked by. Access is a udev rule on the device node, so a
-// failure here is a deployment fact — the wrong group, or a rule that did not apply — and it is
-// reported as the errno the caller can act on rather than swallowed into "no input".
-int OpenRestricted(const char* path, int flags, void* /*user*/)
+// failure here is a deployment fact — the wrong group, or a rule that did not apply.
+//
+// **It is also the only place that fact exists.** The errno returned here is libinput's to discard
+// and it discards it, so the census is taken on the way past rather than reconstructed afterwards
+// from a device list the refusals are missing from. That it runs on hotplug too is the half a check
+// after enumeration could not have: a keyboard plugged in at three in the morning and refused says
+// so at three in the morning.
+int OpenRestricted(const char* path, int flags, void* user)
 {
+	Admission* const admission = static_cast<Admission*>(user);
+
 	// `O_CLOEXEC` on top of libinput's own flags, because everything gyro opens is closed across an
 	// exec and there is nothing here to make an exception of.
 	const int descriptor = ::open(path, flags | O_CLOEXEC);
 
 	if (descriptor < 0)
 	{
-		return -errno;
+		const int error = errno;
+
+		++admission->Refused;
+		ReportRefusal(path, error);
+
+		return -error;
 	}
 
-	Claim(path, descriptor);
+	// Asked once and used twice: it decides the exclusive grab, and it is the only capability the
+	// count below is worth taking. A device that cannot produce a letter is not one a person can
+	// answer a login prompt or reach the escape hatch with, whatever libinput calls it.
+	const bool typist = TypesLetters(descriptor);
+
+	++admission->Opened;
+	admission->Typists += typist ? 1 : 0;
+
+	Claim(path, descriptor, typist);
 
 	return descriptor;
 }
@@ -248,7 +311,7 @@ Result<std::unique_ptr<Devices>> Devices::Open(std::string seat)
 		return Failure(ENOMEM, "opening a udev context for input");
 	}
 
-	devices->m_Context = ::libinput_udev_create_context(&Interface, nullptr, devices->m_Udev);
+	devices->m_Context = ::libinput_udev_create_context(&Interface, &devices->m_Admission, devices->m_Udev);
 
 	if (devices->m_Context == nullptr)
 	{
@@ -258,12 +321,53 @@ Result<std::unique_ptr<Devices>> Devices::Open(std::string seat)
 	::libinput_log_set_handler(devices->m_Context, &Log);
 	::libinput_log_set_priority(devices->m_Context, LIBINPUT_LOG_PRIORITY_ERROR);
 
-	// **The seat is where permission actually bites.** This enumerates the seat's devices and opens
-	// every one of them through the interface above, so a machine whose udev rules have not been
-	// applied fails here rather than at the first keystroke that does not arrive.
+	// **The seat is where permission bites, and this call will not tell you so.** It enumerates the
+	// seat's devices and opens every one of them through the interface above, and libinput documents
+	// that it "succeeds even if no input devices are currently available on this seat, or if devices
+	// are available but fail to open" — the only failure it reports is a seat already assigned. So a
+	// zero here means the enumeration ran, and nothing more.
 	if (::libinput_udev_assign_seat(devices->m_Context, devices->m_Seat.c_str()) != 0)
 	{
 		return Failure(EACCES, "assigning libinput to seat", Subject{ devices->m_Seat });
+	}
+
+	// **What the enumeration actually admitted, said out loud.** `open_restricted` ran synchronously
+	// for every node during the call above, so the census is complete here — and it is read here
+	// rather than after the first drain because the devices that opened are not in `m_Devices` yet,
+	// and the ones that were refused would never be in it at all.
+	const Admission& admitted = devices->m_Admission;
+
+	if (admitted.Opened == 0 && admitted.Refused > 0)
+	{
+		spdlog::error(
+			"input: every one of the {} device nodes on seat {} was refused. There is no keyboard and "
+			"no pointer, and there will not be one until the udev rules above are applied.",
+			admitted.Refused,
+			devices->m_Seat
+		);
+	}
+	else if (admitted.Typists == 0)
+	{
+		// **Worth a line even where nothing was refused**, because it is the state a person is in when
+		// the keyboard's node is the one the rule missed — and the way out of a compositor holding DRM
+		// master with no VT behind it is a key chord, which nothing can reach from here.
+		spdlog::error(
+			"input: nothing on seat {} can type — {} devices opened, {} refused. Ctrl+Alt+Esc cannot be "
+			"pressed on this machine.",
+			devices->m_Seat,
+			admitted.Opened,
+			admitted.Refused
+		);
+	}
+	else
+	{
+		spdlog::info(
+			"input: seat {} has {} devices, {} of which can type; {} refused.",
+			devices->m_Seat,
+			admitted.Opened,
+			admitted.Typists,
+			admitted.Refused
+		);
 	}
 
 	return devices;

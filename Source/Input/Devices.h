@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -33,6 +34,23 @@ struct udev;
 
 namespace Input
 {
+// **What the udev rules actually admitted, counted as libinput opens the nodes.** This is the only
+// place the question can be answered: `libinput_udev_assign_seat` returns success when every device
+// on the seat was refused, so the enumeration's own return value says nothing, and the devices that
+// did land are not in `m_Devices` until the first drain has run.
+//
+// **Three numbers rather than one, because the interesting failure is partial.** A rule that admits
+// the touchpad and not the keyboard leaves a machine that opens devices, counts more than zero, and
+// cannot be typed on — and on a laptop a lid switch, a power button and a row of hotkeys all present
+// as keyboards, so *how many* is never the question. `Typists` is the count that can produce a
+// letter, which is the same test the exclusive grab is gated on.
+struct Admission
+{
+	std::size_t Opened = 0;
+	std::size_t Refused = 0;
+	std::size_t Typists = 0;
+};
+
 // Every device on one seat, and the keys they produce.
 class Devices final : public IInput
 {
@@ -46,10 +64,16 @@ public:
 
 	// Bring up a context against a seat, which is `seat0` unless something says otherwise.
 	//
-	// **A seat with no keyboard on it opens successfully.** Devices arrive as events rather than as a
-	// list, so the first drain is what discovers them, and refusing here would refuse a machine whose
-	// keyboard is plugged in a moment later. What a caller can rely on is that failure means the
-	// *context* could not be made — no udev, or no permission to any device node at all.
+	// **A seat with no keyboard on it opens successfully**, and so does one where every device node
+	// was refused. Devices arrive as events rather than as a list, so the first drain is what
+	// discovers them, and refusing here would refuse a machine whose keyboard is plugged in a moment
+	// later — a rule reapplies on the hotplug. What a caller can rely on is that failure means the
+	// *context* could not be made: no udev, or a seat libinput would not take.
+	//
+	// **A deployment failure is a log line at error, not a `Failure`.** The refusals are counted as
+	// they happen and named individually with the group that owns the node, and what this cannot do
+	// is return them — a compositor that would not start because the keyboard is in the wrong group
+	// is one that cannot be used to fix the group.
 	[[nodiscard]] static Result<std::unique_ptr<Devices>> Open(std::string seat = "seat0");
 
 	[[nodiscard]] RawFd Descriptor() const noexcept override;
@@ -58,6 +82,10 @@ public:
 
 private:
 	Devices() = default;
+
+	// Filled in by `open_restricted` as libinput enumerates, so it is complete by the time
+	// `libinput_udev_assign_seat` returns and keeps counting across hotplug.
+	Admission m_Admission;
 
 	// Owned by the context and released with it, which is why neither is an `Fd`: libinput opened the
 	// device nodes through the interface below and closes them itself.
