@@ -66,6 +66,21 @@ public:
 	// A tablet tool, in range or touching. A hover produces these and no pointer event at all.
 	Signal<const ToolEvent&> Tool;
 
+	// A device arrived, with everything the device itself can say about what it is.
+	//
+	// **It is `Removed` pointed the other way, and until now only one direction existed** — because
+	// nothing downstream needed to know anything about a device beyond the id on its events. An
+	// absolute one breaks that: a touchscreen reports a fraction of its own glass, and the fraction is
+	// not a place on a screen until somebody says which screen. Neither side of that sentence can be
+	// finished here — this module may not name an output, and the module that holds outputs may not
+	// name a libinput device — so what this signal is for is carrying the device's own half of it to
+	// the composition root, which is the one party that sees both. Decision 167 has the argument and
+	// the rungs the root resolves the binding with.
+	//
+	// Emitted before the device produces anything, so an observer that binds on it is bound before the
+	// first event it would have had to drop. `Core/Input.h` has what crosses and what does not.
+	Signal<const InputDevice&> Added;
+
 	// A device is gone, and every sequence keyed to it is over without an ending.
 	//
 	// **It is a signal rather than something a stale id is discovered by**, because the discovery

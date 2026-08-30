@@ -48,6 +48,70 @@ struct InputDeviceTag
 // else, so two touchscreens both report a point 0 and the pair is what separates them.
 using InputDeviceId = Handle<InputDeviceTag>;
 
+// How big a device's active surface is, in millimetres of real glass.
+//
+// It is here and not in `Geometry` because it is not a coordinate: nothing is measured against it and
+// nothing is transformed by it. It is a physical fact about a slab, and the one thing it is for is
+// recognizing which panel that slab is bonded to — decision 167's third rung, where a digitizer and
+// the screen behind it agree because they are the same piece of glass.
+struct InputDeviceSize
+{
+	double WidthMm = 0.0;
+	double HeightMm = 0.0;
+
+	friend constexpr bool operator==(const InputDeviceSize&, const InputDeviceSize&) noexcept = default;
+};
+
+// A device arrived, and what the device itself can say about what it is.
+//
+// **This is the half `IInput` was missing, and it exists for one caller and one question**: an
+// absolute device reports a fraction of its own glass, and turning that into a place on a screen
+// needs to know which screen. Neither half of the process can answer it — `Input` may not name an
+// output and `Scene` may not name a libinput device — so the record crosses to the composition root,
+// which is the only party that sees both. Decision 167 has the argument and the three rungs the root
+// resolves it with.
+//
+// **What crosses is the device's vocabulary and nothing else.** An identity, a name for the log, the
+// millimetres where the device has them, and the property where somebody set one. No coordinate
+// space, for the reason at the top of this header — a device record that carried one would be making
+// the claim the whole path exists to avoid.
+//
+// **The strings are borrowed for the duration of the emit**, because they are the device set's own
+// and it is holding them open across the call. An observer that keeps one keeps a copy. That is the
+// allocation-free shape on the thread a keystroke travels, and device arrival is rare enough that the
+// copy an observer does make is invisible.
+struct InputDevice
+{
+	InputDeviceId Id{};
+
+	// libinput's name for it, which is the string a person will be looking for in the log line that
+	// tells them a touchscreen is bound to nothing.
+	std::string_view Name;
+
+	// The device states a position on its own surface rather than a displacement, so it is meaningless
+	// until it is bound to an output.
+	//
+	// **It is a touchscreen or a tablet and it is asked of the capability rather than of the events**,
+	// which is what can honestly be established at the moment a device arrives — the events have not
+	// happened yet. A pointer that turns out to report absolute positions is not distinguishable here:
+	// libinput has no capability for one, and `LIBINPUT_DEVICE_CAP_POINTER` is what a mouse has too. So
+	// this is false for a virtual pointer behind a remote session, which is correct in the only sense
+	// that matters today — there is nothing on this machine that produces one — and is the paragraph to
+	// re-read on the day there is.
+	bool Absolute = false;
+
+	// The active area, where libinput has it. Absent is an ordinary answer and is *no evidence* rather
+	// than a size of zero: a device without the data fails the query outright, and decision 167's size
+	// match refuses a candidate it cannot measure instead of matching it against nothing.
+	std::optional<InputDeviceSize> Size;
+
+	// `GYRO_OUTPUT` off the udev device, naming the connector this one is glued to, or empty where
+	// nobody set it. It is the rung that always wins because it is the only one that is correct by
+	// construction — decision 167 puts it in the same file the rule admitting the device already lives
+	// in, rather than inventing a second configuration channel with nowhere to keep it.
+	std::string_view Output;
+};
+
 // One key transition, which was the whole of what the first input path carried.
 //
 // **The instant is the device's own**, converted at ingest by whichever implementation read it —

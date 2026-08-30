@@ -223,6 +223,18 @@ void Log(libinput* /*context*/, libinput_log_priority priority, const char* form
 
 // An axis a tool reports, or nothing where this tool does not have it — which is per tool rather than
 // per tablet, since a puck on the same tablet as a pen reports neither pressure nor tilt.
+// libinput's name for a device, as a view that is safe to build.
+//
+// The library has always answered this and the wrapper is not defensiveness about that: it is that a
+// null `const char*` assigned to a `std::string_view` is undefined behaviour rather than an empty
+// string, so the one place the conversion happens is worth naming.
+[[nodiscard]] std::string_view Named(libinput_device* device)
+{
+	const char* const name = ::libinput_device_get_name(device);
+
+	return name != nullptr ? std::string_view{ name } : std::string_view{};
+}
+
 [[nodiscard]] std::optional<double> Axis(bool present, double value)
 {
 	return present ? std::optional<double>{ value } : std::nullopt;
@@ -434,6 +446,52 @@ Result<void> Devices::Drain()
 				spdlog::info(
 					"input: {} ({}) is {}", ::libinput_device_get_name(device), keys ? "keys" : "no keys", *id
 				);
+
+				// **What the device can say about itself, on its way to the party that binds it.** A
+				// touchscreen reports a fraction of its own glass and nothing here can turn that into a
+				// place on a screen, so decision 167 has the composition root do it and this is the half
+				// it needs. Emitted after the id is in the map, so an observer that turns straight around
+				// and asks about a device is asking about one that exists.
+				//
+				// **A failed size query is absent rather than zero**, which is the distinction the match
+				// downstream rests on: libinput refuses this outright for a device with no dimensions, and
+				// a candidate that cannot be measured has to be refused rather than matched against
+				// nothing.
+				std::optional<InputDeviceSize> size;
+				double width = 0.0;
+				double height = 0.0;
+
+				if (::libinput_device_get_size(device, &width, &height) == 0)
+				{
+					size = InputDeviceSize{ .WidthMm = width, .HeightMm = height };
+				}
+
+				// **Held open across the emit, because the property is borrowed and not copied.** libinput
+				// hands back a reference of its own here rather than the one it is holding, so this is a
+				// ref to release — and the string belongs to it until it is, which is exactly as long as
+				// `Core/Input.h` promises an observer has one.
+				udev_device* const node = ::libinput_device_get_udev_device(device);
+				const char* const bound =
+					node != nullptr ? ::udev_device_get_property_value(node, "GYRO_OUTPUT") : nullptr;
+
+				Added.Emit(
+					InputDevice{
+						.Id = *id,
+						.Name = Named(device),
+						// A touchscreen or a tablet, asked of the capability because that is what is
+				        // knowable before the device has produced anything. `Core/Input.h` has what this
+				        // misses and why it is the honest answer anyway.
+						.Absolute = ::libinput_device_has_capability(device, LIBINPUT_DEVICE_CAP_TOUCH) ||
+				                    ::libinput_device_has_capability(device, LIBINPUT_DEVICE_CAP_TABLET_TOOL),
+						.Size = size,
+						.Output = bound != nullptr ? std::string_view{ bound } : std::string_view{},
+					}
+				);
+
+				if (node != nullptr)
+				{
+					::udev_device_unref(node);
+				}
 
 				break;
 			}
