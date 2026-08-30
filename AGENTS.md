@@ -30,8 +30,15 @@ the churn that causes is worth more care than it looks. Three habits, all of the
 - **Ask before implementing** where an answer would make the implementation better, and ask when you
   think extra effort would make the code better. Code quality is the point.
 - **Ask before adding a dependency**, and justify it.
-- **Build and test before saying a change is done**: `cmake -S . -B build -G Ninja && ninja -C build
-  && ctest --test-dir build`. The disciplines below are `ALL` targets, so an ordinary build runs them.
+- **Build and test before saying a change is done, and do it through `Tools/Build.sh`** rather than
+  by invoking ninja yourself. It configures if it has to, builds, runs `ctest`, and holds an
+  exclusive lock across all three. Ninja takes no lock on its own `.ninja_deps` and `.ninja_log`, so
+  two agents building at once leave caches the next run rejects — and a rejected deps log is a full
+  rebuild, several minutes on this machine, on every edit after it until somebody notices. If
+  another agent is building, the script says whose build it is waiting behind and then runs; it is
+  not hung. `Tools/Build.sh --no-test` stops after the build, a bare argument is a ninja target, and
+  `--wait <seconds>` bounds the wait. The disciplines below are `ALL` targets, so an ordinary build
+  runs them.
 - **Format C++ with the project's `.clang-format`** before finalizing.
 - **A commit subject says what the commit did**, imperatively — `Render: Modulate the GPU frequency
   floor`, `Bindings: Split the emitter into a shared floor and two arms`. The declarative form
@@ -162,7 +169,9 @@ in `Schema.h`, so what it reads is what gyro wrote or the build fails — a sepa
 the day it is written and then reports a stall that is not there. Perfetto's own
 `trace_processor_shell` is the better instrument for open-ended digging and does not replace it:
 `.venv/bin/python` has the wrapper, it offers SQL over the same file, and it will not object to a file
-that is malformed.
+that is malformed. `Tools/Build.sh` is the odd one out and is not a probe: it is the build itself,
+serialised, and it is a shell script because the thing being protected is a `flock` around a `ninja`
+that any number of agents may reach for at once.
 
 Tests live beside what they test as `<Unit>.Test.cpp`, and are listed in the module's `TESTS` rather
 than compiled into it. A test for something in a dispatch half belongs in that half.
