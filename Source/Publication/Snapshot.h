@@ -150,10 +150,27 @@ static_assert(sizeof(RunEntry) == 16, "Four uint32s, and no padding to leave uni
 // not drag a payload through cache in order not to use it. A node names a position in whichever of
 // them its kind selects.
 //
-// All three are addressed by name and resolved through templates, so this module still names
-// neither the world's records nor a coordinate: `World/Content.h` holds the two content records and
-// `Geometry/AxisTransform.h` holds the adapter, and a field added to any of them touches the waist
-// not at all.
+// **`Roots` and `Sessions` are decision 21's partition, and they are two runs because they are
+// counted by two different things.** A published scene holds every connected session's roots at once
+// and an output shows the one it is assigned to, so the frame thread needs both halves of that
+// comparison: `Roots` names each top-level node and the session it belongs to, and is as long as the
+// scene has roots; `Sessions` names the session each output is showing, and is one entry per output
+// in output order under decision 84's rule exactly as `Wakes` and `Views` are. Neither is a channel,
+// so neither is in `Runs`.
+//
+// **An absent `Sessions` or `Roots` run means an unpartitioned scene rather than no information**,
+// which is the one place this file departs from decision 84's *a short run is nothing* reading, and
+// it departs for a reason rather than for convenience: `SessionId::None` is the default on both
+// sides, so a run of all-`None` and no run at all describe the same world — a machine with no
+// sessions on it, which is what gyro is between boot and the first agent's offer. A `Sessions` run
+// that is present and the *wrong length* is neither: decision 84 makes it no information, and the
+// frame thread resolves the output to `None` and draws gyro's own roots only — a black panel somebody
+// reports rather than a screen that might be showing the wrong person's windows.
+//
+// All of them are addressed by name and resolved through templates, so this module still names
+// neither the world's records nor a coordinate: `World/Content.h` holds the two content records,
+// `World/Root.h` the root record, and `Geometry/AxisTransform.h` the adapter, and a field added to
+// any of them touches the waist not at all.
 //
 // **`Sequence` is the snapshot's identity, and it is here for shape rather than for use this cut.**
 // Decision 45's deferred reclamation has the frame thread publish the sequence it last consumed and
@@ -178,12 +195,16 @@ struct SnapshotHeader
 	RunEntry Views = {};  // the per-output placement, one adapter per output
 	RunEntry Images = {}; // what an image node draws
 	RunEntry Solids = {}; // what a solid node draws
+	RunEntry Roots = {};  // the top-level nodes, and the session each belongs to
+
+	// Which session each output is showing, one entry per output in output order.
+	RunEntry Sessions = {};
 };
 
 static_assert(std::is_trivially_copyable_v<SnapshotHeader> && std::is_standard_layout_v<SnapshotHeader>);
 static_assert(
-	sizeof(SnapshotHeader) == 184,
-	"One uint64, four uint32, five coefficient run entries, and the five named ones, exactly"
+	sizeof(SnapshotHeader) == 216,
+	"One uint64, four uint32, five coefficient run entries, and the seven named ones, exactly"
 );
 static_assert(
 	alignof(SnapshotHeader) == 8,

@@ -12,6 +12,7 @@
 #include "Animation/Solve/Spring.h"
 #include "Core/Clock.h"
 #include "Core/ColorState.h"
+#include "Core/Session.h"
 #include "Core/Time.h"
 #include "Frame/Admission.h"
 #include "Frame/Projection.h"
@@ -23,6 +24,7 @@
 #include "Seam/Renderer.h"
 #include "World/Content.h"
 #include "World/Node.h"
+#include "World/Root.h"
 // See Docs/Architecture.md#the-frame-loop and decisions 82, 86, 88, 90, 92, 93, 94, and 95.
 
 // What turns a published snapshot into the flat span of draw items a renderer is handed.
@@ -238,6 +240,8 @@ private:
 	{
 		const std::span<const Node> nodes = request.Snapshot.Nodes<Node>();
 		const std::span<const OutputAdapter> views = request.Snapshot.Views<OutputAdapter>();
+		const std::span<const SceneRoot> roots = request.Snapshot.Roots<SceneRoot>();
+		const std::span<const SessionId> sessions = request.Snapshot.Sessions<SessionId>();
 
 		// Decision 84's rule, and the whole of the check that is available before the header carries a
 		// set generation: a run that is not this output set's is no information rather than partial
@@ -248,6 +252,16 @@ private:
 		}
 
 		const OutputView view{ views[request.Output], request.Resolution };
+
+		// Which session this output is showing, and therefore which roots it draws. Decision 84's length
+		// test as everywhere else, resolving to `None` rather than returning: an output with no
+		// assignment published for it is showing gyro's own scene, which is a scene rather than an
+		// error, and it is what every output is showing between boot and the first agent's offer.
+		const SessionId shown = sessions.size() == request.Outputs ? sessions[request.Output] : SessionId::None;
+
+		// Where the root run has been read up to. A preorder walk meets its roots in increasing node
+		// order and the run is written in that order, so one forward pass over it serves the whole walk.
+		std::size_t root = 0;
 
 		const Runs runs{
 			.Translations = request.Snapshot.Run<Spring<Vector3<double>>>(SnapshotRun::Translation),
@@ -304,6 +318,27 @@ private:
 				continue;
 			}
 
+			// Decision 21's partition, and it is asked at depth one only because that is the only depth
+			// it can be asked at: a root's session is the session of everything under it, or the
+			// partition would be a second tree cutting across this one. The skip is the same addition
+			// `Hidden` above is, so a session nobody is showing costs one comparison per root and not
+			// one per window in it — which is what makes *many sessions connected, one presented
+			// locally* a property of the frame rather than an intention.
+			//
+			// **`None` is shown on every output rather than on none.** That is the pointer glyph, which
+			// Scene/Cursor.h makes the last root so that it draws over whatever else is on screen, and
+			// it is the splash and the console for the same reason. An output showing `None` therefore
+			// draws exactly gyro's own roots, which is the two halves agreeing without a third state.
+			if (m_Depth == 1)
+			{
+				const SessionId owner = Owner(roots, root, index);
+
+				if (owner != SessionId::None && owner != shown)
+				{
+					continue;
+				}
+			}
+
 			if (!Visit(node, index, nodes, runs, view, request))
 			{
 				m_Count = mark;
@@ -313,6 +348,24 @@ private:
 				return;
 			}
 		}
+	}
+
+	// Which session a root belongs to, advancing the cursor as the walk advances.
+	//
+	// **The run names the node index and this compares it rather than trusting the ordinal**, which is
+	// decision 90's rule that the frame thread validates what it walks applied one run over. A root run
+	// that had drifted from the node run by one entry would otherwise draw one session's windows on
+	// another session's screen, silently and for as long as both were connected — so a root the run
+	// does not name is `None` and is shown, which fails towards a scene a person can see and act on.
+	[[nodiscard]] static SessionId
+	Owner(std::span<const SceneRoot> roots, std::size_t& cursor, std::size_t index) noexcept
+	{
+		while (cursor < roots.size() && roots[cursor].Node < index)
+		{
+			++cursor;
+		}
+
+		return cursor < roots.size() && roots[cursor].Node == index ? roots[cursor].Session : SessionId::None;
 	}
 
 	// The coefficient runs a walk resolves against, gathered once per call rather than per node.

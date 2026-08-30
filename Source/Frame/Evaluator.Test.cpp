@@ -9,6 +9,7 @@
 #include "Animation/Solve/Spring.h"
 #include "Core/Clock.h"
 #include "Core/FrameSection.h"
+#include "Core/Session.h"
 #include "Core/Time.h"
 #include "Frame/Assign.h"
 #include "Geometry/AxisTransform.h"
@@ -18,6 +19,7 @@
 #include "Testing/Test.h"
 #include "World/Content.h"
 #include "World/Node.h"
+#include "World/Root.h"
 
 // The walk, asserted by what each failure looks like on a screen rather than by what it does to an
 // array.
@@ -72,6 +74,18 @@ public:
 		Stage(m_Named[3], elements);
 	}
 
+	template<typename T>
+	void PutRoots(std::span<const T> elements)
+	{
+		Stage(m_Named[4], elements);
+	}
+
+	template<typename T>
+	void PutSessions(std::span<const T> elements)
+	{
+		Stage(m_Named[5], elements);
+	}
+
 	[[nodiscard]] SnapshotReader Read(std::uint64_t sequence = 1)
 	{
 		std::size_t cursor = sizeof(SnapshotHeader);
@@ -99,6 +113,8 @@ public:
 		header.Views = m_Named[1].Entry;
 		header.Images = m_Named[2].Entry;
 		header.Solids = m_Named[3].Entry;
+		header.Roots = m_Named[4].Entry;
+		header.Sessions = m_Named[5].Entry;
 
 		m_Store.assign((cursor + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t), std::max_align_t{});
 
@@ -160,7 +176,7 @@ private:
 	}
 
 	std::array<Staged, SnapshotRunCount> m_Runs{};
-	std::array<Staged, 4> m_Named{};
+	std::array<Staged, 6> m_Named{};
 	std::vector<std::max_align_t> m_Store;
 };
 
@@ -1118,4 +1134,172 @@ GYRO_TEST(Evaluator, AnImageThatStatesNoTexelsIsRefusedForSampling)
 
 	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
 	GYRO_CHECK_EQ(WhyNotPromoted(list.Items[0], ColorState::Srgb()), PromotionRefusal::Sampling);
+}
+
+// Decision 21's partition, asserted the way the rest of this file is: by what each failure looks like
+// on a screen. A root drawn on the wrong output is one person's windows on another person's monitor.
+// A root drawn on none is a session that logged in and got a black screen. A partition that costs a
+// test per node rather than per root is the frame time of every switched-away session, paid every
+// refresh by whoever is actually looking at the machine.
+namespace
+{
+// Two outputs showing the same world, which is what a partition needs in order to differ.
+[[nodiscard]] EvaluateRequest On(const SnapshotReader& snapshot, std::size_t output)
+{
+	return { .Snapshot = snapshot, .Output = output, .Outputs = 2, .Resolution = Screen, .Presentation = {} };
+}
+
+constexpr auto First = static_cast<SessionId>(1);
+constexpr auto Second = static_cast<SessionId>(2);
+} // namespace
+
+GYRO_TEST(Evaluator, ARootIsDrawnOnlyOnAnOutputShowingItsSession)
+{
+	Wire wire;
+
+	// One window each, and the container above it, so that skipping is proved to take the subtree with
+	// it rather than the root alone — a session skipped a node at a time is its windows without their
+	// frames, which is worse than either whole answer.
+	const std::array nodes{ Container(1), Image(0, 10.0, 10.0), Container(1), Image(0, 400.0, 10.0) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement(), Placement() };
+	const std::array roots{ SceneRoot{ .Node = 0, .Session = First }, SceneRoot{ .Node = 2, .Session = Second } };
+	const std::array sessions{ First, Second };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutRoots(std::span<const SceneRoot>{ roots });
+	wire.PutSessions(std::span<const SessionId>{ sessions });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList one = evaluator.Evaluate(On(snapshot, 0));
+
+	GYRO_REQUIRE_EQ(one.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(one.Items[0].Shape.Bounds().Origin, Point<DeviceSpace>{ 10.0F, 10.0F });
+
+	const DrawList two = evaluator.Evaluate(On(snapshot, 1));
+
+	GYRO_REQUIRE_EQ(two.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(two.Items[0].Shape.Bounds().Origin, Point<DeviceSpace>{ 400.0F, 10.0F });
+}
+
+// The pointer glyph is the standing case: gyro's own, and on screen over whichever session an output
+// is showing. A `None` root that followed the same rule as a session's would be a machine with two
+// users logged in and a cursor on neither screen.
+GYRO_TEST(Evaluator, ARootOfNoSessionIsDrawnOnEveryOutput)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.0, 10.0), Image(0, 400.0, 10.0) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement(), Placement() };
+	const std::array roots{ SceneRoot{ .Node = 0, .Session = First },
+		                    SceneRoot{ .Node = 1, .Session = SessionId::None } };
+
+	// The second output is showing gyro's own scene, which is the splash, the console, and the gap
+	// between one session and the next.
+	const std::array sessions{ First, SessionId::None };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutRoots(std::span<const SceneRoot>{ roots });
+	wire.PutSessions(std::span<const SessionId>{ sessions });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	// The session's window and the cursor over it.
+	GYRO_CHECK_EQ(evaluator.Evaluate(On(snapshot, 0)).Items.size(), std::size_t{ 2 });
+
+	// The cursor alone, over gyro's own scene.
+	const DrawList own = evaluator.Evaluate(On(snapshot, 1));
+
+	GYRO_REQUIRE_EQ(own.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(own.Items[0].Shape.Bounds().Origin, Point<DeviceSpace>{ 400.0F, 10.0F });
+}
+
+// A scene nobody has partitioned is drawn whole, and this is the assertion that keeps the gate from
+// being a behaviour change on the day it lands: everything gyro published before there were sessions
+// publishes no roots and no assignment, and must go on looking exactly as it did.
+GYRO_TEST(Evaluator, AnUnpartitionedSceneIsDrawnWhole)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.0, 10.0), Image(0, 400.0, 10.0) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement(), Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	GYRO_CHECK_EQ(evaluator.Evaluate(On(snapshot, 0)).Items.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(evaluator.Evaluate(On(snapshot, 1)).Items.size(), std::size_t{ 2 });
+}
+
+// An assignment run that is not the output set's is decision 84's *no information rather than partial
+// information*, and here that resolves to gyro's own scene rather than to everything. It fails towards
+// the screen that cannot be the wrong person's: showing nothing of a session is a black panel somebody
+// reports, and showing a session that may not be this output's is the one outcome the partition exists
+// to prevent.
+GYRO_TEST(Evaluator, AnAssignmentRunOfTheWrongLengthShowsGyrosOwnSceneOnly)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.0, 10.0), Image(0, 400.0, 10.0) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement(), Placement() };
+	const std::array roots{ SceneRoot{ .Node = 0, .Session = First },
+		                    SceneRoot{ .Node = 1, .Session = SessionId::None } };
+	const std::array sessions{ First };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutRoots(std::span<const SceneRoot>{ roots });
+	wire.PutSessions(std::span<const SessionId>{ sessions });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(On(snapshot, 0));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Origin, Point<DeviceSpace>{ 400.0F, 10.0F });
+}
+
+// The root run names node indices and the walk compares them, so a run that has drifted from the scene
+// cannot quietly attribute one session's roots to another. What it does instead is show them, which is
+// the direction to fail in: a person sees a window that should not be on their screen and says so, and
+// nobody's session is invisible while they wait for somebody to notice.
+GYRO_TEST(Evaluator, ARootTheRunDoesNotNameIsShown)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.0, 10.0), Image(0, 400.0, 10.0) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement(), Placement() };
+
+	// One entry, and it names neither root: the first index is past both.
+	const std::array roots{ SceneRoot{ .Node = 9, .Session = Second } };
+	const std::array sessions{ First, First };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutRoots(std::span<const SceneRoot>{ roots });
+	wire.PutSessions(std::span<const SessionId>{ sessions });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	GYRO_CHECK_EQ(evaluator.Evaluate(On(snapshot, 0)).Items.size(), std::size_t{ 2 });
 }

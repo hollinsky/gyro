@@ -247,6 +247,76 @@ GYRO_TEST(SceneSerializer, TheViewsRunIsOnePlacementPerOutputInOutputOrder)
 	GYRO_CHECK_EQ(views[1].Translation.X, -1920.0);
 }
 
+// Decision 21's partition, writer's half. `Frame/Evaluator.h` walks the root run with a single
+// forward cursor and compares the node index it finds against the node it is standing on, so what it
+// needs of this file is exactly two properties: every root is named, and they are named in increasing
+// node order. A root the run skipped would be shown on every output — the walk fails towards visible —
+// which on a machine with two people logged in is one of them looking at the other's windows.
+GYRO_TEST(SceneSerializer, TheRootRunNamesEveryTopLevelNodeInNodeOrder)
+{
+	SceneStore store{ Clock };
+
+	// Two roots with a child each, so that the second root's node index is not its ordinal and a run
+	// built by counting roots rather than by recording where they landed would disagree here.
+	const EntityId first = store.CreateContainer({}, {}).value();
+	GYRO_CHECK(store.CreateSolid(first, Panel(4.0F, 4.0F), SolidContent{}).has_value());
+
+	const EntityId second = store.CreateContainer({}, {}).value();
+	GYRO_CHECK(store.CreateSolid(second, Panel(4.0F, 4.0F), SolidContent{}).has_value());
+
+	SceneSerializer serializer;
+	const SnapshotBuffer buffer = serializer.Serialize(store).Build(1);
+	const SnapshotReader reader{ buffer.Bytes() };
+
+	GYRO_REQUIRE(reader.IsValid());
+
+	const std::span<const SceneRoot> roots = reader.Roots<SceneRoot>();
+
+	GYRO_REQUIRE_EQ(roots.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(roots[0].Node, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(roots[1].Node, std::uint32_t{ 2 });
+
+	// Every root is gyro's until a session has a root container of its own, which is the step this run
+	// exists to make cheap. Asserted rather than assumed, because the day it stops being true is the day
+	// something has to place a window under the right one.
+	GYRO_CHECK(roots[0].Session == SessionId::None);
+	GYRO_CHECK(roots[1].Session == SessionId::None);
+}
+
+// The other half, which is one output's assignment carried rather than computed. `SceneOutput` holds
+// it because the composition root wrote it there; this file only has to put it on the wire in the
+// order decision 84 governs every per-output run by.
+GYRO_TEST(SceneSerializer, TheAssignmentRunIsOneSessionPerOutputInOutputOrder)
+{
+	SceneStore store{ Clock };
+
+	GYRO_CHECK(store.CreateContainer({}, {}).has_value());
+
+	SceneOutput showing = Primary();
+	showing.Session = static_cast<SessionId>(4);
+
+	SceneOutput own = Primary();
+	own.Id = OutputId{ 2, 1 };
+	own.Bounds = { { 1920.0, 0.0 }, { 1920.0, 1080.0 } };
+
+	const SceneOutput both[] = { showing, own };
+	store.SetOutputs(both);
+
+	SceneSerializer serializer;
+	const SnapshotBuffer buffer = serializer.Serialize(store).Build(1);
+	const SnapshotReader reader{ buffer.Bytes() };
+
+	GYRO_REQUIRE(reader.IsValid());
+
+	const std::span<const SessionId> sessions = reader.Sessions<SessionId>();
+
+	GYRO_REQUIRE_EQ(sessions.size(), std::size_t{ 2 });
+	GYRO_CHECK(sessions[0] == static_cast<SessionId>(4));
+
+	// An output nothing has been assigned to is showing gyro's own scene, which crosses as itself.
+	GYRO_CHECK(sessions[1] == SessionId::None);
+}
+
 GYRO_TEST(SceneSerializer, ASecondSerialisationKeepsNothingOfTheFirst)
 {
 	SceneStore store{ Clock };

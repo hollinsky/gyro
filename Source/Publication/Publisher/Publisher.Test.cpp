@@ -52,6 +52,17 @@ struct Skeleton
 
 	friend bool operator==(const Skeleton&, const Skeleton&) = default;
 };
+
+// A stand-in root record, standing to `World/Root.h` exactly as `Skeleton` stands to `World/Node.h`
+// and for the same reason: the waist carries a node index and a session id as eight bytes it does not
+// interpret, and this file is where that is asserted without either module being named.
+struct Pair
+{
+	std::uint32_t Node;
+	std::uint32_t Session;
+
+	friend bool operator==(const Pair&, const Pair&) = default;
+};
 } // namespace
 
 GYRO_TEST(SnapshotPublisher, EmptyPublishIsAValidEmptySnapshot)
@@ -142,6 +153,36 @@ GYRO_TEST(SnapshotPublisher, TheNodeRunCrossesWithoutTheWaistNamingItsRecord)
 	// vocabulary lands, and a reader compiled against the old one must read no scene rather than a
 	// wrong one.
 	GYRO_CHECK(reader.Nodes<Wide>().empty());
+}
+
+// Decision 21's partition crosses as two runs counted by two different things, and the waist names
+// neither record — the root is `World/Root.h`'s and the id is `Core/Session.h`'s, and both travel as
+// bytes with the writer's size and alignment exactly as the node run does.
+GYRO_TEST(SnapshotPublisher, ThePartitionCrossesAsTwoRunsCountedDifferently)
+{
+	// Two roots and one output showing the second of them, which is the smallest arrangement where the
+	// two lengths differ and reading one for the other would compile.
+	const std::array<Pair, 2> roots{ Pair{ 0, 1 }, Pair{ 3, 2 } };
+	const std::array<std::uint32_t, 1> sessions{ 2 };
+
+	const SnapshotBuffer buffer =
+		SnapshotPublisher{}.PutRoots<Pair>(roots).PutSessions<std::uint32_t>(sessions).Build(5);
+
+	const SnapshotReader reader{ buffer.Bytes() };
+	GYRO_REQUIRE(reader.IsValid());
+
+	const std::span<const Pair> read = reader.Roots<Pair>();
+	GYRO_REQUIRE_EQ(read.size(), std::size_t{ 2 });
+	GYRO_CHECK(read[0] == roots[0]);
+	GYRO_CHECK(read[1] == roots[1]);
+
+	GYRO_REQUIRE_EQ(reader.Sessions<std::uint32_t>().size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(reader.Sessions<std::uint32_t>()[0], std::uint32_t{ 2 });
+
+	// The same type check every other run gets, and it earns its place here for the reason the node
+	// run's does: an output showing a session read out of a record of the wrong shape is somebody
+	// else's windows rather than a wrong number.
+	GYRO_CHECK(reader.Roots<Wide>().empty());
 }
 
 GYRO_TEST(SnapshotPublisher, EachRunLandsAtAnAlignedAddress)

@@ -208,6 +208,26 @@ public:
 		return *this;
 	}
 
+	// Stage decision 21's partition: one entry per top-level node, naming it and the session it belongs
+	// to, in the order the preorder walk meets them. A template for `PutNodes`' reason — the record is
+	// `World/Root.h`'s, which this module may not name.
+	template<typename T>
+	SnapshotPublisher& PutRoots(std::span<const T> roots)
+	{
+		Stage(m_Roots, roots);
+		return *this;
+	}
+
+	// Stage the other half of it: which session each output is showing, one entry per output in output
+	// order. A template for the same reason one step further down — the id is `Core/Session.h`'s and
+	// carrying it as bytes is what keeps this module from naming even that.
+	template<typename T>
+	SnapshotPublisher& PutSessions(std::span<const T> sessions)
+	{
+		Stage(m_Sessions, sessions);
+		return *this;
+	}
+
 	// Assemble the staged runs into one contiguous offset-addressed snapshot, in a buffer the caller
 	// owns. The header goes first, then each non-empty run at an offset aligned for its element, then
 	// the wake schedule; the directory records where each landed. The result is self-describing: its
@@ -249,6 +269,12 @@ public:
 		std::uint32_t solidOffset = 0;
 		cursor = Place(m_Solids, cursor, solidOffset);
 
+		std::uint32_t rootOffset = 0;
+		cursor = Place(m_Roots, cursor, rootOffset);
+
+		std::uint32_t sessionOffset = 0;
+		cursor = Place(m_Sessions, cursor, sessionOffset);
+
 		const std::size_t byteSize = cursor;
 
 		SnapshotHeader header{};
@@ -263,6 +289,8 @@ public:
 		header.Views = Entry(m_Views, viewOffset);
 		header.Images = Entry(m_Images, imageOffset);
 		header.Solids = Entry(m_Solids, solidOffset);
+		header.Roots = Entry(m_Roots, rootOffset);
+		header.Sessions = Entry(m_Sessions, sessionOffset);
 
 		into.Reset(byteSize);
 		const std::span<std::byte> bytes = into.Bytes();
@@ -277,6 +305,8 @@ public:
 		CopyInto(bytes, viewOffset, m_Views);
 		CopyInto(bytes, imageOffset, m_Images);
 		CopyInto(bytes, solidOffset, m_Solids);
+		CopyInto(bytes, rootOffset, m_Roots);
+		CopyInto(bytes, sessionOffset, m_Sessions);
 	}
 
 	// The same assembly into a buffer nobody had yet. The outbox never takes this path — it always has
@@ -354,6 +384,8 @@ private:
 	Staged m_Wakes;
 	Staged m_Nodes;
 	Staged m_Views;
+	Staged m_Roots;
+	Staged m_Sessions;
 	Staged m_Images;
 	Staged m_Solids;
 };

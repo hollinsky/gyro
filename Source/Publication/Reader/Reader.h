@@ -163,6 +163,40 @@ public:
 		return m_Valid ? Resolve<T>(m_Header.Solids) : std::span<const T>{};
 	}
 
+	// Decision 21's partition: each top-level node and the session it belongs to, in the order a
+	// preorder walk meets them. A published scene holds every connected session's roots at once, and
+	// this is what lets an output draw only the one it is showing.
+	//
+	// **Empty is a scene nobody has partitioned, and the walk reads it as such.** That is the reading
+	// Publication/Snapshot.h argues for and it is narrower than it looks: `SessionId::None` is the
+	// default on both sides, so no run and a run of all-`None` describe one world — gyro with no
+	// session on it, which is every moment between boot and the first agent's offer.
+	template<typename T>
+	[[nodiscard]] std::span<const T> Roots() const noexcept
+	{
+		static_assert(
+			std::is_trivially_copyable_v<T> && std::is_standard_layout_v<T>,
+			"A root record is reconstituted from bytes at an offset, so it must be one"
+		);
+
+		return m_Valid ? Resolve<T>(m_Header.Roots) : std::span<const T>{};
+	}
+
+	// The other half: which session each output is showing, one entry per output in output order.
+	// Decision 84's rule governs it as it governs `Wakes` and `Views` — a run whose length is not the
+	// output set's is no information rather than partial information, and the caller tests that rather
+	// than indexing into it.
+	template<typename T>
+	[[nodiscard]] std::span<const T> Sessions() const noexcept
+	{
+		static_assert(
+			std::is_trivially_copyable_v<T> && std::is_standard_layout_v<T>,
+			"A session id is reconstituted from bytes at an offset, so it must be one"
+		);
+
+		return m_Valid ? Resolve<T>(m_Header.Sessions) : std::span<const T>{};
+	}
+
 private:
 	// Whether the span's base meets the alignment every element depends on. Checked against the actual
 	// address rather than assumed, so that a reader handed an under-aligned mapping refuses it rather

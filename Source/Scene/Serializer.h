@@ -7,6 +7,7 @@
 
 #include "Animation/Solve/Ramp.h"
 #include "Animation/Solve/Spring.h"
+#include "Core/Session.h"
 #include "Core/Time.h"
 #include "Core/Wake.h"
 #include "Geometry/AxisTransform.h"
@@ -18,6 +19,7 @@
 #include "Scene/Store.h"
 #include "World/Content.h"
 #include "World/Node.h"
+#include "World/Root.h"
 
 // The store, turned into the bytes the frame thread walks.
 //
@@ -190,6 +192,8 @@ private:
 		m_Solids.clear();
 		m_Views.clear();
 		m_Wakes.clear();
+		m_Roots.clear();
+		m_Sessions.clear();
 		m_Open.clear();
 
 		// Where each entity's record landed, indexed by the entity's slot, so a reference can be
@@ -327,6 +331,19 @@ private:
 
 			const auto index = static_cast<std::uint32_t>(m_Nodes.size());
 
+			// A root is an entity with nothing open above it, which is the whole of what depth means to
+			// this walk. Recorded here rather than by a second pass over the store's root chain, because
+			// the position a root landed at in the node run is only known while the run is being built.
+			if (m_Open.empty())
+			{
+				// **Every root is gyro's until an entity can say otherwise**, which is the state of a
+				// machine that has authored a floor and adopted no listener. The partition is published
+				// from the first cut so that the frame thread's gate is exercised by every scene rather
+				// than by the first one that ever needs it; what fills this in is a session's own root
+				// container, which is the step this run exists to make cheap.
+				m_Roots.push_back(SceneRoot{ .Node = index, .Session = SessionId::None });
+			}
+
 			m_Nodes.push_back(Emit(*entity, store, index));
 			m_Published[cursor.Index] = index;
 
@@ -408,6 +425,11 @@ private:
 			// contributor attached to an output arrives, it folds into its own entry here and nothing
 			// downstream changes, which is the property the monoid was chosen for.
 			m_Wakes.push_back(m_Wake);
+
+			// Decision 21's assignment, which the composition root wrote onto the output and this only
+			// carries. `SessionId::None` is an output showing gyro's own scene rather than one nobody
+			// has got round to, so it crosses as itself and the frame thread needs no absent case.
+			m_Sessions.push_back(output.Session);
 		}
 
 		// Every run is staged on every serialisation, including the empty ones. The publisher is reused
@@ -424,6 +446,8 @@ private:
 		m_Publisher.PutViews<OutputAdapter>(m_Views);
 		m_Publisher.PutImages<ImageContent>(m_Images);
 		m_Publisher.PutSolids<SolidContent>(m_Solids);
+		m_Publisher.PutRoots<SceneRoot>(m_Roots);
+		m_Publisher.PutSessions<SessionId>(m_Sessions);
 	}
 
 	// One channel's whole story: retire it if it has settled, publish it if it has not, and fold what it
@@ -504,6 +528,10 @@ private:
 	std::vector<ImageContent> m_Images;
 	std::vector<SolidContent> m_Solids;
 	std::vector<OutputAdapter> m_Views;
+
+	// Decision 21's partition, both halves: one entry per root and one per output.
+	std::vector<SceneRoot> m_Roots;
+	std::vector<SessionId> m_Sessions;
 	std::vector<Wake> m_Wakes;
 
 	// The sweep's two scratch lists: what finished dying this pass, and the subtree stack that decides it.
