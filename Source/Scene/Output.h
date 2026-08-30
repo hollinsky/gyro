@@ -110,20 +110,39 @@ struct SceneOutput
 	// fourth thing to keep in agreement with them — decision 16's *derived, never maintained*, on a
 	// record that changes while a person drags a monitor.
 	//
-	// The order is the adapter's own — a point is oriented, then scaled, then translated — so the
-	// offset that carries this output's origin to its own top-left corner is the oriented, scaled
-	// origin negated. Spelled through `Orient` rather than through a bare `Map` of the origin, because
-	// `Map` lands its result on the destination's scalar and device space is single precision: the
-	// translation this adapter carries is `double`, and rounding it to float before storing it there
-	// would put a fifth of a device pixel of error on every coordinate of a distant output.
+	// The order is the adapter's own — a point is oriented, then scaled, then translated — so what has
+	// to be stored is whatever carries the *oriented* rectangle onto the grid's own top-left corner.
+	// Spelled through `Orient` rather than through a bare `Map`, because `Map` lands its result on the
+	// destination's scalar and device space is single precision: the translation this adapter carries
+	// is `double`, and rounding it to float before storing it there would put a fifth of a device pixel
+	// of error on every coordinate of a distant output.
+	//
+	// **The corner that has to land on nothing is the rectangle's, not the origin's, and those are
+	// different points on six of the eight orientations.** `Detail::Orient` is a pure turn about the
+	// coordinate origin with no re-centring in it, so turning a rectangle that starts in the positive
+	// quadrant sends part of it negative — a quarter turn puts every row of a panel at a negative
+	// device `y`. Carrying only the oriented origin was therefore right for `Normal` and for the one
+	// flip that happens to fix its own corner, and wrong for the rest: a monitor stood on end drew
+	// entirely off its own glass, and the whole screen was black. Only the origin was ever mapped in a
+	// test, and the origin lands on nothing under every orientation by construction, which is why this
+	// survived being pinned.
+	//
+	// The correction is the *minimum* of the four oriented corners rather than a table of eight cases,
+	// and it is two comparisons because a turn is a signed permutation: the oriented offsets are the
+	// zero corner and three others, so the least of them on each axis is whichever of zero and the
+	// oriented extent is smaller.
 	[[nodiscard]] constexpr OutputAdapter Placement() const noexcept
 	{
 		const double density = Density.ToDouble();
-		const Detail::Axes<double> turned = Detail::Orient(Orientation, Bounds.Origin.X, Bounds.Origin.Y);
+		const Detail::Axes<double> origin = Detail::Orient(Orientation, Bounds.Origin.X, Bounds.Origin.Y);
+		const Detail::Axes<double> extent = Detail::Orient(Orientation, Bounds.Extent.Width, Bounds.Extent.Height);
+
+		const double leastX = origin.X + (extent.X < 0.0 ? extent.X : 0.0);
+		const double leastY = origin.Y + (extent.Y < 0.0 ? extent.Y : 0.0);
 
 		return { .Orientation = Orientation,
 			     .ScaleX = density,
 			     .ScaleY = density,
-			     .Translation = { -density * turned.X, -density * turned.Y } };
+			     .Translation = { -density * leastX, -density * leastY } };
 	}
 };
