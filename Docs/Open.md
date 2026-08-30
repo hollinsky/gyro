@@ -222,7 +222,7 @@ is to do the work.
   every ledger entry clears against a single panel. The gap opens the day a window can move.
 
   Closing it wants a nominal refresh period on `SceneOutput`, which cuts against
-  [decision 97](Decisions.md#97-a-view-is-split-in-half-the-world-places-an-output-and-the-frame-side-carries-its-extent)
+  [decision 97](Decisions.md#97-an-outputs-placement-is-published-the-modes-half-of-the-view-meets-it-in-the-walk)
   giving the mode's extent to the frame side — the case for it being that a period used to *choose
   between* outputs is a policy input rather than a timing authority, and dispatch already holds worse
   ones. Not latching to the panel holding the window's centre instead: it carries no rate either, and
@@ -1016,7 +1016,7 @@ is to do the work.
   the render device refuses to export, which today means lavapipe — and there the layout is linear
   either way, so the choice is free. On a machine where the GPU renders but its exporter is broken or
   disabled, the same rung would hand a real part a linear target, which
-  [decision 138](Decisions.md#138-the-device-picks-the-modifier-and-the-host-only-says-which-are-importable)
+  [decision 138](Decisions.md#138-the-parent-compositor-says-what-it-can-import-the-device-says-what-it-wants-to-draw-into)
   measured at 7.4ms against 2.8ms for the same composite. That is a tier drop the frame clock will
   absorb silently. The log line names the provider, which is the whole of the instrumentation, and
   whether that is enough to notice is the open half.
@@ -1280,7 +1280,7 @@ network, and `RLIMIT_RTTIME` remains what saves a spinning frame thread.
 after startup either — so a monitor's refresh rate cannot be changed, an output cannot be turned off
 by the idle ladder, and hotplug is not connected to anything.
 
-What it needs is the shape [decision 73](Decisions.md#73-a-reconfiguration-is-initiated-on-the-frame-thread-and-performed-elsewhere)
+What it needs is the shape [decision 73](Decisions.md#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it)
 already fixes: a thread that owns the blocking commit, and a completion that arrives back through the
 frame loop's own drain so that `Reconfigured` emits on the thread it is claimed by. The reason it is
 not free is the reason that decision exists — `drm_atomic_nonblocking_commit` runs the driver's

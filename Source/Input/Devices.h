@@ -23,7 +23,7 @@ struct udev;
 //
 // **Devices are opened directly, with no session behind them.** `open_restricted` is an `open`, and
 // what makes it succeed is a udev rule rather than a seat manager handing over a descriptor —
-// [decision 145](../../Docs/Decisions.md#145) settled the same question for DRM master, and this is
+// [decision 145](../../Docs/Decisions.md#145-the-drm-backend-takes-master-by-opening-the-node-and-libdrm-stops-at-the-frame-section) settled the same question for DRM master, and this is
 // that answer applied to the second device class. So there is no pause, no resume, and no revoke: a
 // device gyro can open it keeps until it is unplugged.
 //

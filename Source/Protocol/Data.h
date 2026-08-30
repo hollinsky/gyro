@@ -24,7 +24,7 @@
 // list is dropped, rather than stored against a selection nobody can read.
 //
 // The half that lands next is the selection, because the serial it validates against now exists. See
-// [decision 149](../../Docs/Decisions.md#149).
+// [decision 149](../../Docs/Decisions.md#149-focus-is-state-the-world-holds-and-the-seat-compares-against-it-rather-than-being-told).
 //
 // **Not a refusal to advertise, and not the real clipboard either.** Leaving the global out costs
 // every GTK application; what is here is the registry entry and the object graph under it, so the day

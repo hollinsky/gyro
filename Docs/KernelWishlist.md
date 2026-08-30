@@ -371,7 +371,7 @@ at what the other two will accept.
 is slower than it needed to be. Handing a compositor's targets to whichever provider answered first
 produced a linear scanout buffer on hardware that renders two and a half times faster into a tiled
 one, which reached a person as a blur that switched itself off and reached the log as nothing;
-[decision 138](Decisions.md#138-the-device-picks-the-modifier-and-the-host-only-says-which-are-importable)
+[decision 138](Decisions.md#138-the-parent-compositor-says-what-it-can-import-the-device-says-what-it-wants-to-draw-into)
 is that measurement. A negotiated allocation is the difference between a picture and a fast picture,
 which is why trial and error is not good enough here.
 

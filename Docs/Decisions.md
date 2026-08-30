@@ -9846,10 +9846,10 @@ screen and gives up the blur behind a panel instead.
 A shadow is the backdrop darkened, which is premultiplied black — and premultiplied black is the
 *same four components in every transfer function and every set of primaries*. So there is nothing for
 a specialization constant to select and nothing for
-[decision 62](#62-a-pointwise-chain-is-fused-into-one-pass-and-a-gathering-one-is-not)'s variant
+[decision 62](#62-effect-composition-is-an-optimization-and-the-unfused-path-is-the-reference)'s variant
 lattice to enumerate: one pipeline per attachment format, about three milliseconds at a binding
 against the quad program's twenty-five. The blend is the same `over`
-[decision 95](#95-a-node-carries-one-material-and-one-elevation-and-both-are-fields) fixes for
+[decision 95](#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind) fixes for
 everything else, which is why the two programs share their fixed-function state rather than each
 declaring it.
 
@@ -10360,7 +10360,7 @@ value it has submitted, stamps the doomed image with all of them, and destroys i
 landed. One value per renderer rather than a single high-water mark, because the timelines are
 separate and 4000 on one says nothing about 4000 on the other. Rejected: a device-wide timeline every
 renderer signals, which is a larger change to
-[decision 108](#108-a-sync-point-is-a-device-property-not-a-frame-property)'s export than the problem
+[decision 108](#108-a-device-that-cannot-export-a-timeline-finishes-the-frame-inside-record)'s export than the problem
 justifies, and reaches into the one thing on this path that is already measured against two drivers.
 
 **A `wl_shm` buffer needs `VK_EXT_host_image_copy`, and without it it is refused by name.** Filling a
@@ -11143,7 +11143,7 @@ not ask a session broker for the display it is the reason the machine boots for.
 
 **libdrm is used for everything except the commit that happens every frame, and the line is
 `Present`.** `drmModeAtomicCommit` allocates four arrays per call, and `IPresenter::Present` runs
-inside `Core/FrameSection.h`'s guard, where [decision 36](#36-disciplines-are-build-failures)'s
+inside `Core/FrameSection.h`'s guard, where [decision 36](#36-frame-path-discipline-is-enforced-mechanically-not-by-review)'s
 allocator makes an allocation an abort rather than a jitter figure nobody traces. So the per-frame
 flip is a bare `DRM_IOCTL_MODE_ATOMIC` over property ids and values that were resolved when the
 output was opened, and enumeration, property blobs, `AddFB2` and the mode set — all of which run
@@ -11163,7 +11163,7 @@ with it. Reading `drm_event` records directly is forty lines and the two cases a
 **What is not built, said here rather than discovered later.** `Reconfigure` reports the
 configuration the output still has, which `SatisfiedBy` reads as *not honoured*: the mode set at
 `Open` is a blocking commit before the frame thread exists, and performing a later one needs the
-thread and the completion path [decision 73](#73-a-reconfiguration-is-initiated-on-the-frame-thread-and-performed-elsewhere)
+thread and the completion path [decision 73](#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it)
 describes, because `atomic_check` runs synchronously on the caller. Plane assignment is not built
 either — one primary plane per output, and a layer set with a second layer in it is refused rather
 than partly honoured. Both are in [Open.md](Open.md).
@@ -11430,7 +11430,7 @@ iteration, buys no latency over a link — the keystroke that moved focus and th
 are the same wakeup of the same thread — and avoids emitting from inside `SceneStore::Retire`, which
 walks a subtree and would be re-entered by any observer that authored anything.
 
-**Focus leaves at retirement, not at the free.** [Decision 114](#114-retirement-is-not-destruction)
+**Focus leaves at retirement, not at the free.** [Decision 114](#114-retirement-is-the-author-going-away-and-resurrection-is-the-authors-alone)
 keeps a closing window in the tree, being drawn, for as long as its exit runs. If focus left when the
 slot came back, a person would go on typing into a window they are watching collapse. So the store
 withdraws from `Retire`, over the whole subtree, and no author has to remember.
@@ -11447,7 +11447,7 @@ expensive later, which is exactly the trigger this log uses for writing the deci
 #### The stack is the whole policy, and it takes no parameter
 
 **Newest on top, falling back to what was underneath.** It is
-[decision 141](#141-gyro-authors-the-container-and-the-floorplanner-places-a-window-in-it)'s
+[decision 141](#141-a-window-is-parented-into-gyros-floor-and-shown-when-placed-the-floorplanner-stands-in-for-an-absent-shell)'s
 Floorplanner applied to focus rather than to placement, and it is chosen for the same reason: centring
 on an output and focusing the window that just opened are the two placements that need nothing
 configured. Click-to-focus and follows-mouse both need a pointer, and both are the shell's model
@@ -12523,7 +12523,7 @@ it is not making.
 
 A popup's container is parented into the container of the surface it is anchored on. Three things fall
 out of that and none of them needed code: it moves with the window it belongs to; it draws over it,
-because [decision 55](#55-composition-is-strict-tree-order-with-no-depth-buffer) makes the sibling
+because [decision 55](#55-transforms-are-3d-the-scene-is-a-painters-algorithm) makes the sibling
 list the z order; and it is not clipped to it, because the scene vocabulary has no clipping and
 `Scene/Hit.h` reads that the same way — so what is drawn outside the parent is exactly what catches
 the pointer.

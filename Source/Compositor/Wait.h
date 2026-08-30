@@ -38,7 +38,7 @@
 // vblank, and a late frame is the one error that contract does not permit. Dispatch has no deadline —
 // Dispatch/Loop.h says so in its first line — and a wake served late there costs the *first frame or
 // two* of a motion and never its shape, because
-// [decision 89](../../Docs/Decisions.md#89-a-model-value-is-set-under-a-shared-origin-and-setting-it-is-a-retarget)
+// [decision 89](../../Docs/Decisions.md#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete)
 // stamps a retarget with the instant it fell due rather than with now. So the animation renders already
 // in progress by exactly the lateness, which is what `ISceneAuthor::Advance` is documented to want.
 //
