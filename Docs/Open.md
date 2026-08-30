@@ -1433,3 +1433,84 @@ What the rule is standing in for is a demand test over an interval rather than o
 saturated card, the cost of being coarse is latency on a card that is not, and only the first is
 something a person cannot see coming.
 
+
+## The first frame a window is promoted on lands a refresh late, and i915 asks for it
+
+A window opens and its first frame is on screen for two refreshes instead of one. It is the moment a
+person is most likely to be looking — the thing they just launched appearing — and it is not a rare
+race: six captures out of six, five of them consecutive runs of the same script, every one missing at
+the single `items 0→1` transition and nowhere else.
+
+The frame is not late. Against a vblank grid fitted from the flip-event timestamps — 16.6528 ms with a
+4.6 µs residual σ over 563 samples — the missed commit was issued 4.010 ms before its target in the
+first capture and 3.184 ms in the instrumented one, against 2.926 ms for the frame immediately before
+it that landed. Across the six the miss margins span 3.4–4.1 ms while hundreds of tighter frames make
+their vblank; in one run the miss has the second-widest margin in the whole capture. Margin is not the
+variable. Neither is the client's fence — the only `dma_fence_wait` near the commit is 28 µs, and
+`Promoted` hands the layer `SyncPoint::Immediate()` anyway — and neither is scheduling: the commit
+thread's state trace is identical in shape to every frame that succeeded.
+
+What the merged system trace shows instead is a *two-phase* sleep. Every landing frame sleeps in `D`
+and is woken by flip-done about 14 µs after its target vblank. The missed frame woke at its target
+vblank +4 µs, ran for 10 µs, and went back to sleep for a further 16.476 ms. That is not a flip armed
+too late; that is a `wait_for_next_vblank` inside the commit tail.
+
+`drivers/gpu/drm/i915/display/intel_fbc.c` names it. Framebuffer compression is bound to one plane, and
+while gyro scans out its own full-screen target on the primary that is the case FBC is for. Promoting
+the window replaces that framebuffer with the client's, and `intel_fbc_can_flip_nuke` refuses the cheap
+address swap when the format, the modifier, the plane stride or the cfb stride changed — the stride
+certainly did, panel width to window width. So FBC is deactivated, and `__intel_fbc_pre_update` then
+answers `need_vblank_wait` under **Display WA #1198**, *glk+*: an extra vblank between an FBC disable
+and most plane updates, because touching the plane registers otherwise shows as corruption.
+`intel_pre_plane_update` spends it.
+
+gyro feels it because it drops `DRM_MODE_ATOMIC_NONBLOCK` and runs the ioctl on a per-output commit
+thread — the trade `Drm/Commit.h` argues, that a non-blocking commit returns having only queued the
+work and leaves a `SCHED_OTHER` kernel worker to arm the flip. The driver's extra vblank is therefore
+spent inside gyro's `drmModeAtomicCommit` — and `CommitDepth` is one, so the loop is then locked out
+until the flip, which is why one late latch reads as a duplicated frame rather than as slack absorbed.
+The consistency check that makes the reading hard to dismiss is the transition that *does not* miss:
+`1→2` enables an overlay and leaves the primary's framebuffer alone, and FBC binds to one plane, so
+there is nothing to tear down and no extra vblank. Only the commit that rewrites the primary plane
+pays.
+
+**This is not settled.** That FBC was active is inferred rather than read: `enable_fbc` is `-1`, which
+is auto and means the driver decides, and the parameter is `0400` so it cannot be toggled at runtime
+and the debugfs status went unread. The kernel read is `linux-next 20260814` rather than the 7.1.9 the
+capture ran on. What closes it is one boot with `i915.enable_fbc=0` — the miss disappears or it does
+not, and either answer is worth more than the rest of this entry.
+
+If it holds, three mitigations and none of them free. **Accept it** — one duplicated frame per window
+map, spent on a driver workaround, and arguably the honest price. **Never promote onto the primary** —
+keep the composite there and promote only onto overlays, so the primary's framebuffer never changes
+shape and FBC keeps its flip-nuke path; this forfeits exactly the arrangement the partition exists for,
+the fully-promoted screen with the GPU asleep. **Price it** — let the assigner know that rewriting the
+primary plane's framebuffer costs a frame on this driver and schedule the transition a refresh early,
+which keeps the promotion and turns a miss into a plan. The third is the only one that does not give
+something up, and it is also the only one that puts a driver's name inside a portable module, which is
+the reason it is a question rather than a change.
+
+## The `planes` counter reads zero on a frame that committed a layer
+
+`TraceCount("planes", partition.Layers())` at `Frame/Loop.h:1279` is the shape the frame actually
+committed, and on an empty scene it is a lie. Where `TestLayers` refuses or nothing is promotable the
+fallback rebuilds the partition as `Partition{ .Composited = list.Items.size() }` at `Loop.h:1248`; with
+no items that is zero composited, so `NeedsComposite()` is false and `Layers()` is zero — while `count`
+is one and the composite layer is what goes out. `DrmOutput::Expressible` refuses an empty layer set
+with `EINVAL` at `Drm/Output.cpp:601`, which is the proof the commit was not empty: the flip was issued,
+so a layer was there.
+
+The cost is not the number, it is what a reader concludes from it. A `planes` of zero beside an `items`
+of zero reads as *this frame configured no plane*, when what happened is *this frame put gyro's
+composite on the primary*. During the Display WA #1198 hunt above it produced two wrong readings of the
+same trace — first that a plane had been enabled at the transition, then that the primary had gone from
+nothing to something — where the truth is that one layer was committed before and one after, and only
+the *framebuffer* changed. That is the whole of the defect being chased, and the instrument pointed
+away from it twice.
+
+What the fix has to decide is what the counter is *for*, because the two answers differ here. If it
+means the layers this commit carried, it is `count` and the empty scene reads one. If it means the
+partition's shape — the reading `Loop.h`'s own comment takes, where one is a screen the GPU drew whole
+and the interesting frame is the one where it climbs — then a scene with nothing in it is a third state
+rather than a zero, since *the GPU drew a whole screen of nothing* and *no plane was configured* are
+different frames and currently share a number.
