@@ -943,6 +943,8 @@ gyro_add_module(Protocol DISPATCH
 		Floor.cpp
 		Host.cpp
 		Keymap.cpp
+		Popup.cpp
+		Positioner.cpp
 		Region.cpp
 		Seat.cpp
 		Server.cpp
@@ -953,6 +955,7 @@ gyro_add_module(Protocol DISPATCH
 		Dmabuf.Test.cpp
 		Floor.Test.cpp
 		Host.Test.cpp
+		Positioner.Test.cpp
 		Server.Test.cpp
 		Shm.Test.cpp
 		Surface.Test.cpp

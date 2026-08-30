@@ -3,10 +3,12 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "Core/Handle.h"
 #include "Geometry/Space.h"
 #include "Protocol/Context.h"
+#include "Protocol/Positioner.h"
 #include "Protocol/Surface.h"
 #include "Wayland/Server/Wayland.h"
 #include "Wayland/Server/XdgShell.h"
@@ -14,18 +16,29 @@
 // `xdg_wm_base`: the role that turns a client's rectangle of pixels into a window.
 //
 // **Advertised at version 1, on `wl_compositor`'s rule: the number is a promise about what gyro
-// sends.** Version 2 adds the tiled states, 4 a `configure_bounds` event, 5 a `wm_capabilities` event
-// telling the client which of maximise, minimise, fullscreen and the window menu it may offer. gyro
-// has no shell, no seat and no output model reaching this module, so it has nothing true to say in any
-// of them — and a client told 5 and sent no capabilities is entitled to assume it has all four, which
-// is a titlebar full of buttons that do nothing. Every toolkit binds this at whatever version it
-// finds; none requires more than one.
+// sends.** Version 2 adds the tiled states, 3 `xdg_popup.reposition` and the reactive positioner, 4 a
+// `configure_bounds` event, 5 a `wm_capabilities` event telling the client which of maximise,
+// minimise, fullscreen and the window menu it may offer. gyro has no shell, no seat and no output
+// model reaching this module, so it has nothing true to say in any of them — and a client told 5 and
+// sent no capabilities is entitled to assume it has all four, which is a titlebar full of buttons that
+// do nothing. Every toolkit binds this at whatever version it finds; none requires more than one.
+//
+// **3 is the one worth naming, because the code for it is already here.** `OnReposition` below is
+// implemented rather than stubbed even though a client bound at 1 can never send the request:
+// answering `reposition` with nothing is precisely the bug this file was fixed for, and a version
+// constant somebody raises in a hurry must not reintroduce it. What raising it to 3 still needs is
+// `set_reactive` honoured — a mapped popup resolved again when its parent moves under it — which is a
+// walk on every dispatch iteration and buys nothing until something moves a window, since the
+// Floorplanner places one once and never again (141).
 //
 // **The whole of the mapping protocol is here because the whole of it is one state machine.** A
-// client gets an `xdg_surface`, gets an `xdg_toplevel` from it, commits with *no* buffer to ask for a
-// configure, is configured, acks, and only then commits a buffer — and the window is mapped at that
-// last step and nowhere else. Splitting those across files would put half the sequence where the other
-// half's invariants are not readable.
+// client gets an `xdg_surface`, gets an `xdg_toplevel` or an `xdg_popup` from it, commits with *no*
+// buffer to ask for a configure, is configured, acks, and only then commits a buffer — and the window
+// is mapped at that last step and nowhere else. Splitting those across files would put half the
+// sequence where the other half's invariants are not readable. What is *not* here is the arithmetic a
+// popup's position comes out of ([Positioner.h](Positioner.h)) and the grab stack a menu is dismissed
+// through ([Popup.h](Popup.h)): neither is part of the sequence, and both are testable with no client
+// in front of them.
 
 // The advertised version. See above before raising it.
 inline constexpr std::uint32_t ShellVersion = 1;
@@ -95,25 +108,172 @@ private:
 	std::string m_AppId;
 };
 
-// One `xdg_popup`. Accepted, never configured, and therefore never shown.
+// One `xdg_positioner`: the client's description of where a popup should go, accumulated across as
+// many requests as it likes and read once, by the `get_popup` that names it.
 //
-// **A menu that does not appear is worse than a client that will not start, and this is still the
-// right answer for now.** A popup needs a positioner resolved against the anchor rectangle of its
-// parent and constrained to an output — decision 141's guard puts placement policy squarely outside
-// gyro, and the positioner's constraint adjustment is the one piece of placement the *protocol*
-// specifies rather than the shell. Until that is built, refusing the object would take down every
-// toolkit at its first tooltip; accepting it costs the menu and keeps the application running.
-class ClientXdgPopup final : public Wayland::Server::XdgPopupIgnoring
+// **It is a value that is copied out rather than an object a popup keeps a pointer to**, which is the
+// protocol's own rule and not a convenience: a client is explicitly permitted to destroy the
+// positioner the instant `get_popup` returns, and every toolkit does. What survives is
+// [Positioner.h](Positioner.h)'s `PopupPlacement`, which is the whole of what was said.
+class ClientXdgPositioner final : public Wayland::Server::XdgPositionerHandler
 {
 public:
 	void OnGone() override { delete this; }
+
+	// The resource is already destroyed when this runs, and `OnGone` follows immediately.
+	void OnDestroy() override {}
+
+	[[nodiscard]] const PopupPlacement& Rules() const noexcept { return m_Rules; }
+
+	void OnSetSize(std::int32_t width, std::int32_t height) override;
+
+	void OnSetAnchorRect(std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) override;
+
+	void OnSetAnchor(Wayland::Server::XdgPositionerAnchor anchor) override { m_Rules.Anchor = anchor; }
+
+	void OnSetGravity(Wayland::Server::XdgPositionerGravity gravity) override { m_Rules.Gravity = gravity; }
+
+	void OnSetConstraintAdjustment(Wayland::Server::XdgPositionerConstraintAdjustment adjustment) override
+	{
+		m_Rules.Adjustment = adjustment;
+	}
+
+	void OnSetOffset(std::int32_t x, std::int32_t y) override { m_Rules.Offset = { x, y }; }
+
+	// The three that a client bound below version 3 cannot send. Recorded for the day the version goes
+	// up, and [Positioner.h](Positioner.h) says what each is for.
+	void OnSetReactive() override { m_Rules.Reactive = true; }
+
+	void OnSetParentSize(std::int32_t width, std::int32_t height) override
+	{
+		m_Rules.ParentExtent = PixelSize<SurfaceSpace>{ width, height };
+	}
+
+	void OnSetParentConfigure(std::uint32_t serial) override { m_Rules.ParentConfigure = serial; }
+
+private:
+	PopupPlacement m_Rules;
 };
 
-// One `xdg_positioner`. Recorded and unread, for `ClientXdgPopup`'s reason.
-class ClientXdgPositioner final : public Wayland::Server::XdgPositionerIgnoring
+// One `xdg_popup`: a menu, a tooltip, a combo box's list — a surface positioned against a rectangle of
+// its parent rather than placed by anybody.
+//
+// **A popup is a window in the store like any other, and the only thing that makes it a popup is where
+// it hangs.** It is parented into its parent's own container rather than into the floor, so it moves
+// with the window it belongs to, draws over it because the sibling list is the z order (55), and is
+// not clipped by it because the scene vocabulary has no clipping — which `Scene/Hit.h` relies on in
+// exactly the same direction, so what is drawn outside the parent is also what catches the pointer.
+//
+// **What gyro decides here is nothing, and that is the point.** Decision 141's guard keeps placement
+// policy out of the compositor, and a popup is the one window whose position is not a policy at all:
+// the client states an anchor, a gravity and what to do at the edge of a screen, and the compositor
+// does arithmetic. The only judgement is which rectangle counts as *the screen*, and with no panels
+// and no struts that is the output the anchor is on.
+class ClientXdgPopup final : public Wayland::Server::XdgPopupHandler
 {
 public:
+	ClientXdgPopup(HostContext& context, ClientXdgSurface& surface, ClientXdgSurface* parent, PopupPlacement rules);
+
+	~ClientXdgPopup() override;
+
 	void OnGone() override { delete this; }
+
+	// The resource is already destroyed when this runs, and `OnGone` follows immediately.
+	void OnDestroy() override {}
+
+	void OnGrab(Wayland::Server::WlSeat seat, std::uint32_t serial) override;
+
+	void OnReposition(Wayland::Server::XdgPositioner positioner, std::uint32_t token) override;
+
+	[[nodiscard]] const PopupPlacement& Rules() const noexcept { return m_Rules; }
+
+	[[nodiscard]] ClientXdgSurface* Parent() const noexcept { return m_Parent; }
+
+	// The `xdg_surface` this popup is the role of, which is what a *is this the topmost popup* question
+	// is really asking about — the protocol names the surface in `get_popup`, not the role object.
+	[[nodiscard]] ClientXdgSurface* Surface() const noexcept { return m_Surface; }
+
+	[[nodiscard]] bool IsGrabbing() const noexcept { return m_Grabbing; }
+
+	// The container this popup's window is, or null while it is unmapped. What `PopupStack` compares an
+	// ancestor walk against.
+	[[nodiscard]] EntityId Node() const noexcept;
+
+	// **The compositor taking the menu away**, which is what a press outside a grab means and what a
+	// parent going first leaves no alternative to. The client is told with `popup_done` and takes its
+	// own surface down; gyro unmaps immediately rather than waiting, because a menu that stayed on
+	// screen until the client got round to it is a menu that outlives the click that dismissed it.
+	void Dismiss();
+
+	// The window it hangs on went away. Distinct from `Dismiss` only in that there is nothing left to
+	// hang on, so the parent pointer is dropped before the unmap rather than after.
+	void ForgetParent() noexcept;
+
+	// The `xdg_surface` went first, which is `ClientXdgToplevel::Forget`'s case and needs the same
+	// answer for the same reason.
+	void Forget() noexcept { m_Surface = nullptr; }
+
+	// The placement this popup was last configured at, in its parent's window-geometry space.
+	[[nodiscard]] PixelRect<SurfaceSpace> Placement() const noexcept { return m_Placement; }
+
+	// Whether that placement has still to be written into the world.
+	//
+	// **A menu redrawing is not a menu moving**, and the two have to be told apart here because a client
+	// commits every frame it animates: writing the position back each time would be a retarget per
+	// commit on a channel whose target never changed, which is the cost
+	// Docs/Architecture.md#doing-nothing-must-cost-nothing exists to keep out of a window that is only
+	// repainting itself.
+	[[nodiscard]] bool PlacementPending() const noexcept { return m_PlacementPending; }
+
+	void PlacementApplied() noexcept { m_PlacementPending = false; }
+
+	// Resolve the rules against the world and remember the answer. Called by the `xdg_surface` when it
+	// is about to configure, because the client is told a position and a size in the same event.
+	void Resolve();
+
+	// Send the `repositioned` a `reposition` is owed, if one is. **Immediately before the configure
+	// that carries the new position and never after it**, which is the order the protocol fixes and the
+	// order a client's own state machine asserts on: GTK warns about an unexpected `repositioned` and
+	// then waits forever for the one it wanted.
+	void AnswerReposition();
+
+	// Register with the grab stack, which happens at map rather than at `grab` — the protocol's own
+	// ordering, since `grab` must arrive before the first commit and a popup that is never committed
+	// never grabs anything.
+	void Enter();
+
+	// Leave it again, at the unmap. Idempotent, because a popup can be taken down by its client, by a
+	// press outside it, and by its parent going away, and two of those can happen in one iteration.
+	void Leave() noexcept;
+
+	// Whether the compositor has already taken this one away. A dismissed popup is inert: it maps
+	// nothing, configures nothing, and waits for the client to destroy it.
+	[[nodiscard]] bool IsDismissed() const noexcept { return m_Dismissed; }
+
+private:
+	// The rectangle a popup should stay inside, in its parent's window-geometry space. Empty where
+	// there is no world, no parent, or no output — all three of which mean *do not constrain*.
+	[[nodiscard]] PixelRect<SurfaceSpace> Bounds() const;
+
+	HostContext* m_Context = nullptr;
+
+	// This popup's own `xdg_surface`, and the one it is anchored on. Both borrowed, and both told to
+	// forget this object before they die.
+	ClientXdgSurface* m_Surface = nullptr;
+	ClientXdgSurface* m_Parent = nullptr;
+
+	PopupPlacement m_Rules;
+	PixelRect<SurfaceSpace> m_Placement{};
+
+	bool m_PlacementPending = false;
+	bool m_Grabbing = false;
+	bool m_Entered = false;
+	bool m_Dismissed = false;
+
+	// The token a `reposition` is owed a `repositioned` for, which goes out immediately before the
+	// configure that carries the new position. Only reachable at version 3.
+	std::uint32_t m_RepositionToken = 0;
+	bool m_Repositioned = false;
 };
 
 // One `xdg_surface`: the role a `wl_surface` takes, and the object that owns the window in the scene.
@@ -130,6 +290,12 @@ public:
 // below-subsurfaces, its own surface, and its above-subsurfaces. There are no subsurfaces yet and the
 // container still earns its place, because the offset between the window's declared geometry and the
 // surface's own origin lives on the child.
+//
+// **A popup runs the identical sequence and differs in two lines**: the configure carries a position
+// and a size instead of *pick your own*, and the container is parented into the popup's parent instead
+// of into the floor. Everything between — the ack, the buffer, the geometry, the input region, the
+// binding a frame callback travels back along — is the same code, because it is the same state
+// machine with a different role object on the end of it.
 class ClientXdgSurface final : public Wayland::Server::XdgSurfaceHandler, public SurfaceRole
 {
 public:
@@ -137,8 +303,14 @@ public:
 	// object still has to exist — the client is holding an id and libwayland needs something behind it
 	// — and every request on it then does nothing, which costs nothing because the connection has
 	// already been ended by the caller.
-	ClientXdgSurface(HostContext& context, ClientSurface* surface) noexcept
-		: m_Context{ &context }, m_Surface{ surface }
+	//
+	// `base` is the `xdg_wm_base` this surface came from, held because three of the errors a popup can
+	// raise — `invalid_positioner`, `invalid_popup_parent`, `not_the_topmost_popup` — belong to that
+	// interface rather than to this one. A client reads an error's code against the interface of the
+	// object it arrived on, so posting one of them here would be a compositor telling a client
+	// `unconfigured_buffer` when it meant *your menu has the wrong parent*.
+	ClientXdgSurface(HostContext& context, Wayland::Server::XdgWmBase base, ClientSurface* surface) noexcept
+		: m_Context{ &context }, m_Base{ base }, m_Surface{ surface }
 	{}
 
 	~ClientXdgSurface() override;
@@ -166,17 +338,33 @@ public:
 	// window exists without inferring it from a node count.
 	[[nodiscard]] EntityId Window() const noexcept { return m_Window; }
 
+	// Whether this surface has a window in the world right now, which is what a popup's parent has to be
+	// before the popup can hang off it.
+	[[nodiscard]] bool IsMapped() const noexcept { return !m_Window.IsNull(); }
+
 	// The role object let go, which unmaps the window: a toplevel that is destroyed is a window that is
 	// gone, whatever the surface still has attached.
 	void Orphan() noexcept;
 
-private:
-	// The client is entitled to a size and gyro has no opinion about what it should be, which the
-	// protocol spells `0 x 0` — *pick your own*. That is the honest configure for a compositor with no
-	// shell placing windows at their natural size, rather than a number invented here that every client
-	// would then be obliged to obey.
+	// Take the window off the screen while the role object stays. **The difference from `Orphan` is
+	// who is still there afterwards**: a dismissed popup keeps its `xdg_popup` until the client
+	// destroys it, and a compositor that dropped the role pointer here would answer that destroy
+	// against nothing.
+	void Withdraw() noexcept;
+
+	// The popups anchored on this surface, which have to be told when it goes. The protocol requires a
+	// client to destroy them first and gyro still has to survive one that does not.
+	void Adopt(ClientXdgPopup& popup);
+	void Release(ClientXdgPopup& popup) noexcept;
+
+	// Send the configure the client is waiting for. Public because a popup's `reposition` produces one
+	// outside the commit sequence that otherwise drives them.
 	void Configure();
 
+	// The `xdg_wm_base` this surface came from, for the errors that belong to that interface.
+	[[nodiscard]] Wayland::Server::XdgWmBase Base() const noexcept { return m_Base; }
+
+private:
 	// Turn a committed surface into a window, or update the one that is already there.
 	void Map(ClientSurface& surface);
 
@@ -189,14 +377,25 @@ private:
 	// whole surface where it declared none.
 	[[nodiscard]] Size<SurfaceSpace, float> Natural(const ClientSurface& surface) const noexcept;
 
+	// Whether the client has said what kind of thing this surface is. A commit before it is a client
+	// asking to be configured; a *buffer* before it is `not_constructed`.
+	[[nodiscard]] bool HasRole() const noexcept { return m_Toplevel != nullptr || m_Popup != nullptr; }
+
 	HostContext* m_Context = nullptr;
+
+	Wayland::Server::XdgWmBase m_Base;
 
 	// The surface this role was taken on, or null once it has gone. Not owned.
 	ClientSurface* m_Surface = nullptr;
 
 	// The role object, or null while the client has an `xdg_surface` and has not yet said what kind of
-	// thing it is. Not owned — a toplevel is a protocol object with its own lifetime.
+	// thing it is. At most one is ever set. Not owned — a role is a protocol object with its own
+	// lifetime.
 	ClientXdgToplevel* m_Toplevel = nullptr;
+	ClientXdgPopup* m_Popup = nullptr;
+
+	// The popups hanging off this surface. Borrowed, and each removes itself as it dies.
+	std::vector<ClientXdgPopup*> m_Children;
 
 	// The window's own two nodes. Null while unmapped.
 	EntityId m_Window{};

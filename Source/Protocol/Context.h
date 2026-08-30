@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "Core/Handle.h"
+#include "Protocol/Popup.h"
 #include "Scene/Store.h"
 #include "Scene/Textures.h"
 
@@ -50,6 +51,12 @@ public:
 	[[nodiscard]] EntityId Floor() const noexcept { return m_Floor; }
 
 	void SetFloor(EntityId floor) noexcept { m_Floor = floor; }
+
+	// The open menus, per [Popup.h](Popup.h). Beside the floor for the same reason: it is one per
+	// session rather than one per connection, it outlives every client that pushes onto it, and the
+	// seat and the shell are both entitled to it — one to dismiss on a press, the other to refuse a
+	// grab that is not the topmost.
+	[[nodiscard]] PopupStack& Popups() noexcept { return m_Popups; }
 
 	// The surface behind an entity, for the one direction nothing else can travel.
 	//
@@ -120,6 +127,7 @@ private:
 	SceneStore* m_Store = nullptr;
 	ITextures* m_Textures = nullptr;
 	EntityId m_Floor{};
+	PopupStack m_Popups;
 
 	// The mapped windows, keyed by the entity their pixels are. Borrowed pointers: a surface unbinds
 	// itself as it unmaps and again as it goes away, so nothing here outlives what it names.

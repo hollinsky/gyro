@@ -12469,3 +12469,114 @@ a preference.
 
 **Nor is the focus ring**, which decision 96 owes and nothing draws. It is what makes focus visible
 without the raise, and until it exists the coupling above is carrying it.
+
+### 163. A popup is configured, hangs under its parent, and is placed by its own positioner; accepting one and never answering it is what freezes the application
+
+*(Decided 2026-08-29, from a trace of GNOME Calculator opening its mode menu and stopping dead. The
+superseded position was never an entry here — it lived as a paragraph in `Protocol/Shell.h` saying
+that accepting an `xdg_popup` and never configuring it "costs the menu and keeps the application
+running". That paragraph is wrong, and the way it was wrong is the useful part.)*
+
+**A compositor that accepts an `xdg_popup` and never configures it does not lose the menu. It loses
+the application.** GTK's `gdk_wayland_popup_present` ends with a loop that dispatches the Wayland
+queue until the popup's initial configure arrives, on the main thread, inside the click handler:
+
+```c
+while (wayland_popup->display_server.xdg_popup && !is_relayout_finished (surface))
+  gdk_wayland_display_dispatch_queue (surface->display, wayland_surface->event_queue);
+```
+
+`is_relayout_finished` is false until `initial_configure_received`, and that dispatch blocks on the
+display descriptor. So the process goes to sleep waiting for an event gyro decided not to send, and
+every GTK application on the machine does it at its first menu, combo box or tooltip. The trace is
+unambiguous about which side is wedged: the whole world stops for seven seconds, the frame thread
+takes three idle wakeups in that span, and the dispatch thread runs **zero** steps — not a slow
+client, a silent one.
+
+**So refusing the object would have been better than the position that replaced it**, and that is the
+part worth keeping. The old paragraph's premise — that refusing `get_popup` takes down every toolkit
+at its first tooltip — is true. Its conclusion, that accepting is therefore the safer half, is not:
+between an application that will not start and one that stops answering the moment a person uses it,
+the second is worse, because it looks like the compositor lost the frame rather than like the
+compositor is unfinished. **The rule the reversal is an instance of: a request that is accepted and
+never answered is not a stub, it is a deadlock with a polite face on it.** Every place gyro takes a
+`new_id` or a token it owes an event for is the same shape, and `xdg_popup.reposition` is implemented
+below despite being unreachable at the advertised version for exactly this reason.
+
+#### The placement is the client's, and it is the one piece of placement 51 does not keep out
+
+[Decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) keeps window placement out of
+the compositor and [decision 141](#141-a-window-is-parented-into-gyros-floor-and-shown-when-placed-the-floorplanner-stands-in-for-an-absent-shell)
+holds the Floorplanner down to a rule with no parameter in it. A popup does not test either guard,
+because nothing about it is gyro's decision: the client states an anchor rectangle on its own window,
+a corner to hang from, a direction to hang in, and what it would rather have happen than run off the
+edge of a screen. Resolving that is arithmetic on the client's own numbers, and the compositor is
+simply the only party that knows where the parent is and where the screen ends.
+
+The one judgement left is which rectangle counts as *the screen*, and the answer is the output the
+anchor rectangle is mostly on, carried down into the parent's coordinate space by the same
+unprojection the pointer uses. **Not a work area**, because gyro has no panels and no struts to
+subtract, and a compositor that invented an inset would be making the layout decision this entry says
+it is not making.
+
+#### Under the parent's container, not under the floor
+
+A popup's container is parented into the container of the surface it is anchored on. Three things fall
+out of that and none of them needed code: it moves with the window it belongs to; it draws over it,
+because [decision 55](#55-composition-is-strict-tree-order-with-no-depth-buffer) makes the sibling
+list the z order; and it is not clipped to it, because the scene vocabulary has no clipping and
+`Scene/Hit.h` reads that the same way — so what is drawn outside the parent is exactly what catches
+the pointer.
+
+**Rejected: a popup as another root on the floor.** It reads simpler and it makes the menu a window
+in its own right, which is what it is not: a menu whose parent is dragged to another monitor has to
+go with it, and a chain of them has to go with it in order. Under the parent that is free; on the
+floor it is a per-frame reconciliation of two positions that must not disagree for even one frame,
+because the frame they disagree on is a menu detached from its own button.
+
+#### The behaviour is Mutter's, and reading it settled the thing this would have got wrong
+
+The protocol's prose describes sliding as a two-step walk towards the gravity and then away from it.
+`mutter/src/core/constraints.c` clamps instead, and every compositor that ships does the same; the two
+differ only where a popup is larger than the screen, where the clamp pins the near edge — the end a
+person reads a menu from. Toolkits are written against what ships.
+
+**The reading also reversed a change that was about to be made.** *Invert the anchor and gravity*
+reads as though the offset should mirror with them, and mirroring it is the tidier construction.
+Mutter mirrors the anchor and the gravity and leaves the offset alone, which is right: the offset is
+almost always a toolkit's shadow margin, and mirroring it puts a flipped menu on the wrong side of its
+own control by twice that margin on every toolkit that draws one. This is the fifth time an entry here
+has been settled by opening the source an argument rested on rather than by arguing it.
+
+A flip is also taken where it merely *helps* rather than only where it fits, which is Mutter's again
+and is the case a person sees: a menu too tall for the screen either way still opens upward at the
+bottom of one, so its first row is on screen instead of its last.
+
+#### The grab dismisses and does not route, and the difference is stated
+
+`xdg_popup.grab` gets one of its two halves. A press outside every popup in the chain dismisses from
+the top down — which is what makes a menu closable — and the topmost grabbing popup takes keyboard
+focus through the same `SceneFocus::Offer` a toplevel maps with, so focus falls back to the window
+underneath when the menu goes by the stack policy already there (114, 149) rather than by anything the
+popup remembers.
+
+What is missing is the routing: under a real grab the owning client sees pointer events for its own
+surfaces and nobody else sees any. So a press that dismisses a menu is also delivered to whatever it
+landed on, and clicking another application's window while a menu is open both closes the menu and
+activates that window. That is the behaviour a person gets on a Mac, it takes no parameter, and the
+piece that would make it exact is per-client filtering in the seat's delivery rather than anything in
+the shell. It is written down in `Protocol/Popup.h` rather than left to be discovered.
+
+**The grab's serial is not checked**, which is the other stated gap. The protocol lets a compositor
+dismiss a popup whose serial does not name an event it sent, and the seat keeps one counter rather
+than a history — so the check available today is *is this number plausible*, which is not a check. The
+exposure is one misbehaving client on a machine with no session model yet.
+
+#### The advertised version stays at 1
+
+`xdg_wm_base` 3 is what `reposition` and the reactive positioner need, and neither is advertised.
+`reposition` is implemented anyway — the whole of this entry is about what an unanswered request
+costs, and a version constant somebody raises in a hurry must not put that back. What raising it
+still needs is `set_reactive` honoured, which is a mapped popup resolved again when its parent moves
+under it, and which buys nothing until something moves a window: the Floorplanner places one once and
+never again.

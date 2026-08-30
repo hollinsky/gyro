@@ -405,6 +405,13 @@ void SeatGlobal::SyncPointer(SceneStore& scene, Instant now)
 			{
 				m_Grab = m_Pointed;
 
+				// **Before the focus, because a press outside an open menu is first of all a press that
+				// closes it.** Dismissing retires the popup and `SceneStore::Retire` takes it off the focus
+				// stack, so doing this second would focus a menu on its way out and leave a person's next
+				// keystroke going to a window that is no longer on screen. [Popup.h](Popup.h) has what a
+				// grab does and does not do here.
+				m_Context->Popups().DismissOutside(scene, m_Grab);
+
 				// **The press that opens the grab is the press that focuses**, and no other: a second
 				// button going down inside a gesture, or a release ending one, must not move focus, and
 				// under the grab they are not even asking about what is under the pointer any more.
