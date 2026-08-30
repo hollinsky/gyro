@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 
+#include "Animation/Author/Bundle.h"
 #include "Core/Clock.h"
 #include "Core/Session.h"
 #include "Geometry/Scale.h"
@@ -277,6 +278,99 @@ GYRO_TEST(Floor, AWindowLargerThanTheScreenHangsOffBothEdgesEqually)
 	// dialog whose buttons are at the bottom.
 	GYRO_CHECK_EQ(scene.Find(*window)->Translation.Model().X, (1920.0 - 2400.0) / 2.0);
 	GYRO_CHECK_EQ(scene.Find(*window)->Translation.Model().Y, (1080.0 - 1400.0) / 2.0);
+}
+
+// The screen a window is on, which is what `xdg_toplevel.configure_bounds` tells a client and is the
+// half of that answer worth asserting: the event itself carries these two numbers and nothing else.
+//
+// **The extent is the output's logical rectangle rather than its device grid**, which is the whole
+// point of sending it. A client that is told nothing derives the screen from `wl_output` — the grid
+// over the integer scale — and decision 164 runs panels at scales that are not integers, so on the
+// 1.37x panel below the two answers differ by a third and a toolkit refuses to grow a window past the
+// smaller one.
+GYRO_TEST(Floor, AWindowWithNoPlaceYetIsToldAboutTheScreenItIsAboutToOpenOn)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	// A laptop panel: 1920 device pixels at 164/120, which is what 309 mm at arm's length derives.
+	SceneOutput panel{ .Bounds = { { 0.0, 0.0 }, { 1405.0, 790.0 } },
+		               .Density = Scale::FromNumerator(164),
+		               .Grid = { 1920, 1080 } };
+	panel.Session = First;
+
+	const std::array outputs{ panel };
+	scene.SetOutputs(outputs);
+
+	// Null, because the window does not exist yet: the first configure goes out before anything is
+	// mapped, and it is the one a toolkit sizes its opening frame against.
+	const SceneOutput* const shown = OutputFor(scene, First, EntityId{});
+
+	GYRO_REQUIRE(shown != nullptr);
+	GYRO_CHECK_EQ(shown->Bounds.Extent.Width, 1405.0);
+
+	// What `wl_output` alone would have said, and the reason this function exists.
+	GYRO_CHECK(shown->Bounds.Extent.Width != panel.Grid.Width / panel.Density.CeilToInteger());
+}
+
+GYRO_TEST(Floor, AWindowOfASessionOnNoOutputIsToldNothing)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	SceneOutput panel = Panel();
+	panel.Session = First;
+
+	const std::array outputs{ panel };
+	scene.SetOutputs(outputs);
+
+	// Not the other session's screen, which would have a window sized for a monitor it will never
+	// appear on. The caller sends zero, which the protocol reads as *bounds unknown*.
+	GYRO_CHECK(OutputFor(scene, Second, EntityId{}) == nullptr);
+}
+
+// Two panels, one session, and a window dragged across the seam between them.
+GYRO_TEST(Floor, AWindowIsToldAboutTheScreenItIsMostlyOn)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	SceneOutput left = Panel();
+	left.Session = First;
+
+	SceneOutput right = Panel(PanelWidth, 0.0);
+	right.Id = OutputId{ 2, 1 };
+	right.Session = First;
+
+	const std::array outputs{ left, right };
+	scene.SetOutputs(outputs);
+
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, First).has_value());
+
+	const std::optional<EntityId> window = scene.CreateContainer(floors.Container(First), {});
+	GYRO_REQUIRE(window.has_value());
+
+	const auto put = [&](double x) {
+		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+
+		static_cast<void>(commit.Move(*window, { x, 0.0, 0.0 }, Immediate()));
+		static_cast<void>(commit.Resize(*window, Window(600.0F, 400.0F)));
+	};
+
+	put(100.0);
+	GYRO_CHECK(OutputFor(scene, First, *window) == &scene.Outputs()[0]);
+
+	// Two thirds of the way over the seam, which is a corner still on the left panel and most of the
+	// window on the right. **The corner is what a naive answer would follow**, and following it would
+	// change what a window may be at the instant a sliver of it crosses.
+	put(PanelWidth - 200.0);
+	GYRO_CHECK(OutputFor(scene, First, *window) == &scene.Outputs()[1]);
+
+	// Dragged off the end of the desk entirely. There is nothing true to say, so it keeps the session's
+	// first screen rather than being told its bounds went away underneath it.
+	put(PanelWidth * 4.0);
+	GYRO_CHECK(OutputFor(scene, First, *window) == &scene.Outputs()[0]);
 }
 
 GYRO_TEST(Floor, APlacementWithNoOutputsChangesNothing)

@@ -143,6 +143,20 @@ void ClientXdgToplevel::Configure() const
 		states[count++] = Wayland::Server::XdgToplevelState::Resizing;
 	}
 
+	// **Before the configure, which is the protocol's own order** — a client reads the pair together and
+	// the bounds are what it clamps the size in the next event against. Sent on every configure rather
+	// than only where it moved: it is two integers on a batch that already carries five, and the
+	// alternative is a second *has this client been told* ledger beside the one `m_Room` already is.
+	//
+	// **Gated here rather than left to the bindings**, which drop an event a client's version cannot
+	// carry and record a fault saying so — that is a diagnostic for a mistake, and a compositor tripping
+	// it on every configure of every window would bury the one that means something. `ShellVersion` is 4
+	// now, but a client is entitled to bind lower and a toolkit that does is not making one.
+	if (Object().Version() >= 4)
+	{
+		Object().ConfigureBounds(m_Room.Width, m_Room.Height);
+	}
+
 	Object().Configure(m_Size.Width, m_Size.Height, std::as_bytes(std::span{ states.data(), count }));
 }
 
@@ -405,10 +419,11 @@ void ClientXdgPopup::OnGrab(Wayland::Server::WlSeat seat, std::uint32_t serial)
 
 void ClientXdgPopup::OnReposition(Wayland::Server::XdgPositioner positioner, std::uint32_t token)
 {
-	// Unreachable while `ShellVersion` is 1 — libwayland refuses the opcode before it reaches here —
-	// and implemented rather than stubbed for the reason [Shell.h](Shell.h) gives at length: a
-	// `reposition` that is accepted and never answered is a client blocked forever inside its own
-	// event loop, which is exactly the failure this file was rewritten for.
+	// Reachable at last: this was written against a `ShellVersion` of 1, where libwayland refused the
+	// opcode before it could arrive, and implemented rather than stubbed for the reason
+	// [Shell.h](Shell.h) gives at length — a `reposition` that is accepted and never answered is a
+	// client blocked forever inside its own event loop, which is exactly the failure this file was
+	// rewritten for.
 	Wayland::Server::XdgPositionerHandler* const handler = positioner.Implementation();
 
 	if (handler == nullptr)
@@ -782,6 +797,14 @@ void ClientXdgSurface::Configure()
 		// doing layout — the thing decision 51 keeps out of the compositor. A resize is the one thing that
 		// makes gyro have an opinion, and it is not layout: the number comes from where a person's hand is
 		// (166). The size and the states are both the toplevel's own, so it is asked rather than told.
+		//
+		// **The room, though, is the world's**, so it is refreshed here where the store is reachable and
+		// immediately before it is sent. This is the call that matters for a window opening: the first
+		// configure goes out before anything is mapped, so `SyncWindows` — which walks mapped windows —
+		// has never seen this one, and a toolkit sizing its first frame would be working from the
+		// `wl_output` arithmetic this event exists to correct.
+		static_cast<void>(RefreshRoom());
+
 		m_Toplevel->Configure();
 	}
 	else if (m_Popup != nullptr)
@@ -1208,6 +1231,82 @@ bool ClientXdgSurface::SetResizing(bool resizing) noexcept
 	return m_Toplevel != nullptr && m_Toplevel->SetResizing(resizing);
 }
 
+void ClientXdgSurface::SyncPopups()
+{
+	// Over a copy for the same reason `SyncWindows` walks one: a configure is a wire write, and a client
+	// whose connection has already failed is torn down inside libwayland, which destroys its popups and
+	// so edits this list underneath the walk.
+	const std::vector<ClientXdgPopup*> children{ m_Children.begin(), m_Children.end() };
+
+	for (ClientXdgPopup* const child : children)
+	{
+		ClientXdgSurface* const surface = child->Surface();
+
+		if (surface == nullptr)
+		{
+			continue;
+		}
+
+		// **Dismissed is inert and unmapped has nothing to resolve against**, which is the same pair of
+		// guards every other verb on a popup carries: a menu the compositor has taken away must not be put
+		// back on screen by a walk, and one that has never been committed has no window to be moved.
+		if (child->Rules().Reactive && !child->IsDismissed() && surface->IsMapped())
+		{
+			const PixelRect<SurfaceSpace> before = child->Placement();
+
+			child->Resolve();
+
+			// **Configured only where it moved.** A menu that is still in the right place is a client that
+			// should not be woken, and a configure per dispatch iteration would have every open menu redraw
+			// at input rate for as long as it is open.
+			if (child->Placement() != before)
+			{
+				surface->Configure();
+			}
+		}
+
+		// A submenu hangs off the menu rather than off the window, so the chain is a tree and this is the
+		// step down it. After the parent's own resolve, because a child is positioned in the parent's space.
+		surface->SyncPopups();
+	}
+}
+
+bool ClientXdgSurface::RefreshRoom()
+{
+	const SceneStore* const scene = m_Context->Store();
+
+	if (m_Toplevel == nullptr || scene == nullptr)
+	{
+		// **The last room stands rather than being cleared**, which is the difference between *outside a
+		// dispatch* and *on no screen*: the store being unreachable says nothing about where the window
+		// is, and zeroing on it would tell a client its bounds are unknown every time gyro asked from the
+		// wrong place.
+		return false;
+	}
+
+	const SceneOutput* const output = OutputFor(*scene, m_Context->Session(Object().WireClient()), m_Window);
+
+	if (output == nullptr)
+	{
+		return m_Toplevel->SetRoom({});
+	}
+
+	// **The output's logical extent taken as a surface size, which is exact for as long as a window
+	// hangs on a floor** — a floor is a top-level container at the origin with the identity transform
+	// ([Floor.h](Floor.h)), so the two spaces differ by a translation and a size survives it unchanged.
+	// It is the same assumption [Drag.h](Drag.h) resizes under, and it breaks in the same place: the day
+	// a window sits inside a container that is scaled, this is the output's rectangle pulled through
+	// that container rather than read off.
+	//
+	// **Truncated rather than rounded, because this is a ceiling.** Rounding up recommends a window
+	// half a pixel wider than the screen it is on, which is the one direction an upper bound must never
+	// go.
+	return m_Toplevel->SetRoom(
+		{ static_cast<std::int32_t>(output->Bounds.Extent.Width),
+	      static_cast<std::int32_t>(output->Bounds.Extent.Height) }
+	);
+}
+
 bool ClientXdgSurface::SetSize(PixelSize<SurfaceSpace> size) noexcept
 {
 	return m_Toplevel != nullptr && m_Toplevel->SetSize(size);
@@ -1265,6 +1364,18 @@ void SyncWindows(HostContext& context, const SceneStore& scene, EntityId focused
 		const bool resizing = drag.IsResizing() && drag.Window() == window->Window();
 
 		owed = window->SetResizing(resizing) || owed;
+
+		// **Beside the other two because it is the same kind of comparison**: a fact about the world held
+		// against what this client has been told, with a configure owed where they disagree. What moves it
+		// is a person dragging a window onto another monitor, and on a machine with one panel it changes
+		// exactly once — at the first configure, which happens before this walk can see the window at all.
+		owed = window->RefreshRoom() || owed;
+
+		// **The menus, which are not in this registry and hang off the windows that are.** Outside the
+		// `owed` fold on purpose: a popup is configured through its own `xdg_surface` and carries a
+		// position rather than a size and a state, so the comparison that decides whether one is owed is
+		// its placement rather than this window's.
+		window->SyncPopups();
 
 		if (resizing)
 		{

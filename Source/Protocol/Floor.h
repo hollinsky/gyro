@@ -7,6 +7,7 @@
 #include "Core/Session.h"
 #include "Geometry/Space.h"
 #include "Scene/Commit.h"
+#include "Scene/Output.h"
 #include "Scene/Store.h"
 
 // Where a client's window hangs, and who does the shell's job while there is none.
@@ -83,6 +84,19 @@ private:
 
 	std::vector<Floor> m_Floors;
 };
+
+// The screen a window of this session belongs to, or null where the session is being shown on none.
+//
+// **Two rules and the second is the fallback**, which is the order a window's life runs in: a mapped
+// window is on the output it covers most of, and a window with no place in the world yet is on the one
+// the Floorplanner is about to put it on. The first is what a person would say — *the monitor the
+// window is on* — and the second is the only honest answer before there is a rectangle to ask about,
+// which is where `xdg_toplevel.configure_bounds` needs one most: a toolkit sizes its first frame
+// against whatever it is told here, and hearing nothing is what has it open two thirds the size it
+// meant to on a fractionally scaled panel.
+//
+// A null `window` asks the second question directly, which is what `PlaceOnFloor` itself does.
+[[nodiscard]] const SceneOutput* OutputFor(const SceneStore& scene, SessionId session, EntityId window);
 
 void PlaceOnFloor(
 	SceneCommit& commit,

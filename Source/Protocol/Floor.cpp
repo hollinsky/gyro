@@ -9,6 +9,7 @@
 #include "Scene/Entity.h"
 #include "Scene/Hit.h"
 #include "Scene/Output.h"
+#include "Scene/Reach.h"
 
 Result<void> SessionFloors::Open(SceneStore& scene, SessionId session)
 {
@@ -83,6 +84,65 @@ EntityId SessionFloors::Container(SessionId session) const noexcept
 	return found == m_Floors.end() ? EntityId{} : found->Container;
 }
 
+const SceneOutput* OutputFor(const SceneStore& scene, SessionId session, EntityId window)
+{
+	const std::span<const SceneOutput> outputs = scene.Outputs();
+
+	// **The first output showing this session, and nothing at all where none is.** Taking
+	// `outputs.front()` regardless would name a monitor this session is not being shown on — for
+	// `PlaceOnFloor` below that is an application a person launched, running and drawing, on a screen
+	// they are not looking at and cannot bring it to.
+	const auto shown = std::find_if(outputs.begin(), outputs.end(), [session](const SceneOutput& output) noexcept {
+		return output.Session == session;
+	});
+
+	if (shown == outputs.end())
+	{
+		return nullptr;
+	}
+
+	const Coverage cover = window.IsNull() ? Coverage{} : Cover(scene, window);
+
+	if (!cover.Definite)
+	{
+		return &*shown;
+	}
+
+	// **Most of the window rather than its top-left corner**, which is the difference a person notices
+	// when they drag a window between two panels of different scales: the corner crosses at the moment
+	// a sliver has, and constraining against the new screen while nine tenths of the window is still on
+	// the old one is a window that changes what it can be for no reason the hand can see.
+	const SceneOutput* best = &*shown;
+	double covered = 0.0;
+
+	for (const SceneOutput& output : outputs)
+	{
+		if (output.Session != session)
+		{
+			continue;
+		}
+
+		const double width =
+			std::min(cover.Bounds.Right(), output.Bounds.Right()) - std::max(cover.Bounds.Left(), output.Bounds.Left());
+		const double height =
+			std::min(cover.Bounds.Bottom(), output.Bounds.Bottom()) - std::max(cover.Bounds.Top(), output.Bounds.Top());
+
+		const double area = width > 0.0 && height > 0.0 ? width * height : 0.0;
+
+		if (area > covered)
+		{
+			covered = area;
+			best = &output;
+		}
+	}
+
+	// A window that has been dragged off every screen keeps the session's first, which is the same
+	// answer an unplaced one gets and for the same reason: there is nothing else true to say, and the
+	// alternative is telling a client its bounds are unknown at the moment it is furthest from being
+	// able to work them out itself.
+	return best;
+}
+
 void PlaceOnFloor(
 	SceneCommit& commit,
 	const SceneStore& scene,
@@ -91,25 +151,19 @@ void PlaceOnFloor(
 	Size<SurfaceSpace, float> natural
 )
 {
-	const std::span<const SceneOutput> outputs = scene.Outputs();
+	// The output holding the pointer, which with no input devices is the first one shown. Asked with no
+	// window because there is nothing in the world yet to ask about — this call is what puts it
+	// somewhere — and written as a named step rather than inline, because the day there is a pointer
+	// this line is the whole of the change.
+	const SceneOutput* const shown = OutputFor(scene, session, EntityId{});
 
-	// **The first output showing this session, and no placement at all where none is.** Centring on
-	// `outputs.front()` regardless would put a window on a monitor its own session is not being shown
-	// on — an application a person launched, running and drawing, on a screen they are not looking at
-	// and cannot bring it to. A window that stays unplaced is invisible until an output arrives, which
-	// is the state a session switched away from is already in.
-	const auto shown = std::find_if(outputs.begin(), outputs.end(), [session](const SceneOutput& output) noexcept {
-		return output.Session == session;
-	});
-
-	if (shown == outputs.end())
+	// A window that stays unplaced is invisible until an output arrives, which is the state a session
+	// switched away from is already in.
+	if (shown == nullptr)
 	{
 		return;
 	}
 
-	// The output holding the pointer, which with no input devices is the first one shown. Written as a
-	// named step rather than inline, because the day there is a pointer this line is the whole of the
-	// change.
 	const Rect<GlobalSpace> bounds = shown->Bounds;
 
 	const double x = bounds.Left() + (bounds.Extent.Width - static_cast<double>(natural.Width)) * 0.5;

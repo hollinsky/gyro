@@ -118,25 +118,37 @@ struct Ancestry
 }
 } // namespace Detail
 
-// The outputs this entity's own quad lands on, as a mask over the store's output set.
+// What an entity's own quad covers in global space.
 //
-// Zero for an entity that names nothing live, one that is hidden or under something hidden, and one
-// nested deeper than the frame walk will descend. Every output for a quad the projection cannot
-// answer for — see `AllOutputs` above for which way that trade runs.
-[[nodiscard]] inline OutputReach Reach(const SceneStore& store, EntityId id)
+// **The rectangle and *whether there is one* are separate fields, because the two callers answer an
+// indefinite quad differently.** `Reach` below folds one to every output, so a window gyro cannot
+// project still hears back about the frame it drew; a caller picking one output to constrain a window
+// against has to know it would be picking blind, and taking a zero rectangle for a real one would put
+// every such window on the first screen in the list.
+struct Coverage
 {
-	const std::span<const SceneOutput> outputs = store.Outputs();
+	// The bounding box of the node's four projected corners, in the global space an output's own
+	// rectangle is stated in. Meaningful only where `Definite`.
+	Rect<GlobalSpace> Bounds{};
 
-	if (outputs.empty())
-	{
-		return 0;
-	}
+	// Whether anything draws this entity at all: live, visible, visibly parented, and no deeper than
+	// the frame walk descends.
+	bool Reachable = false;
 
+	// Whether a rectangle came out. False for a reachable entity with no extent of its own and for one
+	// whose corners the projection cannot answer for.
+	bool Definite = false;
+};
+
+// The coverage above, composed down the ancestor chain once. See `Reach` below for the fold that was
+// this function's only caller until a window needed to be told which screen it is on.
+[[nodiscard]] inline Coverage Cover(const SceneStore& store, EntityId id)
+{
 	const Detail::Ancestry ancestry = Detail::LineageOf(store, id);
 
 	if (!ancestry.Reachable)
 	{
-		return 0;
+		return {};
 	}
 
 	// Composed from the top level down, which is the order `ComposedTransform::Push` is written for and
@@ -151,7 +163,7 @@ struct Ancestry
 
 		if (entity == nullptr)
 		{
-			return 0;
+			return {};
 		}
 
 		const Node record = entity->Record();
@@ -164,14 +176,14 @@ struct Ancestry
 
 	if (node == nullptr)
 	{
-		return 0;
+		return {};
 	}
 
 	const Size<SurfaceSpace, float> extent = node->Extent;
 
 	if (extent.IsEmpty())
 	{
-		return AllOutputs(outputs.size());
+		return { .Reachable = true };
 	}
 
 	// The four corners of the node's own quad, in the winding `Frame/Projection.h` states — the order
@@ -193,7 +205,7 @@ struct Ancestry
 
 		if (!projected.IsVisible())
 		{
-			return AllOutputs(outputs.size());
+			return { .Reachable = true };
 		}
 
 		const double x = projected.Position.X;
@@ -205,6 +217,37 @@ struct Ancestry
 		bottom = corner == 0 ? y : std::max(bottom, y);
 	}
 
+	return { .Bounds = Rect<GlobalSpace>::FromEdges({ left, top }, { right, bottom }),
+		     .Reachable = true,
+		     .Definite = true };
+}
+
+// The outputs this entity's own quad lands on, as a mask over the store's output set.
+//
+// Zero for an entity that names nothing live, one that is hidden or under something hidden, and one
+// nested deeper than the frame walk will descend. Every output for a quad the projection cannot
+// answer for — see `AllOutputs` above for which way that trade runs.
+[[nodiscard]] inline OutputReach Reach(const SceneStore& store, EntityId id)
+{
+	const std::span<const SceneOutput> outputs = store.Outputs();
+
+	if (outputs.empty())
+	{
+		return 0;
+	}
+
+	const Coverage cover = Cover(store, id);
+
+	if (!cover.Reachable)
+	{
+		return 0;
+	}
+
+	if (!cover.Definite)
+	{
+		return AllOutputs(outputs.size());
+	}
+
 	OutputReach reach = 0;
 
 	for (std::size_t index = 0; index < outputs.size() && index < MaxReachableOutputs; ++index)
@@ -214,8 +257,8 @@ struct Ancestry
 		// Half-open in both axes, which is the same rule a scissor rectangle is read under: a window
 		// whose right edge is exactly an output's left edge puts no pixel on it, and counting that as an
 		// intersection is how a window one pixel off a screen paces itself against a panel it is not on.
-		const bool overlaps =
-			left < bounds.Right() && right > bounds.Left() && top < bounds.Bottom() && bottom > bounds.Top();
+		const bool overlaps = cover.Bounds.Left() < bounds.Right() && cover.Bounds.Right() > bounds.Left() &&
+		                      cover.Bounds.Top() < bounds.Bottom() && cover.Bounds.Bottom() > bounds.Top();
 
 		if (overlaps)
 		{

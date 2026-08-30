@@ -407,11 +407,12 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 	const Registry::Global* const shell = bound.Listener.Find(Wayland::XdgWmBase::WireName);
 	GYRO_REQUIRE(shell != nullptr);
 
-	// Version 1 for `wl_compositor`'s reason. 4 owes a `configure_bounds` and 5 a `wm_capabilities`,
-	// and gyro has no shell, no seat and no output model reaching this module — a client told 5 and
-	// sent no capabilities is entitled to assume it has all four, which is a titlebar of buttons that
-	// do nothing.
-	GYRO_CHECK_EQ(shell->Version, std::uint32_t{ 1 });
+	// Version 4 for `wl_compositor`'s reason: it owes a `configure_bounds`, and that event is what stops
+	// a toolkit sizing every window against `wl_output.scale` — which on a fractionally scaled panel is
+	// the ceiling of the real scale and so a screen a third narrower than the one the world is on. 5 is
+	// not taken: a client told 5 and sent no `wm_capabilities` is entitled to assume it has maximise,
+	// minimise, fullscreen and the window menu, which is a titlebar of buttons that do nothing.
+	GYRO_CHECK_EQ(shell->Version, std::uint32_t{ 4 });
 
 	const Registry::Global* const data = bound.Listener.Find(Wayland::WlDataDeviceManager::WireName);
 	GYRO_REQUIRE(data != nullptr);

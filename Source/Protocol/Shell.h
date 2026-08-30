@@ -19,18 +19,30 @@
 // **Advertised at version 1, on `wl_compositor`'s rule: the number is a promise about what gyro
 // sends.** Version 2 adds the tiled states, 3 `xdg_popup.reposition` and the reactive positioner, 4 a
 // `configure_bounds` event, 5 a `wm_capabilities` event telling the client which of maximise,
-// minimise, fullscreen and the window menu it may offer. gyro has no shell, no seat and no output
-// model reaching this module, so it has nothing true to say in any of them — and a client told 5 and
-// sent no capabilities is entitled to assume it has all four, which is a titlebar full of buttons that
-// do nothing. Every toolkit binds this at whatever version it finds; none requires more than one.
+// minimise, fullscreen and the window menu it may offer. A client told 5 and sent no capabilities is
+// entitled to assume it has all four, which is a titlebar full of buttons that do nothing. Every
+// toolkit binds this at whatever version it finds; none requires more than one.
 //
-// **3 is the one worth naming, because the code for it is already here.** `OnReposition` below is
-// implemented rather than stubbed even though a client bound at 1 can never send the request:
-// answering `reposition` with nothing is precisely the bug this file was fixed for, and a version
-// constant somebody raises in a hurry must not reintroduce it. What raising it to 3 still needs is
-// `set_reactive` honoured — a mapped popup resolved again when its parent moves under it — which is a
-// walk on every dispatch iteration and buys nothing until something moves a window, since the
-// Floorplanner places one once and never again (141).
+// **4 is what the number is now, and it was raised because 1 was making windows the wrong size.**
+// `configure_bounds` is how a client is told how much screen it has, and a client that is never told
+// derives it from `wl_output`: the mode in device pixels over the integer scale. Decision 164 runs
+// panels at fractional scales and `wl_output.scale` can carry only the ceiling of one (56), so on a
+// laptop panel deriving 1.37 a toolkit works out a screen half the width of the one the world is laid
+// out on and will not let a window be more than about two thirds of it — a person drags the corner out
+// and the window springs back, and every window on that panel opens undersized.
+//
+// **Getting there meant honouring version 3, which is what `SyncPopups` below is.** `reposition` was
+// already implemented rather than stubbed, and the positioner already recorded `set_parent_size` and
+// `set_parent_configure`; what was missing was `set_reactive` — a mapped popup resolved again when its
+// parent moves under it. That was worth nothing while the Floorplanner placed a window once and never
+// again (141) and became worth something the day a person could drag one, which is the same decision
+// (51) that made this whole file grow gestures.
+//
+// **5 is not taken and the reason is unchanged**: a client told 5 and sent no `wm_capabilities` is
+// entitled to assume it has maximise, minimise, fullscreen and the window menu, which is a titlebar
+// full of buttons that do nothing. Version 2's tiled states cost nothing — they are states gyro may
+// send and does not — and came along with the rest. Every toolkit binds this at whatever version it
+// finds.
 //
 // **The whole of the mapping protocol is here because the whole of it is one state machine.** A
 // client gets an `xdg_surface`, gets an `xdg_toplevel` or an `xdg_popup` from it, commits with *no*
@@ -42,7 +54,7 @@
 // in front of them.
 
 // The advertised version. See above before raising it.
-inline constexpr std::uint32_t ShellVersion = 1;
+inline constexpr std::uint32_t ShellVersion = 4;
 
 class ClientXdgSurface;
 
@@ -160,6 +172,29 @@ public:
 		return changed;
 	}
 
+	// The room this window is told it has, which is the screen it is on: `xdg_toplevel.configure_bounds`,
+	// and *not* the `ApplyBounds` below — that one is the client's own minimum and maximum, coming the
+	// other way.
+	//
+	// **This is the number a toolkit sizes its first frame against, and gyro withholding it is what
+	// makes a window open the wrong size.** A client that is told nothing works the bounds out from
+	// `wl_output`: the mode in device pixels divided by the integer scale. Decision 164 runs panels at
+	// fractional scales and `wl_output.scale` can only carry the ceiling of one (56), so on a laptop
+	// panel deriving 1.37 a toolkit concludes the screen is half of 1920 rather than the 1405 the world
+	// is actually laid out in — and refuses to be more than 68% of it, however far a person drags the
+	// corner. Saying it directly is the only fix that does not involve lying about the mode.
+	//
+	// Zero is *unknown*, which is what the protocol says to send when there is nothing to say and is
+	// what a window whose session is on no output gets.
+	bool SetRoom(PixelSize<SurfaceSpace> room) noexcept
+	{
+		const bool changed = room != m_Room;
+
+		m_Room = room;
+
+		return changed;
+	}
+
 	// The client's own minimum and maximum, applied to a size the pointer asked for. Zero in either
 	// axis of either bound is *no limit*, which is what almost every client sends and what an unset
 	// bound means on the wire.
@@ -192,6 +227,10 @@ private:
 	// What the last configure said, so that a comparison rather than a signal decides whether one is
 	// owed — the same shape `m_Activated` has.
 	PixelSize<SurfaceSpace> m_Size{};
+
+	// The screen this window was last told it has, held for `m_Size`'s reason: a person dragging a
+	// window onto a second monitor changes it, and nothing else does.
+	PixelSize<SurfaceSpace> m_Room{};
 
 	// What the client says it can be, staged and current.
 	PixelSize<SurfaceSpace> m_PendingMin{};
@@ -233,8 +272,9 @@ public:
 
 	void OnSetOffset(std::int32_t x, std::int32_t y) override { m_Rules.Offset = { x, y }; }
 
-	// The three that a client bound below version 3 cannot send. Recorded for the day the version goes
-	// up, and [Positioner.h](Positioner.h) says what each is for.
+	// The three a client bound below version 3 cannot send, which since `ShellVersion` reached 4 is only
+	// one that bound low on purpose. [Positioner.h](Positioner.h) says what each is for; `set_reactive`
+	// is acted on by `ClientXdgSurface::SyncPopups` and the other two are still recorded and unread.
 	void OnSetReactive() override { m_Rules.Reactive = true; }
 
 	void OnSetParentSize(std::int32_t width, std::int32_t height) override
@@ -479,6 +519,27 @@ public:
 	bool SetActivated(bool activated) noexcept;
 	bool SetResizing(bool resizing) noexcept;
 	bool SetSize(PixelSize<SurfaceSpace> size) noexcept;
+
+	// The fourth, and the one whose argument is the world's rather than the caller's: it reads the
+	// screen this window is on rather than being told. Answers whether the room changed, which is a
+	// configure owed — a person dragging a window from one panel to another of a different scale is the
+	// case, and it is the same walk `SetActivated` above is folded into.
+	bool RefreshRoom();
+
+	// `xdg_positioner.set_reactive` honoured: the menus hanging off this surface resolved again against
+	// where their parent now is, and configured where the answer moved.
+	//
+	// **What makes this necessary is that a window can be dragged (51).** A popup is placed once, against
+	// the screen edges as they stood in its parent's coordinates at the moment it opened; move the window
+	// and a menu that flipped upward to stay on screen should flip back, and one that fitted should slide.
+	// Without this the menu keeps the placement it was born with, which a person sees as a submenu opening
+	// off the side of the screen after they have moved the window it belongs to.
+	//
+	// **Only the popups that asked, and the walk descends whether or not they did**: a reactive submenu
+	// under a plain menu is an ordinary arrangement, so the recursion is unconditional and the resolve
+	// is not. Top down, because a popup is positioned against its parent's own space and the parent
+	// has to have settled before the child is asked about.
+	void SyncPopups();
 
 	// The `xdg_wm_base` this surface came from, for the errors that belong to that interface.
 	[[nodiscard]] Wayland::Server::XdgWmBase Base() const noexcept { return m_Base; }
