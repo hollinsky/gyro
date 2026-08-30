@@ -122,6 +122,17 @@ public:
 	// edge moves no origin at all and this answers with the anchor unchanged.
 	[[nodiscard]] Vector3<double> Anchored(Size<SurfaceSpace, float> actual) const noexcept;
 
+	// How far this window's origin moves between two sizes its client might come back with.
+	//
+	// **The question a popup asks while its parent is being resized**, per `xdg_positioner`'s
+	// `set_parent_size`: a client positioning a menu against a window it has not drawn yet is describing
+	// a space that is about to move, and this is how far. Zero when the edge being pulled is the right or
+	// the bottom, which hold the origin still and so move nothing a menu is measured against.
+	//
+	// It is `Anchored` twice rather than a rule of its own so that which edge is fixed is stated once.
+	[[nodiscard]] Offset<GlobalSpace>
+	Between(Size<SurfaceSpace, float> from, Size<SurfaceSpace, float> to) const noexcept;
+
 private:
 	// The window being moved or resized, null when no gesture is running.
 	EntityId m_Window{};

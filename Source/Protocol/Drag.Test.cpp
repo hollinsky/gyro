@@ -383,6 +383,64 @@ GYRO_TEST(Drag, PullingTheLeftAndTopEdgesMovesTheOriginAndHoldsTheFarEdge)
 	GYRO_CHECK_EQ(anchored.Y + static_cast<double>(drag.Wanted().Height), 500.0);
 }
 
+// What a menu opened during a resize is measured against: the space its parent will be in rather than
+// the one it is in. A client positioning a popup in response to a configure it has not answered yet
+// states the size it is about to be, and the only thing that turns into is how far the window's origin
+// still has to travel.
+GYRO_TEST(Drag, TheSpaceAheadOfAWindowIsTheOriginItHasStillToReach)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	const std::array outputs{ Panel() };
+	scene.SetOutputs(outputs);
+
+	const EntityId window = Window(scene, { 300.0, 200.0, 0.0 });
+
+	PointAt(scene, { 300.0, 200.0 }, outputs);
+
+	WindowDrag drag;
+	GYRO_REQUIRE(drag.BeginResize(scene, window, { .Left = true, .Top = true }));
+
+	// A window the client says will be 100 wider and 50 taller than the 400 by 300 it currently is.
+	// Holding the far edge still means the origin goes the other way by exactly that much.
+	const Offset<GlobalSpace> ahead = drag.Between({ 400.0F, 300.0F }, { 500.0F, 350.0F });
+
+	GYRO_CHECK_EQ(ahead.X, -100.0);
+	GYRO_CHECK_EQ(ahead.Y, -50.0);
+
+	// And a client describing the size it already has is describing the present, which is the case that
+	// makes this need no expiry: a positioner naming a configure the client has since answered stops
+	// moving anything by itself.
+	const Offset<GlobalSpace> settled = drag.Between({ 400.0F, 300.0F }, { 400.0F, 300.0F });
+
+	GYRO_CHECK_EQ(settled.X, 0.0);
+	GYRO_CHECK_EQ(settled.Y, 0.0);
+}
+
+// The edges a person pulls that move no origin at all, so a menu opened while they are pulling is
+// measured against a space that never moved.
+GYRO_TEST(Drag, ThereIsNoSpaceAheadOfAWindowPulledByItsRightOrBottomEdge)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	const std::array outputs{ Panel() };
+	scene.SetOutputs(outputs);
+
+	const EntityId window = Window(scene, { 300.0, 200.0, 0.0 });
+
+	PointAt(scene, { 700.0, 500.0 }, outputs);
+
+	WindowDrag drag;
+	GYRO_REQUIRE(drag.BeginResize(scene, window, { .Right = true, .Bottom = true }));
+
+	const Offset<GlobalSpace> ahead = drag.Between({ 400.0F, 300.0F }, { 500.0F, 350.0F });
+
+	GYRO_CHECK_EQ(ahead.X, 0.0);
+	GYRO_CHECK_EQ(ahead.Y, 0.0);
+}
+
 // **The claim decision 166 exists for.** A client is free to come back with a size other than the one
 // it was asked for — its own increment, its own minimum, or its own opinion — and the window has to be
 // positioned from what arrived. Anchoring on the request instead is the shimmer a person sees on the

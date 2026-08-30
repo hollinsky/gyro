@@ -502,6 +502,7 @@ PixelRect<SurfaceSpace> ClientXdgPopup::Bounds() const
 	// journey exactly. `Scene/Hit.h`'s `LocalOn` is the same unprojection the pointer uses, which is
 	// what keeps *where the screen edge is* and *where a click lands* from being computed two ways.
 	const EntityId window = m_Parent->Window();
+	const PixelOffset<SurfaceSpace> shift = m_Parent->PendingShift(m_Rules);
 
 	PixelRect<SurfaceSpace> best{};
 	std::int64_t covered = -1;
@@ -517,8 +518,13 @@ PixelRect<SurfaceSpace> ClientXdgPopup::Bounds() const
 			continue;
 		}
 
+		// **The screen as it will stand in the parent's space, not as it stands now.** A window whose left
+		// edge is being pulled has an origin that moves with every size its client produces, so a popup
+		// positioned against a configure that has not been answered yet is positioned in a space that is
+		// about to shift underneath it — see `ClientXdgSurface::PendingShift`. The rectangle moves the
+		// opposite way to the window, because it is the world holding still.
 		const PixelRect<SurfaceSpace> local =
-			PixelRect<SurfaceSpace>::FromEdges(OnGrid(*topLeft), OnGrid(*bottomRight));
+			PixelRect<SurfaceSpace>::FromEdges(OnGrid(*topLeft) - shift, OnGrid(*bottomRight) - shift);
 
 		// **Chosen by how much of the anchor rectangle it holds**, which is *the output the control the
 		// menu belongs to is on*. Not the output the popup would land on, which is the question that has
@@ -777,6 +783,11 @@ void ClientXdgSurface::OnAckConfigure(std::uint32_t serial)
 	}
 
 	m_Acked = true;
+
+	// The newest the client has answered, which is what makes the range in `PendingShift` a set of
+	// configures still in flight. The maximum rather than the argument, because a client acknowledging
+	// an older configure after a newer one has not un-answered the newer.
+	m_AckedSerial = std::max(m_AckedSerial, serial);
 }
 
 void ClientXdgSurface::Configure()
@@ -898,6 +909,7 @@ void ClientXdgSurface::OnSurfaceCommitted(ClientSurface& surface)
 
 		m_Configured = false;
 		m_Acked = false;
+		m_AckedSerial = 0;
 
 		return;
 	}
@@ -1190,6 +1202,7 @@ void ClientXdgSurface::Withdraw() noexcept
 	// and that is a fresh negotiation rather than a continuation of the last one.
 	m_Configured = false;
 	m_Acked = false;
+	m_AckedSerial = 0;
 }
 
 void ClientXdgSurface::BeginMove(Wayland::Server::WlSeat seat, std::uint32_t serial)
@@ -1229,6 +1242,64 @@ bool ClientXdgSurface::SetActivated(bool activated) noexcept
 bool ClientXdgSurface::SetResizing(bool resizing) noexcept
 {
 	return m_Toplevel != nullptr && m_Toplevel->SetResizing(resizing);
+}
+
+PixelOffset<SurfaceSpace> ClientXdgSurface::PendingShift(const PopupPlacement& rules) const
+{
+	// **Both or neither.** The protocol pairs them — the size is what the window will be and the serial
+	// is which configure that is an answer to — and a size with no serial names no moment, so there is
+	// nothing to say how far ahead of the world it is.
+	if (!rules.ParentExtent || !rules.ParentConfigure)
+	{
+		return {};
+	}
+
+	// **A configure still in flight: sent, and not yet answered.** Not merely one gyro once sent — a
+	// positioner naming a configure the client has already acknowledged is describing a window that has
+	// since arrived, and treating it as the future would walk a menu away from its own window for as
+	// long as a person kept dragging. Mutter keeps a list of unacknowledged configurations and adjusts
+	// nothing when the serial is not in it (`meta_wayland_xdg_positioner_to_placement`, trimmed at every
+	// ack in `meta-window-wayland.c`); serials only go up, so the same set is two integers here.
+	//
+	// **A range rather than a membership test, and the difference is stated because it is real**: a
+	// serial is the display's rather than this object's, so a number in the gap that belonged to some
+	// other event is accepted. What that costs is honouring a size the client itself stated while
+	// quoting a serial it made up, which the protocol already calls undefined — and the arithmetic below
+	// retires itself the moment the client draws that size, so a wrong answer here cannot persist.
+	if (!m_Configured || *rules.ParentConfigure > m_Serial || *rules.ParentConfigure <= m_AckedSerial)
+	{
+		return {};
+	}
+
+	const WindowDrag& drag = m_Context->Drag();
+	const SceneStore* const scene = m_Context->Store();
+
+	// **Nothing else in gyro gives a window a future**, so a window that is not under the hand is a
+	// window whose size will be whatever it already is. A shell that moved or resized windows of its own
+	// accord would be the second answer here, and there is none (51).
+	if (scene == nullptr || m_Window.IsNull() || !drag.IsResizing() || drag.Window() != m_Window)
+	{
+		return {};
+	}
+
+	const Entity* const entity = scene->Find(m_Window);
+
+	if (entity == nullptr)
+	{
+		return {};
+	}
+
+	const Size<SurfaceSpace, float> future{ static_cast<float>(rules.ParentExtent->Width),
+		                                    static_cast<float>(rules.ParentExtent->Height) };
+
+	// From the size the window is to the size the client says it is about to be. Measured between two
+	// sizes rather than against the window's own translation, so that the answer is the same whether or
+	// not the client has committed since the gesture began.
+	const Offset<GlobalSpace> shift = drag.Between(entity->Extent, future);
+
+	// Global to the parent's own space is a translation while a window hangs on a floor, which is
+	// [Drag.h](Drag.h)'s assumption and breaks where that one does.
+	return { static_cast<std::int32_t>(std::lround(shift.X)), static_cast<std::int32_t>(std::lround(shift.Y)) };
 }
 
 void ClientXdgSurface::SyncPopups()

@@ -104,6 +104,16 @@ void WindowDrag::Track(SceneStore& scene, Instant origin)
 	static_cast<void>(commit.Move(m_Window, position, Immediate()));
 }
 
+Offset<GlobalSpace> WindowDrag::Between(Size<SurfaceSpace, float> from, Size<SurfaceSpace, float> to) const noexcept
+{
+	const Vector3<double> before = Anchored(from);
+	const Vector3<double> after = Anchored(to);
+
+	// Z is left out because a window is anchored in the plane: a resize changes no elevation, and the
+	// spaces a popup is placed in are two dimensional in any case.
+	return { after.X - before.X, after.Y - before.Y };
+}
+
 Vector3<double> WindowDrag::Anchored(Size<SurfaceSpace, float> actual) const noexcept
 {
 	// The fixed edge is the one the pointer is not on, so the origin moves by exactly the difference

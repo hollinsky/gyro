@@ -71,10 +71,15 @@ struct PopupPlacement
 	bool Reactive = false;
 
 	// What the client believed about its parent when it built this, per `set_parent_size` and
-	// `set_parent_configure`. Recorded and unread: both exist so that a compositor resizing a window
-	// can resolve a popup against the size the client *will* have rather than the one it has, and gyro
-	// never resizes a window (51). The `optional` is the distinction that matters if that ever changes
-	// — a client that said nothing and a client that said zero are different clients.
+	// `set_parent_configure`: the size the parent will have, and the configure that is an answer to.
+	//
+	// **Read, since decision 166 made gyro resize windows after all.** They exist so that a compositor
+	// resizing a window can resolve a popup against the size the client *will* have rather than the one
+	// it has — which for a while gyro could not do, because it never changed a window's size; a menu
+	// opened during a drag is the case, and `ClientXdgSurface::PendingShift` is the arithmetic.
+	//
+	// The `optional` is what makes that possible at all: a client that said nothing and a client that
+	// said zero are different clients, and only the second is describing a window.
 	std::optional<PixelSize<SurfaceSpace>> ParentExtent;
 	std::optional<std::uint32_t> ParentConfigure;
 

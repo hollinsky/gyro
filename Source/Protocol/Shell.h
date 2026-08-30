@@ -273,8 +273,8 @@ public:
 	void OnSetOffset(std::int32_t x, std::int32_t y) override { m_Rules.Offset = { x, y }; }
 
 	// The three a client bound below version 3 cannot send, which since `ShellVersion` reached 4 is only
-	// one that bound low on purpose. [Positioner.h](Positioner.h) says what each is for; `set_reactive`
-	// is acted on by `ClientXdgSurface::SyncPopups` and the other two are still recorded and unread.
+	// one that bound low on purpose. [Positioner.h](Positioner.h) says what each is for: `set_reactive` is
+	// acted on by `ClientXdgSurface::SyncPopups`, and the other two together by `PendingShift`.
 	void OnSetReactive() override { m_Rules.Reactive = true; }
 
 	void OnSetParentSize(std::int32_t width, std::int32_t height) override
@@ -526,6 +526,24 @@ public:
 	// case, and it is the same walk `SetActivated` above is folded into.
 	bool RefreshRoom();
 
+	// Where this window will be once it has answered a configure it has already been sent, as an offset
+	// from where it is now — which is `xdg_positioner.set_parent_size` and `set_parent_configure`
+	// honoured, and is zero for every popup that named neither.
+	//
+	// **A client positioning a menu while its own window is being resized is describing a window that
+	// does not exist yet.** It says *I am responding to configure S and I will be W by H*, and the whole
+	// use of that is which way a menu flips at the edge of a screen: resolving against the window as it
+	// stands puts the flip one frame behind the hand, and on the frame a person crosses the threshold
+	// the menu jumps the wrong way and back.
+	//
+	// **In gyro the answer is one subtraction, because a resize is the only thing that makes a window's
+	// future differ from its present.** Decision 166 holds the edge a person is not touching still, so
+	// the origin is a function of the size the client produced — and the offset between two futures is
+	// `Drag::Anchored` asked twice, once about the size the client says it will be and once about the
+	// size it is. It needs no expiry: the day the client produces the size it named, the two answers are
+	// the same one and this returns zero on its own.
+	[[nodiscard]] PixelOffset<SurfaceSpace> PendingShift(const PopupPlacement& rules) const;
+
 	// `xdg_positioner.set_reactive` honoured: the menus hanging off this surface resolved again against
 	// where their parent now is, and configured where the answer moved.
 	//
@@ -593,6 +611,11 @@ private:
 	std::uint32_t m_Serial = 0;
 	bool m_Configured = false;
 	bool m_Acked = false;
+
+	// And the newest it has answered, which with `m_Serial` bounds the configures still in flight — the
+	// set `PendingShift` asks a positioner's serial against. Zero is *none yet*, and a renegotiation puts
+	// it back there beside `m_Acked`.
+	std::uint32_t m_AckedSerial = 0;
 };
 
 // One client's `xdg_wm_base`.
