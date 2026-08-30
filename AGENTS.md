@@ -16,6 +16,17 @@ commits. When a change is ready, check that there are no currently staged change
 `git add` it, hunkwise if necessary to avoid accidentally pulling another agent's work in. In any case
 put the message in the reply — subject on one line, blank line, then the body.
 
+**You are probably not alone in this tree.** Another agent is often editing it at the same time, and
+the churn that causes is worth more care than it looks. Three habits, all of them earned:
+
+- **Don't try to isolate your change unless you confirm with the user.** No stashing, no copying the tree somewhere clean, no reverting
+  somebody else's files to get a quiet test run. It costs far more than it settles (clean builds take a while and contend with others on the same machine), and the answer it
+  buys was usually available by reading. If in doubt, defer it to the end and the user will check.
+- **A failure in a file somebody else has uncommitted changes to is theirs until shown otherwise.**
+  `git status` first, then read the failing assertion: if it names a feature you did not touch, say so
+  and carry on. Say it *out loud* rather than silently discounting it, so Paul can tell you are not
+  reporting a green run over somebody else's red one.
+
 - **Ask before implementing** where an answer would make the implementation better, and ask when you
   think extra effort would make the code better. Code quality is the point.
 - **Ask before adding a dependency**, and justify it.
