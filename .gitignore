@@ -14,3 +14,9 @@
 # of the above and downloads a binary on first use. Not a build dependency: nothing in the tree needs
 # it, and Tools/TraceDump.cpp is what runs where this is absent.
 /.venv/
+
+# Perfetto's all-in-one capture binary, which Tools/Tracing/README.md tells you to curl into the tree
+# root. Same reasoning as the venv above: nothing builds against it, it is a release artifact rather
+# than a source dependency, and pinning a downloaded binary in git would make the tree carry a copy
+# of somebody else's build for every version it is bumped to.
+/tracebox
