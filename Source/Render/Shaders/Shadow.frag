@@ -32,9 +32,14 @@ layout(push_constant) uniform Shadow
 
 layout(location = 0) out vec4 Colour;
 
-// How many standard deviations of the penumbra are followed before it is treated as nothing. The
-// same figure Seam/Dressing.h's expansion is cut at, for the same reason: past it the shadow is below
-// what an eight-bit target can hold.
+// How many standard deviations of the penumbra are followed before it is treated as nothing: past it
+// the shadow is below what an eight-bit target can hold.
+//
+// **Deliberately one sigma wider than the quad, and it was described here as the same figure until
+// 2026-08-30.** `Seam/Dressing.h`'s `Expansion` cuts the geometry at `Offset + 3σ`, so no fragment
+// outside three ever reaches this shader at all. Carrying four costs nothing — it is a bound in
+// arithmetic rather than an area — and it buys the margin that lets `ShadowPhi` clamp its own domain
+// without the clamp ever landing on a fragment that is drawn.
 const float ShadowSpan = 4.0;
 
 // Six-point Gauss-Legendre on `[-1, 1]`. Six because decision 132 measured it: the integrand is
@@ -44,22 +49,51 @@ const float ShadowNode[6] =
 	float[6](-0.93246951, -0.66120939, -0.23861919, 0.23861919, 0.66120939, 0.93246951);
 const float ShadowWeight[6] = float[6](0.17132449, 0.36076157, 0.46791393, 0.46791393, 0.36076157, 0.17132449);
 
-// The error function, to about one part in ten thousand (Winitzki's approximation), which is a
-// fiftieth of a code point at the umbra's alpha and two orders below the arithmetic it feeds.
-float ShadowErf(float value)
-{
-	const float a = 0.147;
-
-	float square = value * value;
-	float inner = square * (4.0 / 3.14159265 + a * square) / (1.0 + a * square);
-
-	return sign(value) * sqrt(1.0 - exp(-inner));
-}
-
 // The normal distribution's own integral: how much of a blurred half-plane's light survives at `x`.
+// Four of these are the whole of the separable term below, so this is the hottest arithmetic in the
+// shader by a wide margin, and what it is built out of is the point.
+//
+// **A polynomial rather than an error function, because the expensive instruction is the wrong one
+// to spend here.** Decision 169. The obvious form is `erf`, which is what this was: Winitzki's
+// approximation, an `exp`, a `sqrt` and a reciprocal. Those three run on the elementary function unit
+// rather than on the main ALU, and that unit is deliberately narrow — a quarter of the ALU's width on
+// the parts gyro most wants to be pleasant on, because an ordinary shader issues one transcendental
+// for every twenty multiplies and this one issued one for every three. Measured on an Adreno 618 at
+// 2160x1440, a shadow fragment cost 12.6 times a plain fill and two elevated panels cost 4.47 ms of a
+// 16.67 ms refresh, which is a frame gyro does not have. The arithmetic below is not cheaper in any
+// absolute sense; it is the same work moved onto the wide unit.
+//
+// **What makes a polynomial available at all is that the domain is bounded, and `ShadowSpan` bounds
+// it.** A sigmoid over the whole line is hopeless to fit and this is not one: past four standard
+// deviations the shadow is already below what an eight-bit target can hold, and the quad is cut a
+// sigma tighter than that again, which is why the clamp costs nothing and never lands on a fragment
+// that is drawn. So the fit is over `[-ShadowSpan, ShadowSpan]` and is *for* that number — moving
+// `ShadowSpan` invalidates these coefficients rather than rescaling them.
+//
+// **Odd about zero, and one at the ends by construction.** Half the terms are gone because the true
+// integral is symmetric about the edge, and the coefficients are constrained to sum to one so that
+// the clamp meets the polynomial exactly — a shadow reaching 0.9997 at its own cutoff would leave a
+// faint step around every panel where the expansion ends, which is worse than any error in the middle.
+//
+// A degree-thirteen minimax fit lands within 0.028 of an eight-bit code point, against 0.016 for the
+// error function it replaces, and the two never differ by more than 0.041 — so nothing on screen
+// changes, and what is given up is precision the target could not hold.
+const float ShadowFit[7] =
+	float[7](3.18810152, -8.36587794, 18.62752647, -28.66216116, 28.14849436, -15.63691075, 3.70082751);
+
 float ShadowPhi(float x)
 {
-	return 0.5 + 0.5 * ShadowErf(x * 0.70710678);
+	float s = clamp(x / ShadowSpan, -1.0, 1.0);
+	float q = s * s;
+
+	float odd = ShadowFit[6];
+
+	for (int term = 5; term >= 0; --term)
+	{
+		odd = odd * q + ShadowFit[term];
+	}
+
+	return 0.5 + 0.5 * s * odd;
 }
 
 // The signed distance to a rounded rect, negative inside. Used for the mask at the bottom of this

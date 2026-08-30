@@ -1602,16 +1602,19 @@ how many lifted items. A target that a busy scene cannot meet on any part is a t
 defect on every machine and means nothing. Whether the answer is a fraction, a per-scene figure
 resolved at admission, or a tier step that reaches `Budget::Invalidate` sooner is open.
 
-**And what a shadow costs, which is what the 6.49 ms mostly is.** 4.47 of it is two shadow draws:
-12.6 times a plain fill per fragment, which is `ShadowPhi`'s four error functions over a quad
-expanded past the panel by the penumbra, on a part where every `exp` and `sqrt` runs on a quarter-rate
-unit. Decision 132's accuracy budget is a fiftieth of an eight-bit code point and its own comment
-observes that this is two orders below the arithmetic it feeds, so an approximation to Φ with no
-elementary-function op in it could spend most of those two orders and still land inside a code point.
-Nobody has written one, and nobody has measured whether the win survives on a part that was never
-bound on that unit — the same scene on a Tiger Lake laptop draws everything the materials gym adds
-over the lanes gym at a *lower* cost per fragment than the base scene, so the shader that is the whole
-story on one part is invisible on the other.
+**And what a shadow costs, which is what the 6.49 ms mostly is** — answered by
+[decision 169](Decisions.md#169-the-shadows-normal-integral-is-a-polynomial-over-the-span-the-shadow-is-already-cut-at-because-what-it-costs-is-the-instruction-class-rather-than-the-operation-count),
+which took the Adreno 618's composite from 10.58 ms to 8.79 ms by replacing `ShadowPhi`'s error
+function with a polynomial and changed nothing measurable on a Tiger Lake. What that entry leaves here
+is smaller and still real: the shadow is 7.7 times a plain fill per fragment rather than 12.6, and two
+levers remain and one of them is already spent. `Seam/Dressing.h`'s `Expansion` sets the quad's *area*
+at `Offset + 3σ`, which is a separate lever from the per-fragment cost — but it is at the right place
+already: the alpha left outside the bound is 0.11 of a code point at three sigma, 0.51 at two and a
+half and 1.86 at two, so tightening it trades a real cost for a visible edge around every shadow. What
+is actually open is the other one. A fragment saturated on both axes, which
+is most of a large panel's interior, still evaluates four full polynomials to answer one; an early out
+there is the shape of win the deficit's own early exits already are, and nobody has measured how much
+of the quad qualifies.
 
 Worth stating what is *not* open: the corner quadrature decision 132 is mostly about has never
 executed. Nothing in the tree sets `DrawItem::Radius` to anything but zero, so every quad gyro draws

@@ -13306,3 +13306,109 @@ but zero. The floor tier drops materials and keeps every shadow, which is what
 [Docs/Experience.md](Experience.md) promises, and on this machine that promise is most of the floor
 composite. Sizing `C_min` for a part like this one, and whether `ShadowPhi` needs an approximation
 with no elementary-function op in it, are Open.md's.
+
+### 169. The shadow's normal integral is a polynomial over the span the shadow is already cut at, because what it costs is the instruction class rather than the operation count
+
+*(Decided 2026-08-30, closing the second half of the question [decision 168](#168-the-schedule-reserves-against-the-larger-of-the-floor-target-and-what-floor-frames-cost-and-it-arms-for-the-most-expensive-tier-still-reachable) handed to Open.md. Measured on two parts, and the second one is what makes the entry worth having.)*
+
+**A shadow fragment cost 12.6 times a plain fill on an Adreno 618, and the arithmetic that explains
+it is not the arithmetic anyone would count.** The shader issues about forty-five ordinary multiplies
+and adds per fragment and fourteen elementary-function ops — twelve of them
+[decision 132](#132-the-shadows-coverage-is-exact-the-rectangle-is-closed-form-and-the-corners-are-quadrature)'s
+four `erf` calls, at an `exp`, a `sqrt` and a reciprocal each. The elementary function unit is
+narrower than the main ALU by design, commonly a quarter of its width, because an ordinary shader
+issues one transcendental for every twenty multiplies and the transistors are better spent elsewhere.
+At a quarter rate those fourteen occupy about fifty-six ALU-equivalent slots against the forty-five
+real ones, so more than half of what the shader costs is a sixth of what it does.
+
+That ratio is the finding. **`Shadow.frag` is an outlier against the assumption the hardware is
+balanced for**, at roughly one transcendental per three ordinary ops where a typical shader is nearer
+one in twenty — and a part tuned for the common ratio is a part this shader is the worst case for.
+
+#### The domain is bounded, and that is the whole of why a polynomial is available
+
+Φ is a sigmoid, and fitting one over the whole line with a polynomial is hopeless. This is not one.
+`ShadowSpan` already declares that past four standard deviations the shadow is below what an eight-bit
+target can hold, and Seam/Dressing.h's `Expansion` cuts the *geometry* a sigma tighter still, at
+`Offset + 3σ` — so no fragment beyond three ever reaches the shader. Φ only has to be right on
+`[-ShadowSpan, ShadowSpan]`, with a sigma of margin nothing is rasterized in, and a minimax fit over a
+bounded interval is arithmetic rather than an art.
+
+**Those two figures were described as one until this entry.** `ShadowSpan`'s comment claimed to be
+"the same figure Seam/Dressing.h's expansion is cut at" and the expansion has returned `3.0F *
+Softness` throughout. Nothing was wrong on screen — the wider bound is the safe direction, and the
+deficit early exits it gates have never run — but a fit whose domain is justified by a second file
+cannot rest on a sentence that was not checked, so both ends now state the gap and why it is there.
+
+**The coefficients are constrained to sum to one, and that constraint is not cosmetic.** It makes the
+clamp meet the curve exactly at the cutoff. A fit left free lands near 0.9997 there, which is a step
+of a code point drawn as a faint rectangle around every panel exactly where the expansion ends — an
+error in the one place on the quad where nothing else is happening to hide it, which is worse than
+several times that error in the middle of the gradient.
+
+**The fit is *for* that span rather than merely scaled by it.** Moving `ShadowSpan` invalidates these
+coefficients; it does not rescale them. That is a coupling between two files and it is stated at both
+ends.
+
+```
+                            vs true Φ        the two against each other
+Winitzki (rejected)      0.016 code points
+degree-13 polynomial     0.028 code points   0.041 code points, worst case, in fp32
+```
+
+Nothing on screen changes. What is given up is precision an eight-bit alpha could not hold, which is
+what decision 132's own comment already said it had two orders of in hand.
+
+#### What it bought, and the second machine is the point
+
+```
+Adreno 618, materials gym, 2160x1440   10.578 ms  →  8.788 ms   11.95 M fragments both
+Tiger Lake, same scene                  2.1085 ms →  2.1135 ms   5.97 M fragments both
+```
+
+1.79 ms on the part that was bound on that unit — 17% of the composite, of which the shadow's own
+share went from 4.47 ms to about 2.68 ms — and **nothing at all on the part that was not.** The same
+change, the same shader, a factor that is either large or absent depending on a ratio in the hardware
+that no amount of reading the shader would reveal.
+
+That is the rule worth keeping: **the operation count is not the cost, and a shader can be rewritten
+into the same number of operations and get faster.** The arithmetic below is not cheaper in any
+absolute sense. It is the same work moved onto the wide unit.
+
+#### Rejected
+
+**Winitzki's approximation**, which is what was there. Good to one part in ten thousand, and three
+elementary-function ops to get it — accuracy bought at the one price this shader cannot afford.
+
+**A logistic, `1/(1 + exp(-1.702x))`.** The obvious cheap sigmoid, and it still costs an `exp` and a
+reciprocal. Two elementary-function ops instead of three is not the shape of the win, and it is less
+accurate than the polynomial into the bargain.
+
+**A lookup texture.** It moves the work to the texture unit, which is contended by everything else in
+the composite, and it puts a resource behind the one shader that reads nothing —
+[decision 104](#104-an-elevation-is-a-height-under-one-light-and-the-shadow-is-analytic) states *no
+pass, no offscreen, no cache, and no input read at all* as the reason a level stays off decision 34's
+ladder, and a sampler here would quietly cost that.
+
+**Half precision.** The transcendentals would issue faster, but the fit's coefficients reach 28.7 and
+alternate in sign to sum to one, so the evaluation loses about five bits to cancellation and fp16 does
+not have them to lose. It would also make this the only shader in the tree with a precision qualifier.
+
+**Shrinking the quad instead.** The area and the per-fragment cost are separate levers and they
+compose rather than compete, so this would have been a fair alternative — except that it is already
+spent. Seam/Dressing.h cuts the expansion at three sigma, where 0.11 of a code point is left outside
+the bound; two and a half leaves 0.51 and two leaves 1.86, so tightening it buys area at the price of
+a visible edge around every shadow. Three is the right number and there is nothing behind it.
+
+#### What is left
+
+The shadow is still about 7.7 times a plain fill per fragment, down from 12.6, and about 2.68 ms of
+the frame. One lever remains and it is Open.md's: an early out for a fragment saturated on both axes,
+which is most of a large panel's interior and currently evaluates four full polynomials to answer one.
+It is the same shape of win the corner deficit's own early exits already are, and nobody has measured
+how much of a quad qualifies.
+
+And the corner quadrature decision 132 is mostly about *still* has never executed — nothing in the
+tree sets `DrawItem::Radius` to anything but zero. When the first rounded corner reaches the screen it
+brings `ShadowPanel`'s `exp`, `sin` and `cos` with it, six nodes at a time, and this entry's argument
+applies to them before they are measured rather than after.
