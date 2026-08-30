@@ -492,3 +492,59 @@ GYRO_TEST(Options, TheMissTriggerOverNoRingIsAContradiction)
 	GYRO_CHECK(Parse({ "--trace-on-miss", "--trace-buffer=1M" }).has_value());
 	GYRO_CHECK(!Parse({ "--trace-on-miss", "--trace-buffer=0" }).has_value());
 }
+
+GYRO_TEST(Options, TheInterfaceSizeIsAnAngleAndCarriesItsUnit)
+{
+	// Decision 164: what a person states is a size at the eye, not a scale. The unit is mandatory
+	// because a bare number is a number in whatever unit the reader assumed, and this one divides into
+	// every output's scale, the pointer's speed, and the layout at once.
+	const Result<Options> stated = Parse({ "--ui-size=1.1arcmin" });
+
+	GYRO_REQUIRE(stated);
+	GYRO_CHECK_EQ(stated->LogicalPixelAngle.MilliArcminutes, 1100);
+
+	GYRO_CHECK_EQ(Parse({})->LogicalPixelAngle.MilliArcminutes, AngularPreference::Default);
+
+	// A missing decimal point is the way this flag gets typed wrong, and it is the one the band exists
+	// to catch. So is a bare number, which would otherwise be a taste nobody meant.
+	GYRO_CHECK(!Parse({ "--ui-size=134arcmin" }));
+	GYRO_CHECK(!Parse({ "--ui-size=1.34" }));
+	GYRO_CHECK(!Parse({ "--ui-size=arcmin" }));
+	GYRO_CHECK(!Parse({ "--ui-size=1.34deg" }));
+}
+
+GYRO_TEST(Options, AViewingDistanceRidesOnTheOutputItIsAbout)
+{
+	// The one term in decision 164's derivation that is on nobody's connector, so it is the one thing a
+	// person has to be able to say. Per output, because two panels on one desk are at two distances.
+	const Result<Options> desk =
+		Parse({ "--output=DP-1:3440x1440@144,distance=730mm", "--output=eDP-1,distance=800mm" });
+
+	GYRO_REQUIRE(desk);
+	GYRO_REQUIRE(desk->Requested().size() == 2);
+	GYRO_CHECK_EQ(desk->Requested()[0].Width, 3440);
+	GYRO_CHECK_EQ(desk->Requested()[0].Refresh, 144.0);
+	GYRO_CHECK(desk->Requested()[0].DistanceMm == 730);
+	GYRO_CHECK_EQ(desk->Requested()[1].Connector, "eDP-1");
+	GYRO_CHECK(desk->Requested()[1].DistanceMm == 800);
+
+	// A field with no mode in front of it, which is what somebody with one panel and nothing to say
+	// about it types. The mode stays the default rather than becoming part of the field.
+	const Result<Options> alone = Parse({ "--output=distance=700mm" });
+
+	GYRO_REQUIRE(alone);
+	GYRO_CHECK(alone->Requested()[0].DistanceMm == 700);
+	GYRO_CHECK_EQ(alone->Requested()[0].Width, 1920);
+
+	// Saying nothing is the ordinary case and leaves the form-factor prior in Scene/Density.h alone,
+	// which is a better guess than any single number a default here could hold.
+	GYRO_CHECK(!Parse({ "--output=2560x1440" })->Requested()[0].DistanceMm.has_value());
+
+	// The unit is mandatory here too, the band catches a stray decimal point, and a second positional
+	// piece is a contradiction rather than a field.
+	GYRO_CHECK(!Parse({ "--output=distance=700" }));
+	GYRO_CHECK(!Parse({ "--output=distance=7mm" }));
+	GYRO_CHECK(!Parse({ "--output=distance=70000mm" }));
+	GYRO_CHECK(!Parse({ "--output=2560x1440,144" }));
+	GYRO_CHECK(!Parse({ "--output=2560x1440,depth=8" }));
+}

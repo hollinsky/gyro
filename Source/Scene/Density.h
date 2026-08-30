@@ -52,6 +52,16 @@ struct PanelSize
 
 // The person's one preference: how big a logical pixel should be, as an angle.
 //
+// **The angle is a logical pixel's, not a glyph's.** That is the unit every extent on the machine is
+// in — a window's size, a margin, an icon, and the font size a toolkit asks for — so text follows from
+// it rather than being what it measures. It cannot be a character height: gyro does not own the font,
+// and a number defined against somebody's default face and x-height ratio would be the 96 DPI mistake
+// again, wearing typography. The intuition is still available and worth writing down — ordinary body
+// text is about 16 logical pixels to the em, so at the default an em subtends 21 arcminutes and an
+// x-height about 10.7, a little under the 12 where reading speed stops improving. At the reference it
+// is 12.1, which is to say 96 DPI at 600 mm put ordinary text exactly on that threshold and the
+// default sits 11% inside it.
+//
 // **The unit is arcminutes per logical pixel, stored in thousandths.** A physical quantity declared
 // as one, so a bigger number is bigger text — the direction a person expects, needing no warning —
 // and so the value means something without a reference beside it, which matters because decision
@@ -76,8 +86,26 @@ struct PanelSize
 // fingertip rather than because of anything about eyes.
 struct AngularPreference
 {
-	// 1.516 arcminutes per logical pixel, in thousandths.
+	// **The basis, not the default.** 1.516 arcminutes per logical pixel, and the two are different
+	// jobs: this is the unit global space is measured in and the unit decision 164 has a setup store
+	// its arrangement in, so it is arbitrary but frozen — the day the first setup reaches a disk, it
+	// can never move again. `Default` below is a guess at taste and is expected to move.
 	static constexpr std::int32_t Reference = 1516;
+
+	// **What a person gets before they have said anything: 1.340 arcminutes.**
+	//
+	// Three independent pairings people actually run land here — Apple's default rung on a 27-inch 5K,
+	// a 27-inch 1440p panel at 1x, and a 27-inch 4K at 1.5x, which is the fraction every desktop
+	// offering one picks. That is a far better evidenced claim about taste than the reference, whose
+	// support is a 1987 logical inch.
+	//
+	// **It is not the reference, and it costs two snaps to not be.** At 1516 a 13.3-inch 2560x1600
+	// laptop lands exactly on 2x and a 24-inch 1080p monitor exactly on 1x; at 1340 they derive 1.74
+	// and 0.84 and take them. The band edges are 1368 and 1404, so a default of 1404 would have been
+	// free. It is not taken, because choosing the default for what the snapping band does with it is
+	// letting the mechanism pick the taste — and the retina laptop's actual cost is a 1.15:1
+	// minification, milder than the 1.60 decision 56 already accepts at a scale of 1.25.
+	static constexpr std::int32_t Default = 1340;
 
 	// A thousand arcminutes is sixteen degrees to the logical pixel, which is past absurd in the one
 	// direction anybody could reach by typo. It is a bound on the arithmetic rather than on taste:
@@ -85,7 +113,7 @@ struct AngularPreference
 	// is an int64 overflow instead of a scale nobody wanted.
 	static constexpr std::int32_t MaximumMilliArcminutes = 1'000'000;
 
-	std::int32_t MilliArcminutes = Reference;
+	std::int32_t MilliArcminutes = Default;
 
 	// What a person writes, which is a decimal number of arcminutes. The one conversion in the story
 	// that needs a real division, kept here — at the boundary, once per preference — rather than in the

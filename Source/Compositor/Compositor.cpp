@@ -1328,6 +1328,7 @@ public:
 	{
 		m_Options = options;
 		m_RealTime = options.RealTime;
+		m_LogicalPixelAngle = options.LogicalPixelAngle;
 
 		if (const Result<void> ready = m_Interrupt.Open(); !ready)
 		{
@@ -2526,20 +2527,27 @@ private:
 		{
 			const OutputConfiguration& achieved = m_Bound[index].Configuration;
 			const PanelFacts panel = m_Backend->Panel(index);
-			const std::int32_t distance = SeededDistance(panel.Kind, panel.Size);
+
+			// A person's own measurement where they made one, and form factor where they did not. The
+			// requests are positional against the outputs for the reason stated above this function, so
+			// this is the same index the placement below writes.
+			const std::span<const OutputRequest> requested = m_Options.Requested();
+			const std::optional<std::int32_t> stated =
+				index < requested.size() ? requested[index].DistanceMm : std::nullopt;
+			const std::int32_t distance = stated ? *stated : SeededDistance(panel.Kind, panel.Size);
 
 			const std::optional<Scale> derived =
-				DensityFromGeometry(panel.Size, achieved.Resolution, distance, m_Preference);
+				DensityFromGeometry(panel.Size, achieved.Resolution, distance, m_LogicalPixelAngle);
 			const Scale density = derived ? *derived : DensityFromResolution(achieved.Resolution);
 
 			if (derived)
 			{
 				spdlog::info(
-					"  output {}: {} mm x {} mm at a seeded {} mm, so {}",
+					"  output {}: {} mm x {} mm at {} mm, so {}",
 					index,
 					panel.Size.WidthMm,
 					panel.Size.HeightMm,
-					distance,
+					stated ? std::format("a stated {}", distance) : std::format("a seeded {}", distance),
 					density
 				);
 			}
@@ -2944,12 +2952,15 @@ private:
 	// One identity per output, minted where hotplug will release them.
 	SlotAllocator<OutputTag> m_OutputIds{ MaxOutputs };
 
-	// How big text should be, which decision 164 makes the only density figure on the machine — and
-	// the reference until a session supplies one. It is deliberately *not* on the command line: what
-	// somebody would type there is a scale, which is the settings-panel implementation detail this
-	// axis exists to stop exposing, and the honest knob is a viewing distance per output that belongs
-	// to a setup nothing can yet keep.
-	AngularPreference m_Preference{};
+	// How big a logical pixel should be at the eye, which decision 164 makes the only density figure on
+	// the machine — and the whole machine's until a session supplies one per person.
+	//
+	// **It is on the command line now, and the argument that kept it off has been answered rather than
+	// overruled.** That argument was that what somebody would type is a *scale*, the settings-panel
+	// detail this axis exists to stop exposing. What `--ui-size` takes is an angle carrying its own
+	// unit, which is a size and not a scale, so the objection no longer applies to the thing being
+	// typed. The viewing distance is the second knob and is per-output, on `--output` beside the mode.
+	AngularPreference m_LogicalPixelAngle{};
 
 	bool m_RealTime = false;
 

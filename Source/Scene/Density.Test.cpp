@@ -13,7 +13,10 @@
 
 namespace
 {
-constexpr AngularPreference Reference{};
+// Decision 164's table is stated at the reference, which since the default moved to 1340 is no longer
+// what an unconfigured machine takes. Named explicitly here so the table's rows keep checking the
+// table rather than quietly re-tabulating themselves against whatever the default is this month.
+constexpr AngularPreference Reference{ AngularPreference::Reference };
 
 // The rounded 120th a derivation lands on, or zero where it refused.
 [[nodiscard]] std::int32_t
@@ -149,10 +152,14 @@ GYRO_TEST(Density, ThePreferenceIsAnAngleAndReadsTheWayAPersonExpects)
 		Derived({ 597, 336 }, { 3840, 2160 }, 600, AngularPreference{ 1200 })
 	);
 
-	// The default is the reference and the reference is 1.516 arcminutes, which is 96 DPI at 600 mm
-	// restated as the angle it always was.
-	GYRO_CHECK_EQ(AngularPreference{}.MilliArcminutes, AngularPreference::Reference);
+	// **The default is not the reference, and the two being different is the point.** The reference is
+	// the frozen basis global space and a setup file are written in; the default is a guess at taste
+	// that has already moved once. Decision 164 worried that nothing built against one preference could
+	// tell whether the distinction had been honoured, and this is what stops that being true.
+	GYRO_CHECK_EQ(AngularPreference{}.MilliArcminutes, AngularPreference::Default);
+	GYRO_CHECK(AngularPreference::Default != AngularPreference::Reference);
 	GYRO_CHECK_EQ(AngularPreference::FromArcminutes(1.516), Reference);
+	GYRO_CHECK_EQ(AngularPreference::FromArcminutes(1.34), AngularPreference{});
 
 	// What a person writes is a decimal, and the one division in the story happens here rather than in
 	// the derivation. The reader decision 164 tabulates sits at 1.10.

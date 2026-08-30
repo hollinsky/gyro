@@ -13,6 +13,7 @@
 #include "Core/Time.h"
 #include "Frame/Admission.h"
 #include "Gym/Gym.h"
+#include "Scene/Density.h"
 #include "Seam/Renderer.h"
 #include "Session/Handover.h"
 
@@ -80,6 +81,21 @@ struct OutputRequest
 	// Hertz rather than a period, because that is the unit a panel and a person both quote. The
 	// conversion is Core/Time.h's and happens once, where the configuration is built.
 	double Refresh = 60.0;
+
+	// How far this panel's viewer is from it, in millimetres, or nothing for the form-factor prior.
+	//
+	// **The one term in decision 164's derivation that is on nobody's connector**, and the reason the
+	// entry wants a setup: the same laptop panel is at 350 mm on a lap and 700 mm shoved aside as a
+	// third screen, and EDID cannot tell those apart. `Scene/Density.h`'s `SeededDistance` guesses from
+	// form factor and is right often enough to boot into; this is a person overriding that guess for
+	// one panel, and it *overrides* rather than replaces — an output nobody names still takes the prior.
+	//
+	// **A setup fact riding a mode request, which is what it is until there is a setup.** Everything
+	// else on this struct is what was asked of the panel; a viewing distance is a fact about the room.
+	// It lives here anyway because the flag is already keyed by connector and a second one would
+	// duplicate the whole binding rule, positional fallback included — the same expedient decision 141
+	// takes when the Floorplanner stands in for an absent shell.
+	std::optional<std::int32_t> DistanceMm{};
 };
 
 // Where `--backend=dump` writes, when the command line does not say. Relative, because a boot
@@ -108,6 +124,21 @@ struct Options
 	// card nodes and the panel is on one of them. Named for the case where that guess is wrong and for
 	// the machine with two monitors on two cards, which gyro cannot yet drive at once.
 	std::string Device;
+
+	// How big a logical pixel should be at the eye — `--ui-size` — which decision 164 makes the only
+	// density figure on the machine: one number for every output, from which each derives its own scale out of its own
+	// pitch and how far away it is. A *person's* number rather than a panel's, which is why it is not
+	// per-output the way the distance beside it is.
+	//
+	// **It is a size and deliberately not a scale.** What every other system exposes here is a scale,
+	// which couples the artefact-free point to the size choice and pins the bottom of the ladder to
+	// whatever panel somebody happens to own — decision 164 is the argument, and `--ui-size` is the
+	// whole of what it buys a person on the command line.
+	// **Named for what the angle is of rather than for the flag that sets it.** A logical pixel is the
+	// unit a window's size, a margin, an icon and a requested font size are all in, and the two things
+	// a reader here will otherwise assume — that this is a font size, or that it is a scale — are both
+	// wrong. The type carries whose preference it is; the name carries what it is a preference about.
+	AngularPreference LogicalPixelAngle{};
 
 	std::array<OutputRequest, MaxOutputs> Outputs{};
 	std::size_t OutputCount = 0;
@@ -316,9 +347,93 @@ namespace Detail
 	return letter && text.find('-') != std::string_view::npos;
 }
 
+// How far a viewer can be said to be, in millimetres. Wide enough to hold a phone at arm's length
+// and a projector across a hall, and narrow enough that a decimal point in the wrong place is
+// refused rather than derived from.
+inline constexpr std::int64_t MinimumDistanceMm = 100;
+inline constexpr std::int64_t MaximumDistanceMm = 10'000;
+
+// One `KEY=VALUE` out of `--output`'s comma-separated tail. Named rather than a fourth positional
+// field because the positional grammar is out of separators, and because every further setup fact a
+// panel acquires lands the same way rather than growing another one.
+[[nodiscard]] inline Result<void> ParseOutputField(std::string_view field, OutputRequest& request)
+{
+	constexpr std::string_view Distance = "distance=";
+
+	if (!field.starts_with(Distance))
+	{
+		return Failure(EINVAL, "--output takes distance=NNNmm after a comma, and no other field yet");
+	}
+
+	std::string_view text = field.substr(Distance.size());
+
+	// The unit is mandatory for `--ui-size`'s reason: a bare number is a number in whatever unit the
+	// reader assumed, and this one is load-bearing for three things at once.
+	if (!text.ends_with("mm"))
+	{
+		return Failure(EINVAL, "--output distance wants millimetres, as distance=700mm");
+	}
+
+	text.remove_suffix(2);
+
+	std::int64_t millimetres = 0;
+
+	if (!ParseInteger(text, millimetres) || millimetres < MinimumDistanceMm || millimetres > MaximumDistanceMm)
+	{
+		return Failure(EINVAL, "--output distance is how far away the viewer is, in millimetres, from 100 to 10000");
+	}
+
+	request.DistanceMm = static_cast<std::int32_t>(millimetres);
+
+	return {};
+}
+
 [[nodiscard]] inline Result<OutputRequest> ParseOutput(std::string_view text)
 {
 	OutputRequest request{};
+
+	if (text.empty())
+	{
+		return request;
+	}
+
+	// A comma-separated tail of named fields in front of the positional grammar, and **a piece
+	// carrying an `=` is named wherever it sits** — so `--output=distance=700mm` is the whole request
+	// for somebody with one panel and nothing to say about its mode, and the positional head stays
+	// exactly what it was for everybody who never types a comma.
+	{
+		std::string_view head{};
+		std::string_view rest = text;
+		bool first = true;
+
+		while (!rest.empty())
+		{
+			const std::size_t comma = rest.find(',');
+			const std::string_view piece = rest.substr(0, comma);
+
+			rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
+
+			if (piece.find('=') != std::string_view::npos)
+			{
+				if (const Result<void> parsed = ParseOutputField(piece, request); !parsed)
+				{
+					return std::unexpected{ parsed.error() };
+				}
+			}
+			else if (first)
+			{
+				head = piece;
+			}
+			else
+			{
+				return Failure(EINVAL, "--output is one mode and then named fields, as DP-1:2560x1440,distance=700mm");
+			}
+
+			first = false;
+		}
+
+		text = head;
+	}
 
 	if (text.empty())
 	{
@@ -388,6 +503,41 @@ namespace Detail
 	}
 
 	return request;
+}
+
+// The band `--ui-size` accepts, in arcminutes. The useful range is about 0.95 to 1.9 — 20/20 acuity
+// at one end and the critical print size at the other, per Scene/Density.h — and this is far wider
+// on purpose: guard rails stop a typo, not a taste. What they actually catch is a missing decimal
+// point, since `134arcmin` is the way this flag will be got wrong.
+inline constexpr double MinimumArcminutes = 0.5;
+inline constexpr double MaximumArcminutes = 10.0;
+
+// `1.34arcmin`, with the unit mandatory. The name says the effect and the value says the quantity,
+// which is what keeps a flag that sizes the whole interface from reading as a font size — a font size
+// is a different lever and lives in the toolkit.
+//
+// **The angle is one logical pixel's**, which is the unit a window's size, a margin, an icon and a
+// requested font size are all in. Text moves with it because a toolkit asks for its fonts in those
+// units, not because this flag knows what a font is.
+[[nodiscard]] inline Result<AngularPreference> ParseUiSize(std::string_view text)
+{
+	constexpr std::string_view Unit = "arcmin";
+
+	if (!text.ends_with(Unit))
+	{
+		return Failure(EINVAL, "--ui-size wants an angle carrying its unit, as --ui-size=1.34arcmin");
+	}
+
+	text.remove_suffix(Unit.size());
+
+	double arcminutes = 0.0;
+
+	if (!ParseReal(text, arcminutes) || !(arcminutes >= MinimumArcminutes) || !(arcminutes <= MaximumArcminutes))
+	{
+		return Failure(EINVAL, "--ui-size is how big a logical pixel is at the eye, from 0.5 to 10 arcminutes");
+	}
+
+	return AngularPreference::FromArcminutes(arcminutes);
 }
 
 [[nodiscard]] inline bool Matches(std::string_view argument, std::string_view name, std::string_view& value) noexcept
@@ -657,6 +807,20 @@ namespace Detail
 
 			options.Outputs[options.OutputCount] = *request;
 			++options.OutputCount;
+
+			continue;
+		}
+
+		if (Detail::Matches(argument, "--ui-size", value))
+		{
+			const Result<AngularPreference> preference = Detail::ParseUiSize(value);
+
+			if (!preference)
+			{
+				return std::unexpected{ preference.error() };
+			}
+
+			options.LogicalPixelAngle = *preference;
 
 			continue;
 		}
