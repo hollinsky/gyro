@@ -60,7 +60,7 @@ Result<void> DispatchWait::WaitUntil(std::optional<Instant> deadline, Instant no
 	// The stop first and the borrowed sources after it, so the array is a prefix whatever was wired in.
 	// Which of them returned is never asked: the caller re-checks the stop flag and steps, and a step
 	// drains input and reads whatever the author has waiting anyway.
-	std::array<struct pollfd, 3> watched{};
+	std::array<struct pollfd, DispatchWait::MaxWatched + 1> watched{};
 	watched[0].fd = m_Fd.Get();
 	watched[0].events = POLLIN;
 

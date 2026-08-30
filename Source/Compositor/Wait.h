@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstddef>
 #include <optional>
 
@@ -27,10 +28,11 @@
 // two descriptors is not it.
 //
 // **Input is that second kind, and it is still one more `pollfd`.** libinput hands over one descriptor
-// for the whole seat, so a run driving a panel with clients on it waits on three files rather than
-// one-per-device, and what a ring would multiplex is a set small enough to name. What would actually
-// change the answer is a set whose *size* is not known when the thread starts — a control socket per
-// connected agent — because that is where an array stops being a wait and starts being a registry.
+// for the whole seat, and Session/Control.h hands over one for every agent behind its own epoll, so a
+// run with everything in it waits on four files rather than one-per-device and one-per-agent — and what
+// a ring would multiplex is a set small enough to name. What would actually change the answer is a set
+// whose *size* is not known when the thread starts, because that is where an array stops being a wait
+// and starts being a registry.
 //
 // **The timeout is relative, which is the opposite of what Compositor/Uring.h argues for, and the
 // difference between the two threads is the argument.** The frame ring uses `IORING_TIMEOUT_ABS`
@@ -38,7 +40,8 @@
 // vblank, and a late frame is the one error that contract does not permit. Dispatch has no deadline —
 // Dispatch/Loop.h says so in its first line — and a wake served late there costs the *first frame or
 // two* of a motion and never its shape, because
-// [decision 89](../../Docs/Decisions.md#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete)
+// [decision
+// 89](../../Docs/Decisions.md#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete)
 // stamps a retarget with the instant it fell due rather than with now. So the animation renders already
 // in progress by exactly the lateness, which is what `ISceneAuthor::Advance` is documented to want.
 //
@@ -65,25 +68,42 @@ public:
 	[[nodiscard]] Result<void> Open() noexcept;
 
 	// Also wake when this descriptor is readable. The root's, borrowed and never closed here — it
-	// belongs to whatever produced it, which today is the Wayland event loop inside the client host or
-	// the libinput context beside it. Called once per descriptor, before the dispatch thread starts;
-	// `-1` is the ordinary case of a run with neither, and leaves the wait exactly what it was.
+	// belongs to whatever produced it, which today is the Wayland event loop inside the client host, the
+	// session control socket, or the libinput context beside them. Called once per descriptor, before
+	// the dispatch thread starts; `-1` is the ordinary case of a run without one, and leaves the wait
+	// exactly what it was.
 	//
-	// **Bounded at two, which is what the run with everything in it needs**, and stated as a capacity
-	// rather than grown to a vector because the next descriptor after these is the one that reopens
-	// decision 126's question rather than one more entry in an array.
+	// **Bounded at `MaxWatched`, and a descriptor past it is refused rather than dropped.** The
+	// capacity is stated rather than grown to a vector because the descriptor after these is the one
+	// that reopens decision 126's question rather than one more entry in an array — but a wait that
+	// silently discarded the overflow is what a compositor holding the panel cannot afford, and it
+	// already cost an evening: the control socket became the third caller, `OpenInput` ran last, and
+	// libinput's descriptor went into no wait at all. Every key and every motion on the machine was
+	// dropped, the escape chord with them, and nothing said so — the frame thread was idle because the
+	// world had genuinely stopped changing, which is indistinguishable on screen from a hang. So the
+	// refusal is a `Result` the composition root carries out, and the next descriptor is a startup
+	// failure with a sentence rather than a silence.
 	//
 	// **Level-triggered and deliberately not drained here**, unlike the stop. What makes it readable is
 	// a client with a request pending, and what makes it unreadable again is the author reading that
 	// request inside its own `Advance` — so the descriptor is the author's to quiet, and a wait that
 	// tried to consume it would be reading a client's traffic on behalf of nobody.
-	void Watch(int descriptor) noexcept
+	[[nodiscard]] Result<void> Watch(int descriptor) noexcept
 	{
-		if (descriptor >= 0 && m_Watching < m_Watched.size())
+		if (descriptor < 0)
 		{
-			m_Watched[m_Watching] = descriptor;
-			++m_Watching;
+			return {};
 		}
+
+		if (m_Watching == m_Watched.size())
+		{
+			return Failure(ENOSPC, "watching a descriptor on the dispatch thread's wait");
+		}
+
+		m_Watched[m_Watching] = descriptor;
+		++m_Watching;
+
+		return {};
 	}
 
 	// Dispatch thread. Blocks until the deadline falls due or the wait is stopped, whichever is first;
@@ -118,11 +138,16 @@ public:
 
 	[[nodiscard]] bool IsStopping() const noexcept { return m_Stopping.load(std::memory_order_acquire); }
 
+	// The Wayland event loop, the session control socket, and libinput: the run with everything in it.
+	// Public because Wait.cpp sizes its `pollfd` array off it — the two were independent numbers that
+	// had to agree, which is half of how the third descriptor went missing.
+	static constexpr std::size_t MaxWatched = 3;
+
 private:
 	Fd m_Fd;
 
 	// Borrowed rather than owned, which is why they are plain `int`s beside an `Fd`.
-	std::array<int, 2> m_Watched{ -1, -1 };
+	std::array<int, MaxWatched> m_Watched{ -1, -1, -1 };
 	std::size_t m_Watching = 0;
 
 	std::atomic<bool> m_Stopping{ false };

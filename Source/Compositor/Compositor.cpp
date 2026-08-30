@@ -1629,7 +1629,10 @@ private:
 		m_PointerButton.ConnectTo<&Compositor::OnPointerButton>(m_Input->Button, *this);
 		m_PointerScroll.ConnectTo<&Compositor::OnPointerScroll>(m_Input->Scroll, *this);
 
-		m_DispatchWait.Watch(m_Input->Descriptor().Value);
+		if (const Result<void> watched = m_DispatchWait.Watch(m_Input->Descriptor().Value); !watched)
+		{
+			return watched;
+		}
 
 		// Said out loud on every run that has a keyboard, because a chord nobody knows about is a chord
 		// nobody uses, and this one is the only exit.
@@ -2222,7 +2225,10 @@ private:
 		// deadline with. Borrowed: the descriptor is the event loop's and dies with the host.
 		if (m_Clients != nullptr)
 		{
-			m_DispatchWait.Watch(m_Clients->PollFd());
+			if (const Result<void> watched = m_DispatchWait.Watch(m_Clients->PollFd()); !watched)
+			{
+				return watched;
+			}
 		}
 
 		// The third and last, and Session/Control.h is what keeps it to one: a listener and a connection
@@ -2230,7 +2236,10 @@ private:
 		// a file rather than by a registry and decision 126 stands.
 		if (m_Control)
 		{
-			m_DispatchWait.Watch(m_Control->Descriptor().Value);
+			if (const Result<void> watched = m_DispatchWait.Watch(m_Control->Descriptor().Value); !watched)
+			{
+				return watched;
+			}
 		}
 
 		if (const Result<void> opened = OpenInput(); !opened)
