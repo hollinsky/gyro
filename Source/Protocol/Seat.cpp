@@ -3,11 +3,14 @@
 #include <wayland-server-core.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <optional>
 #include <span>
 
 #include "Protocol/Surface.h"
+#include "Scene/Hit.h"
 
 namespace
 {
@@ -22,12 +25,6 @@ constexpr const char* SeatName = "seat0";
 
 // What comes back with the error above: an object the client is holding an id for and will never send
 // a request on, because the connection is over. It deletes itself the way every object here does.
-class RefusedPointer final : public Wayland::Server::WlPointerIgnoring
-{
-public:
-	void OnGone() override { delete this; }
-};
-
 class RefusedTouch final : public Wayland::Server::WlTouchIgnoring
 {
 public:
@@ -42,6 +39,54 @@ public:
 [[nodiscard]] std::uint32_t Milliseconds(Instant at) noexcept
 {
 	return static_cast<std::uint32_t>(static_cast<std::uint64_t>(Monotonic::ToNanoseconds(at) / 1'000'000));
+}
+
+// A surface-local coordinate as the wire spells one: 24.8 fixed point, which is the *only* place a
+// pointer position is ever quantized. Decision 52's rule arriving at the far edge — everything inside
+// gyro carries the subpixel position, and a client asked for it in 256ths.
+//
+// Truncating rather than rounding, and toward negative infinity rather than toward zero: the grid a
+// client reads this on is the same half-open grid its input region is stated on, so a position of
+// 10.996 belongs to the column at 10 and rounding it to 11 would put the pointer one column past the
+// edge it is actually inside. `std::floor` rather than a cast for the negative half, which a grab
+// reaches every time somebody drags off the left of a window.
+[[nodiscard]] wl_fixed_t Fixed(double value) noexcept
+{
+	return static_cast<wl_fixed_t>(std::floor(value * 256.0));
+}
+
+// The same, for the surface-local coordinates, which are single precision because a surface is bounded
+// by its own size (`Geometry/Space.h`). A separate overload rather than a promotion at the call site,
+// because the build treats an implicit widening as an error and this is where it would happen.
+[[nodiscard]] wl_fixed_t Fixed(float value) noexcept
+{
+	return Fixed(static_cast<double>(value));
+}
+
+[[nodiscard]] Wayland::Server::WlPointerAxis WireAxis(ScrollAxis axis) noexcept
+{
+	return axis == ScrollAxis::Horizontal ? Wayland::Server::WlPointerAxis::HorizontalScroll :
+	                                        Wayland::Server::WlPointerAxis::VerticalScroll;
+}
+
+// What did the scrolling, which decides whether a toolkit runs kinetic scrolling at all: only a finger
+// can lift, so only a finger has a flick to decay. `Core/Input.h` carries the argument; this is the
+// translation.
+[[nodiscard]] Wayland::Server::WlPointerAxisSource WireSource(ScrollSource source) noexcept
+{
+	switch (source)
+	{
+		case ScrollSource::Finger:
+			return Wayland::Server::WlPointerAxisSource::Finger;
+
+		case ScrollSource::Continuous:
+			return Wayland::Server::WlPointerAxisSource::Continuous;
+
+		case ScrollSource::Wheel:
+			break;
+	}
+
+	return Wayland::Server::WlPointerAxisSource::Wheel;
 }
 } // namespace
 
@@ -65,9 +110,21 @@ bool ClientKeyboard::BelongsTo(wl_client* client) const noexcept
 	return client != nullptr && Object().WireClient() == client;
 }
 
+void ClientPointer::OnGone()
+{
+	m_Seat->Remove(*this);
+
+	delete this;
+}
+
+bool ClientPointer::BelongsTo(wl_client* client) const noexcept
+{
+	return client != nullptr && Object().WireClient() == client;
+}
+
 void ClientSeat::OnBound()
 {
-	Object().Capabilities(Wayland::Server::WlSeatCapability::Keyboard);
+	Object().Capabilities(Wayland::Server::WlSeatCapability::Keyboard | Wayland::Server::WlSeatCapability::Pointer);
 	Object().Name(SeatName);
 }
 
@@ -82,9 +139,11 @@ Wayland::Server::WlKeyboardHandler* ClientSeat::OnGetKeyboard()
 
 Wayland::Server::WlPointerHandler* ClientSeat::OnGetPointer()
 {
-	Object().PostError(Wayland::Server::WlSeatError::MissingCapability, "this seat has no pointer");
+	ClientPointer* const pointer = new ClientPointer{ *m_Seat };
 
-	return new RefusedPointer{};
+	m_Seat->Add(*pointer);
+
+	return pointer;
 }
 
 Wayland::Server::WlTouchHandler* ClientSeat::OnGetTouch()
@@ -136,6 +195,24 @@ void SeatGlobal::Add(ClientKeyboard& keyboard)
 void SeatGlobal::Remove(ClientKeyboard& keyboard) noexcept
 {
 	std::erase(m_Keyboards, &keyboard);
+}
+
+void SeatGlobal::Add(ClientPointer& pointer)
+{
+	m_Pointers.push_back(&pointer);
+
+	// **No enter for a pointer bound while it is already over the window**, which is the one place this
+	// differs from `Add(ClientKeyboard&)` above and the difference is the protocol's. A `wl_keyboard`
+	// with focus and no `enter` is deaf forever, because nothing else will move focus; a pointer is
+	// resolved from scratch on the next `SyncPointer`, which is the next dispatch iteration — so
+	// clearing what the clients have been told is all this owes, and it costs one redundant enter
+	// against the surface the pointer was already on.
+	m_Pointed = {};
+}
+
+void SeatGlobal::Remove(ClientPointer& pointer) noexcept
+{
+	std::erase(m_Pointers, &pointer);
 }
 
 void SeatGlobal::SyncFocus(EntityId focused)
@@ -223,12 +300,17 @@ void SeatGlobal::Key(const KeyEvent& event, bool consumed)
 
 Wayland::Server::WlSurface SeatGlobal::FocusedSurface() const noexcept
 {
-	if (m_Focused.IsNull())
+	return SurfaceFor(m_Focused);
+}
+
+Wayland::Server::WlSurface SeatGlobal::SurfaceFor(EntityId id) const noexcept
+{
+	if (id.IsNull())
 	{
 		return {};
 	}
 
-	const ClientSurface* const surface = m_Context->SurfaceOf(m_Focused);
+	const ClientSurface* const surface = m_Context->SurfaceOf(id);
 
 	return surface != nullptr ? surface->Object() : Wayland::Server::WlSurface{};
 }
@@ -283,6 +365,301 @@ void SeatGlobal::SendLeave()
 		if (keyboard->BelongsTo(client))
 		{
 			keyboard->Object().Leave(serial, surface);
+		}
+	}
+}
+
+void SeatGlobal::Button(const PointerButton& event)
+{
+	m_Queue.push_back(SeatPointerEvent{ .What = SeatPointerEvent::Kind::Button, .Pressed = event });
+}
+
+void SeatGlobal::Scroll(const PointerScroll& event)
+{
+	m_Queue.push_back(SeatPointerEvent{ .What = SeatPointerEvent::Kind::Scroll, .Scrolled = event });
+}
+
+void SeatGlobal::SyncPointer(SceneStore& scene, Instant now)
+{
+	// Where the pointer is now, before anything the devices said is routed: a press lands on what the
+	// motion in front of it moved onto, which is what makes clicking a window a person just slid onto
+	// work in the wakeup they slid onto it.
+	Refocus(Resolve(scene), now);
+
+	// **The grab opens on the first button and closes on the last**, and it is settled before the events
+	// go out rather than after, so that the surface a release is delivered to is the one that took the
+	// press even when both are in this queue.
+	const bool grabbed = !m_Grab.IsNull();
+
+	for (const SeatPointerEvent& event : m_Queue)
+	{
+		if (event.What != SeatPointerEvent::Kind::Button)
+		{
+			continue;
+		}
+
+		if (event.Pressed.Pressed)
+		{
+			if (m_ButtonsDown++ == 0)
+			{
+				m_Grab = m_Pointed;
+			}
+		}
+		else if (m_ButtonsDown > 0 && --m_ButtonsDown == 0)
+		{
+			m_Grab = {};
+		}
+	}
+
+	Deliver();
+
+	m_Queue.clear();
+	m_MovedAt.reset();
+
+	// **The grab ended, so where the pointer is is a question again.** A person who presses on a window,
+	// drags off it and lets go is over something else by then, and the enter for it has to go out now
+	// rather than on whatever wakes the thread next — which, on a world that has settled, may be
+	// nothing at all until they move again.
+	if (grabbed && m_Grab.IsNull())
+	{
+		Refocus(Resolve(scene), now);
+	}
+}
+
+SeatGlobal::PointerTarget SeatGlobal::Resolve(const SceneStore& scene) const
+{
+	// **A pointer nobody can see is on nothing.** A machine driven by a touchscreen has a position and
+	// no cursor (`Scene/Pointer.h`), and this is also what keeps a compositor that has never seen a mouse
+	// from sending an `enter` for whatever happens to be at the origin.
+	if (!scene.Pointer().IsVisible())
+	{
+		return {};
+	}
+
+	const Point<GlobalSpace> position = scene.Pointer().Position();
+
+	if (!m_Grab.IsNull())
+	{
+		const std::optional<Point<SurfaceSpace>> local = LocalOn(scene, m_Grab, position);
+
+		// Nothing where the grabbed window went away or was hidden underneath the gesture. The client is
+		// told it lost the pointer, which is the truth: what it was tracking is not on screen.
+		return local ? PointerTarget{ .Node = m_Grab, .Local = *local } : PointerTarget{};
+	}
+
+	const SceneHit hit = HitTest(scene, position);
+
+	return { .Node = hit.Node, .Local = hit.Local };
+}
+
+void SeatGlobal::Refocus(const PointerTarget& target, Instant now)
+{
+	if (target.Node != m_Pointed)
+	{
+		// The leave first and against the *old* surface, for `SyncFocus`'s reason: the event names what
+		// is being left, so it goes out before the member moves.
+		SendPointerLeave();
+
+		m_Pointed = target.Node;
+		m_Local = target.Local;
+
+		SendPointerEnter(target.Local);
+
+		return;
+	}
+
+	// **A motion that moved nothing sends nothing**, which is not a micro-optimization: a window
+	// animating under a still pointer is republished every frame, and a `motion` per publication would
+	// tell a toolkit the hand moved sixty times a second while it was resting on the desk. Toolkits
+	// start hover timers and cancel tooltips off exactly that event.
+	if (m_Pointed.IsNull() || target.Local == m_Local)
+	{
+		return;
+	}
+
+	m_Local = target.Local;
+
+	const Wayland::Server::WlSurface surface = SurfaceFor(m_Pointed);
+
+	if (!surface.IsValid())
+	{
+		return;
+	}
+
+	wl_client* const client = surface.WireClient();
+
+	// The device's own instant where a device moved this iteration, and dispatch's now where the *window*
+	// moved under a still hand — there is no hand movement to timestamp in the second case, and carrying
+	// the last one would date a motion to a wakeup it did not happen in.
+	const std::uint32_t time = Milliseconds(m_MovedAt.value_or(now));
+
+	for (ClientPointer* const pointer : m_Pointers)
+	{
+		if (!pointer->BelongsTo(client))
+		{
+			continue;
+		}
+
+		pointer->Object().Motion(time, Fixed(target.Local.X), Fixed(target.Local.Y));
+
+		if (pointer->Grouped())
+		{
+			pointer->Object().Frame();
+		}
+	}
+}
+
+void SeatGlobal::SendPointerEnter(Point<SurfaceSpace> local)
+{
+	const Wayland::Server::WlSurface surface = SurfaceFor(m_Pointed);
+
+	if (!surface.IsValid())
+	{
+		// The pointer is over a window gyro authored for itself — the splash, the recovery console, the
+		// floor between two windows — or over nothing at all. There is no client on the far side of it,
+		// which is a case rather than an error.
+		return;
+	}
+
+	wl_client* const client = surface.WireClient();
+	const std::uint32_t serial = NextSerial();
+
+	for (ClientPointer* const pointer : m_Pointers)
+	{
+		if (!pointer->BelongsTo(client))
+		{
+			continue;
+		}
+
+		pointer->Object().Enter(serial, surface, Fixed(local.X), Fixed(local.Y));
+
+		if (pointer->Grouped())
+		{
+			pointer->Object().Frame();
+		}
+	}
+}
+
+void SeatGlobal::SendPointerLeave()
+{
+	const Wayland::Server::WlSurface surface = SurfaceFor(m_Pointed);
+
+	if (!surface.IsValid())
+	{
+		// The window went away underneath the pointer, so there is nobody to tell — the same case
+		// `SendLeave` names for the keyboard, and the protocol's own rule that a destroyed surface takes
+		// its focus with it.
+		return;
+	}
+
+	wl_client* const client = surface.WireClient();
+	const std::uint32_t serial = NextSerial();
+
+	for (ClientPointer* const pointer : m_Pointers)
+	{
+		if (!pointer->BelongsTo(client))
+		{
+			continue;
+		}
+
+		pointer->Object().Leave(serial, surface);
+
+		if (pointer->Grouped())
+		{
+			pointer->Object().Frame();
+		}
+	}
+}
+
+void SeatGlobal::Deliver()
+{
+	if (m_Queue.empty())
+	{
+		return;
+	}
+
+	const Wayland::Server::WlSurface surface = SurfaceFor(m_Pointed);
+
+	if (!surface.IsValid())
+	{
+		// Clicked on gyro's own background, or on nothing. The queue is still cleared by the caller: an
+		// event nobody was under is spent rather than owed to whoever appears next.
+		return;
+	}
+
+	wl_client* const client = surface.WireClient();
+
+	for (ClientPointer* const pointer : m_Pointers)
+	{
+		if (!pointer->BelongsTo(client))
+		{
+			continue;
+		}
+
+		bool sent = false;
+
+		for (const SeatPointerEvent& event : m_Queue)
+		{
+			if (event.What == SeatPointerEvent::Kind::Button)
+			{
+				pointer->Object().Button(
+					NextSerial(),
+					Milliseconds(event.Pressed.When),
+					event.Pressed.Code,
+					event.Pressed.Pressed ? Wayland::Server::WlPointerButtonState::Pressed :
+											Wayland::Server::WlPointerButtonState::Released
+				);
+
+				sent = true;
+
+				continue;
+			}
+
+			const PointerScroll& scroll = event.Scrolled;
+			const Wayland::Server::WlPointerAxis axis = WireAxis(scroll.Axis);
+			const std::uint32_t time = Milliseconds(scroll.When);
+
+			// **The source first, then the detents, then the distance**, which is the order the protocol
+			// fixes and the order a toolkit reads them in: it decides whether to run kinetic scrolling from
+			// the source, and it cannot decide that after it has already consumed the distance.
+			if (pointer->Grouped())
+			{
+				pointer->Object().AxisSource(WireSource(scroll.Source));
+			}
+
+			if (scroll.Stop)
+			{
+				// The fingers left the pad, which carries no distance and is the whole of what a flick
+				// decays from. Only a `Finger` produces one, so a client below version 5 simply never hears
+				// that a gesture ended — which is what it would have had from any compositor of that era.
+				if (pointer->Grouped())
+				{
+					pointer->Object().AxisStop(time, axis);
+				}
+
+				sent = true;
+
+				continue;
+			}
+
+			// Whole detents only. `axis_discrete` cannot say *a third of a notch*, and a high-resolution
+			// wheel reports exactly that — so the fine motion travels in the distance below, where it is
+			// expressible, and this carries the clicks a person actually felt.
+			const std::int32_t detents = static_cast<std::int32_t>(scroll.Clicks120 / 120.0);
+
+			if (pointer->Grouped() && detents != 0)
+			{
+				pointer->Object().AxisDiscrete(axis, detents);
+			}
+
+			pointer->Object().Axis(time, axis, Fixed(scroll.Distance));
+
+			sent = true;
+		}
+
+		if (sent && pointer->Grouped())
+		{
+			pointer->Object().Frame();
 		}
 	}
 }

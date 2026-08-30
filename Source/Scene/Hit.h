@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 
 #include "Core/Handle.h"
 #include "Geometry/NodeTransform.h"
@@ -109,6 +110,60 @@ namespace Detail
 	return true;
 }
 } // namespace Detail
+
+// Where a point of global space falls on one *named* entity, whatever is over it.
+//
+// **This is what a grab is made of.** Once a button is down the coordinates belong to the surface that
+// was under the pointer when it went down, wherever the pointer travels afterwards: a person dragging
+// a scrollbar past the edge of its window is still dragging that scrollbar, and a toolkit tracking the
+// drag needs numbers that keep going rather than numbers that stop at the frame. So this asks about a
+// stated entity rather than about whatever is frontmost, and it answers outside the extent as readily
+// as inside it — clamping would be gyro deciding a gesture had ended.
+//
+// It is deliberately *not* filtered by what the entity accepts. An input shape says where a surface
+// takes the pointer, which is a question about where a press lands; a grab already landed, and a
+// finger sliding over a corner the client cut out of its region must not make the drag stutter.
+//
+// Nothing where the entity names nothing live, is hidden or under something hidden, sits deeper than
+// the frame walk descends, or lies edge-on to the viewer. The ancestor walk is `Scene/Reach.h`'s, for
+// the same reason it is one there: what is asked about is the handful of nodes somebody is pointing
+// at rather than the world.
+[[nodiscard]] inline std::optional<Point<SurfaceSpace>>
+LocalOn(const SceneStore& store, EntityId id, Point<GlobalSpace> point)
+{
+	const Detail::Ancestry ancestry = Detail::LineageOf(store, id);
+
+	if (!ancestry.Reachable)
+	{
+		return std::nullopt;
+	}
+
+	ComposedTransform chain{};
+
+	for (std::size_t level = ancestry.Depth; level != 0; --level)
+	{
+		const Entity* const entity = store.Find(ancestry.Line[level - 1]);
+
+		if (entity == nullptr)
+		{
+			return std::nullopt;
+		}
+
+		const Node record = entity->Record();
+
+		chain =
+			chain.Push(record.Transform, record.Transform.BoundingRadius(record.Extent.Width, record.Extent.Height));
+	}
+
+	const Unprojected found = chain.Unproject(point);
+
+	if (!found.IsVisible())
+	{
+		return std::nullopt;
+	}
+
+	return found.Local;
+}
 
 // The topmost node accepting the pointer at this point, and where on it.
 //

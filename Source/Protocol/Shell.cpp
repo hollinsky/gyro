@@ -352,6 +352,15 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		static_cast<void>(commit.Attach(m_Content, state.Content, source));
 		static_cast<void>(commit.Resize(m_Content, extent));
 		static_cast<void>(commit.Resize(m_Window, natural));
+
+		// **Where the surface becomes something the pointer can land on**, and it is in the client's own
+		// transaction beside the resize because it is the same fact: a window that grew and reshaped in
+		// one commit must never be hit-tested with one of the two halves stale, which for exactly one
+		// frame would be a dead strip down the side of a window that is there.
+		//
+		// The container above it accepts nothing and is not told to — decision 111's toplevel is a frame
+		// around the pixels, and what a client declared a region for is the surface.
+		static_cast<void>(commit.AcceptInput(m_Content, state.Input));
 	}
 
 	if (mapping)

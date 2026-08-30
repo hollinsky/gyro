@@ -1619,6 +1619,15 @@ private:
 
 		m_Input = std::move(*devices);
 		m_Key.ConnectTo<&Compositor::OnKey>(m_Input->Key, *this);
+
+		// **The pointer's three go straight to the host and never past the chord.** The escape hatch is
+		// keys, deliberately: a chord that could be entered with a mouse is one a person triggers by
+		// resting a thumb on a side button, and the way out of a compositor holding the panel may not be
+		// something a hand finds by accident.
+		m_PointerMotion.ConnectTo<&Compositor::OnPointerMotion>(m_Input->Motion, *this);
+		m_PointerButton.ConnectTo<&Compositor::OnPointerButton>(m_Input->Button, *this);
+		m_PointerScroll.ConnectTo<&Compositor::OnPointerScroll>(m_Input->Scroll, *this);
+
 		m_DispatchWait.Watch(m_Input->Descriptor().Value);
 
 		// Said out loud on every run that has a keyboard, because a chord nobody knows about is a chord
@@ -1675,6 +1684,34 @@ private:
 		if (m_Clients)
 		{
 			m_Clients->OnKey(event, verdict.Consumed);
+		}
+	}
+
+	// The pointer, on its way to whatever is under it. Nothing is routed here and nothing can be: what a
+	// click lands on is a question about the world, and the world is only in hand inside `Advance` —
+	// which is where [Protocol/Seat.h](../Protocol/Seat.h) resolves it, in the same wakeup these arrived
+	// in. `--gym` has no clients to route to, so the guard is the same one `OnKey` uses.
+	void OnPointerMotion(const PointerMotion& event)
+	{
+		if (m_Clients)
+		{
+			m_Clients->OnPointerMotion(event);
+		}
+	}
+
+	void OnPointerButton(const PointerButton& event)
+	{
+		if (m_Clients)
+		{
+			m_Clients->OnPointerButton(event);
+		}
+	}
+
+	void OnPointerScroll(const PointerScroll& event)
+	{
+		if (m_Clients)
+		{
+			m_Clients->OnPointerScroll(event);
 		}
 	}
 
@@ -2417,6 +2454,9 @@ private:
 	std::unique_ptr<Input::Devices> m_Input;
 	Input::Chord m_Chord;
 	Connection<const KeyEvent&> m_Key;
+	Connection<const PointerMotion&> m_PointerMotion;
+	Connection<const PointerButton&> m_PointerButton;
+	Connection<const PointerScroll&> m_PointerScroll;
 	bool m_InputFailed = false;
 
 	// Whether this run drives a panel, which is the one condition under which gyro takes the machine's

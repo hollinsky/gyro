@@ -109,6 +109,21 @@ void ClientHost::OnKey(const KeyEvent& event, bool consumed)
 	m_Seat.Key(event, consumed);
 }
 
+void ClientHost::OnPointerMotion(const PointerMotion& event)
+{
+	m_Seat.Moved(event.When);
+}
+
+void ClientHost::OnPointerButton(const PointerButton& event)
+{
+	m_Seat.Button(event);
+}
+
+void ClientHost::OnPointerScroll(const PointerScroll& event)
+{
+	m_Seat.Scroll(event);
+}
+
 void ClientHost::OnReached(EntityId entity, Instant at)
 {
 	if (ClientSurface* const surface = m_Context.SurfaceOf(entity); surface != nullptr)
@@ -119,8 +134,6 @@ void ClientHost::OnReached(EntityId entity, Instant at)
 
 Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 {
-	(void)now;
-
 	// The world, reachable for exactly the length of this call. Every request below runs inside the
 	// dispatch, so a `wl_surface.commit` finds the texture space on the stack rather than in a
 	// reference this object had to keep — which is the arrangement `ISceneAuthor` is shaped for and
@@ -140,6 +153,11 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// comparison has to run downstream of the dispatch that performed it. See [Seat.h](Seat.h) for why
 	// the change is noticed by comparing rather than by a signal out of `Scene`.
 	m_Seat.SyncFocus(scene.Focus().Focused());
+
+	// **After the focus rather than before it**, and both after the dispatch for the same reason: a
+	// window that mapped in this wakeup is one the pointer may already be sitting on, and a person who
+	// clicks the instant an application opens is clicking on the window rather than through it.
+	m_Seat.SyncPointer(scene, now);
 
 	return Wake::Never();
 }

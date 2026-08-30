@@ -423,10 +423,10 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 	const Registry::Global* const seat = bound.Listener.Find(Wayland::WlSeat::WireName);
 	GYRO_REQUIRE(seat != nullptr);
 
-	// Version 4 is `wl_seat.name` and `wl_keyboard.repeat_info`. Everything above it is a pointer
-	// event, and gyro advertises no pointer capability — so 5 would be a promise about an object no
-	// client can obtain from this seat. See Protocol/Seat.h.
-	GYRO_CHECK_EQ(seat->Version, std::uint32_t{ 4 });
+	// Version 5 is `wl_pointer.frame` and the three axis events beside it, which is the whole of what
+	// gyro sends about a scroll. Not 8, which is the high-resolution wheel and would be a promise about
+	// events this binary does not send. See Protocol/Seat.h.
+	GYRO_CHECK_EQ(seat->Version, std::uint32_t{ 5 });
 
 	const Registry::Global* const dmabuf = bound.Listener.Find(Wayland::ZwpLinuxDmabufV1::WireName);
 	GYRO_REQUIRE(dmabuf != nullptr);
@@ -1379,9 +1379,11 @@ GYRO_TEST(ProtocolRoundTrip, ASeatOffersOneKeyboardAndHandsOverALayoutBeforeAnyt
 	Keyboard keyboard;
 	GYRO_REQUIRE(Listen(session, bound, keyboard));
 
-	// The keyboard and nothing else. A client told there is a pointer would draw a cursor and wait for
-	// an `enter` that cannot come, so the capability set is the honest half of what is built.
-	GYRO_CHECK(keyboard.SeatListener.Capabilities == Wayland::WlSeatCapability::Keyboard);
+	// A keyboard and a pointer, and no touch. A client told there is a capability gyro has not built
+	// would wait for an `enter` that cannot come, so the set is exactly what is routed.
+	GYRO_CHECK(
+		keyboard.SeatListener.Capabilities == (Wayland::WlSeatCapability::Keyboard | Wayland::WlSeatCapability::Pointer)
+	);
 	GYRO_CHECK(keyboard.SeatListener.Name == "seat0");
 
 	// **The layout arrives without being asked for and before any key does**, which is the contract:
@@ -1644,7 +1646,161 @@ GYRO_TEST(ProtocolRoundTrip, AWindowThatClosedStopsReceivingKeys)
 
 // Asking a keyboard-only seat for a pointer. The protocol has a name for it, and a client that is
 // told which one can fix itself where one handed an inert object waits for an `enter` forever.
-GYRO_TEST(ProtocolRoundTrip, AskingAKeyboardOnlySeatForAPointerEndsTheClient)
+namespace
+{
+// A client's pointer, recording what the seat told it. Everything here is what a toolkit acts on: what
+// it is over, where on it, and the frame that says a group of them was one physical event.
+class PointerEvents final : public Wayland::WlPointerIgnoring
+{
+public:
+	void OnEnter(std::uint32_t serial, Wayland::WlSurface surface, Wire::Fixed x, Wire::Fixed y) override
+	{
+		++Entered;
+		EnterSerial = serial;
+		On = surface;
+		X = x;
+		Y = y;
+	}
+
+	void OnLeave(std::uint32_t, Wayland::WlSurface surface) override
+	{
+		++Left;
+		LeftSurface = surface;
+		On = {};
+	}
+
+	void OnMotion(std::uint32_t time, Wire::Fixed x, Wire::Fixed y) override
+	{
+		++Motions;
+		At = time;
+		X = x;
+		Y = y;
+	}
+
+	void OnButton(std::uint32_t, std::uint32_t, std::uint32_t button, Wayland::WlPointerButtonState state) override
+	{
+		++Buttons;
+		LastButton = button;
+		LastState = state;
+	}
+
+	void OnAxis(std::uint32_t, Wayland::WlPointerAxis axis, Wire::Fixed value) override
+	{
+		++Axes;
+		LastAxis = axis;
+		LastValue = value;
+	}
+
+	void OnFrame() override { ++Frames; }
+
+	void OnAxisSource(Wayland::WlPointerAxisSource source) override
+	{
+		++Sources;
+		LastSource = source;
+	}
+
+	void OnAxisStop(std::uint32_t, Wayland::WlPointerAxis) override { ++Stops; }
+
+	void OnAxisDiscrete(Wayland::WlPointerAxis, std::int32_t discrete) override
+	{
+		++Discretes;
+		LastDiscrete = discrete;
+	}
+
+	std::uint32_t Entered = 0;
+	std::uint32_t Left = 0;
+	std::uint32_t Motions = 0;
+	std::uint32_t Buttons = 0;
+	std::uint32_t Axes = 0;
+	std::uint32_t Frames = 0;
+	std::uint32_t Sources = 0;
+	std::uint32_t Stops = 0;
+	std::uint32_t Discretes = 0;
+	std::uint32_t EnterSerial = 0;
+	std::uint32_t At = 0;
+	std::int32_t LastDiscrete = 0;
+	std::uint32_t LastButton = 0;
+	Wayland::WlPointerButtonState LastState{};
+	Wayland::WlPointerAxis LastAxis{};
+	Wayland::WlPointerAxisSource LastSource{};
+	Wire::Fixed LastValue;
+	Wire::Fixed X;
+	Wire::Fixed Y;
+	Wayland::WlSurface On;
+	Wayland::WlSurface LeftSurface;
+};
+
+struct Pointer
+{
+	PointerEvents Listener;
+	Wayland::WlPointer Device;
+};
+
+[[nodiscard]] bool Grip(Session& session, Keyboard& keyboard, Pointer& pointer)
+{
+	pointer.Device = keyboard.Seat.GetPointer(pointer.Listener);
+
+	session.Turn();
+
+	return pointer.Device.IsValid();
+}
+
+// A window on screen with the pointer somewhere definite, which is the state every case below starts
+// from: one panel, one mapped toplevel, and the pointer parked away from it.
+[[nodiscard]] bool Show(Session& session, BoundCompositor& bound, Toplevel& toplevel, std::byte fill)
+{
+	if (!Role(bound, toplevel, fill))
+	{
+		return false;
+	}
+
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	session.Turn();
+
+	return true;
+}
+
+// The pointer, moved the way `Dispatch/Loop.h` moves it: a displacement against the outputs, with no
+// rounding anywhere on the way.
+void Push(Session& session, double x, double y)
+{
+	static_cast<void>(session.Store.Pointer().Move({ x, y }, session.Store.Outputs()));
+}
+
+// Where the window's pixels ended up, which is the Floorplanner's answer and not a number this file
+// should be repeating. The pointer is pushed to the middle of it.
+[[nodiscard]] Point<GlobalSpace> MiddleOfTheWindow(const SceneStore& scene)
+{
+	const Entity* const window = WindowNode(scene);
+
+	if (window == nullptr)
+	{
+		return {};
+	}
+
+	const Vector3<double> at = window->Translation.Model();
+
+	return { at.X + (static_cast<double>(window->Extent.Width) / 2.0),
+		     at.Y + (static_cast<double>(window->Extent.Height) / 2.0) };
+}
+
+[[nodiscard]] PointerButton Click(std::uint32_t code, bool pressed, Instant when)
+{
+	return PointerButton{ .Code = code, .Pressed = pressed, .When = when };
+}
+} // namespace
+
+// The seat has a pointer now, and it says so before a client asks. Touch is still refused by name,
+// which is the half of `wl_seat` that has not been built — the refusal and the capability are one
+// statement and a client is entitled to read them as one.
+GYRO_TEST(ProtocolRoundTrip, TheSeatOffersAPointerAndStillRefusesTouchByName)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
@@ -1657,16 +1813,274 @@ GYRO_TEST(ProtocolRoundTrip, AskingAKeyboardOnlySeatForAPointerEndsTheClient)
 	Keyboard keyboard;
 	GYRO_REQUIRE(Listen(session, bound, keyboard));
 
-	Wayland::WlPointerIgnoring events;
-	static_cast<void>(keyboard.Seat.GetPointer(events));
+	GYRO_CHECK(
+		(keyboard.SeatListener.Capabilities & Wayland::WlSeatCapability::Pointer) == Wayland::WlSeatCapability::Pointer
+	);
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(session, keyboard, pointer));
+	GYRO_CHECK(!session.Client.Fault().has_value());
+
+	Wayland::WlTouchIgnoring touch;
+	static_cast<void>(keyboard.Seat.GetTouch(touch));
 
 	session.Turn();
 
 	GYRO_REQUIRE(session.Client.Fault().has_value());
-
-	// `missing_capability` and not `no_memory`, which is what the bindings send for a request nothing
-	// answers — the difference is a client's log naming an allocation failure that did not happen.
 	GYRO_CHECK_EQ(session.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::WlSeatError::MissingCapability));
+}
+
+// The pointer arriving on a window and moving across it. The coordinates are the surface's own, which
+// is the whole of what the hit test is for: a toolkit decides which of its buttons is under the cursor
+// from these two numbers and nothing else.
+GYRO_TEST(ProtocolRoundTrip, APointerOverAWindowEntersItAndFollowsTheHand)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-pointing" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(session, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(session, keyboard, pointer));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(session, bound, toplevel, std::byte{ 0x40 }));
+
+	// **Nothing yet, because nothing has moved a mouse.** A compositor that had sent an `enter` here
+	// would be one that draws a cursor on a machine driven by a touchscreen.
+	GYRO_CHECK_EQ(pointer.Listener.Entered, std::uint32_t{ 0 });
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(session.Store);
+	GYRO_REQUIRE(middle.X > 0.0);
+
+	Push(session, middle.X, middle.Y);
+	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(pointer.Listener.Entered, std::uint32_t{ 1 });
+	GYRO_CHECK(pointer.Listener.On.Id() == toplevel.Drawn.Surface.Id());
+
+	// The middle of the window is the middle of the surface, because there is no shadow margin on a
+	// client that declared no geometry — and the buffer is the harness's 16x8.
+	GYRO_CHECK_EQ(pointer.Listener.X.ToInt(), std::int32_t{ 8 });
+	GYRO_CHECK_EQ(pointer.Listener.Y.ToInt(), std::int32_t{ 4 });
+	GYRO_CHECK_EQ(pointer.Listener.Motions, std::uint32_t{ 0 });
+
+	// A second wakeup with the hand still on the desk sends nothing at all, which is what keeps a
+	// window animating under a resting pointer from telling its toolkit the hand is moving.
+	session.Turn();
+
+	GYRO_CHECK_EQ(pointer.Listener.Motions, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(pointer.Listener.Entered, std::uint32_t{ 1 });
+
+	Push(session, 2.0, 1.0);
+	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(pointer.Listener.Motions, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pointer.Listener.X.ToInt(), std::int32_t{ 10 });
+	GYRO_CHECK_EQ(pointer.Listener.Y.ToInt(), std::int32_t{ 5 });
+	GYRO_CHECK(!session.Client.Fault().has_value());
+}
+
+// Sliding off the window, which is the event a toolkit un-highlights everything on.
+GYRO_TEST(ProtocolRoundTrip, ThePointerLeavesAWindowItSlidOff)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-leaving" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(session, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(session, keyboard, pointer));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(session, bound, toplevel, std::byte{ 0x40 }));
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(session.Store);
+
+	Push(session, middle.X, middle.Y);
+	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(pointer.Listener.Entered, std::uint32_t{ 1 });
+
+	// Off the far side of it, onto gyro's own floor — which has no client behind it, so what the client
+	// hears is the leave and nothing after it.
+	Push(session, 600.0, 0.0);
+	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(pointer.Listener.Left, std::uint32_t{ 1 });
+	GYRO_CHECK(pointer.Listener.LeftSurface.Id() == toplevel.Drawn.Surface.Id());
+	GYRO_CHECK_EQ(pointer.Listener.Entered, std::uint32_t{ 1 });
+	GYRO_CHECK(!session.Client.Fault().has_value());
+}
+
+// The implicit grab: a button held is a surface that keeps the pointer wherever the hand goes.
+//
+// **This is what every drag in every toolkit rests on.** A person who presses on a scrollbar and slides
+// off the window is still scrolling; a compositor that sent a `leave` at the frame edge would leave the
+// thumb stuck where the pointer crossed it, which is the bug this test exists to keep out.
+GYRO_TEST(ProtocolRoundTrip, AButtonHeldKeepsThePointerOnTheWindowItWasPressedOn)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-grab" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(session, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(session, keyboard, pointer));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(session, bound, toplevel, std::byte{ 0x40 }));
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(session.Store);
+
+	Push(session, middle.X, middle.Y);
+	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(pointer.Listener.Entered, std::uint32_t{ 1 });
+
+	// `BTN_LEFT`, in the kernel's numbering all the way to the client — the same rule the keyboard is
+	// under, and the reason nothing in the middle has a button map.
+	(*session.Host)->OnPointerButton(Click(0x110, true, session.Clock.Now()));
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(pointer.Listener.Buttons, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pointer.Listener.LastButton, std::uint32_t{ 0x110 });
+	GYRO_CHECK(pointer.Listener.LastState == Wayland::WlPointerButtonState::Pressed);
+
+	// Off the window entirely, with the button still down. No leave, and the coordinates keep going —
+	// negative, because the hand is to the left of where the surface starts.
+	Push(session, -600.0, 0.0);
+	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(pointer.Listener.Left, std::uint32_t{ 0 });
+	GYRO_CHECK(pointer.Listener.Motions > 0);
+	GYRO_CHECK(pointer.Listener.X.Raw() < 0);
+
+	// The release goes to the window that took the press, and the leave follows it in the same wakeup:
+	// the hand is over gyro's floor by now, and the client would otherwise sit believing it still had
+	// the pointer until something else moved.
+	(*session.Host)->OnPointerButton(Click(0x110, false, session.Clock.Now()));
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(pointer.Listener.Buttons, std::uint32_t{ 2 });
+	GYRO_CHECK(pointer.Listener.LastState == Wayland::WlPointerButtonState::Released);
+	GYRO_CHECK_EQ(pointer.Listener.Left, std::uint32_t{ 1 });
+	GYRO_CHECK(!session.Client.Fault().has_value());
+}
+
+// A scroll, with the three events that say what did it. The source is the one that decides whether a
+// toolkit runs kinetic scrolling at all, so it has to arrive and it has to arrive first.
+GYRO_TEST(ProtocolRoundTrip, AScrollCarriesWhatDidItBeforeItCarriesHowFar)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-scroll" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(session, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(session, keyboard, pointer));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(session, bound, toplevel, std::byte{ 0x40 }));
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(session.Store);
+
+	Push(session, middle.X, middle.Y);
+	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+
+	session.Turn();
+
+	GYRO_REQUIRE(pointer.Listener.Entered == std::uint32_t{ 1 });
+
+	(*session.Host)
+		->OnPointerScroll(
+			PointerScroll{ .Axis = ScrollAxis::Vertical,
+	                       .Source = ScrollSource::Wheel,
+	                       .Distance = 15.0,
+	                       .Clicks120 = 120.0,
+	                       .When = session.Clock.Now() }
+		);
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(pointer.Listener.Sources, std::uint32_t{ 1 });
+	GYRO_CHECK(pointer.Listener.LastSource == Wayland::WlPointerAxisSource::Wheel);
+	GYRO_CHECK_EQ(pointer.Listener.Discretes, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pointer.Listener.LastDiscrete, std::int32_t{ 1 });
+	GYRO_CHECK_EQ(pointer.Listener.Axes, std::uint32_t{ 1 });
+	GYRO_CHECK(pointer.Listener.LastAxis == Wayland::WlPointerAxis::VerticalScroll);
+	GYRO_CHECK_EQ(pointer.Listener.LastValue.ToInt(), std::int32_t{ 15 });
+
+	// A touchpad that stopped, which is the event a flick decays from and the only one that carries no
+	// distance. A wheel never produces one, so nothing here would have made it up.
+	(*session.Host)
+		->OnPointerScroll(
+			PointerScroll{ .Axis = ScrollAxis::Vertical,
+	                       .Source = ScrollSource::Finger,
+	                       .Stop = true,
+	                       .When = session.Clock.Now() }
+		);
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(pointer.Listener.Stops, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pointer.Listener.Axes, std::uint32_t{ 1 });
+	GYRO_CHECK(pointer.Listener.LastSource == Wayland::WlPointerAxisSource::Finger);
+	GYRO_CHECK(!session.Client.Fault().has_value());
 }
 
 // The dmabuf half: what a client is offered, what it does with a pair it was never offered, and the

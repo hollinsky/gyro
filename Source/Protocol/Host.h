@@ -59,11 +59,12 @@
 // connection is the composition root's to make for decision 115's reason: `Scene` may not name
 // `Protocol`, so the signal carries an entity and this module is what knows which surface that is.
 //
-// **A window can now be typed into.** `wl_seat` carries a keyboard and nothing else: focus is
-// `Scene`'s (`Scene/Focus.h`), the layout is xkbcommon's, and this object is what turns the two into a
-// `wl_keyboard.enter` and the keys after it. What a person still cannot do is point at anything —
-// there is no `wl_pointer`, so nothing routes a click, a drag or a paste, and the seat says so by
-// advertising the keyboard capability alone.
+// **A window can now be typed into and pointed at.** `wl_seat` carries a keyboard and a pointer:
+// focus is `Scene`'s (`Scene/Focus.h`), what is under the pointer is `Scene/Hit.h`'s, the layout is
+// xkbcommon's, and this object is what turns those into a `wl_keyboard.enter`, a `wl_pointer.enter`
+// and the events after them. What a person still cannot do is *raise* a window by clicking it — focus
+// follows what opened last rather than what was clicked — or drag one, or paste: click-to-focus,
+// interactive move and resize, and the data device all come after this.
 //
 // The global is a member rather than something the root passes in, because its lifetime is the
 // server's: `wl_compositor` exists for as long as there is a socket to reach it through, and unlike a
@@ -89,6 +90,14 @@ public:
 	// too, because the modifier state is a fact about a person's hands rather than about who is
 	// listening. [Seat.h](Seat.h) carries the routing.
 	void OnKey(const KeyEvent& event, bool consumed);
+
+	// The pointer's three, and they are the root's to call for `OnKey`'s reason. None of them routes
+	// anything: a displacement has already moved `Scene/Pointer.h`, and what the seat takes from a
+	// motion is only the instant it happened at — the buttons and the scroll increments are held until
+	// `Advance`, where the world a click lands in is in hand. [Seat.h](Seat.h) carries why.
+	void OnPointerMotion(const PointerMotion& event);
+	void OnPointerButton(const PointerButton& event);
+	void OnPointerScroll(const PointerScroll& event);
 
 	// Answer frame callbacks against what reached the glass. The root's to call once, before the first
 	// step, because it is the only party that holds both this host and the loop's return leg.
