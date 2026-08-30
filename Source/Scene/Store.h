@@ -271,6 +271,29 @@ public:
 
 	[[nodiscard]] std::span<const SceneOutput> Outputs() const noexcept { return m_Outputs; }
 
+	// Assign one output to a session, or back to none.
+	//
+	// **Deliberately not `SetOutputs` above, and the difference is what the two facts mean.** That verb
+	// replaces the set because a hotplug changed which monitors exist, and decision 84's generation is
+	// what makes the moment between the old set and the new one unreadable. A session arriving changes
+	// no monitor, so renumbering the set here would answer a question nobody asked — *do these runs mean
+	// my outputs at all* — and would reconfine the pointer, which a person sees as their cursor jumping
+	// because somebody else logged in on another screen.
+	//
+	// Does nothing for an output that is not here, which is one a hotplug removed between an agent
+	// offering its listener and the root getting to this call.
+	void SetOutputSession(OutputId output, SessionId session) noexcept
+	{
+		for (SceneOutput& held : m_Outputs)
+		{
+			if (held.Id == output)
+			{
+				held.Session = session;
+				return;
+			}
+		}
+	}
+
 	// Decision 84's set generation: what a per-output run in the snapshot means by *output 2*. It is
 	// carried here and not yet on the wire — the header reserves four bytes for it and nothing spends
 	// them, so a run whose length matches is trusted for now and the guard lands with the publisher's

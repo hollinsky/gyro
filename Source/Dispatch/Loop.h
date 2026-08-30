@@ -286,6 +286,11 @@ public:
 	// from the bytes that crossed.
 	[[nodiscard]] const SceneStore& Store() const noexcept { return m_Store; }
 
+	// The same world, to write one fact into that no author owns: which session an output is showing.
+	// The composition root's, because Docs/Open.md reserves output-to-session assignment to a party no
+	// client can reach, and because it is the only one holding both the sessions and the outputs.
+	[[nodiscard]] SceneStore& Store() noexcept { return m_Store; }
+
 	// The images the world holds, for the same reason: a test asserts that a swap retired what it
 	// replaced rather than that nothing crashed, and the root's report line says how many are live.
 	[[nodiscard]] const TextureRegistry& Textures() const noexcept { return m_Textures; }

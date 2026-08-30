@@ -33,7 +33,7 @@ struct ClientWatch
 {
 	wl_listener Destroyed{};
 
-	std::unordered_map<wl_client*, Session::SessionId>* Watched = nullptr;
+	std::unordered_map<wl_client*, SessionId>* Watched = nullptr;
 
 	wl_client* Client = nullptr;
 };
@@ -144,7 +144,7 @@ Result<void> Server::Bind(std::string_view name)
 	return {};
 }
 
-Result<void> Server::Adopt(Fd listener, std::uint32_t uid, Session::SessionId session)
+Result<void> Server::Adopt(Fd listener, std::uint32_t uid, SessionId session)
 {
 	if (m_EventLoop == nullptr)
 	{
@@ -156,7 +156,7 @@ Result<void> Server::Adopt(Fd listener, std::uint32_t uid, Session::SessionId se
 		return Failure(EBADF, "adopting a listener that is not a descriptor");
 	}
 
-	if (session == Session::SessionId::None)
+	if (session == SessionId::None)
 	{
 		return Failure(EINVAL, "adopting a listener for no session");
 	}
@@ -184,7 +184,7 @@ Result<void> Server::Adopt(Fd listener, std::uint32_t uid, Session::SessionId se
 	return {};
 }
 
-void Server::Release(Session::SessionId session) noexcept
+void Server::Release(SessionId session) noexcept
 {
 	for (std::size_t index = m_Listeners.size(); index > 0; --index)
 	{

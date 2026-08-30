@@ -8,6 +8,8 @@
 #include <span>
 #include <string_view>
 
+#include "Core/Session.h"
+
 // The listener handover, as a vocabulary rather than as a mechanism.
 //
 // Docs/Architecture.md#listener-handover inverts socket creation: a small agent running as the user
@@ -62,13 +64,6 @@ inline constexpr std::string_view DefaultControlPath = "/run/gyro/control";
 // user's session away over a field it does not need.
 inline constexpr std::uint32_t HandoverVersion = 1;
 inline constexpr std::uint32_t MinimumHandoverVersion = 1;
-
-// A session, as gyro names it and the agent quotes it back in a log line. Minted by gyro on the first
-// accepted offer for a uid; the agent never invents one.
-enum class SessionId : std::uint32_t
-{
-	None = 0,
-};
 
 // What a message is. Numbered explicitly and never reused, because a value that meant one thing in a
 // shipped release cannot mean another in the next — which is the whole content of calling this an ABI.

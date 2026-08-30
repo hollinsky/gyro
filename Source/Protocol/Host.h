@@ -8,6 +8,7 @@
 #include "Core/Fd.h"
 #include "Core/Input.h"
 #include "Core/Result.h"
+#include "Core/Session.h"
 #include "Core/Signal.h"
 #include "Core/Time.h"
 #include "Core/Wake.h"
@@ -22,7 +23,6 @@
 #include "Protocol/Shm.h"
 #include "Scene/Author.h"
 #include "Scene/Return.h"
-#include "Session/Handover.h"
 
 // The author with clients behind it: gyro's Wayland server standing where a gym stands.
 //
@@ -110,14 +110,14 @@ public:
 	// Serve a session's clients on the listener its agent offered. The composition root's to call, on
 	// the dispatch thread, because it is the party holding both this host and the control socket the
 	// offer arrived on.
-	[[nodiscard]] Result<void> Adopt(Fd listener, std::uint32_t uid, Session::SessionId session)
+	[[nodiscard]] Result<void> Adopt(Fd listener, std::uint32_t uid, SessionId session)
 	{
 		return m_Server.Adopt(std::move(listener), uid, session);
 	}
 
 	// The agent went away, so the session did. Ends every client that arrived on that listener, which
 	// retires their windows through the path a client exiting already takes.
-	void Release(Session::SessionId session) noexcept { m_Server.Release(session); }
+	void Release(SessionId session) noexcept { m_Server.Release(session); }
 
 	// Push everything owed back out to the clients. The root's to call, immediately before it sleeps.
 	void Flush() noexcept { m_Server.Flush(); }

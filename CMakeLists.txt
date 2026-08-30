@@ -973,7 +973,6 @@ gyro_add_module(Protocol DISPATCH
 		Core
 		Geometry
 		Scene
-		Session
 	SOURCES
 		Compositor.cpp
 		Data.cpp

@@ -192,6 +192,50 @@ GYRO_TEST(SceneStore, TheOutputSetIsReplacedWholeAndTheGenerationSaysSo)
 	GYRO_CHECK_EQ(store.OutputGeneration(), std::uint64_t{ 2 });
 }
 
+GYRO_TEST(SceneStore, AssigningASessionMovesOneOutputAndDoesNotRenumberTheSet)
+{
+	SceneStore store{ Clock };
+
+	const SceneOutput primary{ .Id = OutputId{ 1, 1 }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } };
+	const SceneOutput secondary{ .Id = OutputId{ 2, 1 },
+		                         .Bounds = { { 1920.0, 0.0 }, { 1920.0, 1080.0 } },
+		                         .Density = Scale::FromInteger(1),
+		                         .Grid = { 1920, 1080 } };
+
+	const SceneOutput both[] = { primary, secondary };
+
+	store.SetOutputs(both);
+
+	// Every output starts showing gyro's own scene, which is what the splash and the recovery console
+	// are, rather than showing a session nobody has offered yet.
+	GYRO_CHECK(store.Outputs()[0].Session == SessionId::None);
+	GYRO_CHECK(store.Outputs()[1].Session == SessionId::None);
+
+	const std::uint64_t before = store.OutputGeneration();
+
+	store.SetOutputSession(OutputId{ 2, 1 }, static_cast<SessionId>(7));
+
+	GYRO_CHECK(store.Outputs()[0].Session == SessionId::None);
+	GYRO_CHECK(store.Outputs()[1].Session == static_cast<SessionId>(7));
+
+	// **The set did not change, so the generation must not move.** Decision 84's number answers *do
+	// these runs mean my outputs at all*, and bumping it because somebody logged in would invalidate
+	// every per-output run in the snapshot over a fact none of them carries.
+	GYRO_CHECK_EQ(store.OutputGeneration(), before);
+
+	// A monitor unplugged between an agent offering and the root assigning is an id that is not here,
+	// and the assignment is dropped rather than landing on whoever took the slot.
+	store.SetOutputSession(OutputId{ 9, 1 }, static_cast<SessionId>(7));
+
+	GYRO_CHECK(store.Outputs()[0].Session == SessionId::None);
+
+	// The session ending returns its outputs to gyro, which is the same field written the other way.
+	store.SetOutputSession(OutputId{ 2, 1 }, SessionId::None);
+
+	GYRO_CHECK(store.Outputs()[1].Session == SessionId::None);
+	GYRO_CHECK_EQ(store.OutputGeneration(), before);
+}
+
 // Raising is the z order written to: the sibling list is the paint order (55), so the raised node
 // comes out last and everything it passed keeps its own order.
 GYRO_TEST(SceneStore, RaisingAChildPutsItLastAndLeavesTheRestInOrder)

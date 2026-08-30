@@ -236,7 +236,7 @@ GYRO_TEST(Server, AnAdoptedListenerServesClients)
 	Server server;
 
 	GYRO_REQUIRE(server.Open().has_value());
-	GYRO_REQUIRE(server.Adopt(std::move(offered.Socket), ::getuid(), static_cast<Session::SessionId>(1)).has_value());
+	GYRO_REQUIRE(server.Adopt(std::move(offered.Socket), ::getuid(), static_cast<SessionId>(1)).has_value());
 
 	// No socket of gyro's own: everything this run serves arrived from an agent, which is what the
 	// composition root refuses to mix.
@@ -261,7 +261,7 @@ GYRO_TEST(Server, ReleasingASessionClosesItsListenerAndEndsItsClients)
 	Server server;
 
 	GYRO_REQUIRE(server.Open().has_value());
-	GYRO_REQUIRE(server.Adopt(std::move(offered.Socket), ::getuid(), static_cast<Session::SessionId>(7)).has_value());
+	GYRO_REQUIRE(server.Adopt(std::move(offered.Socket), ::getuid(), static_cast<SessionId>(7)).has_value());
 
 	const Fd client = ConnectTo(offered.Path);
 
@@ -271,7 +271,7 @@ GYRO_TEST(Server, ReleasingASessionClosesItsListenerAndEndsItsClients)
 
 	// The agent's connection closing is the session ending, and a session whose windows stayed on
 	// screen with nothing behind them would make that event advisory.
-	server.Release(static_cast<Session::SessionId>(7));
+	server.Release(static_cast<SessionId>(7));
 
 	GYRO_CHECK(server.Clients() == 0);
 
@@ -289,7 +289,7 @@ GYRO_TEST(Server, ReleasingAnUnknownSessionDoesNothing)
 
 	// Every client under `Bind` belongs to no session, so this is the ordinary case rather than an edge:
 	// a run that never took an offer still has `Release` called on it by nothing at all.
-	server.Release(static_cast<Session::SessionId>(3));
+	server.Release(static_cast<SessionId>(3));
 
 	GYRO_CHECK(server.SocketName() == "gyro-adopted-2");
 }

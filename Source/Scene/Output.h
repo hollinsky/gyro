@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "Core/Handle.h"
+#include "Core/Session.h"
 #include "Geometry/AxisTransform.h"
 #include "Geometry/Scale.h"
 #include "Geometry/Space.h"
@@ -36,6 +37,26 @@ struct SceneOutput
 	// the next one takes the slot, and anything still keyed to the old one is wrong about a display
 	// that is physically no longer there.
 	OutputId Id{};
+
+	// Which session this output is showing, or `SessionId::None` for gyro's own scene.
+	//
+	// **An output belongs to a session or to gyro, and there is no third state.** Decision 21 keeps
+	// every connected session alive and presents one of them locally, so *which one* is a property of
+	// the output rather than of the session — switching users moves this field and tears nothing down.
+	// `None` is not an output nobody has got round to: it is the boot splash, the background between one
+	// session and the next, and the recovery console, all of which gyro authors for itself.
+	//
+	// **The composition root fills it in, and Docs/Open.md requires that it stay there.** Assignment
+	// must not be client-reachable — a System-tier client that could move an output between sessions
+	// walks straight through decision 43's locking — so configuration and assignment are separate
+	// operations with separate reachability, and the root is the only party that sees both the sessions
+	// `Session/Control.h` mints and the outputs the world holds.
+	//
+	// **Nothing draws differently by it yet**, and it is minted now for the reason the composition root
+	// mints an `OutputId` before anything reads one: the reader is a per-session root for the walk to
+	// gate on, and a field added alongside it would be a second scheme to reconcile with the assignment
+	// policy written first.
+	SessionId Session = SessionId::None;
 
 	// Decision 73's per-output reconfiguration generation, echoed from what the composition root last
 	// asked the backend for. It answers *is this output's mode request newer than what I have

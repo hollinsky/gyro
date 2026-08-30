@@ -9,7 +9,7 @@
 
 #include "Core/Fd.h"
 #include "Core/Result.h"
-#include "Session/Handover.h"
+#include "Core/Session.h"
 
 struct wl_client;
 struct wl_display;
@@ -113,7 +113,7 @@ public:
 	// `uid` is what the kernel said about the offering process rather than anything it claimed, and it
 	// is the whole of what a connection is admitted against. The descriptor is taken: it is closed by
 	// `Release`, by the destructor, or here if the event source cannot be made.
-	[[nodiscard]] Result<void> Adopt(Fd listener, std::uint32_t uid, Session::SessionId session);
+	[[nodiscard]] Result<void> Adopt(Fd listener, std::uint32_t uid, SessionId session);
 
 	// Stop serving a session: close its listener, and end every client that arrived on it.
 	//
@@ -126,7 +126,7 @@ public:
 	// path and not through a second one written for this.
 	//
 	// Does nothing for a session that has no listener here, which is every session under `Bind`.
-	void Release(Session::SessionId session) noexcept;
+	void Release(SessionId session) noexcept;
 
 	// The event loop's single descriptor, for the composition root to add to its `ppoll` set. Borrowed
 	// from libwayland and never closed here; valid only while the server is open, and `-1` before it is.
@@ -172,7 +172,7 @@ private:
 
 		std::uint32_t Uid = 0;
 
-		Session::SessionId Session = Session::SessionId::None;
+		SessionId Session = SessionId::None;
 	};
 
 	// libwayland's `wl_event_loop_fd_func_t`: a connection is pending on an adopted listener.
@@ -192,5 +192,5 @@ private:
 	// **The destroy listener that keeps this current is not here**: libwayland's is intrusive, so the
 	// record holding it has to contain a `wl_listener` by value, and that is a type this header goes out
 	// of its way not to name. Server.cpp owns it and frees it from its own notify.
-	std::unordered_map<wl_client*, Session::SessionId> m_Watched;
+	std::unordered_map<wl_client*, SessionId> m_Watched;
 };

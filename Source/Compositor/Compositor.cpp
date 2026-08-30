@@ -1849,26 +1849,82 @@ private:
 	{
 		while (std::optional<Session::AcceptedOffer> offer = m_Control->TakeOffer())
 		{
-			const Session::SessionId id = offer->Id;
+			const SessionId id = offer->Id;
 
 			const Result<void> adopted = m_Clients->Adopt(std::move(offer->Listener), offer->Uid, id);
 
 			if (!adopted)
 			{
 				spdlog::error("session {} could not be served: {}", static_cast<std::uint32_t>(id), adopted.error());
+				continue;
+			}
+
+			ShowSession(id);
+		}
+	}
+
+	// Which outputs a session that has just arrived is shown on, while nothing is entitled to say.
+	//
+	// **Every output showing nobody, which is the whole of the policy and is a stand-in for an absent
+	// party rather than a design.** Docs/Open.md reserves output-to-session assignment to the login
+	// agent — a client that could move an output between sessions walks straight through decision 43's
+	// locking — and there is no login agent. So the rule here is the one that takes no parameter: a
+	// session that arrives on a screen nobody is using is shown, and one that arrives second is not,
+	// because the first is still being used. It is Protocol/Floor.h's shape one level up, and it leaves
+	// the same way, when something is entitled to place a session.
+	//
+	// **What it deliberately is not is a switch.** Decision 21 keeps a session that is not on screen
+	// alive and warm, so a second session's clients run, draw and are simply not presented — which is
+	// the state the fast-user-switch animation will start from rather than a case to be avoided.
+	void ShowSession(SessionId session)
+	{
+		if (m_Dispatch == nullptr)
+		{
+			return;
+		}
+
+		SceneStore& store = m_Dispatch->Store();
+
+		for (std::size_t index = 0; index < store.Outputs().size(); ++index)
+		{
+			const SceneOutput& output = store.Outputs()[index];
+
+			if (output.Session == SessionId::None)
+			{
+				store.SetOutputSession(output.Id, session);
 			}
 		}
 	}
 
 	// A session agent's connection closed, which is that session ending — the whole reason the agent
 	// holds the connection open rather than offering and exiting.
-	void OnSessionEnded(Session::SessionId session)
+	void OnSessionEnded(SessionId session)
 	{
 		// Silent on the way through: Session/Control.h says the session ended, and this is what that
 		// costs the world rather than a second announcement of the same fact.
 		if (m_Clients != nullptr)
 		{
 			m_Clients->Release(session);
+		}
+
+		// **The outputs go back to gyro rather than to the next session along.** Handing them to another
+		// connected session would be this function choosing who gets the screen, which is the assignment
+		// decision the paragraph above `ShowSession` says gyro is not entitled to make — and with no
+		// login agent there is nobody to ask. `SessionId::None` is the boot splash and the recovery
+		// console, so the screen a logged-out session leaves behind is a screen gyro is still drawing.
+		if (m_Dispatch != nullptr)
+		{
+			SceneStore& store = m_Dispatch->Store();
+
+			for (std::size_t index = 0; index < store.Outputs().size(); ++index)
+			{
+				const SceneOutput& output = store.Outputs()[index];
+
+				if (output.Session == session)
+				{
+					store.SetOutputSession(output.Id, SessionId::None);
+				}
+			}
 		}
 	}
 
@@ -2552,7 +2608,7 @@ private:
 	// then never again, for the input path's reason.
 	std::unique_ptr<Session::SessionControl> m_Control;
 
-	Connection<Session::SessionId> m_SessionEnded;
+	Connection<SessionId> m_SessionEnded;
 
 	// The device set, the compositor's own keys, and the connection between them. Declared beside the
 	// host rather than with the backend because both are the dispatch thread's, and destroyed before
