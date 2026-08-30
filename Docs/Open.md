@@ -365,7 +365,14 @@ is to do the work.
   alternative is gyro picking the number. That the mechanism half works with no constraints at all
   is evidence for the split rather than against it; the question the enumeration still has to answer
   is resize, where a minimum and a maximum size are already on the wire and arrive from the *client*
-  rather than from a shell. The gesture
+  rather than from a shell. *(Annotated 2026-08-29.)* Resize is now built too, on
+  [decision 166](Decisions.md#166-a-resize-is-a-request-the-client-owns-the-extent-gyro-owns-the-anchor),
+  and it answers the half of this entry that was about to break the rule: the only bound it honours
+  comes from the party being resized rather than from a policy, so nothing about it wanted a
+  per-event request and the mechanism side stayed declarative. What is still unenumerated is the
+  shell's own list — snap targets, tiling gravity, the edges a window may not cross — and the case
+  that will settle whether the rule holds is now the first one that needs *two* of them at once,
+  since a snap target and a minimum size can disagree and only the shell knows which wins. The gesture
   vocabulary itself — which gestures exist, and what each binds to — belongs with the scene and
   material vocabularies above and for the same reason: a gesture, the transition it drives, and the
   nodes it moves are one design problem seen three ways.

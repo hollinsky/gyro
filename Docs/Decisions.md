@@ -12939,3 +12939,85 @@ which is decision 22 finally taken literally and is a change to a udev rule rath
 
 There is also no agent: nothing offers a listener except a test, so `--control` is a rendezvous a
 person has to speak to by hand. That is the next commit rather than a hole in this one.
+
+### 166. A resize is a request: the client owns the extent, gyro owns the anchor
+
+`xdg_toplevel.resize` starts a gesture gyro runs at pointer rate, and what the gesture produces is a
+*size in a configure* rather than a change to the world. The window's extent changes when the client
+commits a buffer and at no other moment. What gyro does not delegate is where that rectangle is
+pinned: the position is recomputed from the size that **arrived**, so the edge a person is holding
+still is the one that stays still.
+
+**The round trip is not removable and [decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) never claimed it was.**
+That entry is worth re-reading before this one is argued with, because it is easy to remember it as
+*gyro moves the edge and the pixels catch up*, which is not what it says. It says resize *is already*
+a round trip — configure, render, commit, and only then does the edge move — and that putting a shell
+in the middle makes it `gyro → shell → gyro → client → gyro` on the interaction people judge most
+harshly. The win is two hops, not the loop. So a compositor that "owns resize" owns the pointer, the
+arithmetic and the anchor, and owns none of the pixels.
+
+**The anchor is the half nobody can do for gyro, and it is the half everyone gets wrong.** A client
+is free to come back with a size other than the one it was asked for — a terminal that grows by whole
+character cells, a dialog at its own minimum, a toolkit that rounds to its scale factor. Position the
+window from the size that was *requested* and the far edge moves by the difference on every frame of
+the drag: pull a window's left edge and its right edge shimmers. Position it from the size that
+arrived and the far edge is exact by construction, because the origin is `anchor + (extent at grab −
+extent now)` and the two terms cancel wherever the client lands. This is arithmetic rather than a
+policy, which is what makes it mechanism and therefore gyro's.
+
+**A configure per pointer event would make the window fall further behind the longer somebody
+dragged.** A mouse reports at a thousand hertz and a toolkit draws at sixty, so an ungated stream
+queues sizes in front of a client that will render every one of them in order and arrive at the
+newest last — which is precisely the rubber-banding decision 51 keeps this gesture in the compositor
+to avoid, reintroduced from the other end. So a size is asked for only when the last one has been
+acknowledged: the client is always working on the freshest number and is at most one round trip
+behind, and a window whose client has stopped answering stops resizing, which is the truth about it.
+The `activated` half of the same walk is deliberately *not* gated — a stale size costs nothing a
+person can see and a titlebar that stays grey behind a slow client is read as the compositor having
+lost track of them.
+
+**`resizing` is a promise about latency rather than a fact about geometry**, and it is the second
+state gyro has an answer to. It tells a toolkit more configures are coming, so the expensive paths —
+a terminal reflowing scrollback, a browser relaying out a page — may be deferred until it clears. A
+compositor that drove a resize without sending it would get the slow path on every frame of the drag,
+which is what people describe as a window being heavy to resize. Maximised, fullscreen and the tiled
+set stay out for decision 51's reason: they are window management and a shell owns them.
+
+**The client's minimum and maximum size are honoured, and they are not a counterexample to the
+constraint set being empty.** [Open.md](Open.md) records that a shell declares snap targets, tiling
+gravity and the edges a window may not cross, and that there is no shell — but a minimum size does
+not come from a shell at all. It arrives on the wire from the party being resized, which is the one
+participant entitled to say that forty pixels is not a window. Ignoring it produces the same picture
+as a resize that does not work: the compositor asks, the client refuses, and a person watches an edge
+that will not move.
+
+**Rejected: scaling the client's pixels to the pointer for the duration of the gesture.** It is the
+only way to make the edge track the hand exactly, and it is what a design that took *gyro owns the
+edge* literally would have to build — the container is authored to the pointer's rectangle and the
+image child is stretched into it until a correctly sized buffer arrives. It was rejected on what a
+person sees: every frame of every resize is a blurred, stretched window, and text is where that is
+worst. The artefact it removes — an edge that lags by one client frame — is smaller than the artefact
+it introduces, and it is smaller *because* the shell hop is gone. It is worth reopening if a client
+is ever slow enough that the lag is measured in frames rather than in one.
+
+**Rejected: writing the extent gyro asked for into the world and letting the pixels catch up.** This
+is the shape the work started from, and it is worse than useless rather than merely wrong: the
+container draws nothing, so a window whose container grew and whose image did not looks *exactly* like
+a window that did not resize — with the hit region now disagreeing with the picture. It buys no
+feedback and costs a frame of dead strip down the side of every window being resized.
+
+#### What is not built
+
+The gesture is anchored where the pointer is when the *request* arrives rather than where the press
+was, because the press is several iterations old by then and gyro keeps one serial rather than a
+history of positions. What that costs is the few pixels of travel between the press and the request,
+which a person reads as nothing at all; what it would take to fix is a position beside the serial in
+[Seat.h](../Source/Protocol/Seat.h), and it is not obvious the fix is an improvement — anchoring in
+the past means the window jumps on the gesture's first frame.
+
+Nothing constrains where a resize can end up beyond the client's own bounds — a window can be made
+larger than every screen, or dragged so its far edge leaves the desk — for the same reason a move can
+(141, and Open.md's constraint set). And `set_window_geometry` is read but the *increment* half of
+resizing is not: there is no protocol for a client to declare that it grows by whole cells, so a
+terminal's rounding shows up here as gyro asking for sizes it will not get, which the anchor rule
+above is exactly what makes harmless.

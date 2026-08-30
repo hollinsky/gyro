@@ -71,7 +71,7 @@ GYRO_TEST(Drag, TheWindowFollowsThePointerByTheDistanceThePointerTravelled)
 	PointAt(scene, { 400.0, 250.0 }, outputs);
 
 	WindowDrag drag;
-	GYRO_REQUIRE(drag.Begin(scene, window));
+	GYRO_REQUIRE(drag.BeginMove(scene, window));
 
 	PointAt(scene, { 450.0, 280.0 }, outputs);
 	drag.Track(scene, scene.Now());
@@ -101,7 +101,7 @@ GYRO_TEST(Drag, AnIterationWithNoMotionLeavesTheWindowWhereItIs)
 	PointAt(scene, { 400.0, 250.0 }, outputs);
 
 	WindowDrag drag;
-	GYRO_REQUIRE(drag.Begin(scene, window));
+	GYRO_REQUIRE(drag.BeginMove(scene, window));
 
 	PointAt(scene, { 420.0, 250.0 }, outputs);
 	drag.Track(scene, scene.Now());
@@ -127,7 +127,7 @@ GYRO_TEST(Drag, TheWindowIsAtThePointerRatherThanTravellingTowardsIt)
 	PointAt(scene, { 400.0, 250.0 }, outputs);
 
 	WindowDrag drag;
-	GYRO_REQUIRE(drag.Begin(scene, window));
+	GYRO_REQUIRE(drag.BeginMove(scene, window));
 
 	PointAt(scene, { 900.0, 250.0 }, outputs);
 	drag.Track(scene, scene.Now());
@@ -166,7 +166,7 @@ GYRO_TEST(Drag, AWindowGrabbedMidFlightIsAnchoredWhereItIsSeen)
 	PointAt(scene, { 400.0, 400.0 }, outputs);
 
 	WindowDrag drag;
-	GYRO_REQUIRE(drag.Begin(scene, window));
+	GYRO_REQUIRE(drag.BeginMove(scene, window));
 
 	// The hand has not moved yet, so the window must be exactly where it was drawn — not at 800.
 	drag.Track(scene, scene.Now());
@@ -190,7 +190,7 @@ GYRO_TEST(Drag, NothingKeepsTheWindowOnTheScreen)
 	PointAt(scene, { 200.0, 200.0 }, outputs);
 
 	WindowDrag drag;
-	GYRO_REQUIRE(drag.Begin(scene, window));
+	GYRO_REQUIRE(drag.BeginMove(scene, window));
 
 	PointAt(scene, { 0.0, 0.0 }, outputs);
 	drag.Track(scene, scene.Now());
@@ -213,7 +213,7 @@ GYRO_TEST(Drag, LettingGoLeavesTheWindowWhereItWasDropped)
 	PointAt(scene, { 400.0, 250.0 }, outputs);
 
 	WindowDrag drag;
-	GYRO_REQUIRE(drag.Begin(scene, window));
+	GYRO_REQUIRE(drag.BeginMove(scene, window));
 
 	PointAt(scene, { 500.0, 250.0 }, outputs);
 	drag.Track(scene, scene.Now());
@@ -245,7 +245,7 @@ GYRO_TEST(Drag, AWindowThatCloses)
 	PointAt(scene, { 400.0, 250.0 }, outputs);
 
 	WindowDrag drag;
-	GYRO_REQUIRE(drag.Begin(scene, window));
+	GYRO_REQUIRE(drag.BeginMove(scene, window));
 
 	// Retired rather than destroyed, which is the path an unmap takes (114): the window is still in the
 	// store, still on screen, and playing out whatever exit it is owed. Dragging it would be moving
@@ -278,7 +278,7 @@ GYRO_TEST(Drag, ADragCannotStartOnAWindowThatIsNotThere)
 
 	WindowDrag drag;
 
-	GYRO_CHECK(!drag.Begin(scene, EntityId{}));
+	GYRO_CHECK(!drag.BeginMove(scene, EntityId{}));
 
 	{
 		SceneCommit unmap{ scene, CommitAuthor::Client };
@@ -286,6 +286,230 @@ GYRO_TEST(Drag, ADragCannotStartOnAWindowThatIsNotThere)
 		GYRO_REQUIRE(unmap.Retire(window));
 	}
 
-	GYRO_CHECK(!drag.Begin(scene, window));
+	GYRO_CHECK(!drag.BeginMove(scene, window));
 	GYRO_CHECK(!drag.IsActive());
+}
+
+// Decision 166's first half: a resize asks and does not write. The extent belongs to the client, so
+// the world does not change until it has drawn one — and a test that only checked the size asked for
+// would pass just as happily on a compositor that resized the window itself.
+GYRO_TEST(Drag, AResizeAsksForASizeAndChangesNothingInTheWorld)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	const std::array outputs{ Panel() };
+	scene.SetOutputs(outputs);
+
+	const EntityId window = Window(scene, { 300.0, 200.0, 0.0 });
+
+	PointAt(scene, { 700.0, 500.0 }, outputs);
+
+	WindowDrag drag;
+	GYRO_REQUIRE(drag.BeginResize(scene, window, { .Right = true }));
+
+	PointAt(scene, { 760.0, 500.0 }, outputs);
+	drag.Track(scene, scene.Now());
+
+	GYRO_CHECK_EQ(drag.Wanted().Width, 460.0F);
+	GYRO_CHECK_EQ(drag.Wanted().Height, 300.0F);
+
+	// The window is exactly as it was: same place, same size.
+	GYRO_CHECK_EQ(Where(scene, window).X, 300.0);
+	GYRO_CHECK_EQ(scene.Find(window)->Extent.Width, 400.0F);
+}
+
+// Pulling the far edges grows the window without moving its origin, which is the case that would
+// still look right if `Anchored` were wrong — hence the one below it.
+GYRO_TEST(Drag, PullingTheRightAndBottomEdgesHoldsTheOrigin)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	const std::array outputs{ Panel() };
+	scene.SetOutputs(outputs);
+
+	const EntityId window = Window(scene, { 300.0, 200.0, 0.0 });
+
+	PointAt(scene, { 700.0, 500.0 }, outputs);
+
+	WindowDrag drag;
+	GYRO_REQUIRE(drag.BeginResize(scene, window, { .Right = true, .Bottom = true }));
+
+	PointAt(scene, { 750.0, 540.0 }, outputs);
+	drag.Track(scene, scene.Now());
+
+	GYRO_CHECK_EQ(drag.Wanted().Width, 450.0F);
+	GYRO_CHECK_EQ(drag.Wanted().Height, 340.0F);
+
+	const Vector3<double> anchored = drag.Anchored({ 450.0F, 340.0F });
+
+	GYRO_CHECK_EQ(anchored.X, 300.0);
+	GYRO_CHECK_EQ(anchored.Y, 200.0);
+}
+
+// And the near edges, which grow the window in the other direction and move the origin to keep the far
+// edge still. A person pulling the left edge left expects the right edge not to move.
+GYRO_TEST(Drag, PullingTheLeftAndTopEdgesMovesTheOriginAndHoldsTheFarEdge)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	const std::array outputs{ Panel() };
+	scene.SetOutputs(outputs);
+
+	// Right edge at 700, bottom edge at 500.
+	const EntityId window = Window(scene, { 300.0, 200.0, 0.0 });
+
+	PointAt(scene, { 300.0, 200.0 }, outputs);
+
+	WindowDrag drag;
+	GYRO_REQUIRE(drag.BeginResize(scene, window, { .Left = true, .Top = true }));
+
+	PointAt(scene, { 250.0, 170.0 }, outputs);
+	drag.Track(scene, scene.Now());
+
+	GYRO_CHECK_EQ(drag.Wanted().Width, 450.0F);
+	GYRO_CHECK_EQ(drag.Wanted().Height, 330.0F);
+
+	const Vector3<double> anchored = drag.Anchored(drag.Wanted());
+
+	GYRO_CHECK_EQ(anchored.X, 250.0);
+	GYRO_CHECK_EQ(anchored.Y, 170.0);
+
+	// Stated as the invariant rather than as the coordinate, because the coordinate is the thing that
+	// would drift and the invariant is what a person is looking at.
+	GYRO_CHECK_EQ(anchored.X + static_cast<double>(drag.Wanted().Width), 700.0);
+	GYRO_CHECK_EQ(anchored.Y + static_cast<double>(drag.Wanted().Height), 500.0);
+}
+
+// **The claim decision 166 exists for.** A client is free to come back with a size other than the one
+// it was asked for — its own increment, its own minimum, or its own opinion — and the window has to be
+// positioned from what arrived. Anchoring on the request instead is the shimmer a person sees on the
+// edge they are *not* holding.
+GYRO_TEST(Drag, TheOriginFollowsTheSizeThatArrivedRatherThanTheSizeThatWasAsked)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	const std::array outputs{ Panel() };
+	scene.SetOutputs(outputs);
+
+	const EntityId window = Window(scene, { 300.0, 200.0, 0.0 });
+
+	PointAt(scene, { 300.0, 200.0 }, outputs);
+
+	WindowDrag drag;
+	GYRO_REQUIRE(drag.BeginResize(scene, window, { .Left = true }));
+
+	PointAt(scene, { 250.0, 200.0 }, outputs);
+	drag.Track(scene, scene.Now());
+
+	GYRO_REQUIRE(drag.Wanted().Width == 450.0F);
+
+	// A terminal that only grows by whole character cells and rounded down to 440.
+	const Vector3<double> anchored = drag.Anchored({ 440.0F, 300.0F });
+
+	// The right edge is still at 700 — not 690, which is what anchoring on the request would give.
+	GYRO_CHECK_EQ(anchored.X, 260.0);
+	GYRO_CHECK_EQ(anchored.X + 440.0, 700.0);
+}
+
+// A person who drags an edge clean past the far side of the window. Zero on the wire means *pick your
+// own size*, which would hand the client back the freedom the gesture is taking away, so the ask
+// bottoms out at one and stays there.
+GYRO_TEST(Drag, AnEdgeDraggedPastTheOppositeOneAsksForTheSmallestWindowRatherThanForNone)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	const std::array outputs{ Panel() };
+	scene.SetOutputs(outputs);
+
+	const EntityId window = Window(scene, { 300.0, 200.0, 0.0 });
+
+	PointAt(scene, { 700.0, 500.0 }, outputs);
+
+	WindowDrag drag;
+	GYRO_REQUIRE(drag.BeginResize(scene, window, { .Right = true, .Bottom = true }));
+
+	PointAt(scene, { 100.0, 100.0 }, outputs);
+	drag.Track(scene, scene.Now());
+
+	GYRO_CHECK_EQ(drag.Wanted().Width, 1.0F);
+	GYRO_CHECK_EQ(drag.Wanted().Height, 1.0F);
+}
+
+// `xdg_toplevel.resize` with `none`, which is legal on the wire and is a gesture with no direction to
+// run in. Refused rather than started, so the pointer is not taken away from the client for nothing.
+GYRO_TEST(Drag, AResizeWithNoEdgesIsRefused)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	const std::array outputs{ Panel() };
+	scene.SetOutputs(outputs);
+
+	const EntityId window = Window(scene, { 300.0, 200.0, 0.0 });
+
+	PointAt(scene, { 700.0, 500.0 }, outputs);
+
+	WindowDrag drag;
+
+	GYRO_CHECK(!drag.BeginResize(scene, window, ResizeEdges{}));
+	GYRO_CHECK(!drag.IsActive());
+	GYRO_CHECK(!drag.IsResizing());
+}
+
+// A move is not a resize, which the shell asks once per window per iteration and would otherwise
+// configure every window on the machine while somebody drags one of them by its titlebar.
+GYRO_TEST(Drag, AMoveIsNotAResize)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	const std::array outputs{ Panel() };
+	scene.SetOutputs(outputs);
+
+	const EntityId window = Window(scene, { 300.0, 200.0, 0.0 });
+
+	PointAt(scene, { 700.0, 500.0 }, outputs);
+
+	WindowDrag drag;
+	GYRO_REQUIRE(drag.BeginMove(scene, window));
+
+	GYRO_CHECK(drag.IsActive());
+	GYRO_CHECK(!drag.IsResizing());
+
+	drag.End();
+	GYRO_CHECK(!drag.IsResizing());
+}
+
+// The window leaving under a resize, which ends it exactly as it ends a move — the id is the one thing
+// that can notice, and both halves look it up in the same place.
+GYRO_TEST(Drag, AResizeEndsWhenTheWindowDoes)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	const std::array outputs{ Panel() };
+	scene.SetOutputs(outputs);
+
+	const EntityId window = Window(scene, { 300.0, 200.0, 0.0 });
+
+	PointAt(scene, { 700.0, 500.0 }, outputs);
+
+	WindowDrag drag;
+	GYRO_REQUIRE(drag.BeginResize(scene, window, { .Right = true }));
+
+	{
+		SceneCommit unmap{ scene, CommitAuthor::Client };
+
+		GYRO_REQUIRE(unmap.Retire(window));
+	}
+
+	drag.Track(scene, scene.Now());
+
+	GYRO_CHECK(!drag.IsActive());
+	GYRO_CHECK(!drag.IsResizing());
 }

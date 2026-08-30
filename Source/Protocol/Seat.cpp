@@ -388,7 +388,7 @@ void SeatGlobal::SyncPointer(SceneStore& scene, Instant now)
 	// hand is. Doing it after would resolve this iteration's events against last iteration's picture,
 	// which is one frame of the window trailing the pointer — the exact artefact decision 51 keeps this
 	// gesture inside the compositor to avoid.
-	m_Drag.Track(scene, m_MovedAt.value_or(now));
+	m_Context->Drag().Track(scene, m_MovedAt.value_or(now));
 
 	// Where the pointer is now, before anything the devices said is routed: a press lands on what the
 	// motion in front of it moved onto, which is what makes clicking a window a person just slid onto
@@ -440,10 +440,11 @@ void SeatGlobal::SyncPointer(SceneStore& scene, Instant now)
 			m_Grab = {};
 			m_GrabSerial.reset();
 
-			// **The button coming up ends the drag, and nothing else does.** A person lets go of a window
-			// where they let go of it: there is no snap back, no commit to wait for and nothing to
-			// confirm, because the window has been at that position on every frame of the gesture already.
-			m_Drag.End();
+			// **The button coming up ends the gesture, and nothing else does.** A person lets go of a
+			// window where they let go of it: for a move there is no snap back and nothing to confirm,
+			// because the window has been at that position on every frame of the gesture already, and for
+			// a resize the last size asked for is the one the client is already drawing.
+			m_Context->Drag().End();
 		}
 	}
 
@@ -483,7 +484,7 @@ SeatGlobal::PointerTarget SeatGlobal::Resolve(const SceneStore& scene) const
 	// started it. That is the protocol's own answer for a grab taken away — a `leave` is what cancels a
 	// toolkit's own tracking, and it is why it goes out rather than being suppressed — and it is the
 	// same shape every compositor's interactive move has.
-	if (m_Drag.IsActive())
+	if (m_Context->Drag().IsActive())
 	{
 		return {};
 	}
@@ -749,11 +750,11 @@ void SeatGlobal::Deliver()
 	}
 }
 
-bool SeatGlobal::BeginMove(SceneStore& scene, EntityId window, std::uint32_t serial)
+bool SeatGlobal::MayGrab(const SceneStore& scene, EntityId window, std::uint32_t serial) const
 {
-	// One drag at a time, because there is one pointer. A second request inside the same gesture is a
-	// client asking for a grab it already holds, or asking to take one off another window.
-	if (m_Drag.IsActive())
+	// One gesture at a time, because there is one pointer: a second request inside the same grab is a
+	// client asking for something it already holds, or asking to take it off another window.
+	if (m_Context->Drag().IsActive())
 	{
 		return false;
 	}
@@ -769,12 +770,17 @@ bool SeatGlobal::BeginMove(SceneStore& scene, EntityId window, std::uint32_t ser
 	// under the pointer to the window around it, which is the walk click-to-focus already does — so a
 	// press on a client's own surface names its own window, and a press inside an open menu names the
 	// menu rather than the window behind it.
-	if (window.IsNull() || FocusTargetFor(scene, m_Grab) != window)
-	{
-		return false;
-	}
+	return !window.IsNull() && FocusTargetFor(scene, m_Grab) == window;
+}
 
-	return m_Drag.Begin(scene, window);
+bool SeatGlobal::BeginMove(SceneStore& scene, EntityId window, std::uint32_t serial)
+{
+	return MayGrab(scene, window, serial) && m_Context->Drag().BeginMove(scene, window);
+}
+
+bool SeatGlobal::BeginResize(SceneStore& scene, EntityId window, std::uint32_t serial, ResizeEdges edges)
+{
+	return MayGrab(scene, window, serial) && m_Context->Drag().BeginResize(scene, window, edges);
 }
 
 std::uint32_t SeatGlobal::NextSerial() const noexcept

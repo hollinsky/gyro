@@ -56,6 +56,57 @@ namespace
 
 	return width * height;
 }
+
+// The seat behind an id a client named, or null where the id is not one gyro made. `Implementation` is
+// what makes that check safe: it compares the interface *and* the dispatch table, so a resource of the
+// right interface that some other party created is refused rather than reinterpreted.
+[[nodiscard]] SeatGlobal* SeatOf(Wayland::Server::WlSeat seat) noexcept
+{
+	Wayland::Server::WlSeatHandler* const handler = seat.Implementation();
+
+	return handler != nullptr ? &static_cast<ClientSeat*>(handler)->Seat() : nullptr;
+}
+
+// The protocol's edge mask as the four questions a gesture asks of it, or nothing where the value is
+// not one the enumeration has. It is written as a switch rather than as bit tests precisely so that a
+// value like *left and right together* — which the mask can express and the protocol does not define —
+// falls through to the refusal instead of being interpreted.
+[[nodiscard]] std::optional<ResizeEdges> Sides(Wayland::Server::XdgToplevelResizeEdge edges) noexcept
+{
+	using Edge = Wayland::Server::XdgToplevelResizeEdge;
+
+	switch (edges)
+	{
+		case Edge::None:
+			return ResizeEdges{};
+
+		case Edge::Top:
+			return ResizeEdges{ .Top = true };
+
+		case Edge::Bottom:
+			return ResizeEdges{ .Bottom = true };
+
+		case Edge::Left:
+			return ResizeEdges{ .Left = true };
+
+		case Edge::Right:
+			return ResizeEdges{ .Right = true };
+
+		case Edge::TopLeft:
+			return ResizeEdges{ .Left = true, .Top = true };
+
+		case Edge::TopRight:
+			return ResizeEdges{ .Right = true, .Top = true };
+
+		case Edge::BottomLeft:
+			return ResizeEdges{ .Left = true, .Bottom = true };
+
+		case Edge::BottomRight:
+			return ResizeEdges{ .Right = true, .Bottom = true };
+	}
+
+	return std::nullopt;
+}
 } // namespace
 
 void ClientXdgToplevel::OnGone()
@@ -68,13 +119,13 @@ void ClientXdgToplevel::OnGone()
 	delete this;
 }
 
-void ClientXdgToplevel::Configure(std::int32_t width, std::int32_t height) const
+void ClientXdgToplevel::Configure() const
 {
 	// The states as the protocol carries them: an array of `uint32`, handed over as the bytes behind it.
-	// A fixed array rather than a vector because the set is closed and tiny — one entry today, and the
-	// resize grab's `resizing` beside it when that lands — and a heap allocation here would be one per
-	// frame of a resize, on the thread a person's drag is being answered by.
-	std::array<Wayland::Server::XdgToplevelState, 1> states{};
+	// A fixed array rather than a vector because the set is closed and tiny — two entries, and the rest
+	// of the enumeration is window management a shell owns (51) — and a heap allocation here would be
+	// one per frame of a resize, on the thread a person's drag is being answered by.
+	std::array<Wayland::Server::XdgToplevelState, 2> states{};
 	std::size_t count = 0;
 
 	if (m_Activated)
@@ -82,7 +133,77 @@ void ClientXdgToplevel::Configure(std::int32_t width, std::int32_t height) const
 		states[count++] = Wayland::Server::XdgToplevelState::Activated;
 	}
 
-	Object().Configure(width, height, std::as_bytes(std::span{ states.data(), count }));
+	// **`resizing` is a promise about latency rather than a fact about geometry.** It tells a toolkit
+	// that more configures are coming, so the ones that redraw expensively — a terminal reflowing its
+	// scrollback, a browser relaying out a page — may draw something cheaper until it clears. A
+	// compositor that drove a resize without sending it would get the slow path on every frame of the
+	// drag, which is the stutter people describe as a window being heavy to resize.
+	if (m_Resizing)
+	{
+		states[count++] = Wayland::Server::XdgToplevelState::Resizing;
+	}
+
+	Object().Configure(m_Size.Width, m_Size.Height, std::as_bytes(std::span{ states.data(), count }));
+}
+
+PixelSize<SurfaceSpace> ClientXdgToplevel::Clamp(PixelSize<SurfaceSpace> size) const noexcept
+{
+	// Each axis independently, and the maximum after the minimum. The order only matters where a client
+	// has declared a maximum below its own minimum, which the protocol calls an error and `ApplyBounds`
+	// refuses — so this is the arithmetic being total rather than a policy about a case that cannot
+	// arrive.
+	PixelSize<SurfaceSpace> clamped = size;
+
+	if (m_Min.Width > 0)
+	{
+		clamped.Width = std::max(clamped.Width, m_Min.Width);
+	}
+
+	if (m_Min.Height > 0)
+	{
+		clamped.Height = std::max(clamped.Height, m_Min.Height);
+	}
+
+	if (m_Max.Width > 0)
+	{
+		clamped.Width = std::min(clamped.Width, m_Max.Width);
+	}
+
+	if (m_Max.Height > 0)
+	{
+		clamped.Height = std::min(clamped.Height, m_Max.Height);
+	}
+
+	return clamped;
+}
+
+void ClientXdgToplevel::ApplyBounds()
+{
+	if (!m_BoundsStaged)
+	{
+		return;
+	}
+
+	m_BoundsStaged = false;
+
+	// **The protocol's own error, and it is checked here rather than at the request** because the two
+	// bounds arrive as separate requests and a client is entitled to be inconsistent in the middle of a
+	// pair: a window growing its minimum past its old maximum sends one of them first, and refusing on
+	// that request would end a client that was about to be correct.
+	const bool impossible = (m_PendingMax.Width > 0 && m_PendingMin.Width > m_PendingMax.Width) ||
+	                        (m_PendingMax.Height > 0 && m_PendingMin.Height > m_PendingMax.Height);
+
+	if (impossible)
+	{
+		Object().PostError(
+			Wayland::Server::XdgToplevelError::InvalidSize, "a minimum size larger than the maximum size beside it"
+		);
+
+		return;
+	}
+
+	m_Min = m_PendingMin;
+	m_Max = m_PendingMax;
 }
 
 void ClientXdgToplevel::OnShowWindowMenu(
@@ -121,23 +242,50 @@ void ClientXdgToplevel::OnResize(
 	Wayland::Server::XdgToplevelResizeEdge edges
 )
 {
-	(void)seat;
-	(void)serial;
-	(void)edges;
+	// **The one half of a resize that is gyro's and the one that is the client's meet here** (166): this
+	// starts a gesture that computes a size every iteration, and every size it computes goes out as a
+	// configure the client answers by drawing. `OnMove` above says why a refusal is silence, and it is
+	// the same here.
+	const std::optional<ResizeEdges> pulled = Sides(edges);
+
+	if (!pulled)
+	{
+		// **The one refusal on this path that is a protocol error rather than silence, and it is the
+		// protocol's own.** A value outside the enumeration is a client that has miscomputed an edge mask
+		// rather than one gyro declined to serve, and left unsaid it spends the rest of its life dragging
+		// a corner that does nothing.
+		Object().PostError(
+			Wayland::Server::XdgToplevelError::InvalidResizeEdge, "xdg_toplevel.resize with an edge outside the enum"
+		);
+
+		return;
+	}
+
+	if (m_Surface != nullptr)
+	{
+		m_Surface->BeginResize(seat, serial, *pulled);
+	}
 }
 
 void ClientXdgToplevel::OnSetMaxSize(std::int32_t width, std::int32_t height)
 {
 	// Negative is the one thing the protocol calls an error here; zero is *no limit* and is what almost
-	// every client sends. gyro never resizes a window, so the numbers themselves have no reader yet —
-	// what is worth keeping is the refusal, because a client that sent a negative and was not told is a
-	// client whose own layout arithmetic has already gone wrong.
+	// every client sends. A client that sent a negative and was not told is a client whose own layout
+	// arithmetic has already gone wrong.
 	if (width < 0 || height < 0)
 	{
 		Object().PostError(
 			Wayland::Server::XdgToplevelError::InvalidSize, "xdg_toplevel.set_max_size with a negative extent"
 		);
+
+		return;
 	}
+
+	// Staged, and landing with the commit that follows it: these are double buffered exactly as the
+	// window geometry is, and a client that shrinks its minimum and redraws smaller in one commit must
+	// never be seen with one half of that applied.
+	m_PendingMax = { width, height };
+	m_BoundsStaged = true;
 }
 
 void ClientXdgToplevel::OnSetMinSize(std::int32_t width, std::int32_t height)
@@ -147,7 +295,12 @@ void ClientXdgToplevel::OnSetMinSize(std::int32_t width, std::int32_t height)
 		Object().PostError(
 			Wayland::Server::XdgToplevelError::InvalidSize, "xdg_toplevel.set_min_size with a negative extent"
 		);
+
+		return;
 	}
+
+	m_PendingMin = { width, height };
+	m_BoundsStaged = true;
 }
 
 void ClientXdgPositioner::OnSetSize(std::int32_t width, std::int32_t height)
@@ -609,6 +762,11 @@ void ClientXdgSurface::OnAckConfigure(std::uint32_t serial)
 	}
 
 	m_Acked = true;
+
+	// **The newest one wins even where an older one arrives after it**, which is a client acknowledging
+	// out of order and is not something the protocol forbids. What `Outstanding` asks is whether the
+	// client has caught up, so the answer has to be the furthest it has got.
+	m_Acknowledged = std::max(m_Acknowledged, serial);
 }
 
 void ClientXdgSurface::Configure()
@@ -623,17 +781,13 @@ void ClientXdgSurface::Configure()
 
 	if (m_Toplevel != nullptr)
 	{
-		// **Zero by zero, and it is the truthful answer rather than a placeholder.** The protocol reads it
-		// as *pick your own size*, which is exactly what a compositor placing windows at their natural
-		// size has to say. A number invented here would be one the client is obliged to obey, so it would
-		// be gyro doing layout — which is the thing decision 51 keeps out of the compositor.
-		//
-		// **The states are the toplevel's own and `activated` is the only one gyro has an answer to.**
-		// Maximised, fullscreen and the tiled set are window management, which belongs to a shell (51);
-		// `resizing` is true only inside a gesture gyro is driving and arrives with the grab that drives
-		// one. Focus is neither — it is a fact about the world that `Scene/Focus.h` already holds, and a
-		// window that has it and is not told draws itself grey while a person types into it.
-		m_Toplevel->Configure(0, 0);
+		// **Zero by zero until a person takes hold of an edge, and it is the truthful answer rather than a
+		// placeholder.** The protocol reads it as *pick your own size*, which is exactly what a compositor
+		// placing windows at their natural size has to say (141), and a number invented here would be gyro
+		// doing layout — the thing decision 51 keeps out of the compositor. A resize is the one thing that
+		// makes gyro have an opinion, and it is not layout: the number comes from where a person's hand is
+		// (166). The size and the states are both the toplevel's own, so it is asked rather than told.
+		m_Toplevel->Configure();
 	}
 	else if (m_Popup != nullptr)
 	{
@@ -677,6 +831,13 @@ void ClientXdgSurface::OnSurfaceCommitted(ClientSurface& surface)
 	{
 		m_Geometry = m_PendingGeometry;
 		m_GeometryStaged = false;
+	}
+
+	// Beside the geometry because it is the same kind of fact and the same double buffering: what the
+	// client says its window can be, landing with the commit that stated it.
+	if (m_Toplevel != nullptr)
+	{
+		m_Toplevel->ApplyBounds();
 	}
 
 	if (!HasRole())
@@ -894,6 +1055,26 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 
 		PlaceOnFloor(placement, *scene, m_Context->Session(client), m_Window, natural);
 	}
+	else if (m_Popup == nullptr && m_Context->Drag().IsResizing() && m_Context->Drag().Window() == m_Window)
+	{
+		// **Decision 166's other half: the client produced a size and gyro decides where that rectangle
+		// is pinned.** A person pulling the left edge is holding the right one still, so the origin comes
+		// from the size that actually arrived rather than from the size that was asked for — a client is
+		// free to round or to clamp, and a window positioned from the request would jitter its own fixed
+		// edge by the difference on every frame of the drag.
+		const Vector3<double> anchored = m_Context->Drag().Anchored(natural);
+		const Entity* const window = scene->Find(m_Window);
+
+		// Written only where it moved, for the popup's reason below: pulling the right or the bottom edge
+		// holds the origin still, and a retarget per commit on a channel whose target never changed is
+		// the cost Docs/Architecture.md#doing-nothing-must-cost-nothing exists to keep out.
+		if (window != nullptr && window->Translation.Model() != anchored)
+		{
+			SceneCommit placement{ *scene, CommitAuthor::Compositor, scene->Now() };
+
+			static_cast<void>(placement.Move(m_Window, anchored, Immediate()));
+		}
+	}
 
 	if (m_Popup != nullptr && (mapping || m_Popup->PlacementPending()))
 	{
@@ -988,32 +1169,45 @@ void ClientXdgSurface::Withdraw() noexcept
 void ClientXdgSurface::BeginMove(Wayland::Server::WlSeat seat, std::uint32_t serial)
 {
 	SceneStore* const scene = m_Context->Store();
+	SeatGlobal* const from = SeatOf(seat);
 
-	// Unmapped, or outside a dispatch. A client is entitled to ask before its window exists — a toolkit
-	// that hands a press to its own titlebar before the first frame is ordinary — and there is nothing
-	// in the world to move.
-	if (scene == nullptr || m_Window.IsNull())
+	// Unmapped, outside a dispatch, or an id that is not a seat. A client is entitled to ask before its
+	// window exists — a toolkit that hands a press to its own titlebar before the first frame is
+	// ordinary — and there is nothing in the world to move.
+	if (scene == nullptr || from == nullptr || m_Window.IsNull())
 	{
 		return;
 	}
 
-	// **The seat the client named rather than one this object went looking for.** The protocol makes it
-	// an argument because a grab belongs to a seat, and `Implementation` is what refuses an id that is
-	// not a `wl_seat` gyro made — the same check `get_popup` makes of a parent, and for the same reason:
-	// reading user data off an arbitrary id is a type confusion a client can reach on purpose.
-	Wayland::Server::WlSeatHandler* const handler = seat.Implementation();
+	static_cast<void>(from->BeginMove(*scene, m_Window, serial));
+}
 
-	if (handler == nullptr)
+void ClientXdgSurface::BeginResize(Wayland::Server::WlSeat seat, std::uint32_t serial, ResizeEdges edges)
+{
+	SceneStore* const scene = m_Context->Store();
+	SeatGlobal* const from = SeatOf(seat);
+
+	if (scene == nullptr || from == nullptr || m_Window.IsNull())
 	{
 		return;
 	}
 
-	static_cast<void>(static_cast<ClientSeat*>(handler)->Seat().BeginMove(*scene, m_Window, serial));
+	static_cast<void>(from->BeginResize(*scene, m_Window, serial, edges));
 }
 
 bool ClientXdgSurface::SetActivated(bool activated) noexcept
 {
 	return m_Toplevel != nullptr && m_Toplevel->SetActivated(activated);
+}
+
+bool ClientXdgSurface::SetResizing(bool resizing) noexcept
+{
+	return m_Toplevel != nullptr && m_Toplevel->SetResizing(resizing);
+}
+
+bool ClientXdgSurface::SetSize(PixelSize<SurfaceSpace> size) noexcept
+{
+	return m_Toplevel != nullptr && m_Toplevel->SetSize(size);
 }
 
 void ClientXdgSurface::OnSurfaceGone()
@@ -1052,8 +1246,10 @@ bool FocusRestsOn(const SceneStore& scene, EntityId window, EntityId focused)
 	return false;
 }
 
-void SyncActivation(HostContext& context, const SceneStore& scene, EntityId focused)
+void SyncWindows(HostContext& context, const SceneStore& scene, EntityId focused)
 {
+	const WindowDrag& drag = context.Drag();
+
 	// Iterated over a copy for the destructor's reason: a configure is a wire write, and a client whose
 	// connection has already failed is torn down inside libwayland — which runs handlers that unmap
 	// windows, and so edits the registry underneath this walk.
@@ -1061,7 +1257,34 @@ void SyncActivation(HostContext& context, const SceneStore& scene, EntityId focu
 
 	for (ClientXdgSurface* const window : windows)
 	{
-		if (window->SetActivated(FocusRestsOn(scene, window->Window(), focused)))
+		bool owed = window->SetActivated(FocusRestsOn(scene, window->Window(), focused));
+
+		// **The size is asked only of a client that has answered the last thing it was told.** Everything
+		// this costs and buys is on `Outstanding`; what matters here is that the comparison is *skipped*
+		// rather than performed and discarded, because a `Set` that changed the record without sending
+		// the event would lose the change for good.
+		if (!window->Outstanding())
+		{
+			const bool resizing = drag.IsResizing() && drag.Window() == window->Window();
+
+			owed = window->SetResizing(resizing) || owed;
+
+			if (resizing)
+			{
+				// Rounded rather than truncated: the wire carries whole logical pixels and the pointer is
+				// subpixel (52), so truncating would make a window one pixel smaller than the hand asked
+				// for on average and never one larger.
+				const Size<SurfaceSpace, float> wanted = drag.Wanted();
+
+				owed = window->SetSize(
+						   { static_cast<std::int32_t>(std::lround(wanted.Width)),
+				             static_cast<std::int32_t>(std::lround(wanted.Height)) }
+					   ) ||
+				       owed;
+			}
+		}
+
+		if (owed)
 		{
 			window->Configure();
 		}

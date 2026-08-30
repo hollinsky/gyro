@@ -1887,9 +1887,11 @@ public:
 		Y = y;
 	}
 
-	void OnButton(std::uint32_t, std::uint32_t, std::uint32_t button, Wayland::WlPointerButtonState state) override
+	void
+	OnButton(std::uint32_t serial, std::uint32_t, std::uint32_t button, Wayland::WlPointerButtonState state) override
 	{
 		++Buttons;
+		ButtonSerial = serial;
 		LastButton = button;
 		LastState = state;
 	}
@@ -1927,6 +1929,10 @@ public:
 	std::uint32_t Stops = 0;
 	std::uint32_t Discretes = 0;
 	std::uint32_t EnterSerial = 0;
+
+	// The serial the press arrived with, which is the whole of what a client has to quote back to ask
+	// for a move or a resize. A toolkit keeps exactly this.
+	std::uint32_t ButtonSerial = 0;
 	std::uint32_t At = 0;
 	std::int32_t LastDiscrete = 0;
 	std::uint32_t LastButton = 0;
@@ -2638,4 +2644,265 @@ GYRO_TEST(ProtocolRoundTrip, ADescriptorBufferIsNotReleasedUntilNobodyIsReadingI
 	pair.Turn();
 
 	GYRO_CHECK_EQ(released.Released, std::uint32_t{ 1 });
+}
+
+// Decision 51's continuous manipulation over a real socket, and decision 166's split down the middle
+// of it: gyro turns the pointer into a size and the *client* turns the size into a window.
+//
+// **What is being checked is that the loop closes with nobody else in it.** The client asks once, and
+// from then to the button coming up it is told a new size whenever the hand moves and told nothing
+// else — no reply to its request, no second protocol, and no shell.
+GYRO_TEST(ProtocolRoundTrip, ADraggedEdgeConfiguresTheWindowUntilTheButtonComesUp)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-resize" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
+
+	// The window took focus as it mapped, so there is a configure outstanding. A real toolkit answers
+	// every one of them and this is where the harness does: a resize is throttled to the client's own
+	// rate, and a client that has not caught up is not asked for anything new.
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+
+	pair.Turn();
+
+	GYRO_REQUIRE(toplevel.WindowEvents.Width == 0);
+	GYRO_REQUIRE(toplevel.WindowEvents.Height == 0);
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
+
+	Push(pair, middle.X, middle.Y);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	(*pair.Host)->OnPointerButton(Click(0x110, true, pair.Clock.Now()));
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pointer.Listener.ButtonSerial != 0);
+
+	// The corner of the window, quoting the serial of the press a person is holding.
+	toplevel.Window.Resize(keyboard.Seat, pointer.Listener.ButtonSerial, Wayland::XdgToplevelResizeEdge::BottomRight);
+
+	// **The gesture is anchored where the pointer is when the request arrives**, which is the only
+	// instant gyro has: the press that authorised it happened some iterations ago and the hand has been
+	// free to move since. So the request is delivered on its own turn here, exactly as a toolkit's is.
+	pair.Turn();
+
+	// **The first configure of a gesture restates the size and announces the state**, which is not a
+	// wasted round trip: `resizing` is what tells a toolkit to take its cheap redraw path, and it has to
+	// arrive before the sizes that will exercise it. The window has not moved yet, so the size is the one
+	// the client already chose.
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Width, Width);
+	GYRO_CHECK(toplevel.WindowEvents.Has(Wayland::XdgToplevelState::Resizing));
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+
+	Push(pair, 60.0, 40.0);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	// The buffer is the harness's 16x8 and the hand has travelled 60 by 40.
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Width, Width + 60);
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Height, Height + 40);
+	GYRO_CHECK(toplevel.WindowEvents.Has(Wayland::XdgToplevelState::Resizing));
+
+	// **And it is still activated**, which is the reason focus and the gesture are answered by one walk:
+	// a window told it is being resized and not told it still has the keyboard would go grey under a
+	// person's own hand.
+	GYRO_CHECK(toplevel.WindowEvents.Has(Wayland::XdgToplevelState::Activated));
+
+	// The compositor grab superseded the client's implicit one, and the leave is how it was told: a
+	// toolkit still receiving motion would run its own edge-drag logic underneath gyro's.
+	GYRO_CHECK_EQ(pointer.Listener.Left, std::uint32_t{ 1 });
+
+	// **Nothing has changed shape in the world**, which is decision 166: the extent is the client's and
+	// it has not drawn one yet.
+	GYRO_REQUIRE(WindowNode(pair.Store) != nullptr);
+	GYRO_CHECK_EQ(WindowNode(pair.Store)->Extent.Width, static_cast<float>(Width));
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+
+	(*pair.Host)->OnPointerButton(Click(0x110, false, pair.Clock.Now()));
+
+	pair.Turn();
+
+	// Letting go clears the state and keeps the size: going back to zero would read as *pick your own
+	// size again*, which is a window that springs back to its natural size the moment anything else
+	// makes gyro configure it.
+	GYRO_CHECK(!toplevel.WindowEvents.Has(Wayland::XdgToplevelState::Resizing));
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Width, Width + 60);
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+// **The half of a resize that cannot be delegated** (166). The client is asked for one size and comes
+// back with another — its own increment, its own minimum, its own opinion — and the edge the person is
+// *not* holding must not move by the difference. Anchoring on the request instead is the shimmer
+// visible on every compositor that gets this wrong, and it is invisible unless the two sizes differ,
+// which is why this test makes them.
+GYRO_TEST(ProtocolRoundTrip, TheEdgeAPersonIsNotHoldingStaysWhereItIs)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-anchor" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+
+	pair.Turn();
+
+	GYRO_REQUIRE(WindowNode(pair.Store) != nullptr);
+
+	// Where the far edge is now, which is the number that must still be true at the end.
+	const double right = WindowNode(pair.Store)->Translation.Model().X + static_cast<double>(Width);
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
+
+	Push(pair, middle.X, middle.Y);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	(*pair.Host)->OnPointerButton(Click(0x110, true, pair.Clock.Now()));
+
+	pair.Turn();
+
+	toplevel.Window.Resize(keyboard.Seat, pointer.Listener.ButtonSerial, Wayland::XdgToplevelResizeEdge::Left);
+
+	pair.Turn();
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+
+	// Pulling the near edge away from the far one, which grows the window.
+	Push(pair, -40.0, 0.0);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Width, Width + 40);
+
+	// The client answers with a width of its own — ten short of what it was asked for, which is what a
+	// terminal that only grows by whole character cells does on every frame of a drag.
+	constexpr std::int32_t Drawn = Width + 30;
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.XdgSurface.SetWindowGeometry(0, 0, Drawn, Height);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_REQUIRE(WindowNode(pair.Store) != nullptr);
+
+	// The window is the size the client drew rather than the size it was asked for...
+	GYRO_CHECK_EQ(WindowNode(pair.Store)->Extent.Width, static_cast<float>(Drawn));
+
+	// ...and the edge nobody is holding has not moved by the difference between the two.
+	GYRO_CHECK_EQ(WindowNode(pair.Store)->Translation.Model().X + static_cast<double>(Drawn), right);
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+// The one bound a resize honours, and decision 166 says why it is not a counterexample to gyro having
+// no constraints: a minimum size does not come from a shell, it arrives on the wire from the party
+// being resized — the only participant entitled to say that forty pixels is not a window.
+GYRO_TEST(ProtocolRoundTrip, AWindowIsNeverAskedToBeSmallerThanItSaidItCouldBe)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-minimum" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+
+	// Wider than the window already is, which is legal and is what a toolkit that has just laid out its
+	// own chrome sends. Staged, and landing with the commit behind it like the window geometry.
+	constexpr std::int32_t Smallest = 40;
+
+	toplevel.Window.SetMinSize(Smallest, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
+
+	Push(pair, middle.X, middle.Y);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	(*pair.Host)->OnPointerButton(Click(0x110, true, pair.Clock.Now()));
+
+	pair.Turn();
+
+	toplevel.Window.Resize(keyboard.Seat, pointer.Listener.ButtonSerial, Wayland::XdgToplevelResizeEdge::Right);
+
+	pair.Turn();
+
+	// The opening configure of the gesture is already clamped, which is worth checking on its own: it is
+	// the one configure gyro sends without a hand having moved, and a compositor that clamped only the
+	// moving sizes would tell a window to be sixteen wide and then never tell it again.
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Width, Smallest);
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+
+	// Dragging the edge clean through the far side of the window, which without the bound would floor at
+	// one and without the floor would be zero — *pick your own size*, handing the client back the very
+	// freedom the gesture is taking away.
+	Push(pair, -400.0, 0.0);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Width, Smallest);
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 }

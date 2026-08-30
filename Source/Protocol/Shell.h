@@ -8,6 +8,7 @@
 #include "Core/Handle.h"
 #include "Geometry/Space.h"
 #include "Protocol/Context.h"
+#include "Protocol/Drag.h"
 #include "Protocol/Positioner.h"
 #include "Protocol/Surface.h"
 #include "Wayland/Server/Wayland.h"
@@ -131,9 +132,53 @@ public:
 		return changed;
 	}
 
-	// Send `xdg_toplevel.configure` with the states this window is in. The size is the `xdg_surface`'s
-	// to choose and is passed through, because the two events are one answer split across two objects.
-	void Configure(std::int32_t width, std::int32_t height) const;
+	// Whether the client has been told it is being resized, held for `m_Activated`'s reason and read
+	// the same way: the fact is the seat's gesture and this is the last thing sent.
+	bool SetResizing(bool resizing) noexcept
+	{
+		const bool changed = resizing != m_Resizing;
+
+		m_Resizing = resizing;
+
+		return changed;
+	}
+
+	// The size the next configure will carry, clamped to what the client itself declared it can be.
+	//
+	// **Zero is *pick your own size* and is where every window starts** — decision 141 places a window
+	// at its natural size, so gyro has nothing to say about how big it should be until a person takes
+	// hold of an edge. From the first resize onward it does, and it keeps saying it: going back to zero
+	// afterwards would tell a client it may return to its natural size, which is a window that snaps
+	// back the moment anything else makes gyro configure it.
+	bool SetSize(PixelSize<SurfaceSpace> size) noexcept
+	{
+		const PixelSize<SurfaceSpace> clamped = Clamp(size);
+		const bool changed = clamped != m_Size;
+
+		m_Size = clamped;
+
+		return changed;
+	}
+
+	// The client's own minimum and maximum, applied to a size the pointer asked for. Zero in either
+	// axis of either bound is *no limit*, which is what almost every client sends and what an unset
+	// bound means on the wire.
+	//
+	// **These are the one constraint a resize honours, and they are not the shell's** — decision 51 has
+	// a shell declaring snap targets and tiling gravity, and there is none, but a minimum size arrives
+	// from the party being resized rather than from a policy. A compositor that ignored it would ask a
+	// text editor to be forty pixels wide and get back a window that is not, which is the same picture
+	// as a resize that does not work.
+	[[nodiscard]] PixelSize<SurfaceSpace> Clamp(PixelSize<SurfaceSpace> size) const noexcept;
+
+	// Send `xdg_toplevel.configure` with the size and the states this window is in. No arguments,
+	// because both are this object's: the `xdg_surface` decides *when* and the toplevel decides *what*.
+	void Configure() const;
+
+	// The staged minimum and maximum arriving in the world, called by the `xdg_surface` from the commit
+	// that carries them — they are double buffered like everything else a client says, so a toolkit
+	// that shrinks its minimum and redraws in one commit is never seen half applied.
+	void ApplyBounds();
 
 private:
 	ClientXdgSurface* m_Surface = nullptr;
@@ -142,6 +187,18 @@ private:
 	std::string m_AppId;
 
 	bool m_Activated = false;
+	bool m_Resizing = false;
+
+	// What the last configure said, so that a comparison rather than a signal decides whether one is
+	// owed — the same shape `m_Activated` has.
+	PixelSize<SurfaceSpace> m_Size{};
+
+	// What the client says it can be, staged and current.
+	PixelSize<SurfaceSpace> m_PendingMin{};
+	PixelSize<SurfaceSpace> m_PendingMax{};
+	PixelSize<SurfaceSpace> m_Min{};
+	PixelSize<SurfaceSpace> m_Max{};
+	bool m_BoundsStaged = false;
 };
 
 // One `xdg_positioner`: the client's description of where a popup should go, accumulated across as
@@ -374,6 +431,11 @@ public:
 	// window exists without inferring it from a node count.
 	[[nodiscard]] EntityId Window() const noexcept { return m_Window; }
 
+	// The `wl_surface` under this role, or null where the client named something that was not one.
+	// Public because `wl_surface.enter` is the surface's event while the reach that decides it is the
+	// *window's*, and [Output.h](Output.h) is the one party holding both questions.
+	[[nodiscard]] ClientSurface* Content() const noexcept { return m_Surface; }
+
 	// Whether this surface has a window in the world right now, which is what a popup's parent has to be
 	// before the popup can hang off it.
 	[[nodiscard]] bool IsMapped() const noexcept { return !m_Window.IsNull(); }
@@ -383,11 +445,6 @@ public:
 	void Orphan() noexcept;
 
 	// Take the window off the screen while the role object stays. **The difference from `Orphan` is
-	// The `wl_surface` under this role, or null where the client named something that was not one.
-	// Public because `wl_surface.enter` is the surface's event while the reach that decides it is the
-	// *window's*, and [Output.h](Output.h) is the one party holding both questions.
-	[[nodiscard]] ClientSurface* Content() const noexcept { return m_Surface; }
-
 	// who is still there afterwards**: a dismissed popup keeps its `xdg_popup` until the client
 	// destroys it, and a compositor that dropped the role pointer here would answer that destroy
 	// against nothing.
@@ -402,14 +459,28 @@ public:
 	// outside the commit sequence that otherwise drives them.
 	void Configure();
 
-	// Start an interactive move, per `xdg_toplevel.move`. Public because the request arrives on the role
-	// object and the window it names is this one's; the seat does the deciding, and [Seat.h](Seat.h) has
-	// what it decides against.
+	// Start an interactive move or resize, per `xdg_toplevel.move` and `xdg_toplevel.resize`. Public
+	// because the request arrives on the role object and the window it names is this one's; the seat
+	// does the deciding, and [Seat.h](Seat.h) has what it decides against.
 	void BeginMove(Wayland::Server::WlSeat seat, std::uint32_t serial);
 
-	// `ClientXdgToplevel::SetActivated` reached through the surface, which is the object the window
-	// registry holds. False — nothing changed — for a surface whose role is not a toplevel.
+	void BeginResize(Wayland::Server::WlSeat seat, std::uint32_t serial, ResizeEdges edges);
+
+	// Whether a configure has gone out that the client has not acknowledged.
+	//
+	// **What it is for is throttling a resize to the client's own rate, and only that.** A configure per
+	// pointer event would queue a thousand sizes a second in front of a toolkit that draws sixty, so the
+	// window would fall further behind the hand the longer a person dragged — the exact artefact
+	// decision 51 keeps this gesture in the compositor to avoid. Sending only when the last one has come
+	// back means the client is always working on the freshest size and is at most one round trip behind.
+	// A window whose client has stopped answering therefore stops resizing, which is the truth about it.
+	[[nodiscard]] bool Outstanding() const noexcept { return m_Configured && m_Acknowledged != m_Serial; }
+
+	// The three of `ClientXdgToplevel`'s comparisons reached through the surface, which is the object the
+	// window registry holds. False — nothing changed — for a surface whose role is not a toplevel.
 	bool SetActivated(bool activated) noexcept;
+	bool SetResizing(bool resizing) noexcept;
+	bool SetSize(PixelSize<SurfaceSpace> size) noexcept;
 
 	// The `xdg_wm_base` this surface came from, for the errors that belong to that interface.
 	[[nodiscard]] Wayland::Server::XdgWmBase Base() const noexcept { return m_Base; }
@@ -463,6 +534,10 @@ private:
 	std::uint32_t m_Serial = 0;
 	bool m_Configured = false;
 	bool m_Acked = false;
+
+	// The newest serial the client has acknowledged, against which `Outstanding` reads. Distinct from
+	// `m_Acked`, which is *has it ever* and is what makes a buffer before the first configure an error.
+	std::uint32_t m_Acknowledged = 0;
 };
 
 // One client's `xdg_wm_base`.
@@ -502,10 +577,15 @@ private:
 // make.
 [[nodiscard]] bool FocusRestsOn(const SceneStore& scene, EntityId window, EntityId focused);
 
-// Bring every window's idea of whether it is activated up to date with the world's, and send nothing
-// where it has not changed. Called from `Advance`, beside the seat's own comparison and for the same
-// reason: the keystroke or the click that moved focus and the step that notices are the same wakeup of
+// Bring every window's idea of itself up to date with the world's, and send nothing where nothing has
+// changed. Called from `Advance`, beside the seat's own comparison and for the same reason: the
+// keystroke, click or motion that changed something and the step that notices are the same wakeup of
 // the same thread, so nothing has to be observed and no signal crosses.
+//
+// **One walk and one configure per window, because a configure is one event carrying every answer.**
+// Focus and the resize gesture change independently and a window that learned about both in one
+// iteration would otherwise be told twice — and the second event would restate the first, which is a
+// client re-laying out its whole window for news it already had.
 //
 // **A window that has just mapped learns it is focused on this pass rather than in its first
 // configure.** The initial configure is answered before the window exists — a client is asking what
@@ -513,7 +593,12 @@ private:
 // that it is about to take focus would be copying `Scene/Focus.h`'s newest-on-top rule into a second
 // place that could disagree with it. What it costs is that the first frame of a new window is drawn
 // unfocused; the configure that corrects it goes out in the same iteration the window mapped in.
-void SyncActivation(HostContext& context, const SceneStore& scene, EntityId focused);
+//
+// **The size half is skipped for a window with a configure still in flight and the focus half is not**,
+// which is `ClientXdgSurface::Outstanding`'s whole purpose: a stale size costs a person nothing they
+// can see, and a titlebar that stays grey until a slow client answers is the thing they read as the
+// compositor having lost track of them.
+void SyncWindows(HostContext& context, const SceneStore& scene, EntityId focused);
 
 // The global itself, owned by whoever advertises it and outliving every client that binds it.
 class ShellGlobal final : public Wayland::Server::XdgWmBaseBinding

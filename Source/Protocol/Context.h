@@ -7,6 +7,7 @@
 
 #include "Core/Handle.h"
 #include "Core/Session.h"
+#include "Protocol/Drag.h"
 #include "Protocol/Floor.h"
 #include "Protocol/Popup.h"
 #include "Protocol/Server.h"
@@ -94,6 +95,15 @@ public:
 	// seat and the shell are both entitled to it — one to dismiss on a press, the other to refuse a
 	// grab that is not the topmost.
 	[[nodiscard]] PopupStack& Popups() noexcept { return m_Popups; }
+
+	// The window the pointer is moving or resizing, per [Drag.h](Drag.h). Here for the popup stack's
+	// reason and one more: a gesture is read by both halves of this module and neither can hold it.
+	// The seat starts one and advances it, because it owns the grab and the serial a request is checked
+	// against; the shell reads it to know what size to configure a window at and where to put the
+	// window the client drew. Neither may reach into the other, and one pointer means one of these.
+	[[nodiscard]] WindowDrag& Drag() noexcept { return m_Drag; }
+
+	[[nodiscard]] const WindowDrag& Drag() const noexcept { return m_Drag; }
 
 	// The mapped toplevels, which is the set every question about *the windows on this machine* is
 	// asked against. Borrowed, and each one registers itself as it maps and takes itself out as it
@@ -183,6 +193,7 @@ private:
 	const SessionFloors* m_Floors = nullptr;
 	const Server* m_Server = nullptr;
 	PopupStack m_Popups;
+	WindowDrag m_Drag;
 
 	// The mapped toplevels. Borrowed, and each one takes itself out as it unmaps.
 	std::vector<ClientXdgSurface*> m_Windows;

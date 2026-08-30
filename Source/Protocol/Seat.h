@@ -249,7 +249,15 @@ public:
 	// is a shell's constraint to declare and there is no shell (51). See [Drag.h](Drag.h).
 	bool BeginMove(SceneStore& scene, EntityId window, std::uint32_t serial);
 
+	// The same for `xdg_toplevel.resize`, checked against the same three things and refusing one more:
+	// edges naming nothing, which is a gesture with no direction to run in.
+	bool BeginResize(SceneStore& scene, EntityId window, std::uint32_t serial, ResizeEdges edges);
+
 private:
+	// Whether a request quoting `serial` is entitled to take the pointer for `window`. The three checks
+	// `BeginMove` describes, shared because a resize asks exactly the same questions.
+	[[nodiscard]] bool MayGrab(const SceneStore& scene, EntityId window, std::uint32_t serial) const;
+
 	// Everything a keyboard needs to know to address the focused client, or nothing where focus is on a
 	// window no client is behind — which is every window gyro authors for itself.
 	[[nodiscard]] Wayland::Server::WlSurface FocusedSurface() const noexcept;
@@ -335,10 +343,6 @@ private:
 	// than a history, and that is enough for the only question asked of it**: a request naming a grab
 	// names the live one, so a serial that is not this number is not a grab this client is in.
 	std::optional<std::uint32_t> m_GrabSerial;
-
-	// The window the pointer is dragging, which supersedes the implicit grab above rather than sitting
-	// beside it. See [Drag.h](Drag.h).
-	WindowDrag m_Drag;
 
 	// How many buttons are down, which is what opens and closes the grab. A count rather than a flag
 	// because a person may press a second button without releasing the first, and a grab that ended on
