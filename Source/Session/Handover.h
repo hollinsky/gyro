@@ -44,6 +44,16 @@
 
 namespace Session
 {
+// Where an agent offers its listener when nothing says otherwise.
+//
+// **It is in the ABI because it is the rendezvous rather than a default either end chose.** The two
+// binaries are started by different parties — gyro by the service manager, the agent by the login
+// agent or by a person — with no chance to agree on a path between them, so a default that lived in
+// one end's option parser would be a default the other end could drift away from silently. Absolute,
+// and under `/run` rather than a user's runtime directory, because one gyro serves every user on the
+// machine. Docs/Architecture.md#the-login-agent has it in the boot diagram.
+inline constexpr std::string_view DefaultControlPath = "/run/gyro/control";
+
 // What this build speaks, and the oldest it will speak to.
 //
 // The agent sends its own in `Hello` and gyro answers `Welcome` with the version in force, which is

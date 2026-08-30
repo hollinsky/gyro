@@ -934,11 +934,19 @@ gyro_add_module(Session DISPATCH
 	DEPENDS
 		Core
 	SOURCES
+		Agent.cpp
+		Child.cpp
 		Control.cpp
+		Listener.cpp
+		Options.cpp
 		Transport.cpp
 	TESTS
+		Agent.Test.cpp
+		Child.Test.cpp
 		Control.Test.cpp
 		Handover.Test.cpp
+		Listener.Test.cpp
+		Options.Test.cpp
 )
 
 # spdlog for the line naming each session established and each offer refused, which is the only way to
@@ -1207,6 +1215,27 @@ target_link_libraries(gyro
 	PRIVATE
 		Compositor
 		Core
+)
+
+# The session agent, and the second binary this project ships.
+#
+# **It is a separate executable because it is a separate uid.** Docs/Architecture.md#listener-handover
+# inverts socket creation precisely because gyro cannot become the user, so the party that binds the
+# listener and forks the session's first client is a process that already is one. It links `Session`
+# and nothing else: the handover ABI, the two ends of it, and the fork.
+#
+# Core is named alongside Session for the reason the gyro target names it — it is an OBJECT library,
+# so DebugAllocator.cpp's replacement of the global allocator reaches only the targets that name it
+# directly. There is no frame section in this binary to catch an allocation in, and it is named anyway
+# rather than left to a reader to work out that the omission was deliberate.
+add_executable(gyro-session
+	Source/Agent/Main.cpp
+)
+target_link_libraries(gyro-session
+	PRIVATE
+		Core
+		Session
+		spdlog::spdlog
 )
 
 # Standalone diagnostics. Not linked into gyro, and deliberately dependency-free — BuildFlags

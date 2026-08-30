@@ -442,7 +442,7 @@ GYRO_TEST(Options, ControlTakesEveryListenerFromAnAgent)
 
 	GYRO_REQUIRE(bare.has_value());
 	GYRO_CHECK(bare->Clients);
-	GYRO_CHECK(bare->ControlPath == DefaultControlPath);
+	GYRO_CHECK(bare->ControlPath == Session::DefaultControlPath);
 
 	const Result<Options> named = Parse({ "--control=/run/gyro/other" });
 

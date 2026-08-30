@@ -14,6 +14,7 @@
 #include "Frame/Admission.h"
 #include "Gym/Gym.h"
 #include "Seam/Renderer.h"
+#include "Session/Handover.h"
 
 // What the composition root was asked to construct, parsed from the command line and nothing else.
 //
@@ -90,12 +91,6 @@ inline constexpr std::string_view DefaultDumpDirectory = "gyro-frames";
 // reason, and named for what opens it rather than for gyro — a person who has one of these in a
 // directory a month from now needs the extension to tell them what to do with it.
 inline constexpr std::string_view DefaultTracePath = "gyro.pftrace";
-
-// Where session agents offer their listeners when the command line does not say. Absolute, because it
-// is a rendezvous two processes started by different parties have to find without agreeing on a
-// working directory — and under `/run` rather than a user's runtime directory because one gyro serves
-// every user on the machine. Docs/Architecture.md#the-login-agent has it in the boot diagram.
-inline constexpr std::string_view DefaultControlPath = "/run/gyro/control";
 
 struct Options
 {
@@ -564,7 +559,7 @@ namespace Detail
 		if (Detail::Matches(argument, "--control", value))
 		{
 			options.Clients = true;
-			options.ControlPath = value.empty() ? std::string{ DefaultControlPath } : std::string{ value };
+			options.ControlPath = value.empty() ? std::string{ Session::DefaultControlPath } : std::string{ value };
 
 			continue;
 		}
