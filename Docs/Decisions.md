@@ -11055,11 +11055,31 @@ It says `refresh 99`.
 
 **Every way out of `Serve` now says something.** Five exits, two of which used to emit a mark and
 three of which returned in silence. A wake that declines costs one mark naming the reason — `queue
-full`, `over budget`, `idle` — where it used to cost six events describing a slice with nothing in
-it. `idle` is worth having even though it should never appear: a settled world answers `Wake::Never()`
-and `Serve` is not reached, so a mark there is the schedule having armed for an instant that wanted
-nothing, which is the shape Architecture.md#doing-nothing-must-cost-nothing forbids and which no
-counter was going to show.
+full`, `over budget`, `idle`, `armed for nothing` — where it used to cost six events describing a
+slice with nothing in it.
+
+*(Revised 2026-08-29.)* The last two of those were one mark, and the claim attached to it was wrong.
+It read: a settled world answers `Wake::Never()` and `Serve` is not reached, so a mark there is the
+schedule having armed for an instant that wanted nothing. A thirteen-second capture of gyro driving
+a 60 Hz panel through KMS says otherwise — the mark fired 427 times in 2687 iterations, every one of
+them within a few tens of microseconds of a page-flip event, and the `lead` sample beside it shows
+the alarm still had 12.76 ms to run at the median on every one of them that had a wake armed at
+all. The premise skipped a whole way for the thread to be running: an event
+source's descriptor. A host compositor's presentation feedback arrives a whole refresh after the
+instant it reports, and a panel's page flip arrives at its vblank; the frame thread waits on both and
+must wake and drain them, or every deadline after that is computed against an anchor a refresh stale.
+Having drained one and found the world settled, drawing nothing is correct and unavoidable. So the
+two are named apart on the same argument the `queue full` / `over budget` split rests on: `idle` is
+that rest, and `armed for nothing` is the original claim, kept for the case the claim is actually
+about. What tells them apart is the previous iteration's `Wake` against the instant the clock was
+read at — due means the schedule owns the wake, and `Wake::Never()` is not due at any instant, so a
+fold that armed nothing needs no case of its own.
+
+**Rejected: one mark carrying the distinction as a `TraceAttribute`.** An attribute binds to the
+slice open on its row and a declining wake deliberately opens none, so it would attach to whatever
+slice the row last had. **Rejected: suppressing the benign case.** How often a backend wakes this
+thread for nothing is the figure that says what that backend costs to idle under, and a mark gated
+until it never fires is the mistake the flight lanes were built to undo.
 
 **Rejected: filtering the no-op wakes out of the trace.** They are two thirds of the loop's
 iterations and they are real. What was wrong was that they were drawn the same shape as a frame, not

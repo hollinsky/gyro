@@ -32,6 +32,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "Trace/Protobuf.h"
@@ -472,39 +473,132 @@ void ReadEvent(Trace& trace, std::uint64_t sequence, std::int64_t stamp, std::sp
 		}
 	}
 
-	std::unordered_map<std::uint64_t, std::size_t> flows;
-	std::unordered_map<std::uint64_t, std::int64_t> lone;
+	// A flow as the file describes it: how many records named it, when it was first and last named, and
+	// which row it left from — the earliest end being the producing one, which is what a supersession
+	// has to be judged against.
+	struct Flow
+	{
+		std::size_t Count = 0;
+		std::int64_t First = 0;
+		std::int64_t Last = 0;
+		std::uint64_t FromTrack = 0;
+	};
+
+	std::unordered_map<std::uint64_t, Flow> flows;
 
 	for (const Record& record : trace.Records)
 	{
 		for (const std::uint64_t id : record.Flows)
 		{
-			++flows[id];
-			lone[id] = record.Stamp;
+			const auto [at, fresh] = flows.try_emplace(id);
+			Flow& flow = at->second;
+
+			if (fresh || record.Stamp < flow.First)
+			{
+				flow.First = record.Stamp;
+				flow.FromTrack = record.Track;
+			}
+
+			if (fresh)
+			{
+				flow.Last = record.Stamp;
+			}
+
+			flow.Last = std::max(flow.Last, record.Stamp);
+
+			++flow.Count;
 		}
 	}
 
-	std::size_t lapped = 0;
+	// **The other ordinary one-ended arrow, and it is not a defect either: a producer that counts every
+	// attempt feeding a consumer that only ever takes the newest.** `Publication/Ring.h` is exactly
+	// that — the dispatch thread numbers and publishes a scene every iteration, and the frame thread
+	// acquires whatever is in the slot when it looks, so a scene the next publish overwrote before
+	// anybody looked is dropped by design and its `published` mark never gets an `acquired` to point
+	// at. Nothing was lost when that happens; the frame thread drew a *newer* picture.
+	//
+	// What proves it from the file alone, with no name matched and no threshold picked, is that the
+	// same chain later carried a *higher* number all the way across. Ids within one chain come from one
+	// counter, so a completed arrow numbered above this one, drawn after it, is the consumer saying it
+	// had moved past. A chain that simply stops — nothing higher ever completes — is the defect this
+	// check is for, and is still reported.
+	//
+	// A chain is identified by the two rows its completed arrows run between rather than by decoding
+	// anything out of the id, for the reason the track walk above gives: the tool reports what the file
+	// says and does not agree with the encoder about a convention. That also keeps two producers apart,
+	// since only an arrow leaving the *same* row can supersede this one — a one-ended arrow on a
+	// consuming row is an arrival with no departure, which nothing supersedes and which stays a
+	// complaint.
+	std::unordered_map<std::uint64_t, std::vector<std::pair<std::int64_t, std::uint64_t>>> completed;
 
-	for (const auto& [id, count] : flows)
+	for (const auto& [id, flow] : flows)
 	{
-		if (count >= 2)
+		if (flow.Count >= 2)
+		{
+			completed[flow.FromTrack].emplace_back(flow.Last, id);
+		}
+	}
+
+	// Sorted by when the arrow landed, and carrying the highest id that lands at or after each point,
+	// so the question *did this chain get further than here* is one lookup.
+	for (auto& [track, arrows] : completed)
+	{
+		std::sort(arrows.begin(), arrows.end());
+
+		for (std::size_t at = arrows.size(); at-- > 1;)
+		{
+			arrows[at - 1].second = std::max(arrows[at - 1].second, arrows[at].second);
+		}
+	}
+
+	const auto superseded = [&completed](const Flow& flow, std::uint64_t id) {
+		const auto arrows = completed.find(flow.FromTrack);
+
+		if (arrows == completed.end())
+		{
+			return false;
+		}
+
+		// By landing time alone: the suffix maximum above leaves the ids unsorted, and what is being
+		// asked is whether any arrow landed strictly later than this mark.
+		const auto after = std::upper_bound(
+			arrows->second.begin(),
+			arrows->second.end(),
+			flow.Last,
+			[](std::int64_t stamp, const std::pair<std::int64_t, std::uint64_t>& arrow) { return stamp < arrow.first; }
+		);
+
+		return after != arrows->second.end() && after->second > id;
+	};
+
+	std::size_t lapped = 0;
+	std::size_t dropped = 0;
+
+	for (const auto& [id, flow] : flows)
+	{
+		if (flow.Count >= 2)
 		{
 			continue;
 		}
 
-		const std::int64_t stamp = lone[id];
-
-		if (stamp < overlapFrom || stamp > overlapTo)
+		if (flow.First < overlapFrom || flow.First > overlapTo)
 		{
 			++lapped;
 
 			continue;
 		}
 
+		if (superseded(flow, id))
+		{
+			++dropped;
+
+			continue;
+		}
+
 		complaints.emplace_back(
-			"flow " + std::to_string(id) + " at " + std::to_string(stamp) +
-			" is named by one slice inside the window every ring covers, so no arrow is drawn"
+			"flow " + std::to_string(id) + " at " + std::to_string(flow.First) +
+			" is named by one slice inside the window every ring covers, and the chain it belongs to got"
+			" no further, so no arrow is drawn"
 		);
 	}
 
@@ -513,6 +607,13 @@ void ReadEvent(Trace& trace, std::uint64_t sequence, std::int64_t stamp, std::sp
 		// Said rather than hidden, because a large number of these is a ring that is too short for the
 		// thing being looked at rather than a trace that is fine.
 		notes.emplace_back(std::to_string(lapped) + " flow(s) lost a partner to a lapped ring at the window edges");
+	}
+
+	if (dropped != 0)
+	{
+		// Same reason, and this one is a figure worth reading on its own: it is how many scenes the
+		// dispatch thread built that nobody ever drew.
+		notes.emplace_back(std::to_string(dropped) + " flow(s) were superseded before the far side looked");
 	}
 
 	// Timestamps must not go backwards within a sequence: Perfetto orders by them and a record out of

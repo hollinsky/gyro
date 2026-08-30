@@ -2138,9 +2138,13 @@ draw.
 
 *The frame thread's row* is one slice per frame, containing `evaluate`, `record` and `present` —
 drawn separately because they fail for unrelated reasons. A wake that declines to draw is one mark
-naming the reason instead: `queue full`, `over budget`, `idle`. Two thirds of this loop's wakes are
-the panel still holding the frame in front, and drawing them the same shape as a frame is what made
-the old picture unreadable.
+naming the reason instead: `queue full`, `over budget`, `idle`, `armed for nothing`. Two thirds of
+this loop's wakes are the panel still holding the frame in front, and drawing them the same shape as
+a frame is what made the old picture unreadable. The last two are the same refusal wearing two names:
+`idle` is a wake an event source caused before the alarm — a host's presentation feedback or a panel's
+page flip, on a descriptor the thread has to drain — which correctly found nothing to do, and `armed
+for nothing` is the alarm itself firing to draw nothing, which is the defect
+[Doing nothing must cost nothing](#doing-nothing-must-cost-nothing) forbids.
 
 *The GPU row* is the batch, named for the frame, with the passes nested inside it and each carrying
 its position in the run. `VK_EXT_calibrated_timestamps` is what places it: the device counter and

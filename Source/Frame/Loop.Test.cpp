@@ -1951,6 +1951,172 @@ GYRO_TEST(FrameLoop, AWakeThatDeclinesToDrawSaysWhy)
 	GYRO_CHECK_EQ(framesOnTheRow, std::size_t{ 0 });
 }
 
+namespace
+{
+// How many marks of one name landed on this output's row, which is the whole of what the two cases
+// below differ in.
+[[nodiscard]] std::size_t MarksNamed(TraceBuffer& trace, std::string_view name)
+{
+	std::array<TraceEvent, 256> events{};
+	const std::size_t count = trace.Copy(events);
+
+	std::size_t found = 0;
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		const TraceEvent& event = events[index];
+
+		if (event.Scope == TraceOutput(0) && event.Kind == TraceKind::Mark && std::string_view{ event.Name } == name)
+		{
+			++found;
+		}
+	}
+
+	return found;
+}
+
+// The state both cases below run from: frame 8 drawn and flipped, nothing damaged, and a scene that
+// wants its next frame far enough out that the loop is not owed one on the way there. Returns what the
+// iteration that swallowed the flip armed for.
+[[nodiscard]] Wake Quiesce(Harness& harness)
+{
+	constexpr std::array<Wake, 1> later{ Wake::At(At(1200)) };
+
+	harness.Anchor();
+	harness.Publish(1, later);
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	const Wake armed = harness.Loop.Step();
+
+	// The flip the arming above was outstanding for. It lands, and with it every reason this output had
+	// to be owed a frame.
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(armed.When);
+
+	return harness.Loop.Step();
+}
+} // namespace
+
+// The alarm fired and nothing wanted the frame it woke up to make, which is a defect in the arming
+// rather than a rest: a still screen whose frame thread runs anyway is the shape
+// Architecture.md#doing-nothing-must-cost-nothing forbids, and it is what a person pays for in battery
+// on a laptop showing a login prompt.
+GYRO_TEST(FrameLoop, AnAlarmThatFiresWithNothingToDrawIsNamedADefect)
+{
+	Harness harness;
+
+	harness.Anchor();
+	harness.Publish(1, std::array<Wake, 1>{ Wake::At(At(1200)) });
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	const Wake armed = harness.Loop.Step();
+
+	GYRO_REQUIRE(armed.Which == Wake::Kind::Timed);
+
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(armed.When);
+
+	std::array<TraceRecord, 256> records{};
+	TraceBuffer trace;
+	trace.Arm(records, harness.Clock);
+	EnrollTracing(&trace);
+
+	const Wake next = harness.Loop.Step();
+
+	EnrollTracing(nullptr);
+
+	GYRO_CHECK_EQ(MarksNamed(trace, "armed for nothing"), std::size_t{ 1 });
+	GYRO_CHECK_EQ(MarksNamed(trace, "idle"), std::size_t{ 0 });
+
+	// And the wake it armed is now the scene's own, far enough out that the case below can run ahead of
+	// it — which is what makes these two different situations rather than the same one twice.
+	GYRO_REQUIRE(next.Which == Wake::Kind::Timed);
+	GYRO_REQUIRE(next.When > At(1100));
+}
+
+// An event source woke the thread well before that alarm, it drained the event, and the world was
+// settled: nothing to draw is the correct answer and not a defect. This is the ordinary case on every
+// backend — a host compositor reports a presentation a whole refresh after the instant it is about, and
+// a panel reports a page flip at its vblank, both on descriptors the frame thread is waiting on — and
+// it accounted for every one of the four hundred and twenty seven marks in the capture that split this
+// mark in two.
+GYRO_TEST(FrameLoop, AWakeAheadOfTheAlarmWithNothingToDrawIsARest)
+{
+	Harness harness;
+
+	const Wake armed = Quiesce(harness);
+
+	GYRO_REQUIRE(armed.Which == Wake::Kind::Timed);
+
+	// A refresh the panel reports and gyro drew nothing for, arriving on the source rather than at the
+	// alarm — which is still an anchor the clock has to take before anything else is decided.
+	harness.Source.Deliver = &harness.Presenter;
+	harness.Source.Pending = true;
+	harness.Source.FlipAt = At(1020);
+	harness.Source.FlipSequence = 9;
+	harness.Clock.Set(At(1023));
+
+	GYRO_REQUIRE(harness.Clock.Now() < armed.When);
+
+	const int drained = harness.Source.Drains;
+
+	std::array<TraceRecord, 256> records{};
+	TraceBuffer trace;
+	trace.Arm(records, harness.Clock);
+	EnrollTracing(&trace);
+
+	(void)harness.Loop.Step();
+
+	EnrollTracing(nullptr);
+
+	// The event was read before anything was decided, which is the half of this that is not optional:
+	// the wake is unavoidable because the descriptor has to be drained.
+	GYRO_CHECK_EQ(harness.Source.Drains, drained + 1);
+	GYRO_CHECK(!harness.Source.Pending);
+	GYRO_CHECK_EQ(MarksNamed(trace, "idle"), std::size_t{ 1 });
+	GYRO_CHECK_EQ(MarksNamed(trace, "armed for nothing"), std::size_t{ 0 });
+}
+
+// The other way the schedule can be innocent, and the one the fold is actually aiming for: it armed
+// nothing at all, so whatever woke the thread, it was not the alarm. `Wake::Never()` is not due at any
+// instant, so the same comparison covers it without a case of its own.
+GYRO_TEST(FrameLoop, AWakeWithNoAlarmArmedAtAllIsARest)
+{
+	Harness harness;
+
+	harness.Anchor();
+	harness.Publish(1, std::array<Wake, 1>{ Wake::Never() });
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Clock.Set(At(1012));
+
+	// Nothing owed and nothing animating, so the loop parks — which is the invariant, not the defect.
+	while (harness.Loop.Step().Which != Wake::Kind::Settled)
+	{
+		harness.Clock.Set(harness.Clock.Now() + 1ms);
+	}
+
+	harness.Clock.Set(harness.Clock.Now() + 5ms);
+
+	std::array<TraceRecord, 256> records{};
+	TraceBuffer trace;
+	trace.Arm(records, harness.Clock);
+	EnrollTracing(&trace);
+
+	(void)harness.Loop.Step();
+
+	EnrollTracing(nullptr);
+
+	GYRO_CHECK_EQ(MarksNamed(trace, "idle"), std::size_t{ 1 });
+	GYRO_CHECK_EQ(MarksNamed(trace, "armed for nothing"), std::size_t{ 0 });
+}
+
 // Decision 152's partition reaching the seam: what the display engine draws, and what is left for the
 // GPU.
 //

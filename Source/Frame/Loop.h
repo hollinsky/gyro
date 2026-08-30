@@ -1009,12 +1009,41 @@ private:
 		// it is the scene's `Wake` rather than a second opinion about timing.
 		if (!Wants(output, index, decision))
 		{
-			// **The loop woke and nothing was due, which is a defect rather than a rest.** A settled
-			// world answers `Wake::Never()` and this function is not reached at all, so a mark here is
-			// the schedule having armed for an instant that turned out to want nothing — the exact
-			// shape Architecture.md#doing-nothing-must-cost-nothing forbids, and one no counter was
-			// ever going to show.
-			TraceMark("idle", output.m_Trace);
+			// **Two different things wear this return and only one of them is a defect**, which is the
+			// same split as `queue full` against `over budget` above and was arrived at by measurement
+			// rather than by argument. The comment that used to stand here called every one of these a
+			// schedule that armed for nothing; a thirteen second capture of gyro driving a 60 Hz panel
+			// through KMS recorded four hundred and twenty seven of them, every one of them within a
+			// few tens of microseconds of a page flip, and the `lead` sample above says the alarm still
+			// had twelve milliseconds to run on every one that had one.
+			//
+			// **A wake the schedule armed for that turns out to want nothing is the defect.** Nothing is
+			// owed, nothing is animating, and the fold should therefore have answered `Wake::Never()`
+			// and left the thread blocked — an alarm that fires to draw nothing is the exact shape
+			// Architecture.md#doing-nothing-must-cost-nothing forbids, and what it costs is a laptop
+			// showing a still screen running its frame thread anyway. It is rare, it is a bug in the
+			// arming rather than in the drawing, and that is why it gets a name of its own instead of a
+			// share of one.
+			//
+			// **A wake an event source caused before the alarm is a rest, and gyro cannot avoid it.** A
+			// host compositor's presentation feedback arrives a whole refresh after the instant it
+			// reports and a panel's page flip arrives at its vblank, both on descriptors the frame
+			// thread is waiting on; the thread must wake and read them, or every deadline after this one
+			// is computed against an anchor a refresh stale. Having read them and found the world
+			// settled, drawing nothing is the correct answer and not a failure of anything.
+			//
+			// **It is still marked rather than suppressed**, for the reason the wait above records: a
+			// mark gated until it never fires is a row a reader finds empty where the explanation should
+			// be. How often a backend wakes this thread for nothing is the figure that says what that
+			// backend costs to idle under, and it is only visible if the benign case draws.
+			//
+			// `m_Armed` is the previous iteration's answer and is the whole of what tells them apart.
+			// Due means the instant the schedule named has arrived, so the schedule owns this wake
+			// whatever else also happened to fire — the honest reading, since that instant did turn out
+			// to want nothing. Not due means the loop is running ahead of its own alarm, and `Settled`
+			// means it armed no alarm at all, so in both cases something other than the schedule is what
+			// woke the thread.
+			TraceMark(m_Armed.IsDue(now) ? "armed for nothing" : "idle", output.m_Trace);
 
 			return;
 		}
