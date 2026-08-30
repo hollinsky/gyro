@@ -3,7 +3,9 @@
 #include <wayland-server-core.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -17,6 +19,7 @@
 #include "Scene/Entity.h"
 #include "Scene/Hit.h"
 #include "Scene/Output.h"
+#include "Scene/Reach.h"
 #include "Scene/Store.h"
 #include "World/Content.h"
 
@@ -62,6 +65,23 @@ void ClientXdgToplevel::OnGone()
 	}
 
 	delete this;
+}
+
+void ClientXdgToplevel::Configure(std::int32_t width, std::int32_t height) const
+{
+	// The states as the protocol carries them: an array of `uint32`, handed over as the bytes behind it.
+	// A fixed array rather than a vector because the set is closed and tiny — one entry today, and the
+	// resize grab's `resizing` beside it when that lands — and a heap allocation here would be one per
+	// frame of a resize, on the thread a person's drag is being answered by.
+	std::array<Wayland::Server::XdgToplevelState, 1> states{};
+	std::size_t count = 0;
+
+	if (m_Activated)
+	{
+		states[count++] = Wayland::Server::XdgToplevelState::Activated;
+	}
+
+	Object().Configure(width, height, std::as_bytes(std::span{ states.data(), count }));
 }
 
 void ClientXdgToplevel::OnShowWindowMenu(
@@ -596,9 +616,12 @@ void ClientXdgSurface::Configure()
 		// size has to say. A number invented here would be one the client is obliged to obey, so it would
 		// be gyro doing layout — which is the thing decision 51 keeps out of the compositor.
 		//
-		// No states either: maximised, fullscreen, resizing and activated are all facts about window
-		// management or input, and gyro has neither yet. An empty list is a window that is none of them.
-		m_Toplevel->Object().Configure(0, 0, {});
+		// **The states are the toplevel's own and `activated` is the only one gyro has an answer to.**
+		// Maximised, fullscreen and the tiled set are window management, which belongs to a shell (51);
+		// `resizing` is true only inside a gesture gyro is driving and arrives with the grab that drives
+		// one. Focus is neither — it is a fact about the world that `Scene/Focus.h` already holds, and a
+		// window that has it and is not told draws itself grey while a person types into it.
+		m_Toplevel->Configure(0, 0);
 	}
 	else if (m_Popup != nullptr)
 	{
@@ -810,6 +833,12 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		if (m_Popup == nullptr)
 		{
 			scene->Focus().Offer(*window);
+
+			// **And into the window registry, which is the mapped toplevels of the whole session.** A
+			// popup is deliberately not in it: what the set is asked is which window is activated, and a
+			// menu is part of the window it came out of rather than a second one — `FocusRestsOn` is where
+			// that reading lives.
+			m_Context->Add(*this);
 		}
 	}
 
@@ -890,6 +919,13 @@ void ClientXdgSurface::Unmap()
 
 	m_Context->Unbind(m_Content);
 	m_Context->Unbind(m_Window);
+	m_Context->Remove(*this);
+
+	// **What the client has been told goes with the window.** An unmapped toplevel that is committed
+	// again negotiates from the start — a configure, an ack, then a buffer — and the states go with that
+	// sequence, so a window that was focused when it went down must be told again rather than assumed to
+	// have remembered.
+	SetActivated(false);
 
 	SceneStore* const scene = m_Context->Store();
 
@@ -926,11 +962,61 @@ void ClientXdgSurface::Withdraw() noexcept
 	m_Acked = false;
 }
 
+bool ClientXdgSurface::SetActivated(bool activated) noexcept
+{
+	return m_Toplevel != nullptr && m_Toplevel->SetActivated(activated);
+}
+
 void ClientXdgSurface::OnSurfaceGone()
 {
 	Unmap();
 
 	m_Surface = nullptr;
+}
+
+bool FocusRestsOn(const SceneStore& scene, EntityId window, EntityId focused)
+{
+	if (window.IsNull() || focused.IsNull())
+	{
+		return false;
+	}
+
+	EntityId at = focused;
+
+	for (std::size_t depth = 0; !at.IsNull() && depth < MaxReachDepth; ++depth)
+	{
+		if (at == window)
+		{
+			return true;
+		}
+
+		const Entity* const entity = scene.Find(at);
+
+		if (entity == nullptr)
+		{
+			return false;
+		}
+
+		at = entity->Parent;
+	}
+
+	return false;
+}
+
+void SyncActivation(HostContext& context, const SceneStore& scene, EntityId focused)
+{
+	// Iterated over a copy for the destructor's reason: a configure is a wire write, and a client whose
+	// connection has already failed is torn down inside libwayland — which runs handlers that unmap
+	// windows, and so edits the registry underneath this walk.
+	const std::vector<ClientXdgSurface*> windows{ context.Windows().begin(), context.Windows().end() };
+
+	for (ClientXdgSurface* const window : windows)
+	{
+		if (window->SetActivated(FocusRestsOn(scene, window->Window(), focused)))
+		{
+			window->Configure();
+		}
+	}
 }
 
 Wayland::Server::XdgSurfaceHandler* ClientShell::OnGetXdgSurface(Wayland::Server::WlSurface surface)

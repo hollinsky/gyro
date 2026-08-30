@@ -3,6 +3,7 @@
 #include <cerrno>
 #include <utility>
 
+#include "Protocol/Shell.h"
 #include "Protocol/Surface.h"
 
 Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
@@ -159,7 +160,16 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// iteration sends one `enter` however many times focus changed inside it. See [Seat.h](Seat.h) for
 	// why the change is noticed by comparing rather than by a signal out of `Scene`, and for what the
 	// other order costs — a keystroke delivered to the window a person just clicked away from.
-	m_Seat.SyncFocus(scene.Focus().Focused());
+	const EntityId focused = scene.Focus().Focused();
+
+	m_Seat.SyncFocus(focused);
+
+	// **Beside the seat's comparison and against the same answer**, because the two are one fact told to
+	// two different objects: a `wl_keyboard.enter` says where the keys are going and an `activated`
+	// state says which titlebar is lit, and a window that got one without the other is one a person can
+	// type into and cannot tell they are typing into. [Shell.h](Shell.h) has why a menu leaves its own
+	// window activated.
+	SyncActivation(m_Context, scene, focused);
 
 	return Wake::Never();
 }

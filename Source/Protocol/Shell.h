@@ -101,11 +101,38 @@ public:
 
 	void OnSetMinimized() override {}
 
+	// Whether the client has been told it has the keyboard, which is the whole of what makes a toolkit
+	// draw its titlebar live rather than grey.
+	//
+	// **It is what has been *said* rather than what is true**, which is the distinction
+	// [Seat.h](Seat.h) draws over focus for the same reason: `Scene/Focus.h` holds the fact, this holds
+	// the last thing sent, and a configure goes out exactly where the two disagree. Keeping only the
+	// fact would mean either a configure per dispatch iteration or a signal out of `Scene`, and keeping
+	// only this one would mean a window that is focused and does not know it.
+	[[nodiscard]] bool Activated() const noexcept { return m_Activated; }
+
+	// Record what the next configure will carry, answering whether it changed — which is the whole of
+	// the question *is a configure owed*.
+	bool SetActivated(bool activated) noexcept
+	{
+		const bool changed = activated != m_Activated;
+
+		m_Activated = activated;
+
+		return changed;
+	}
+
+	// Send `xdg_toplevel.configure` with the states this window is in. The size is the `xdg_surface`'s
+	// to choose and is passed through, because the two events are one answer split across two objects.
+	void Configure(std::int32_t width, std::int32_t height) const;
+
 private:
 	ClientXdgSurface* m_Surface = nullptr;
 
 	std::string m_Title;
 	std::string m_AppId;
+
+	bool m_Activated = false;
 };
 
 // One `xdg_positioner`: the client's description of where a popup should go, accumulated across as
@@ -361,6 +388,10 @@ public:
 	// outside the commit sequence that otherwise drives them.
 	void Configure();
 
+	// `ClientXdgToplevel::SetActivated` reached through the surface, which is the object the window
+	// registry holds. False — nothing changed — for a surface whose role is not a toplevel.
+	bool SetActivated(bool activated) noexcept;
+
 	// The `xdg_wm_base` this surface came from, for the errors that belong to that interface.
 	[[nodiscard]] Wayland::Server::XdgWmBase Base() const noexcept { return m_Base; }
 
@@ -437,6 +468,33 @@ public:
 private:
 	HostContext* m_Context = nullptr;
 };
+
+// Whether focus rests on this window, which is a different question from whether this window *is* the
+// focused entity.
+//
+// **A menu belongs to the window it came out of.** A popup that grabbed takes the keyboard —
+// `Scene/Focus.h` holds it, because a person typing while a menu is open is typing into the menu — and
+// the window underneath must not go grey while its own menu is up, which is what a person would read
+// as the application having lost focus mid-click. So the question is asked up the tree: a popup hangs
+// under the window it is anchored on (141), so the walk that finds the window is the same relationship
+// that puts the menu over it on screen.
+//
+// Capped at `MaxReachDepth` for `Scene/Hit.h`'s reason, which also bounds a cycle a bad link could
+// make.
+[[nodiscard]] bool FocusRestsOn(const SceneStore& scene, EntityId window, EntityId focused);
+
+// Bring every window's idea of whether it is activated up to date with the world's, and send nothing
+// where it has not changed. Called from `Advance`, beside the seat's own comparison and for the same
+// reason: the keystroke or the click that moved focus and the step that notices are the same wakeup of
+// the same thread, so nothing has to be observed and no signal crosses.
+//
+// **A window that has just mapped learns it is focused on this pass rather than in its first
+// configure.** The initial configure is answered before the window exists — a client is asking what
+// size to draw and has attached nothing — so there is nothing yet for focus to be on, and predicting
+// that it is about to take focus would be copying `Scene/Focus.h`'s newest-on-top rule into a second
+// place that could disagree with it. What it costs is that the first frame of a new window is drawn
+// unfocused; the configure that corrects it goes out in the same iteration the window mapped in.
+void SyncActivation(HostContext& context, const SceneStore& scene, EntityId focused);
 
 // The global itself, owned by whoever advertises it and outliving every client that binds it.
 class ShellGlobal final : public Wayland::Server::XdgWmBaseBinding

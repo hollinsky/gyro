@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstddef>
@@ -867,15 +868,33 @@ public:
 	{
 		Width = width;
 		Height = height;
-		States = states.size();
 		++Configured;
+
+		// Decoded rather than counted, because a test that knew only how many states arrived could not
+		// tell `activated` from `maximized` — and the failure that matters is a window told it is one
+		// thing when gyro meant another.
+		States.clear();
+
+		for (std::size_t at = 0; at + sizeof(std::uint32_t) <= states.size(); at += sizeof(std::uint32_t))
+		{
+			std::uint32_t value = 0;
+
+			std::memcpy(&value, states.data() + at, sizeof(value));
+
+			States.push_back(static_cast<Wayland::XdgToplevelState>(value));
+		}
 	}
 
 	void OnClose() override { ++Closed; }
 
+	[[nodiscard]] bool Has(Wayland::XdgToplevelState state) const noexcept
+	{
+		return std::find(States.begin(), States.end(), state) != States.end();
+	}
+
 	std::int32_t Width = -1;
 	std::int32_t Height = -1;
-	std::size_t States = 0;
+	std::vector<Wayland::XdgToplevelState> States;
 	std::uint32_t Configured = 0;
 	std::uint32_t Closed = 0;
 };
@@ -1093,7 +1112,7 @@ GYRO_TEST(ProtocolRoundTrip, AToplevelIsConfiguredBeforeItIsAskedToDrawAnything)
 	// are true.
 	GYRO_CHECK_EQ(toplevel.WindowEvents.Width, 0);
 	GYRO_CHECK_EQ(toplevel.WindowEvents.Height, 0);
-	GYRO_CHECK_EQ(toplevel.WindowEvents.States, std::size_t{ 0 });
+	GYRO_CHECK(toplevel.WindowEvents.States.empty());
 
 	// Nothing is on screen: the client has been told it may draw and has not.
 	GYRO_CHECK_EQ(session.Store.Count(), std::uint32_t{ 1 });
@@ -1765,6 +1784,71 @@ struct Pointer
 	session.Turn();
 
 	return true;
+}
+
+// The `activated` state, from the far end of the socket: a window that has the keyboard is told so,
+// and the one it took the keyboard from is told it lost it.
+//
+// **This is what a person reads as a window being live**, and it is the whole of what a toolkit needs
+// to draw a titlebar in colour rather than grey. Without it every window on the machine looks
+// unfocused while a person types into one of them, which is not a subtle artefact — GTK draws the
+// entire header bar in the backdrop style.
+//
+// The count is asserted alongside, because the failure that would hide here is a configure per
+// dispatch iteration: the state would be right, every window on the machine would be asked to redraw
+// on every wakeup, and nothing on screen would say so.
+GYRO_TEST(ProtocolRoundTrip, AWindowIsToldItHasTheKeyboardAndTheOneItTookItFromIsToldItHasNot)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-activated" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Toplevel first;
+	GYRO_REQUIRE(Show(session, bound, first, std::byte{ 0x40 }));
+
+	// Two configures: the `0x0` that answered *what size should I be*, carrying no states because the
+	// window did not exist yet, and the one the mapping produced. They are one turn apart rather than
+	// one frame — the window maps and is told it is focused inside the same `Advance`.
+	GYRO_CHECK_EQ(first.WindowEvents.Configured, std::uint32_t{ 2 });
+	GYRO_CHECK(first.WindowEvents.Has(Wayland::XdgToplevelState::Activated));
+
+	// Nothing changed, so nothing is sent. A window that is being redrawn is not a window that is being
+	// reconfigured.
+	session.Turn();
+
+	GYRO_CHECK_EQ(first.WindowEvents.Configured, std::uint32_t{ 2 });
+
+	Toplevel second;
+	GYRO_REQUIRE(Show(session, bound, second, std::byte{ 0x55 }));
+
+	// Newest on top is `Scene/Focus.h`'s rule and this is a client reading it: the window that just
+	// opened has the keyboard, and the one behind it is told in the same turn.
+	GYRO_CHECK(second.WindowEvents.Has(Wayland::XdgToplevelState::Activated));
+	GYRO_CHECK(!first.WindowEvents.Has(Wayland::XdgToplevelState::Activated));
+	GYRO_CHECK_EQ(first.WindowEvents.Configured, std::uint32_t{ 3 });
+
+	// And back, by the route that has nothing to do with the pointer: focus put where a shell or an
+	// alt-tab would put it.
+	const Entity* const floor = session.Store.Find(session.Store.FirstRoot());
+	GYRO_REQUIRE(floor != nullptr);
+
+	// The floor's first child is the window that opened first, since the store appends and the sibling
+	// list is the z order (55).
+	GYRO_REQUIRE(session.Store.Focus().Focus(floor->FirstChild));
+
+	session.Turn();
+
+	GYRO_CHECK(first.WindowEvents.Has(Wayland::XdgToplevelState::Activated));
+	GYRO_CHECK(!second.WindowEvents.Has(Wayland::XdgToplevelState::Activated));
+	GYRO_CHECK(!session.Client.Fault().has_value());
 }
 
 // The pointer, moved the way `Dispatch/Loop.h` moves it: a displacement against the outputs, with no

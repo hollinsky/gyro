@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -10,6 +11,7 @@
 #include "Scene/Textures.h"
 
 class ClientSurface;
+class ClientXdgSurface;
 
 // What a request handler may reach, and only while a dispatch is running.
 //
@@ -57,6 +59,23 @@ public:
 	// seat and the shell are both entitled to it — one to dismiss on a press, the other to refuse a
 	// grab that is not the topmost.
 	[[nodiscard]] PopupStack& Popups() noexcept { return m_Popups; }
+
+	// The mapped toplevels, which is the set every question about *the windows on this machine* is
+	// asked against. Borrowed, and each one registers itself as it maps and takes itself out as it
+	// unmaps — so this is the windows a person is looking at rather than the session's history, which
+	// is the same rule the surface table below is kept to.
+	//
+	// **It is here rather than in the shell global because a window is per session and a global is per
+	// connection.** Two applications are two `xdg_wm_base` objects and one set of windows, and the
+	// comparison that decides which one is activated has to see all of them at once — a per-connection
+	// list would answer *the frontmost window of this client*, which is not a fact anybody wants.
+	//
+	// A vector and a scan, for `m_Surfaces`' reason and at the same size.
+	void Add(ClientXdgSurface& window) { m_Windows.push_back(&window); }
+
+	void Remove(ClientXdgSurface& window) noexcept { std::erase(m_Windows, &window); }
+
+	[[nodiscard]] std::span<ClientXdgSurface* const> Windows() const noexcept { return m_Windows; }
 
 	// The surface behind an entity, for the one direction nothing else can travel.
 	//
@@ -128,6 +147,9 @@ private:
 	ITextures* m_Textures = nullptr;
 	EntityId m_Floor{};
 	PopupStack m_Popups;
+
+	// The mapped toplevels. Borrowed, and each one takes itself out as it unmaps.
+	std::vector<ClientXdgSurface*> m_Windows;
 
 	// The mapped windows, keyed by the entity their pixels are. Borrowed pointers: a surface unbinds
 	// itself as it unmaps and again as it goes away, so nothing here outlives what it names.

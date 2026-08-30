@@ -957,6 +957,7 @@ gyro_add_module(Protocol DISPATCH
 		Host.Test.cpp
 		Positioner.Test.cpp
 		Server.Test.cpp
+		Shell.Test.cpp
 		Shm.Test.cpp
 		Surface.Test.cpp
 )
