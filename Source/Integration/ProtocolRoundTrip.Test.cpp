@@ -1589,10 +1589,11 @@ GYRO_TEST(ProtocolRoundTrip, ASeatOffersOneKeyboardAndHandsOverALayoutBeforeAnyt
 	Keyboard keyboard;
 	GYRO_REQUIRE(Listen(pair, bound, keyboard));
 
-	// A keyboard and a pointer, and no touch. A client told there is a capability gyro has not built
-	// would wait for an `enter` that cannot come, so the set is exactly what is routed.
+	// All three, and nothing beyond them. A client told there is a capability gyro has not built would
+	// wait for an event that cannot come, so the set is exactly what is routed.
 	GYRO_CHECK(
-		keyboard.SeatListener.Capabilities == (Wayland::WlSeatCapability::Keyboard | Wayland::WlSeatCapability::Pointer)
+		keyboard.SeatListener.Capabilities ==
+		(Wayland::WlSeatCapability::Keyboard | Wayland::WlSeatCapability::Pointer | Wayland::WlSeatCapability::Touch)
 	);
 	GYRO_CHECK(keyboard.SeatListener.Name == "seat0");
 
@@ -1952,6 +1953,84 @@ struct Pointer
 	Wayland::WlPointer Device;
 };
 
+class TouchEvents final : public Wayland::WlTouchIgnoring
+{
+public:
+	void OnDown(
+		std::uint32_t serial,
+		std::uint32_t,
+		Wayland::WlSurface surface,
+		std::int32_t id,
+		Wire::Fixed x,
+		Wire::Fixed y
+	) override
+	{
+		++Downs;
+		DownSerial = serial;
+		On = surface;
+		Id = id;
+		X = x;
+		Y = y;
+	}
+
+	void OnUp(std::uint32_t, std::uint32_t, std::int32_t id) override
+	{
+		++Ups;
+		Id = id;
+	}
+
+	void OnMotion(std::uint32_t, std::int32_t id, Wire::Fixed x, Wire::Fixed y) override
+	{
+		++Motions;
+		Id = id;
+		X = x;
+		Y = y;
+	}
+
+	void OnFrame() override { ++Frames; }
+
+	void OnCancel() override { ++Cancels; }
+
+	std::uint32_t Downs = 0;
+	std::uint32_t Ups = 0;
+	std::uint32_t Motions = 0;
+	std::uint32_t Frames = 0;
+	std::uint32_t Cancels = 0;
+	std::uint32_t DownSerial = 0;
+	std::int32_t Id = -1;
+	Wire::Fixed X;
+	Wire::Fixed Y;
+	Wayland::WlSurface On;
+};
+
+struct Touch
+{
+	TouchEvents Listener;
+	Wayland::WlTouch Device;
+};
+
+[[nodiscard]] bool Feel(Pair& pair, Keyboard& keyboard, Touch& touch)
+{
+	touch.Device = keyboard.Seat.GetTouch(touch.Listener);
+
+	pair.Turn();
+
+	return touch.Device.IsValid();
+}
+
+// One touchscreen, which is every machine this is about. The id is generational for the reason two of
+// them would make matter — `Core/Input.h` — and nothing here needs a second one.
+constexpr InputDeviceId Digitizer{ 0, 1 };
+
+// A contact, at a place on the screen. The two arguments are decision 167's split: the phase and the
+// slot are the device's, and the point is what the composition root resolved the device's own fraction
+// to. A test stands where the root stands and hands over both.
+void Finger(Pair& pair, TouchPhase phase, std::int32_t slot, Point<GlobalSpace> at)
+{
+	(*pair.Host)
+		->OnTouch(TouchEvent{ .Point = slot, .Phase = phase, .When = pair.Clock.Now(), .Device = Digitizer }, at);
+}
+
 [[nodiscard]] bool Grip(Pair& pair, Keyboard& keyboard, Pointer& pointer)
 {
 	pointer.Device = keyboard.Seat.GetPointer(pointer.Listener);
@@ -2078,10 +2157,10 @@ void Push(Pair& pair, double x, double y)
 }
 } // namespace
 
-// The seat has a pointer now, and it says so before a client asks. Touch is still refused by name,
-// which is the half of `wl_seat` that has not been built — the refusal and the capability are one
-// statement and a client is entitled to read them as one.
-GYRO_TEST(ProtocolRoundTrip, TheSeatOffersAPointerAndStillRefusesTouchByName)
+// The seat says what it has before a client asks, and there are three of them now. The capabilities
+// event is the whole of how a toolkit decides whether to build a touch path at all, so a client that
+// binds every object the bitmask claims must get three working objects and no error.
+GYRO_TEST(ProtocolRoundTrip, TheSeatOffersAKeyboardAPointerAndATouchscreen)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
@@ -2097,18 +2176,20 @@ GYRO_TEST(ProtocolRoundTrip, TheSeatOffersAPointerAndStillRefusesTouchByName)
 	GYRO_CHECK(
 		(keyboard.SeatListener.Capabilities & Wayland::WlSeatCapability::Pointer) == Wayland::WlSeatCapability::Pointer
 	);
+	GYRO_CHECK(
+		(keyboard.SeatListener.Capabilities & Wayland::WlSeatCapability::Touch) == Wayland::WlSeatCapability::Touch
+	);
 
 	Pointer pointer;
 	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
+
+	// **Asking for the touchscreen used to end the client**, which was the honest answer for as long as
+	// nothing could route a finger: the protocol names `missing_capability` for a capability a seat has
+	// never had. What it must not do now is either half of that — no error, and an object that works.
+	Touch touch;
+	GYRO_REQUIRE(Feel(pair, keyboard, touch));
+
 	GYRO_CHECK(!pair.Client.Fault().has_value());
-
-	Wayland::WlTouchIgnoring touch;
-	static_cast<void>(keyboard.Seat.GetTouch(touch));
-
-	pair.Turn();
-
-	GYRO_REQUIRE(pair.Client.Fault().has_value());
-	GYRO_CHECK_EQ(pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::WlSeatError::MissingCapability));
 }
 
 // The pointer arriving on a window and moving across it. The coordinates are the surface's own, which
@@ -2968,5 +3049,313 @@ GYRO_TEST(ProtocolRoundTrip, ASilentClientIsStillToldEverySizeTheHandAsksFor)
 	}
 
 	GYRO_CHECK(toplevel.WindowEvents.Has(Wayland::XdgToplevelState::Resizing));
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+// A finger landing on a window, which is the whole of what a `down` has to get right: the surface it
+// names, the coordinates on that surface, and the id every later event about that finger quotes.
+GYRO_TEST(ProtocolRoundTrip, AFingerLandsOnTheWindowUnderItAndTakesTheKeyboardWithIt)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-touching" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Touch touch;
+	GYRO_REQUIRE(Feel(pair, keyboard, touch));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
+	GYRO_REQUIRE(middle.X > 0.0);
+
+	Finger(pair, TouchPhase::Down, 0, middle);
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(touch.Listener.Downs, std::uint32_t{ 1 });
+	GYRO_CHECK(touch.Listener.On.Id() == toplevel.Drawn.Surface.Id());
+
+	// The middle of the window is the middle of the harness's 16x8 buffer, exactly as it is for the
+	// pointer — the hit test is the same walk and the coordinates are the same space.
+	GYRO_CHECK_EQ(touch.Listener.X.ToInt(), std::int32_t{ 8 });
+	GYRO_CHECK_EQ(touch.Listener.Y.ToInt(), std::int32_t{ 4 });
+
+	// **One group, closed once.** A `down` and nothing else is still a frame: the protocol says a frame
+	// terminates at least one event, and a toolkit that accumulates until one arrives would otherwise
+	// hold the contact forever.
+	GYRO_CHECK_EQ(touch.Listener.Frames, std::uint32_t{ 1 });
+
+	// **No cursor was drawn to get here**, which is the difference between a touchscreen and a mouse
+	// that this compositor has to keep: a machine driven by a finger has no pointer, and the seat's own
+	// pointer path refuses to send anything while the cursor is invisible.
+	GYRO_CHECK(!pair.Store.Pointer().IsVisible());
+
+	// And the window it landed on has the keyboard, by the same policy a click focuses under (162).
+	GYRO_CHECK(toplevel.WindowEvents.Has(Wayland::XdgToplevelState::Activated));
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+// The sequence staying on the window it started on, which is what a touch has instead of the pointer's
+// implicit grab — and it is not optional: a person dragging a slider whose finger strays past the edge
+// of the window is still dragging it, and a compositor that re-resolved every motion would hand the
+// rest of that gesture to whatever is behind.
+GYRO_TEST(ProtocolRoundTrip, AFingerKeepsTheWindowItWentDownOnAfterItSlidesOff)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-touchgrab" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Touch touch;
+	GYRO_REQUIRE(Feel(pair, keyboard, touch));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
+
+	Finger(pair, TouchPhase::Down, 0, middle);
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(touch.Listener.Downs, std::uint32_t{ 1 });
+
+	// Off the far side of the window, onto gyro's own floor. The motion still goes to the same client,
+	// and the coordinate it carries is outside the surface — which is what the wire's signed fixed point
+	// is for, and what a toolkit clamps for itself.
+	Finger(pair, TouchPhase::Motion, 0, { middle.X + 400.0, middle.Y });
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(touch.Listener.Motions, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(touch.Listener.Id, std::int32_t{ 0 });
+	GYRO_CHECK(touch.Listener.X.ToInt() > 16);
+	GYRO_CHECK_EQ(touch.Listener.Frames, std::uint32_t{ 2 });
+
+	Finger(pair, TouchPhase::Up, 0, {});
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(touch.Listener.Ups, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(touch.Listener.Frames, std::uint32_t{ 3 });
+
+	// **A motion after the up reaches nobody**, because the sequence is over and the slot names nothing.
+	// The failure this keeps out is a finger the compositor never let go of, which delivers a contact to
+	// a window a person stopped touching.
+	Finger(pair, TouchPhase::Motion, 0, middle);
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(touch.Listener.Motions, std::uint32_t{ 1 });
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+// Two fingers in one wakeup: two ids, and one group. The ids are the seat's own rather than libinput's
+// slots, and the frame is per client rather than per contact — a toolkit reading a pinch wants both
+// positions before it computes a distance from them.
+GYRO_TEST(ProtocolRoundTrip, TwoFingersAreTwoIdentitiesInsideOneGroup)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-pinch" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Touch touch;
+	GYRO_REQUIRE(Feel(pair, keyboard, touch));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
+
+	Finger(pair, TouchPhase::Down, 0, { middle.X - 2.0, middle.Y });
+	Finger(pair, TouchPhase::Down, 1, { middle.X + 2.0, middle.Y });
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(touch.Listener.Downs, std::uint32_t{ 2 });
+	GYRO_CHECK_EQ(touch.Listener.Id, std::int32_t{ 1 });
+	GYRO_CHECK_EQ(touch.Listener.Frames, std::uint32_t{ 1 });
+
+	// The first finger lifts and the second stays down, so the id it frees is the one the next contact
+	// takes — which the protocol permits explicitly and a client has to be able to survive.
+	Finger(pair, TouchPhase::Up, 0, {});
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(touch.Listener.Ups, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(touch.Listener.Id, std::int32_t{ 0 });
+
+	Finger(pair, TouchPhase::Down, 2, middle);
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(touch.Listener.Downs, std::uint32_t{ 3 });
+	GYRO_CHECK_EQ(touch.Listener.Id, std::int32_t{ 0 });
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+// The two ways a sequence ends without a finger being lifted, and they are the reason `wl_touch.cancel`
+// exists: what a client must never be left holding is a contact that will never end.
+GYRO_TEST(ProtocolRoundTrip, ASequenceThatEndsWithoutALiftIsCancelledRatherThanLeftDown)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-cancel" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Touch touch;
+	GYRO_REQUIRE(Feel(pair, keyboard, touch));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
+
+	Finger(pair, TouchPhase::Down, 0, middle);
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(touch.Listener.Downs, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(touch.Listener.Frames, std::uint32_t{ 1 });
+
+	// The device cancelling — a palm the panel decided was not a finger, or a gesture libinput took for
+	// itself. It is the opposite of an up to whatever was tracking the contact: the gesture unwinds
+	// rather than committing, which is why `TouchPhase::Cancel` is a phase rather than a variety of up.
+	Finger(pair, TouchPhase::Cancel, 0, {});
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(touch.Listener.Cancels, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(touch.Listener.Ups, std::uint32_t{ 0 });
+
+	// **And no frame behind it**, which the protocol states: the cancel ends the group it was in.
+	GYRO_CHECK_EQ(touch.Listener.Frames, std::uint32_t{ 1 });
+
+	// The second way, and the one nothing downstream could ever discover for itself: the touchscreen is
+	// unplugged with a finger on it, so no up and no cancel is ever coming from the device. Without the
+	// notice, the client holds that contact for the rest of its life.
+	Finger(pair, TouchPhase::Down, 1, middle);
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(touch.Listener.Downs, std::uint32_t{ 2 });
+
+	(*pair.Host)->OnDeviceGone(Digitizer);
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(touch.Listener.Cancels, std::uint32_t{ 2 });
+	GYRO_CHECK_EQ(touch.Listener.Ups, std::uint32_t{ 0 });
+
+	// The point is gone with the device, so the finger somebody lifts on the way out reaches nobody.
+	Finger(pair, TouchPhase::Up, 1, {});
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(touch.Listener.Ups, std::uint32_t{ 0 });
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+// A client cannot take the pointer with a number nobody sent it. This is the check that stands where
+// the popup grab's has no ledger to stand on ([Popup.h](../Protocol/Popup.h)): one serial, the press
+// gyro is holding, and anything else is an application helping itself to a gesture a person did not
+// make.
+GYRO_TEST(ProtocolRoundTrip, AResizeQuotingASerialNobodySentIsRefused)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-serial" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(pair, bound, toplevel, std::byte{ 0x40 }));
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
+
+	Push(pair, middle.X, middle.Y);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	(*pair.Host)->OnPointerButton(Click(0x110, true, pair.Clock.Now()));
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pointer.Listener.ButtonSerial != 0);
+
+	// One past the press, which is a serial that exists — the counter is the display's and every event
+	// spends one — and is not the press this compositor is holding.
+	toplevel.Window.Resize(
+		keyboard.Seat, pointer.Listener.ButtonSerial + 1, Wayland::XdgToplevelResizeEdge::BottomRight
+	);
+
+	pair.Turn();
+
+	Push(pair, 60.0, 40.0);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	// Nothing started: no size, no state, and the client still has the pointer it would have lost to a
+	// compositor grab.
+	GYRO_CHECK(!toplevel.WindowEvents.Has(Wayland::XdgToplevelState::Resizing));
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Width, 0);
+	GYRO_CHECK_EQ(pointer.Listener.Left, std::uint32_t{ 0 });
 	GYRO_CHECK(!pair.Client.Fault().has_value());
 }

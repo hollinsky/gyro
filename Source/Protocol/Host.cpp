@@ -135,6 +135,16 @@ void ClientHost::OnPointerScroll(const PointerScroll& event)
 	m_Seat.Scroll(event);
 }
 
+void ClientHost::OnTouch(const TouchEvent& event, Point<GlobalSpace> at)
+{
+	m_Seat.Touch(event, at);
+}
+
+void ClientHost::OnDeviceGone(InputDeviceId device)
+{
+	m_Seat.Forget(device);
+}
+
 void ClientHost::OnReached(EntityId entity, Instant at)
 {
 	if (ClientSurface* const surface = m_Context.SurfaceOf(entity); surface != nullptr)
@@ -177,6 +187,12 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// be sitting on: a person who clicks the instant an application opens is clicking on the window
 	// rather than through it.
 	m_Seat.SyncPointer(scene, now);
+
+	// **Beside the pointer and before the focus comparison, because a finger going down moves focus the
+	// way a press does** (162). After it rather than before for no reason stronger than the order the
+	// devices are usually read in — the two queues are independent, and a hand cannot be on a mouse and
+	// a screen in the same wakeup often enough for the order to be a policy.
+	m_Seat.SyncTouch(scene);
 
 	// **After the pointer, because the press this routed is one of the things that moves focus** (162),
 	// and after the requests for the reason that makes a window typeable in the wakeup it opened in: the

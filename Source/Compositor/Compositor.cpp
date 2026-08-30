@@ -1666,6 +1666,13 @@ private:
 		m_PointerButton.ConnectTo<&Compositor::OnPointerButton>(m_Input->Button, *this);
 		m_PointerScroll.ConnectTo<&Compositor::OnPointerScroll>(m_Input->Scroll, *this);
 
+		// **A device leaving is the only thing about a device the host is told**, and it is told because
+		// nothing else can discover it: a touchscreen unplugged with a finger on it produces no up and no
+		// cancel, so a client tracking that contact keeps it forever. Contacts themselves do not arrive
+		// here yet — a fraction of a device's own glass is not a place on a screen until the binding
+		// decision 167 settles is built, which is where `IInput::Touch` gets wired.
+		m_DeviceRemoved.ConnectTo<&Compositor::OnDeviceRemoved>(m_Input->Removed, *this);
+
 		if (const Result<void> watched = m_DispatchWait.Watch(m_Input->Descriptor().Value); !watched)
 		{
 			return watched;
@@ -1753,6 +1760,14 @@ private:
 		if (m_Clients)
 		{
 			m_Clients->OnPointerScroll(event);
+		}
+	}
+
+	void OnDeviceRemoved(InputDeviceId device)
+	{
+		if (m_Clients)
+		{
+			m_Clients->OnDeviceGone(device);
 		}
 	}
 
@@ -2765,6 +2780,7 @@ private:
 	Connection<const PointerMotion&> m_PointerMotion;
 	Connection<const PointerButton&> m_PointerButton;
 	Connection<const PointerScroll&> m_PointerScroll;
+	Connection<InputDeviceId> m_DeviceRemoved;
 	bool m_InputFailed = false;
 
 	// Whether this run drives a panel, which is the one condition under which gyro takes the machine's

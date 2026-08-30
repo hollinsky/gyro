@@ -163,6 +163,15 @@ public:
 	void OnPointerButton(const PointerButton& event);
 	void OnPointerScroll(const PointerScroll& event);
 
+	// One contact, and the place on the screen the root resolved it to — two arguments rather than one,
+	// which is decision 167's rule about a device fraction never becoming a coordinate until somebody
+	// knows which output the glass is in front of. Held until `Advance` for the buttons' reason.
+	void OnTouch(const TouchEvent& event, Point<GlobalSpace> at);
+
+	// A device is gone. The root's to call, and what it costs a client is a `wl_touch.cancel` for a
+	// sequence that will never produce an up — a touchscreen unplugged with a finger on it.
+	void OnDeviceGone(InputDeviceId device);
+
 	// Answer frame callbacks against what reached the glass. The root's to call once, before the first
 	// step, because it is the only party that holds both this host and the loop's return leg.
 	void Observe(SceneReturn& returns) { m_Reached.ConnectTo<&ClientHost::OnReached>(returns.Reached, *this); }

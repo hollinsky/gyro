@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 #include "Core/Handle.h"
@@ -39,6 +40,20 @@ struct wl_display;
 // and the events for them arrive with their own bump rather than with a version claiming three
 // intermediate contracts nothing here implements.
 //
+// **The touch capability is advertised whether or not a touchscreen is plugged in**, which is the
+// choice already made for the keyboard and the pointer one line above it: gyro says what the seat is
+// for rather than what is currently attached, so a machine whose panel is unplugged mid-session does
+// not have every toolkit tear down its `wl_touch` and rebuild it on the way back. What a client is
+// entitled to conclude from a capability is that it may ask for the object, and the object is honest —
+// it says nothing when nothing is happening, which is also what it does on a machine with a touchscreen
+// nobody is using.
+//
+// **A sequence is bound to what it went down on and there is no `enter`.** The pointer is somewhere
+// even when nobody is touching anything, so it needs an enter and a leave to say where; a finger has no
+// position between sequences, and the protocol reflects that by routing a whole sequence to the surface
+// the `down` landed on. So the implicit grab a pointer opens on a button is what touch does *always*,
+// and the table below is one entry per finger rather than one entity for the seat.
+//
 // **`wl_pointer.set_cursor` is accepted and ignored, which is a stated gap rather than a silence.**
 // Decision 152 has gyro drawing its own glyph, and what a client sends here is a *surface* rather than
 // a name — so there is nothing in the request to map onto a shape gyro draws, and honouring it means a
@@ -54,6 +69,32 @@ struct wl_display;
 inline constexpr std::uint32_t SeatVersion = 5;
 
 class SeatGlobal;
+
+// What became of a request to take the pointer, and why where it was refused.
+//
+// **A refusal is silent at both ends otherwise, which is the same argument `Server::Admit` makes about
+// a client of the wrong uid.** `xdg_toplevel.move` and `xdg_toplevel.resize` have no reply and no
+// error the protocol would have gyro send — a client learns what it got from what happens next, and
+// what happens next is nothing. So a person drags a corner, the window does not move, the application
+// is behaving correctly, and there is no record anywhere of the request having been made. This is that
+// record, and the reason it is an enumeration rather than a bool is that *which* check refused is the
+// whole of the diagnosis.
+enum class GestureRefusal : std::uint8_t
+{
+	None,        // it started
+	Unmapped,    // there is no window in the world to act on, or no dispatch around the request
+	NoSeat,      // the id the client named is not a wl_seat gyro made
+	NoEdges,     // xdg_toplevel.resize with `none`, which is legal and names no direction
+	Busy,        // a gesture is already running, and there is one pointer
+	NoButton,    // nothing is held, so there is no grab to ride
+	WrongSerial, // the serial is not the one gyro sent with the press that opened the grab
+	OtherWindow, // that press landed somewhere else
+	Gone,        // the window went away between the press and the request
+};
+
+// One clause, for the log line. Present tense and about the *world* rather than about the code, so
+// that the line reads as a description of what a person did rather than as an internal state name.
+[[nodiscard]] std::string_view Describe(GestureRefusal refusal) noexcept;
 
 // One client's `wl_keyboard`.
 //
@@ -98,17 +139,9 @@ public:
 
 	Wayland::Server::WlKeyboardHandler* OnGetKeyboard() override;
 
-	// **Refused rather than answered, because gyro has never advertised either capability.** The
-	// protocol names this exactly: asking for a capability the seat has never had is
-	// `missing_capability`, and it is the client's error rather than gyro's. Answering with a working
-	// object instead would be a pointer a toolkit waits on forever for an `enter` that cannot come.
-	//
-	// **The error goes out and an inert object comes back**, which reads like a contradiction and is
-	// not: the client is being ended and never reaches a request on this object, and returning null
-	// instead would have the bindings end it a second time with `no_memory` — so the last thing in the
-	// client's log would name an allocation failure that did not happen.
 	Wayland::Server::WlPointerHandler* OnGetPointer() override;
 
+	// Answered like the two above it, and there is nothing left in this interface gyro refuses by name.
 	Wayland::Server::WlTouchHandler* OnGetTouch() override;
 
 	// The seat behind this object, which is how a request that *names* a seat reaches the one thing on
@@ -145,6 +178,36 @@ private:
 	SeatGlobal* m_Seat = nullptr;
 };
 
+// One client's `wl_touch`.
+//
+// **A list rather than one per client, for `ClientKeyboard`'s reason**, and with no version gate on
+// anything it sends: `down`, `up`, `motion`, `frame` and `cancel` are all version 1, so unlike the
+// pointer there is no event here a client can be entitled to and unable to parse. The two that are
+// not — `shape` and `orientation`, at version 6 — carry a contact ellipse libinput exports for a
+// tablet tool and for nothing else, which [Core/Input.h](../Core/Input.h) records as the reason
+// `TouchEvent` has no such field to send.
+//
+// **Nothing is owed at bind, which is where this differs from both objects above it.** A keyboard
+// bound while its client has focus is told so at once or it is deaf forever, and a pointer is resolved
+// from scratch on the next iteration. A finger already down when the object is created is neither: the
+// sequence began with a `down` this object could not have received, and inventing one would hand a
+// toolkit a contact at a position it never travelled to. The next finger is the first this object
+// hears about, and that is one sequence long rather than forever.
+class ClientTouch final : public Wayland::Server::WlTouchIgnoring
+{
+public:
+	explicit ClientTouch(SeatGlobal& seat) noexcept : m_Seat{ &seat } {}
+
+	// Deregisters before it dies, because the seat holds a borrowed pointer and the next contact would
+	// find it.
+	void OnGone() override;
+
+	[[nodiscard]] bool BelongsTo(wl_client* client) const noexcept;
+
+private:
+	SeatGlobal* m_Seat = nullptr;
+};
+
 // One physical event, held until the world is in hand.
 //
 // **The devices are drained outside `Advance` and a button has to be routed inside one**, because
@@ -175,6 +238,53 @@ struct SeatPointerEvent
 	// a client will quote back at gyro is minted on the way out. One bit on an event that already exists
 	// is what joins the two.
 	bool OpensGrab = false;
+};
+
+// One contact, held until the world is in hand.
+//
+// **The global point travels beside the event rather than inside it**, which is decision 167's rule
+// arriving at its one consumer: `TouchEvent` carries a fraction of the device's own glass and no
+// coordinate space at all, and the composition root is the party that knows which output that glass is
+// in front of. So what is queued is what the device said and where on the screen the root resolved it
+// to, as two things — and an event from a device bound to no output never arrives here, rather than
+// arriving with a position meaning *nowhere*.
+//
+// **Queued for `SeatPointerEvent`'s reason and routed in the same call**: hit-testing needs the store,
+// and the store is only in hand inside `Advance`.
+struct SeatTouchEvent
+{
+	TouchEvent Contact{};
+
+	// Where the contact is, in the world. Meaningless on an up and a cancel, which report no position —
+	// the point's own last position is what those are delivered against, and it is not needed: an `up`
+	// carries no coordinate on the wire either.
+	Point<GlobalSpace> At{};
+};
+
+// One finger, for as long as it is down.
+//
+// **The node is resolved once, at the `down`, and never asked again.** That is the protocol's rule
+// rather than a shortcut — a touch sequence has no `enter` and no `leave`, so there is nowhere to say
+// *the finger is over something else now* — and it is what makes dragging off the edge of a window
+// work for a finger the way an implicit grab makes it work for a button.
+struct SeatTouchPoint
+{
+	// The pair that identifies a contact: libinput's slot is unique within its device and meaningless
+	// without it, which is what `Core/Input.h` mints an `InputDeviceId` generationally for. Two
+	// touchscreens both report a point 0.
+	InputDeviceId Device{};
+	std::int32_t Slot = 0;
+
+	// What the client calls this finger, which is *not* the slot. The wire's id has to be unique among
+	// the points currently down on the seat, and two devices' slots collide by construction — so the
+	// seat mints its own, smallest free first, and hands it back when the finger lifts. The protocol
+	// says an id may be reused after an up, which is exactly what that is.
+	std::int32_t Wire = 0;
+
+	// What the `down` landed on, or null where it landed on gyro's own floor or on nothing. A point
+	// with no node is still tracked: its motion and its up have to be recognized and dropped, and it
+	// still counts as a finger being down.
+	EntityId Node{};
 };
 
 // The global, owned by the host and outliving every client that binds it.
@@ -236,6 +346,33 @@ public:
 	// would mean a second copy of the pointer, which is the thing decision 152 refuses.
 	void SyncPointer(SceneStore& scene, Instant now);
 
+	// A touch object came or went, exactly as the pointers do.
+	void Add(ClientTouch& touch);
+	void Remove(ClientTouch& touch) noexcept;
+
+	// One contact, at a place on the screen the composition root resolved (167). Queues rather than
+	// sends, for the buttons' reason.
+	void Touch(const TouchEvent& event, Point<GlobalSpace> at);
+
+	// Route the contacts into the world they happened in, and close the group. Called from `Advance`
+	// beside `SyncPointer` and before `SyncFocus`, because a finger going down moves focus the way a
+	// press does.
+	//
+	// **It takes no `now`, and the pointer's taking one is the difference worth naming.** A pointer can
+	// be moved by the *window* sliding under a hand that did not move, which is a motion with no device
+	// instant behind it; a contact only ever exists because a finger did something, so every event
+	// routed here carries the instant libinput stamped it with.
+	void SyncTouch(SceneStore& scene);
+
+	// Every sequence on `device` is over without an ending, and whoever was tracking one has to be told.
+	//
+	// **Two callers, one verb.** A touchscreen unplugged with a finger on it produces no up and no
+	// cancel ([Seam/Input.h](../Seam/Input.h) argues `IInput::Removed` into existence for exactly this),
+	// and a device whose output has gone away is the same fact arriving from the other side — decision
+	// 167 leaves that one to the seat, and this is where it lands. Neither can be discovered by waiting:
+	// the events simply stop.
+	void Forget(InputDeviceId device);
+
 	// Start moving `window` with the pointer, per decision 51: **the client asks once and gyro runs the
 	// gesture.** Called from `xdg_toplevel.move`, and the answer is whether the drag took.
 	//
@@ -247,16 +384,17 @@ public:
 	//
 	// **What is deliberately not checked is whether the client is allowed to move its own window**, which
 	// is a shell's constraint to declare and there is no shell (51). See [Drag.h](Drag.h).
-	bool BeginMove(SceneStore& scene, EntityId window, std::uint32_t serial);
+	GestureRefusal BeginMove(SceneStore& scene, EntityId window, std::uint32_t serial);
 
 	// The same for `xdg_toplevel.resize`, checked against the same three things and refusing one more:
 	// edges naming nothing, which is a gesture with no direction to run in.
-	bool BeginResize(SceneStore& scene, EntityId window, std::uint32_t serial, ResizeEdges edges);
+	GestureRefusal BeginResize(SceneStore& scene, EntityId window, std::uint32_t serial, ResizeEdges edges);
 
 private:
-	// Whether a request quoting `serial` is entitled to take the pointer for `window`. The three checks
-	// `BeginMove` describes, shared because a resize asks exactly the same questions.
-	[[nodiscard]] bool MayGrab(const SceneStore& scene, EntityId window, std::uint32_t serial) const;
+	// Whether a request quoting `serial` is entitled to take the pointer for `window`, and which check
+	// says otherwise. The three `BeginMove` describes, shared because a resize asks exactly the same
+	// questions.
+	[[nodiscard]] GestureRefusal MayGrab(const SceneStore& scene, EntityId window, std::uint32_t serial) const;
 
 	// Everything a keyboard needs to know to address the focused client, or nothing where focus is on a
 	// window no client is behind — which is every window gyro authors for itself.
@@ -290,6 +428,37 @@ private:
 
 	void SendPointerEnter(Point<SurfaceSpace> local);
 	void SendPointerLeave();
+
+	// The four phases, each with the store in hand. Separate functions rather than a switch body because
+	// a `down` is the only one that resolves anything and the other three are lookups against what it
+	// decided.
+	void TouchBegan(SceneStore& scene, const SeatTouchEvent& queued);
+	void TouchMoved(const SceneStore& scene, const SeatTouchEvent& queued);
+	void TouchEnded(const SeatTouchEvent& queued);
+
+	[[nodiscard]] SeatTouchPoint* FindPoint(InputDeviceId device, std::int32_t slot) noexcept;
+
+	// The smallest id no finger currently down is using. Linear in the fingers on the glass, which is
+	// ten on the most extravagant panel anybody makes.
+	[[nodiscard]] std::int32_t MintPointId() const noexcept;
+
+	// Everything this client was tracking is over, and it is told once.
+	//
+	// **The wire's cancel is per client rather than per point, and that coarseness is the protocol's**:
+	// `wl_touch.cancel` applies to every contact currently active on that client's surfaces. So a device
+	// that cancels one finger cancels every finger that client had, including ones from another
+	// touchscreen — which is worth stating out loud because it is a real if rare loss, and the
+	// alternative is inventing an `up` for a finger that is still down.
+	void CancelClient(wl_client* client);
+
+	// This client heard something and is owed a `frame`, recorded rather than sent so that a `down` and
+	// the two motions behind it close as one group.
+	void Framed(wl_client* client);
+
+	void SendTouchFrames();
+
+	// Which client is behind an entity, or null for a node gyro authored for itself.
+	[[nodiscard]] wl_client* ClientOf(EntityId id) const noexcept;
 
 	// The next serial, from the display: one counter for the whole connection set, which is what a
 	// client compares against when it validates a request of its own against an event of gyro's.
@@ -357,4 +526,20 @@ private:
 	// What the devices said, in the order they said it. Cleared rather than freed after every delivery,
 	// so the steady state allocates nothing.
 	std::vector<SeatPointerEvent> m_Queue;
+
+	// Borrowed, and each one deregisters itself, exactly as the pointers are.
+	std::vector<ClientTouch*> m_Touches;
+
+	// Every finger currently down, whoever it belongs to. **One table for the seat rather than one per
+	// client**, because the wire's ids have to be unique across it and because the question asked most
+	// often — is this the first finger down — is about the machine rather than about a client.
+	std::vector<SeatTouchPoint> m_Points;
+
+	// What the touchscreens said, in the order they said it. `m_Queue`'s twin and cleared the same way.
+	std::vector<SeatTouchEvent> m_TouchQueue;
+
+	// The clients owed a `frame` at the end of this iteration. A vector for `m_Keyboards`' reason: it is
+	// the clients one wakeup's contacts landed on, which is one on every iteration that is not a person
+	// dragging two windows at once with two hands.
+	std::vector<wl_client*> m_Framed;
 };

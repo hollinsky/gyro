@@ -24,14 +24,6 @@ constexpr std::int32_t RepeatDelay = 400;
 // The seat's name. One seat, and the same string libinput was pointed at.
 constexpr const char* SeatName = "seat0";
 
-// What comes back with the error above: an object the client is holding an id for and will never send
-// a request on, because the connection is over. It deletes itself the way every object here does.
-class RefusedTouch final : public Wayland::Server::WlTouchIgnoring
-{
-public:
-	void OnGone() override { delete this; }
-};
-
 // Milliseconds of the compositor's clock, truncated and wrapping at thirty-two bits. Decision 57's
 // conversion at the edge, and the same one `ClientSurface::Present` performs for a frame callback: the
 // domain is an `Instant` everywhere inside gyro and becomes the unit the protocol demands exactly
@@ -123,9 +115,24 @@ bool ClientPointer::BelongsTo(wl_client* client) const noexcept
 	return client != nullptr && Object().WireClient() == client;
 }
 
+void ClientTouch::OnGone()
+{
+	m_Seat->Remove(*this);
+
+	delete this;
+}
+
+bool ClientTouch::BelongsTo(wl_client* client) const noexcept
+{
+	return client != nullptr && Object().WireClient() == client;
+}
+
 void ClientSeat::OnBound()
 {
-	Object().Capabilities(Wayland::Server::WlSeatCapability::Keyboard | Wayland::Server::WlSeatCapability::Pointer);
+	Object().Capabilities(
+		Wayland::Server::WlSeatCapability::Keyboard | Wayland::Server::WlSeatCapability::Pointer |
+		Wayland::Server::WlSeatCapability::Touch
+	);
 	Object().Name(SeatName);
 }
 
@@ -149,9 +156,11 @@ Wayland::Server::WlPointerHandler* ClientSeat::OnGetPointer()
 
 Wayland::Server::WlTouchHandler* ClientSeat::OnGetTouch()
 {
-	Object().PostError(Wayland::Server::WlSeatError::MissingCapability, "this seat has no touch");
+	ClientTouch* const touch = new ClientTouch{ *m_Seat };
 
-	return new RefusedTouch{};
+	m_Seat->Add(*touch);
+
+	return touch;
 }
 
 Result<void> SeatGlobal::Open(wl_display& display)
@@ -750,37 +759,406 @@ void SeatGlobal::Deliver()
 	}
 }
 
-bool SeatGlobal::MayGrab(const SceneStore& scene, EntityId window, std::uint32_t serial) const
+void SeatGlobal::Add(ClientTouch& touch)
+{
+	m_Touches.push_back(&touch);
+}
+
+void SeatGlobal::Remove(ClientTouch& touch) noexcept
+{
+	std::erase(m_Touches, &touch);
+}
+
+void SeatGlobal::Touch(const TouchEvent& event, Point<GlobalSpace> at)
+{
+	m_TouchQueue.push_back(SeatTouchEvent{ .Contact = event, .At = at });
+}
+
+void SeatGlobal::SyncTouch(SceneStore& scene)
+{
+	for (const SeatTouchEvent& queued : m_TouchQueue)
+	{
+		switch (queued.Contact.Phase)
+		{
+			case TouchPhase::Down:
+				TouchBegan(scene, queued);
+
+				break;
+
+			case TouchPhase::Motion:
+				TouchMoved(scene, queued);
+
+				break;
+
+			case TouchPhase::Up:
+				TouchEnded(queued);
+
+				break;
+
+			case TouchPhase::Cancel:
+				// **A cancel from the device is a cancel to the client, and the point is dropped either
+				// way.** `TouchPhase::Cancel` is `Core/Input.h`'s first-class phase precisely because it
+				// means the opposite of an up to whatever was tracking the finger — a gesture unwound
+				// rather than committed — and the wire has the same distinction with a coarser scope.
+				if (const SeatTouchPoint* const point = FindPoint(queued.Contact.Device, queued.Contact.Point))
+				{
+					wl_client* const client = ClientOf(point->Node);
+
+					std::erase_if(m_Points, [point](const SeatTouchPoint& held) { return &held == point; });
+
+					CancelClient(client);
+				}
+
+				break;
+		}
+	}
+
+	m_TouchQueue.clear();
+
+	SendTouchFrames();
+}
+
+void SeatGlobal::TouchBegan(SceneStore& scene, const SeatTouchEvent& queued)
+{
+	// **A second down on a slot that is already down is the device contradicting itself**, which
+	// libinput does not do — and if it ever did, minting a second point for one finger would leave the
+	// first one down forever, because only one up is coming.
+	if (FindPoint(queued.Contact.Device, queued.Contact.Point) != nullptr)
+	{
+		return;
+	}
+
+	const SceneHit hit = HitTest(scene, queued.At);
+
+	// **Only the first finger moves focus or closes a menu**, which is `SyncPointer`'s rule about the
+	// press that opens the grab arriving here: a second finger landing during a pinch is part of a
+	// gesture already in progress, and refocusing under a person's own hand mid-zoom is the artefact
+	// that reads as the window fighting them.
+	const bool first = m_Points.empty();
+
+	m_Points.push_back(
+		SeatTouchPoint{
+			.Device = queued.Contact.Device, .Slot = queued.Contact.Point, .Wire = MintPointId(), .Node = hit.Node }
+	);
+
+	const SeatTouchPoint& point = m_Points.back();
+
+	if (first)
+	{
+		// Dismiss before focus, for the reason `SyncPointer` gives: dismissing retires the popup and
+		// takes it off the focus stack, so the other order focuses a menu on its way out.
+		m_Context->Popups().DismissOutside(scene, hit.Node);
+		FocusByClick(scene, hit.Node);
+	}
+
+	const Wayland::Server::WlSurface surface = SurfaceFor(hit.Node);
+
+	if (!surface.IsValid())
+	{
+		// A finger on gyro's own floor, on the splash, or on nothing. The point is still held: its
+		// motion and its up have to be recognized as this sequence's and dropped.
+		return;
+	}
+
+	wl_client* const client = surface.WireClient();
+	const std::uint32_t serial = NextSerial();
+
+	for (ClientTouch* const touch : m_Touches)
+	{
+		if (touch->BelongsTo(client))
+		{
+			touch->Object().Down(
+				serial, Milliseconds(queued.Contact.When), surface, point.Wire, Fixed(hit.Local.X), Fixed(hit.Local.Y)
+			);
+		}
+	}
+
+	Framed(client);
+}
+
+void SeatGlobal::TouchMoved(const SceneStore& scene, const SeatTouchEvent& queued)
+{
+	const SeatTouchPoint* const point = FindPoint(queued.Contact.Device, queued.Contact.Point);
+
+	if (point == nullptr || point->Node.IsNull())
+	{
+		return;
+	}
+
+	const Wayland::Server::WlSurface surface = SurfaceFor(point->Node);
+
+	if (!surface.IsValid())
+	{
+		return;
+	}
+
+	// **Where the finger is on the window it went down on, wherever that window has got to since.** The
+	// chain is recomposed every event rather than remembered, so a window animating under a still finger
+	// reports the coordinate that is true now — which is the same thing `Resolve` does for the pointer
+	// under a grab.
+	const std::optional<Point<SurfaceSpace>> local = LocalOn(scene, point->Node, queued.At);
+
+	if (!local)
+	{
+		// The window was hidden or unparented underneath the finger, so there is no coordinate to send.
+		// **No cancel and no up**, because the sequence is not over: the finger is still down, the up is
+		// still coming, and it is what the client needs to stop tracking. Sending a cancel here would end
+		// the gesture on a window that is about to come back — a workspace switch, a retiring window
+		// still on screen — and leave nothing to un-cancel it.
+		return;
+	}
+
+	wl_client* const client = surface.WireClient();
+
+	for (ClientTouch* const touch : m_Touches)
+	{
+		if (touch->BelongsTo(client))
+		{
+			touch->Object().Motion(Milliseconds(queued.Contact.When), point->Wire, Fixed(local->X), Fixed(local->Y));
+		}
+	}
+
+	Framed(client);
+}
+
+void SeatGlobal::TouchEnded(const SeatTouchEvent& queued)
+{
+	const SeatTouchPoint* const point = FindPoint(queued.Contact.Device, queued.Contact.Point);
+
+	if (point == nullptr)
+	{
+		return;
+	}
+
+	const std::int32_t wire = point->Wire;
+	const Wayland::Server::WlSurface surface = SurfaceFor(point->Node);
+
+	// Freed before the event goes out, because the id is released by the up itself and a client is
+	// entitled to reuse it on the very next down — which, inside one iteration, is a down this loop has
+	// not reached yet.
+	std::erase_if(m_Points, [point](const SeatTouchPoint& held) { return &held == point; });
+
+	if (!surface.IsValid())
+	{
+		return;
+	}
+
+	wl_client* const client = surface.WireClient();
+	const std::uint32_t serial = NextSerial();
+
+	for (ClientTouch* const touch : m_Touches)
+	{
+		if (touch->BelongsTo(client))
+		{
+			touch->Object().Up(serial, Milliseconds(queued.Contact.When), wire);
+		}
+	}
+
+	Framed(client);
+}
+
+void SeatGlobal::Forget(InputDeviceId device)
+{
+	// Collected first, because cancelling a client takes away every point it holds — including ones this
+	// walk has already passed and ones from a second touchscreen that is still plugged in.
+	std::vector<wl_client*> cancelled;
+
+	for (const SeatTouchPoint& point : m_Points)
+	{
+		if (point.Device != device)
+		{
+			continue;
+		}
+
+		wl_client* const client = ClientOf(point.Node);
+
+		if (client != nullptr && std::find(cancelled.begin(), cancelled.end(), client) == cancelled.end())
+		{
+			cancelled.push_back(client);
+		}
+	}
+
+	std::erase_if(m_Points, [device](const SeatTouchPoint& point) { return point.Device == device; });
+
+	for (wl_client* const client : cancelled)
+	{
+		CancelClient(client);
+	}
+}
+
+SeatTouchPoint* SeatGlobal::FindPoint(InputDeviceId device, std::int32_t slot) noexcept
+{
+	const auto found = std::find_if(m_Points.begin(), m_Points.end(), [device, slot](const SeatTouchPoint& point) {
+		return point.Device == device && point.Slot == slot;
+	});
+
+	return found != m_Points.end() ? &*found : nullptr;
+}
+
+std::int32_t SeatGlobal::MintPointId() const noexcept
+{
+	std::int32_t candidate = 0;
+
+	while (std::any_of(m_Points.begin(), m_Points.end(), [candidate](const SeatTouchPoint& point) {
+		return point.Wire == candidate;
+	}))
+	{
+		++candidate;
+	}
+
+	return candidate;
+}
+
+void SeatGlobal::CancelClient(wl_client* client)
+{
+	if (client == nullptr)
+	{
+		return;
+	}
+
+	std::erase_if(m_Points, [this, client](const SeatTouchPoint& point) { return ClientOf(point.Node) == client; });
+
+	for (ClientTouch* const touch : m_Touches)
+	{
+		if (touch->BelongsTo(client))
+		{
+			touch->Object().Cancel();
+		}
+	}
+
+	// **No frame after a cancel**, which the protocol states and which also settles what happens to a
+	// group this iteration had already started: a client that heard a `down` and then had the sequence
+	// cancelled is owed nothing more, and the cancel is the end of the group.
+	std::erase(m_Framed, client);
+}
+
+void SeatGlobal::Framed(wl_client* client)
+{
+	if (client != nullptr && std::find(m_Framed.begin(), m_Framed.end(), client) == m_Framed.end())
+	{
+		m_Framed.push_back(client);
+	}
+}
+
+void SeatGlobal::SendTouchFrames()
+{
+	for (wl_client* const client : m_Framed)
+	{
+		for (ClientTouch* const touch : m_Touches)
+		{
+			if (touch->BelongsTo(client))
+			{
+				touch->Object().Frame();
+			}
+		}
+	}
+
+	m_Framed.clear();
+}
+
+wl_client* SeatGlobal::ClientOf(EntityId id) const noexcept
+{
+	const Wayland::Server::WlSurface surface = SurfaceFor(id);
+
+	return surface.IsValid() ? surface.WireClient() : nullptr;
+}
+
+GestureRefusal SeatGlobal::MayGrab(const SceneStore& scene, EntityId window, std::uint32_t serial) const
 {
 	// One gesture at a time, because there is one pointer: a second request inside the same grab is a
 	// client asking for something it already holds, or asking to take it off another window.
 	if (m_Context->Drag().IsActive())
 	{
-		return false;
+		return GestureRefusal::Busy;
 	}
 
 	// No button down, or a number that is not the one gyro sent with the press that put it down. Both
-	// are a client asking to be handed the pointer without a person having pressed anything.
-	if (m_Grab.IsNull() || !m_GrabSerial || serial != *m_GrabSerial)
+	// are a client asking to be handed the pointer without a person having pressed anything, and they
+	// are told apart because only one of them is ever a bug in this compositor.
+	if (m_Grab.IsNull())
 	{
-		return false;
+		return GestureRefusal::NoButton;
+	}
+
+	if (!m_GrabSerial || serial != *m_GrabSerial)
+	{
+		return GestureRefusal::WrongSerial;
 	}
 
 	// And the press has to have landed in the window being asked for. `FocusTargetFor` resolves the node
 	// under the pointer to the window around it, which is the walk click-to-focus already does — so a
 	// press on a client's own surface names its own window, and a press inside an open menu names the
 	// menu rather than the window behind it.
-	return !window.IsNull() && FocusTargetFor(scene, m_Grab) == window;
+	if (window.IsNull() || FocusTargetFor(scene, m_Grab) != window)
+	{
+		return GestureRefusal::OtherWindow;
+	}
+
+	return GestureRefusal::None;
 }
 
-bool SeatGlobal::BeginMove(SceneStore& scene, EntityId window, std::uint32_t serial)
+GestureRefusal SeatGlobal::BeginMove(SceneStore& scene, EntityId window, std::uint32_t serial)
 {
-	return MayGrab(scene, window, serial) && m_Context->Drag().BeginMove(scene, window);
+	const GestureRefusal may = MayGrab(scene, window, serial);
+
+	if (may != GestureRefusal::None)
+	{
+		return may;
+	}
+
+	return m_Context->Drag().BeginMove(scene, window) ? GestureRefusal::None : GestureRefusal::Gone;
 }
 
-bool SeatGlobal::BeginResize(SceneStore& scene, EntityId window, std::uint32_t serial, ResizeEdges edges)
+GestureRefusal SeatGlobal::BeginResize(SceneStore& scene, EntityId window, std::uint32_t serial, ResizeEdges edges)
 {
-	return MayGrab(scene, window, serial) && m_Context->Drag().BeginResize(scene, window, edges);
+	if (!edges.Any())
+	{
+		return GestureRefusal::NoEdges;
+	}
+
+	const GestureRefusal may = MayGrab(scene, window, serial);
+
+	if (may != GestureRefusal::None)
+	{
+		return may;
+	}
+
+	return m_Context->Drag().BeginResize(scene, window, edges) ? GestureRefusal::None : GestureRefusal::Gone;
+}
+
+std::string_view Describe(GestureRefusal refusal) noexcept
+{
+	switch (refusal)
+	{
+		case GestureRefusal::None:
+			return "started";
+
+		case GestureRefusal::Unmapped:
+			return "refused: the window is not on screen";
+
+		case GestureRefusal::NoSeat:
+			return "refused: the object named is not a seat this compositor made";
+
+		case GestureRefusal::NoEdges:
+			return "refused: no edge was named, so there is no direction to resize in";
+
+		case GestureRefusal::Busy:
+			return "refused: the pointer is already moving or resizing a window";
+
+		case GestureRefusal::NoButton:
+			return "refused: no button is held, so there is no gesture to take over";
+
+		case GestureRefusal::WrongSerial:
+			return "refused: that serial is not the press this compositor is holding";
+
+		case GestureRefusal::OtherWindow:
+			return "refused: that press landed on a different window";
+
+		case GestureRefusal::Gone:
+			return "refused: the window left between the press and the request";
+	}
+
+	return "refused";
 }
 
 std::uint32_t SeatGlobal::NextSerial() const noexcept
