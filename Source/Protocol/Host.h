@@ -23,6 +23,7 @@
 #include "Protocol/Shell.h"
 #include "Protocol/Shm.h"
 #include "Protocol/Subcompositor.h"
+#include "Protocol/Viewporter.h"
 #include "Scene/Author.h"
 #include "Scene/Return.h"
 
@@ -234,6 +235,9 @@ private:
 
 	SubcompositorGlobal m_Subcompositor{ m_Context };
 	wl_global* m_SubcompositorGlobal = nullptr;
+
+	ViewporterGlobal m_Viewporter{ m_Context };
+	wl_global* m_ViewporterGlobal = nullptr;
 
 	ShmGlobal m_Shm;
 	wl_global* m_ShmGlobal = nullptr;

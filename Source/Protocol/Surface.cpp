@@ -1,12 +1,14 @@
 #include "Protocol/Surface.h"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 #include <vector>
 
 #include "Protocol/Buffer.h"
 #include "Protocol/Region.h"
 #include "Protocol/Subcompositor.h"
+#include "Protocol/Viewporter.h"
 
 namespace
 {
@@ -39,7 +41,50 @@ template<typename S>
 
 	return false;
 }
+
+// One `wl_fixed` unit, which is the tolerance the source rectangle is bounded against.
+//
+// **A rounded comparison rather than an exact one, because only one side of it came off the wire.** A
+// client states the source in 256ths and gyro compares it against the buffer divided by the buffer
+// scale, and where that scale does not divide the buffer the second number is not representable in
+// the units the first one was written in. An exact `>` there refuses a client that asked for exactly
+// the whole of its own buffer, which is the commonest source rectangle there is.
+constexpr float FixedUnit = 1.0F / 256.0F;
 } // namespace
+
+Size<SurfaceSpace, float> SurfaceState::Extent() const noexcept
+{
+	if (Viewport.Destination.has_value())
+	{
+		return { static_cast<float>(Viewport.Destination->Width), static_cast<float>(Viewport.Destination->Height) };
+	}
+
+	if (Viewport.Source.has_value())
+	{
+		return Viewport.Source->Extent;
+	}
+
+	const auto scale = static_cast<float>(BufferScale > 0 ? BufferScale : 1);
+
+	return { static_cast<float>(ContentSize.Width) / scale, static_cast<float>(ContentSize.Height) / scale };
+}
+
+Rect<BufferSpace> SurfaceState::Texels() const noexcept
+{
+	if (!Viewport.Source.has_value())
+	{
+		return { {}, { static_cast<float>(ContentSize.Width), static_cast<float>(ContentSize.Height) } };
+	}
+
+	// Surface-local back into the buffer's own space, which is the buffer scale and nothing else — the
+	// transform belongs in the same conversion and is not applied anywhere in this compositor yet, so
+	// putting half of it here would be a rotated video cropped along the wrong axis.
+	const auto scale = static_cast<float>(BufferScale > 0 ? BufferScale : 1);
+	const Rect<SurfaceSpace>& source = *Viewport.Source;
+
+	return { { source.Origin.X * scale, source.Origin.Y * scale },
+		     { source.Extent.Width * scale, source.Extent.Height * scale } };
+}
 
 bool ClientSurface::AdoptRole(SurfaceRole& role) noexcept
 {
@@ -61,6 +106,86 @@ void ClientSurface::ForgetRole(const SurfaceRole& role) noexcept
 	}
 }
 
+bool ClientSurface::AdoptViewport(ClientViewport& viewport) noexcept
+{
+	if (m_Viewport != nullptr)
+	{
+		return false;
+	}
+
+	m_Viewport = &viewport;
+
+	return true;
+}
+
+void ClientSurface::ForgetViewport(const ClientViewport& viewport) noexcept
+{
+	if (m_Viewport != &viewport)
+	{
+		return;
+	}
+
+	m_Viewport = nullptr;
+
+	// **The crop and scale goes with the object, and it goes into the pending state rather than the
+	// current one.** The protocol says destroying a `wp_viewport` removes the state from the surface
+	// and that the change lands on the next commit — so a client that destroys its viewport and never
+	// commits again keeps the size it last showed, which is the difference between a window returning
+	// to its buffer size when it is asked to and doing it under a person mid-frame.
+	m_Pending.Viewport = {};
+}
+
+bool ClientSurface::CheckViewport(const SurfaceState& state) const noexcept
+{
+	if (m_Viewport == nullptr || !state.Viewport.Source.has_value())
+	{
+		return true;
+	}
+
+	const Rect<SurfaceSpace>& source = *state.Viewport.Source;
+
+	// **A source with no destination crops without scaling, so the surface's size *is* the source's** —
+	// and a size the protocol requires to be whole cannot come out of a rectangle stated in 256ths.
+	if (!state.Viewport.Destination.has_value())
+	{
+		const float width = source.Extent.Width;
+		const float height = source.Extent.Height;
+
+		if (width != std::floor(width) || height != std::floor(height))
+		{
+			m_Viewport->Object().PostError(
+				Wayland::Server::WpViewportError::BadSize,
+				"wp_viewport.set_source with a fractional size and no destination to scale it to"
+			);
+
+			return false;
+		}
+	}
+
+	// A surface with no content has no buffer to be outside of, which the protocol states explicitly:
+	// a client is free to describe the rectangle before it attaches the buffer that holds it.
+	if (state.Content.IsNull())
+	{
+		return true;
+	}
+
+	const auto scale = static_cast<float>(state.BufferScale > 0 ? state.BufferScale : 1);
+	const float width = static_cast<float>(state.ContentSize.Width) / scale;
+	const float height = static_cast<float>(state.ContentSize.Height) / scale;
+
+	if (source.Right() > width + FixedUnit || source.Bottom() > height + FixedUnit)
+	{
+		m_Viewport->Object().PostError(
+			Wayland::Server::WpViewportError::OutOfBuffer,
+			"wp_viewport.set_source with a rectangle reaching past the buffer it was applied to"
+		);
+
+		return false;
+	}
+
+	return true;
+}
+
 ClientSurface::~ClientSurface()
 {
 	// The role is told first, while the surface is still readable: it has a window in the scene to take
@@ -71,6 +196,17 @@ ClientSurface::~ClientSurface()
 		m_Role = nullptr;
 
 		role->OnSurfaceGone();
+	}
+
+	// **And the viewport, which is an object the client still holds after this.** Every request on a
+	// `wp_viewport` whose surface has gone owes `no_surface` rather than reaching through a pointer
+	// that is about to be freed — a client destroying a `wl_surface` and then its viewport, in that
+	// order, is legal and is what a toolkit tearing a window down actually does.
+	if (ClientViewport* const viewport = m_Viewport; viewport != nullptr)
+	{
+		m_Viewport = nullptr;
+
+		viewport->ForgetSurface();
 	}
 
 	// The client is gone and its window with it, so the pixels stop being drawn. Retiring is the id
@@ -410,6 +546,11 @@ void ClientSurface::ApplyCached()
 		return;
 	}
 
+	if (!CheckViewport(m_Cached))
+	{
+		return;
+	}
+
 	const TextureId shown = m_Current.Content;
 
 	m_Current = std::move(m_Cached);
@@ -623,6 +764,14 @@ void ClientSurface::Apply()
 		{
 			ReleaseStaged();
 		}
+	}
+
+	// **After the attach and before the adoption**, which is the one point the buffer this state will
+	// be shown with is known: `out_of_buffer` is a question about the buffer that arrived in this very
+	// commit, and asking before `TakeContent` would measure the source against the previous frame's.
+	if (!CheckViewport(m_Pending))
+	{
+		return;
 	}
 
 	const TextureId shown = m_Current.Content;

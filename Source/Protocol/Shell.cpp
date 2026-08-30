@@ -866,11 +866,7 @@ Size<SurfaceSpace, float> ClientXdgSurface::Natural(const ClientSurface& surface
 		return { static_cast<float>(m_Geometry.Extent.Width), static_cast<float>(m_Geometry.Extent.Height) };
 	}
 
-	const SurfaceState& state = surface.Current();
-	const std::int32_t scale = state.BufferScale > 0 ? state.BufferScale : 1;
-
-	return { static_cast<float>(state.ContentSize.Width / scale),
-		     static_cast<float>(state.ContentSize.Height / scale) };
+	return surface.Current().Extent();
 }
 
 void ClientXdgSurface::OnSurfaceCommitted(ClientSurface& surface)
@@ -957,20 +953,16 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 
 	const SurfaceState& state = surface.Current();
 	const Size<SurfaceSpace, float> natural = Natural(surface);
-	const std::int32_t scale = state.BufferScale > 0 ? state.BufferScale : 1;
 
-	// The surface's own quad, which is the buffer divided by the scale the client declared for it. Not
-	// the natural size: those differ by exactly the shadow margin a toolkit draws outside its window.
-	const Size<SurfaceSpace, float> extent{ static_cast<float>(state.ContentSize.Width / scale),
-		                                    static_cast<float>(state.ContentSize.Height / scale) };
+	// The surface's own quad, which is what the client said its surface is: a viewport destination
+	// where there is one, and the buffer divided by the declared scale where there is not. Not the
+	// natural size — those differ by exactly the shadow margin a toolkit draws outside its window.
+	const Size<SurfaceSpace, float> extent = state.Extent();
 
-	// The texels behind that quad, which is the buffer undivided. Stated rather than left empty so that
-	// `Frame/Projection.h` can count them: a window whose buffer scale matches the panel it is on is
-	// texel for texel and can go on a plane, and a node that says nothing here can never be told apart
-	// from one that is being stretched. There is no viewport yet, so the whole buffer is the source.
-	const Rect<BufferSpace> source{
-		{}, { static_cast<float>(state.ContentSize.Width), static_cast<float>(state.ContentSize.Height) }
-	};
+	// The texels behind that quad. Stated rather than left empty so that `Frame/Projection.h` can count
+	// them: a window whose buffer scale matches the panel it is on is texel for texel and can go on a
+	// plane, and a node that says nothing here can never be told apart from one being stretched.
+	const Rect<BufferSpace> source = state.Texels();
 
 	const bool mapping = m_Window.IsNull();
 

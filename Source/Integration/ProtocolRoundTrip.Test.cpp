@@ -39,6 +39,7 @@
 #include "Scene/Textures.h"
 #include "Testing/Test.h"
 #include "Wayland/LinuxDmabufV1.h"
+#include "Wayland/Viewporter.h"
 #include "Wayland/Wayland.h"
 #include "Wayland/XdgShell.h"
 #include "Wire/Connection.h"
@@ -450,11 +451,19 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 	// One, because `wl_subcompositor` has never been revised.
 	GYRO_CHECK_EQ(subcompositor->Version, std::uint32_t{ 1 });
 
-	// Exactly seven: three a window is built out of, one a toolkit demands before it will look for
+	const Registry::Global* const viewporter = bound.Listener.Find(Wayland::WpViewporter::WireName);
+	GYRO_REQUIRE(viewporter != nullptr);
+
+	// One, for `wl_subcompositor`'s reason. Its absence is not a degradation: a toolkit that states its
+	// surface size with a viewport destination and finds no viewporter states no size at all, and the
+	// window arrives at its buffer's pixel count. See Protocol/Viewporter.h.
+	GYRO_CHECK_EQ(viewporter->Version, std::uint32_t{ 1 });
+
+	// Exactly eight: three a window is built out of, one a toolkit demands before it will look for
 	// them, the seat that makes the window typeable, the one that lets a client hand over a buffer a
-	// panel can scan out instead of pixels gyro has to copy, and the one that lets it say how the
-	// parts of its own window are stacked.
-	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 7 });
+	// panel can scan out instead of pixels gyro has to copy, the one that lets it say how the parts of
+	// its own window are stacked, and the one that lets it say how big any of them is.
+	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 8 });
 }
 
 // What a GTK client actually does with the clipboard global before it has a seat, which is bind it,
@@ -1227,6 +1236,171 @@ GYRO_TEST(ProtocolRoundTrip, AnAcknowledgedFrameBecomesAWindowCentredOnTheOutput
 	GYRO_REQUIRE(content != nullptr);
 	GYRO_CHECK(content->Kind == NodeKind::Image);
 	GYRO_CHECK_EQ(content->Extent.Width, static_cast<float>(Width));
+}
+
+// **The bug this whole global exists for, end to end.** A client renders at twice the size and says so
+// with a viewport destination rather than a buffer scale — which is what Firefox does for the
+// subsurface its page is in, and what every toolkit does under a fractional scale, because
+// `wl_surface.set_buffer_scale` cannot say 1.7. A compositor with no viewporter reads no size at all
+// and the window arrives at its buffer's own pixel count: twice as wide and twice as tall as the
+// person asked for, running off the edge of the screen.
+//
+// The buffer is not scaled here and that is deliberate: the destination has to be read on its own,
+// because the failing client never sends a scale.
+GYRO_TEST(ProtocolRoundTrip, AViewportDestinationIsTheSizeTheWindowArrivesAt)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-viewport" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	const Registry::Global* const advertised = bound.Listener.Find(Wayland::WpViewporter::WireName);
+	GYRO_REQUIRE(advertised != nullptr);
+
+	const Wayland::WpViewporter viewporter =
+		bound.Listener.Object().Bind<Wayland::WpViewporter>(advertised->Name, advertised->Version);
+	GYRO_REQUIRE(viewporter.IsValid());
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x71 }));
+
+	const Wayland::WpViewport viewport = viewporter.GetViewport(toplevel.Drawn.Surface);
+	GYRO_REQUIRE(viewport.IsValid());
+
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
+
+	viewport.SetDestination(Width / 2, Height / 2);
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.DamageBuffer(0, 0, Width, Height);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	const Entity* const window = WindowNode(pair.Store);
+	GYRO_REQUIRE(window != nullptr);
+
+	const Entity* const content = pair.Store.Find(window->FirstChild);
+	GYRO_REQUIRE(content != nullptr);
+
+	// Half the buffer in each axis, and the window around it the same: the destination is a resize of
+	// the node rather than a factor carried beside its extent, so there is one answer to how big this
+	// window is and every party downstream reads the same one.
+	GYRO_CHECK_EQ(content->Extent.Width, static_cast<float>(Width) / 2.0F);
+	GYRO_CHECK_EQ(content->Extent.Height, static_cast<float>(Height) / 2.0F);
+	GYRO_CHECK_EQ(window->Extent.Width, static_cast<float>(Width) / 2.0F);
+
+	// And it is placed against that size, which is the visible half of the bug: a window twice as big
+	// as the compositor thinks is one whose centring is wrong by a quarter of a screen.
+	GYRO_CHECK_EQ(window->Translation.Model().X, (1920.0 - static_cast<double>(Width) / 2.0) / 2.0);
+
+	// The whole buffer is still what is sampled. A destination scales rather than crops, and a node
+	// that reported fewer texels than it has would be one `Frame/Assign.h` believes is being resized.
+	GYRO_REQUIRE(content->Content != NoContent);
+	GYRO_CHECK_EQ(pair.Store.Images()[content->Content].Source.Extent.Width, static_cast<float>(Width));
+}
+
+GYRO_TEST(ProtocolRoundTrip, ASourceReachingPastTheBufferEndsTheClientAtTheCommit)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-viewsrc" };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	const Registry::Global* const advertised = bound.Listener.Find(Wayland::WpViewporter::WireName);
+	GYRO_REQUIRE(advertised != nullptr);
+
+	const Wayland::WpViewporter viewporter =
+		bound.Listener.Object().Bind<Wayland::WpViewporter>(advertised->Name, advertised->Version);
+	GYRO_REQUIRE(viewporter.IsValid());
+
+	DrawnSurface drawn;
+	GYRO_REQUIRE(Draw(bound, drawn, std::byte{ 0x33 }));
+
+	const Wayland::WpViewport viewport = viewporter.GetViewport(drawn.Surface);
+	GYRO_REQUIRE(viewport.IsValid());
+
+	// **Legal at the request and wrong only once there is a buffer to measure it against**, which is
+	// why the protocol defers it and why gyro does: a client is entitled to describe the rectangle
+	// before it attaches the buffer that holds it, and refusing at `set_source` would end a client for
+	// a legal ordering.
+	viewport.SetSource(
+		Wire::Fixed::FromInt(0),
+		Wire::Fixed::FromInt(0),
+		Wire::Fixed::FromInt(Width * 2),
+		Wire::Fixed::FromInt(Height)
+	);
+
+	pair.Turn();
+
+	GYRO_REQUIRE(!pair.Client.Fault().has_value());
+
+	drawn.Surface.Attach(drawn.Buffer, 0, 0);
+	drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::WpViewportError::OutOfBuffer));
+}
+
+GYRO_TEST(ProtocolRoundTrip, AFractionalCropWithNothingToScaleItToEndsTheClient)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-viewcrop" };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	const Registry::Global* const advertised = bound.Listener.Find(Wayland::WpViewporter::WireName);
+	GYRO_REQUIRE(advertised != nullptr);
+
+	const Wayland::WpViewporter viewporter =
+		bound.Listener.Object().Bind<Wayland::WpViewporter>(advertised->Name, advertised->Version);
+	GYRO_REQUIRE(viewporter.IsValid());
+
+	DrawnSurface drawn;
+	GYRO_REQUIRE(Draw(bound, drawn, std::byte{ 0x44 }));
+
+	const Wayland::WpViewport viewport = viewporter.GetViewport(drawn.Surface);
+	GYRO_REQUIRE(viewport.IsValid());
+
+	// A crop with no destination makes the surface's size the source's, and a surface cannot be 8.5
+	// pixels wide. The same rectangle with a destination beside it is legal, which is what makes this
+	// the *pair* being wrong rather than the number.
+	viewport.SetSource(
+		Wire::Fixed::FromInt(0),
+		Wire::Fixed::FromInt(0),
+		Wire::Fixed::FromDouble(8.5),
+		Wire::Fixed::FromInt(Height)
+	);
+
+	drawn.Surface.Attach(drawn.Buffer, 0, 0);
+	drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::WpViewportError::BadSize));
 }
 
 namespace

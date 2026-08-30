@@ -2424,12 +2424,13 @@ private:
 			// already done once: it claimed windows could not be moved or resized for two commits after
 			// they could, while somebody was reading the log to work out why a drag did nothing.
 			spdlog::info(
-				"wl_compositor, wl_subcompositor, wl_shm, zwp_linux_dmabuf_v1, xdg_wm_base, "
+				"wl_compositor, wl_subcompositor, wp_viewporter, wl_shm, zwp_linux_dmabuf_v1, xdg_wm_base, "
 				"wl_data_device_manager and wl_seat are the globals; a window will open with every part its "
-				"toolkit drew separately, be placed, redraw against the frames that reach the glass, take the "
-				"keyboard and the pointer, come to the front on a click, open and dismiss its menus, and be moved and "
-				"resized by a drag it asks for, but there is nothing behind the clipboard, so nothing can be copied, "
-				"pasted or dragged"
+				"toolkit drew separately at the size its client says it is, be placed, redraw against the frames "
+				"that reach the glass, take the keyboard and the pointer, come to the front on a click, open and "
+				"dismiss its menus, and be moved and resized by a drag it asks for, but there is nothing behind the "
+				"clipboard, so nothing can be copied, pasted or dragged, and no client is told a scale that is not a "
+				"whole number"
 			);
 
 			author = std::move(*made);

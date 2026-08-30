@@ -274,17 +274,15 @@ void ClientSubsurface::Sync()
 		return;
 	}
 
-	const std::int32_t scale = state.BufferScale > 0 ? state.BufferScale : 1;
-
-	const Size<SurfaceSpace, float> extent{ static_cast<float>(state.ContentSize.Width / scale),
-		                                    static_cast<float>(state.ContentSize.Height / scale) };
+	// **The viewport is read here and not only on the window**, and this is the call site that made it
+	// worth having: Firefox puts its whole page in a subsurface, leaves the buffer scale at 1 on it,
+	// and says how big it is with a viewport destination alone.
+	const Size<SurfaceSpace, float> extent = state.Extent();
 
 	// The texels behind the quad, stated for `Protocol/Shell.cpp`'s reason: a node that says nothing
 	// here can never be told apart from one being stretched, and a video in a subsurface at its own
 	// texel size is the item most worth putting on a plane.
-	const Rect<BufferSpace> source{
-		{}, { static_cast<float>(state.ContentSize.Width), static_cast<float>(state.ContentSize.Height) }
-	};
+	const Rect<BufferSpace> source = state.Texels();
 
 	const bool mapping = m_Node.IsNull();
 

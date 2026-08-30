@@ -5,6 +5,7 @@
 
 #include "Protocol/Shell.h"
 #include "Protocol/Surface.h"
+#include "Protocol/Viewporter.h"
 
 Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 {
@@ -60,6 +61,18 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		// frame on a plane, and a compositor whose behaviour depends on which global happened to be
 		// advertised is one nobody can reason about from a bug report.
 		return Failure(ENOMEM, "advertising wl_subcompositor");
+	}
+
+	m_ViewporterGlobal = Wayland::Server::WpViewporter::Advertise(*display, ViewporterVersion, m_Viewporter);
+
+	if (m_ViewporterGlobal == nullptr)
+	{
+		// Fatal for `wl_compositor`'s reason, and this one is not a degradation a client works around:
+		// a toolkit that states its surface size with a viewport destination and finds no viewporter
+		// sends no size at all, so the window arrives at its buffer's pixel count — which on a 2x
+		// output is a window twice as wide and twice as tall as the person asked for. [Viewporter.h]
+		// (Viewporter.h) has the shape of that, and it is Firefox.
+		return Failure(ENOMEM, "advertising wp_viewporter");
 	}
 
 	m_ShmGlobal = Wayland::Server::WlShm::Advertise(*display, ShmVersion, m_Shm);

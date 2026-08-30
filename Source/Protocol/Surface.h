@@ -60,6 +60,32 @@
 // paints most of what it was asked to paint is a bug report nobody can reproduce.
 inline constexpr std::uint32_t MaxDamageRects = 4096;
 
+// `wp_viewport`'s crop and scale.
+//
+// **It is state on the surface rather than on the viewport object, which is the protocol's own
+// placement and not a convenience.** The viewport is a handle onto one part of a `wl_surface`'s
+// double buffering — its two requests stage exactly as `set_buffer_scale` stages, land at the same
+// commit, and are removed by the object being destroyed — so putting the fields anywhere else would
+// be a second buffering to keep in step with this one.
+//
+// Both halves are independent and either may be set alone, which is what the two `optional`s carry.
+struct SurfaceViewport
+{
+	// What part of the buffer the surface shows, in **surface-local coordinates**: the protocol's own
+	// ordering is transform, then scale, then crop, so the rectangle a client states is in the
+	// coordinates the surface would have had if it had never set a viewport at all. Nothing is the
+	// whole buffer.
+	std::optional<Rect<SurfaceSpace>> Source;
+
+	// What the surface's size becomes, whatever the buffer under it is — the half Firefox and every
+	// fractionally scaled toolkit actually use, and the reason a window is not twice the size it
+	// should be. Nothing leaves the size derived from the buffer and the scale.
+	//
+	// Integer, because the protocol says so: a destination that is not a whole number of surface-local
+	// pixels is refused at the request rather than rounded here.
+	std::optional<PixelSize<SurfaceSpace>> Destination;
+};
+
 // What one commit carries. Staged by the requests, adopted whole by `Apply`.
 //
 // Aggregate rather than a class with setters, because the requests are its only writer and they are
@@ -99,10 +125,34 @@ struct SurfaceState
 	// screen without destroying anything.
 	TextureId Content{};
 	PixelSize<BufferSpace> ContentSize{};
+
+	// The crop and scale a `wp_viewport` staged into this state, or two absences for the surfaces that
+	// have never had one — which is most of them, and costs two words rather than an indirection.
+	SurfaceViewport Viewport;
+
+	// **How big the surface is, which is the one question three call sites were each answering.** A
+	// destination overrides everything; a source with no destination crops without scaling, so the
+	// size is the source's; and with neither it is the buffer divided by the scale the client declared.
+	//
+	// The division is real rather than integer. A buffer that is not a whole multiple of its own scale
+	// is a client that has already gone wrong, and truncating the size while still sampling every texel
+	// is a window stretched by a fraction of a pixel — which is invisible in a screenshot and visible
+	// as one soft row along an edge.
+	[[nodiscard]] Size<SurfaceSpace, float> Extent() const noexcept;
+
+	// The texels those pixels come from, in the buffer's own space: the viewport's source rectangle
+	// carried back through the buffer scale, or the whole buffer where there is none.
+	//
+	// **Stated rather than left empty even when it is the whole buffer**, which is decision 152's
+	// partition asking to be able to tell a window drawn texel for texel from one being resampled: a
+	// node that says nothing here can never be told apart from one that is being stretched, and the
+	// first is what goes on a plane.
+	[[nodiscard]] Rect<BufferSpace> Texels() const noexcept;
 };
 
 class ClientSurface;
 class ClientSubsurface;
+class ClientViewport;
 
 // What a `wl_surface` becomes when something gives it one.
 //
@@ -284,6 +334,32 @@ public:
 	// role let go, a client destroying a surface with children still on it.
 	void UnmapChildren() noexcept;
 
+	// Claim this surface's crop and scale. False where a `wp_viewport` already has it, which is
+	// `wp_viewporter`'s `viewport_exists` and is raised by the caller for the role's reason.
+	//
+	// **Separate from the role and never in competition with it.** A viewport is not what a surface
+	// *is* — a window with a viewport on it is still a window — so a surface carries at most one of
+	// each and the two questions are asked independently.
+	[[nodiscard]] bool AdoptViewport(ClientViewport& viewport) noexcept;
+
+	// The viewport is going away, which the protocol says removes the crop and scale from the surface
+	// at its next commit. So the staged state goes with it rather than at the destroy, which is the
+	// same double buffering the two requests had.
+	void ForgetViewport(const ClientViewport& viewport) noexcept;
+
+	// The two halves of the crop and scale, staged into this surface's pending state.
+	//
+	// **Verbs rather than a mutable reference into `m_Pending`**, because the pending state's writers
+	// are otherwise all in this file and a handle handed out to another one is how that stops being
+	// checkable. What a viewport may write is these two fields and nothing else, and that is said here
+	// rather than trusted there.
+	void StageViewportSource(std::optional<Rect<SurfaceSpace>> source) noexcept { m_Pending.Viewport.Source = source; }
+
+	void StageViewportDestination(std::optional<PixelSize<SurfaceSpace>> destination) noexcept
+	{
+		m_Pending.Viewport.Destination = destination;
+	}
+
 	// Claim this surface. False where something already has it, which is every role object's own
 	// `role` error and is raised by the caller because only it knows which one to name.
 	[[nodiscard]] bool AdoptRole(SurfaceRole& role) noexcept;
@@ -377,6 +453,17 @@ private:
 	// region that has been correct for nine frames, every frame, forever.
 	void Apply();
 
+	// **The two errors `wp_viewport` defers to the commit**, asked of the state about to become current
+	// and answered on the viewport object, because they are its errors and not the surface's.
+	//
+	// They are here rather than at the request for the reason the protocol gives: both are questions
+	// about the *buffer*, and a client is free to state a source rectangle before it attaches the
+	// buffer that rectangle fits in. Asking at `set_source` would refuse a legal ordering.
+	//
+	// False having ended the client. A viewport already destroyed leaves nothing to check and nothing
+	// to report it on, which is also a state whose crop and scale is on its way out.
+	[[nodiscard]] bool CheckViewport(const SurfaceState& state) const noexcept;
+
 	// The shape a `wl_region` resource currently describes, or an empty shape for a null resource. A
 	// copy, per Region.h: the client may destroy the region the instant this returns and usually does.
 	[[nodiscard]] static SurfaceShape ShapeOf(Wayland::Server::WlRegion region);
@@ -393,6 +480,10 @@ private:
 	// The world this surface's requests act on, for the duration of the `Advance` they arrive in. Never
 	// null; what is null outside a dispatch is what it points at.
 	HostContext* m_Context = nullptr;
+
+	// The `wp_viewport` on this surface, or null for a surface that has never had one. Not owned, and
+	// it lets go through `ForgetViewport` exactly as the role does.
+	ClientViewport* m_Viewport = nullptr;
 
 	// Whatever gave this surface a meaning, or null while it has none. Not owned: a role object is a
 	// protocol object of its own with its own lifetime, and it lets go through `ForgetRole`.

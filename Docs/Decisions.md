@@ -13575,3 +13575,48 @@ format already has a writer in the tree, it carries alpha and more than eight bi
 every image viewer on a Linux box opens one. What it does not open in is a browser, and a person who
 needs one elsewhere runs `magick frame-00000042.pam frame.png`. A stored-block PNG encoder is about
 eighty lines and goes beside Pam.h rather than replacing it, on the day something needs to upload one.
+
+### 171. A viewport's destination is a resize of the node; its source is the texels sampled
+
+`wp_viewporter` is served at version 1, and the two halves land in different places on purpose. The
+destination **is** the surface's size — one number in the world, written through `SceneCommit::Resize`
+exactly as a buffer-derived size is — and the source is the rectangle of the buffer that fills it,
+which `World/Content.h` has held a real-valued field for since before there was anything to put in it.
+
+**This is what made Firefox open at twice its size, and the mechanism is not the obvious one.** A
+toolkit on a 2x panel renders at 2x and says so with `wl_surface.set_buffer_scale`. Firefox does that
+for the GTK shell surface around its window and *not* for the subsurface its page is actually in: that
+one gets a buffer at the full device pixel count, no scale at all, and a `wp_viewport.set_destination`
+carrying what those pixels mean. A compositor with no viewporter has nothing to read the size from, so
+the buffer lands at its own pixel count in surface coordinates and the window covers four times the
+area a person asked for, running off two edges of the screen. There is no fallback being missed —
+Firefox never sends a scale on that surface at all — which is why this had to be the global rather
+than a repair somewhere in the surface state.
+
+**And it is the protocol `wp_fractional_scale_v1` rests on, which is why it lands first.** Telling a
+client to render at 1.7x is only useful if the client can then say what its buffer means, and
+`set_buffer_scale` is an integer and always was. The destination is the only channel for it. Serving
+the fractional scale without the viewporter would advertise a preference no client could act on.
+
+**The destination as a resize rather than a factor beside the extent.** *Rejected: publishing the
+buffer's own extent and carrying the destination as a scale on the node.* It would have put a multiply
+in the frame thread's projection for a quantity that is constant between commits, and — the heavier
+cost — it would have made *how big is this window* a question with two answers depending on who asked.
+The Floorplanner centres against one of them, `Scene/Hit.h` tests against another, and a click landing
+a shadow's width outside the window is the kind of disagreement that only shows up on the panel where
+the two differ. The source stays separate because it is a genuinely different question: which texels
+are read, not how much room they take. Nothing above `Protocol` learns a new concept for either.
+
+**The two deferred errors are deferred because they are questions about the buffer.** A negative
+origin or an empty extent is wrong on its own terms and is refused at the request. `out_of_buffer` and
+`bad_size` are not: a client may legally describe its source rectangle before attaching the buffer
+that holds it, so they are asked at the commit that carries one — and the bound is compared with a
+`wl_fixed` unit of slack, because the client's number came off the wire in 256ths and gyro's came from
+dividing a buffer by a scale that need not divide it. An exact comparison there refuses a client that
+asked for exactly the whole of its own buffer, which is the commonest source rectangle there is.
+
+**What is still not read is the buffer transform**, and it was not read before this either. `Texels`
+composes the source with the buffer scale and stops, which is right for every client that does not
+rotate its own buffer and silently wrong for one that does. The honest version is one conversion
+carrying transform, scale and crop together, and it belongs with the adapter
+[Open.md](Open.md) already wants published so a renderer can classify a resample.

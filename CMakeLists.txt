@@ -993,6 +993,7 @@ gyro_add_module(Protocol DISPATCH
 		Shm.cpp
 		Subcompositor.cpp
 		Surface.cpp
+		Viewporter.cpp
 	TESTS
 		Dmabuf.Test.cpp
 		Drag.Test.cpp
@@ -1004,6 +1005,7 @@ gyro_add_module(Protocol DISPATCH
 		Shm.Test.cpp
 		Subcompositor.Test.cpp
 		Surface.Test.cpp
+		Viewporter.Test.cpp
 )
 
 # libwayland-server for the display, the event loop, and the socket, which are the core library's own
