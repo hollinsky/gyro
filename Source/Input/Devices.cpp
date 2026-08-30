@@ -235,6 +235,59 @@ void Log(libinput* /*context*/, libinput_log_priority priority, const char* form
 	return name != nullptr ? std::string_view{ name } : std::string_view{};
 }
 
+// **The two touchpad defaults gyro overrides, and it overrides them because there is nobody to ask.**
+// libinput ships defaults meant for a desktop that will read a settings file over the top: tapping
+// off, and a clickpad's button taken from *where* the finger is rather than from how many there are.
+// gyro has no settings file and no session daemon behind it, so the default is the whole policy — and
+// left as libinput's it is one a person reads as broken hardware. A two-finger click on a laptop pad
+// arrives as a left click, so a context menu never opens; a two-finger tap arrives as nothing at all,
+// so the pad feels dead. Neither is a bug anywhere in the path the event takes afterwards, which is
+// what makes it worth stating here: the seat routes whatever code it is handed, faithfully.
+//
+// **Clickfinger rather than button areas**, because the bottom strip of a clickpad is not marked on
+// the glass. Nothing tells a person where the right-hand region begins, and a press a millimetre the
+// wrong side of an invisible line is a menu that did not open with no way to tell why. Counting
+// fingers is self-evident from the hand that is already on the pad. What it costs is corner-clicking
+// for anyone who learned it on another system, and that is the trade taken deliberately: with no way
+// yet for either person to set an option, the one who cannot see the regions loses more.
+//
+// **Asked of the device before it is set**, because these are capabilities of a particular pad rather
+// than of a class: a mouse offers no click method at all, and a touchpad with its own physical
+// buttons offers no clickfinger. A device that offers nothing is silent here — the alternative,
+// setting blind and reading `UNSUPPORTED` back, cannot tell *this is a mouse* from *this touchpad
+// refused*. One that offers something and then refuses it is a warning, because that is a pad which
+// will behave the way the paragraphs above say it should not.
+void Configure(libinput_device* device)
+{
+	if ((::libinput_device_config_click_get_methods(device) & LIBINPUT_CONFIG_CLICK_METHOD_CLICKFINGER) != 0 &&
+	    ::libinput_device_config_click_set_method(device, LIBINPUT_CONFIG_CLICK_METHOD_CLICKFINGER) !=
+	        LIBINPUT_CONFIG_STATUS_SUCCESS)
+	{
+		spdlog::warn("input: {} would not take clickfinger", Named(device));
+	}
+
+	// Zero is *this device cannot tap*, which is every mouse and every trackpoint, rather than a pad
+	// that happens to have tapping switched off.
+	if (::libinput_device_config_tap_get_finger_count(device) == 0)
+	{
+		return;
+	}
+
+	if (::libinput_device_config_tap_set_enabled(device, LIBINPUT_CONFIG_TAP_ENABLED) != LIBINPUT_CONFIG_STATUS_SUCCESS)
+	{
+		spdlog::warn("input: {} would not take tap-to-click", Named(device));
+	}
+
+	// One finger left, two right, three middle. It is libinput's own default and is set out loud
+	// anyway, because it is the half of the policy that makes a two-finger *tap* a right click, and a
+	// default that is depended on without being stated is one that moves under the dependency.
+	if (::libinput_device_config_tap_set_button_map(device, LIBINPUT_CONFIG_TAP_MAP_LRM) !=
+	    LIBINPUT_CONFIG_STATUS_SUCCESS)
+	{
+		spdlog::warn("input: {} would not take the tap button map", Named(device));
+	}
+}
+
 [[nodiscard]] std::optional<double> Axis(bool present, double value)
 {
 	return present ? std::optional<double>{ value } : std::nullopt;
@@ -446,6 +499,11 @@ Result<void> Devices::Drain()
 				spdlog::info(
 					"input: {} ({}) is {}", ::libinput_device_get_name(device), keys ? "keys" : "no keys", *id
 				);
+
+				// After the line that names the device and before anything it produces is read, so a
+				// warning from here is attributable and the first click of a session is already under
+				// the policy.
+				Configure(device);
 
 				// **What the device can say about itself, on its way to the party that binds it.** A
 				// touchscreen reports a fraction of its own glass and nothing here can turn that into a
