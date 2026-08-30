@@ -1584,3 +1584,36 @@ partition's shape — the reading `Loop.h`'s own comment takes, where one is a s
 and the interesting frame is the one where it climbs — then a scene with nothing in it is a third state
 rather than a zero, since *the GPU drew a whole screen of nothing* and *no plane was configured* are
 different frames and currently share a number.
+
+## `C_min` is a target no part has been measured against, and the first one to be measured missed it
+
+[Decision 168](Decisions.md#168-the-schedule-reserves-against-the-larger-of-the-floor-target-and-what-floor-frames-cost-and-it-arms-for-the-most-expensive-tier-still-reachable)
+made the schedule tell the truth about a floor composite that overruns its target. It did not make the
+composite cheaper, and on the first machine the figure was ever read against it is out by several
+times: an Adreno 618 draws the materials gym's floor tier in 6.49 ms, inside a 16.67 ms refresh, for a
+target that is supposed to leave room for the frame it is absorbing a shock on behalf of.
+
+Two questions, and they are separable.
+
+**What is `C_min` actually for, as a number?** Decision 35 sizes it as the shock the loop can absorb,
+which makes it a fraction of a period rather than a constant — and the capability probe measures a
+machine rather than a scene, while what a floor composite costs is mostly how many pixels are under
+how many lifted items. A target that a busy scene cannot meet on any part is a target that reports a
+defect on every machine and means nothing. Whether the answer is a fraction, a per-scene figure
+resolved at admission, or a tier step that reaches `Budget::Invalidate` sooner is open.
+
+**And what a shadow costs, which is what the 6.49 ms mostly is.** 4.47 of it is two shadow draws:
+12.6 times a plain fill per fragment, which is `ShadowPhi`'s four error functions over a quad
+expanded past the panel by the penumbra, on a part where every `exp` and `sqrt` runs on a quarter-rate
+unit. Decision 132's accuracy budget is a fiftieth of an eight-bit code point and its own comment
+observes that this is two orders below the arithmetic it feeds, so an approximation to Φ with no
+elementary-function op in it could spend most of those two orders and still land inside a code point.
+Nobody has written one, and nobody has measured whether the win survives on a part that was never
+bound on that unit — the same scene on a Tiger Lake laptop draws everything the materials gym adds
+over the lanes gym at a *lower* cost per fragment than the base scene, so the shader that is the whole
+story on one part is invisible on the other.
+
+Worth stating what is *not* open: the corner quadrature decision 132 is mostly about has never
+executed. Nothing in the tree sets `DrawItem::Radius` to anything but zero, so every quad gyro draws
+today has square corners and `ShadowDeficit` returns at its first line. The measurement above is the
+separable term alone, and the first rounded corner on screen adds to it rather than being included.

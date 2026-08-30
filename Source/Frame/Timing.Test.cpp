@@ -457,19 +457,64 @@ GYRO_TEST(Timing, PinningTheFloorTierDrawsItWhereThePlannedTierWouldHaveFit)
 	GYRO_CHECK_EQ(decision.Finish, At(1004));
 }
 
-// A pin says what is drawn and never what is admitted. A frame already spoken for is still waited for,
-// and the arming is still the planned reserve — so a run under either pin wakes where the compositor
-// would and the schedule a sweep measures is unchanged.
-GYRO_TEST(Timing, APinChangesTheTierAndNotTheSchedule)
+// A pin arms for the tier it pinned — revised, decision 168. This asserted the opposite: that the
+// arming stayed the planned reserve under either pin, so a sweep measured one schedule whichever tier
+// it drew. What that actually produced was a compositor waking for work it was never going to do, and
+// on a machine where the pinned floor composite costs more than the planned seed it is the whole
+// frame late, every frame. The reachable set under a pin is one mode, and the arming is that mode's.
+GYRO_TEST(Timing, APinArmsForTheTierItPinned)
 {
 	const FrameClock clock = Anchored();
 	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
 	const Timing pinned{ TimingPolicy{ .Composite = RenderMode::Floor } };
 	const Timing adaptive;
 
-	GYRO_CHECK_EQ(pinned.Arming(budget), adaptive.Arming(budget));
+	GYRO_CHECK_EQ(pinned.Arming(budget), pinned.Reserve(budget, RenderMode::Floor));
+	GYRO_CHECK(pinned.Arming(budget) < adaptive.Arming(budget));
+
+	// The half of the old claim that was right, and the reason the pin is still honest about
+	// admission: a frame already spoken for is waited for whichever tier will draw it.
 	GYRO_CHECK(pinned.Assess(clock, budget, At(1002), 8).Verdict == Admission::Wait);
+}
+
+// The other pin, and it is the control: `Planned` is what the unpinned schedule already arms for on
+// any machine whose planned composite costs more than its floor one, so pinning it moves nothing.
+GYRO_TEST(Timing, PinningThePlannedTierArmsWhereTheUnpinnedScheduleDoes)
+{
+	const FrameClock clock = Anchored();
+	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
+	const Timing pinned{ TimingPolicy{ .Composite = RenderMode::Planned } };
+	const Timing adaptive;
+
+	GYRO_CHECK_EQ(pinned.Arming(budget), adaptive.Arming(budget));
 	GYRO_CHECK_EQ(pinned.WakeFor(clock, budget, At(1002), 8), adaptive.WakeFor(clock, budget, At(1002), 8));
+}
+
+// Unpinned, the arming is the worst of the reachable set rather than `Planned` by name. Before the
+// first frame the planned pair is a seed this schedule wants optimistic, and a floor target the
+// capability probe measured may legitimately exceed it — which is a frame armed for less than the
+// cheapest thing gyro can draw.
+GYRO_TEST(Timing, TheArmingIsTheWorstTierStillReachable)
+{
+	const Budget budget = Costing(1ms, 1ms, 4ms, 4ms);
+	const Timing timing;
+
+	GYRO_CHECK_EQ(timing.Arming(budget), timing.Reserve(budget, RenderMode::Floor));
+}
+
+// All three halves of decision 168 end to end: a floor frame over its target moves the evidence, the
+// evidence sizes the reservation, and the reservation is what a pinned schedule arms for. Without any
+// one of them the arming below is the target and the frame starts too late for work already measured.
+GYRO_TEST(Timing, AFloorFrameOverItsTargetMovesThePinnedArming)
+{
+	Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
+	const Timing pinned{ TimingPolicy{ .Composite = RenderMode::Floor } };
+
+	const Duration before = pinned.Arming(budget);
+
+	budget.ObserveGpu(RenderMode::Floor, budget.Generation(), 6ms);
+
+	GYRO_CHECK_EQ(pinned.Arming(budget), before + 5ms);
 }
 
 // Decision 31's first frame after idle, under a pin: no anchor, so no deadline to measure against and

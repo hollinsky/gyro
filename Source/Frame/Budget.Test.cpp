@@ -106,8 +106,8 @@ GYRO_TEST(Budget, FloorFramesNeverSizeThePlannedMark)
 
 	for (int frame = 0; frame < 8; ++frame)
 	{
-		GYRO_CHECK(!budget.ObserveCpu(RenderMode::Floor, 1ms));
-		GYRO_CHECK(!budget.ObserveGpu(RenderMode::Floor, budget.Generation(), 1ms));
+		budget.ObserveCpu(RenderMode::Floor, 1ms);
+		budget.ObserveGpu(RenderMode::Floor, budget.Generation(), 1ms);
 	}
 
 	GYRO_CHECK_EQ(budget.PlannedCpu(), 8ms);
@@ -284,22 +284,67 @@ GYRO_TEST(Budget, AnUnchosenFloorTargetCannotBeExceeded)
 	GYRO_CHECK(!budget.FloorExceedsTarget());
 }
 
-// The falsification path. Unwindowed on purpose: a figure whose job is to contradict a target must not
-// forget the contradiction the way a figure whose job is to size a reservation must.
-GYRO_TEST(Budget, AFloorFrameOverTheTargetIsRememberedIndefinitely)
+// The falsification path, and it ages — decision 168. It was unwindowed while its only job was to
+// contradict a target; once `ReservedFloorGpu` sizes a reservation with it, one bad frame held forever
+// is the running maximum this file rejects for the planned mark arriving by a different door.
+GYRO_TEST(Budget, AFloorFrameOverTheTargetIsForgottenWhenItLeavesTheWindow)
 {
 	Budget budget{ BudgetPolicy{ .FloorGpu = 2ms, .Window = 2 } };
 
 	budget.ObserveGpu(RenderMode::Floor, budget.Generation(), 3ms);
+
 	GYRO_CHECK(budget.FloorExceedsTarget());
+	GYRO_CHECK_EQ(budget.ReservedFloorGpu(), 3ms);
 
 	for (int frame = 0; frame < 16; ++frame)
 	{
 		budget.ObserveGpu(RenderMode::Floor, budget.Generation(), 1ms);
 	}
 
-	GYRO_CHECK_EQ(budget.MeasuredFloorGpu(), 3ms);
-	GYRO_CHECK(budget.FloorExceedsTarget());
+	GYRO_CHECK_EQ(budget.MeasuredFloorGpu(), 1ms);
+	GYRO_CHECK(!budget.FloorExceedsTarget());
+	GYRO_CHECK_EQ(budget.ReservedFloorGpu(), 2ms);
+}
+
+// The `max` in both directions. A machine that meets its target reserves the target, so nothing about
+// this change is visible on one; a machine that does not reserves what it actually costs.
+GYRO_TEST(Budget, TheFloorIsReservedAtTheLargerOfTheTargetAndTheEvidence)
+{
+	Budget budget{ BudgetPolicy{ .FloorCpu = 1ms, .FloorGpu = 2ms, .Window = 4 } };
+
+	GYRO_CHECK_EQ(budget.ReservedFloorCpu(), 1ms);
+	GYRO_CHECK_EQ(budget.ReservedFloorGpu(), 2ms);
+
+	budget.ObserveCpu(RenderMode::Floor, 300us);
+	budget.ObserveGpu(RenderMode::Floor, budget.Generation(), 6ms);
+
+	GYRO_CHECK_EQ(budget.ReservedFloorCpu(), 1ms);
+	GYRO_CHECK_EQ(budget.ReservedFloorGpu(), 6ms);
+}
+
+// The observation says *the figure admission control sizes with has changed*, and a floor frame can
+// now say it. It used to answer false however far over the target it landed, which described the
+// defect decision 168 removed rather than the design.
+GYRO_TEST(Budget, AFloorObservationThatMovesTheReservationSaysSo)
+{
+	Budget budget{ BudgetPolicy{ .FloorGpu = 2ms, .Window = 4 } };
+
+	GYRO_CHECK(budget.ObserveGpu(RenderMode::Floor, budget.Generation(), 6ms));
+	GYRO_CHECK(!budget.ObserveGpu(RenderMode::Floor, budget.Generation(), 5ms));
+}
+
+// An invalidation drops the evidence and leaves the target, which is where a reservation starts.
+GYRO_TEST(Budget, InvalidationReturnsTheFloorToItsTarget)
+{
+	Budget budget{ BudgetPolicy{ .FloorGpu = 2ms, .Window = 4 } };
+
+	budget.ObserveGpu(RenderMode::Floor, budget.Generation(), 6ms);
+	GYRO_CHECK_EQ(budget.ReservedFloorGpu(), 6ms);
+
+	budget.Invalidate();
+
+	GYRO_CHECK_EQ(budget.MeasuredFloorGpu(), Duration::zero());
+	GYRO_CHECK_EQ(budget.ReservedFloorGpu(), 2ms);
 }
 
 // The length is data a test varies, and the capacity is what bounds the storage. A policy naming

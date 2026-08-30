@@ -615,7 +615,7 @@ public:
 		Duration arming
 	) const noexcept
 	{
-		const std::uint64_t reach = clock.SequenceAfter(Project(now, deviceFreeAt, budget, RenderMode::Planned).Finish);
+		const std::uint64_t reach = clock.SequenceAfter(Project(now, deviceFreeAt, budget, Scheduled(budget)).Finish);
 
 		if (reach == FrameClock::NoSequence)
 		{
@@ -661,6 +661,33 @@ public:
 		return Detail::Sum(Detail::Sum(Cpu(budget, mode), Gpu(budget, mode)), m_Policy.Margin);
 	}
 
+	// The mode the schedule assumes it is going to draw, which is the most expensive one this policy
+	// can still choose.
+	//
+	// **It used to be `RenderMode::Planned` written out, at each of the three places that need it** —
+	// decision 168 — and the argument for that spelling was the right argument in the wrong scope. Arm
+	// for the tier you want rather than the tier you settle for: true, and its general form is *arm for
+	// the most expensive tier still reachable*, which `Planned` is only by the accident of usually
+	// being the larger figure. Two ways it is not. A pin has already chosen, so the reachable set is
+	// one mode and naming the other schedules a frame the renderer will not draw — the capture that
+	// produced this entry, where `--composite=floor` armed against a planned seed no planned frame
+	// would ever come to correct and lost every latch by construction. And before the first frame the
+	// planned pair is a seed the file argues should be optimistic, which a floor target measured by
+	// the capability probe may legitimately exceed.
+	//
+	// So the reachable set, and the worst of it. Unpinned on a machine whose planned composite costs
+	// more than its floor one — every machine that is working — this is `Planned` and nothing moves.
+	[[nodiscard]] constexpr RenderMode Scheduled(const Budget& budget) const noexcept
+	{
+		if (m_Policy.Composite)
+		{
+			return *m_Policy.Composite;
+		}
+
+		return Reserve(budget, RenderMode::Floor) > Reserve(budget, RenderMode::Planned) ? RenderMode::Floor :
+		                                                                                   RenderMode::Planned;
+	}
+
 	// The same reserve with `TimingPolicy::Lead` on top, which is what an arming subtracts from a
 	// deadline and the only place the lead appears.
 	//
@@ -672,12 +699,13 @@ public:
 	// The lead is the difference between *when the work must start* and *when this thread must be
 	// running*, and only the second is something the loop can ask a timer for.
 	//
-	// Planned rather than a parameter: the floor composite exists to be reachable from wherever the
-	// loop happens to be, and arming for it would schedule gyro to arrive too late for the tier it
-	// wants and exactly on time for the tier it settles for.
+	// `Scheduled` rather than a parameter, and the tier it names is deliberately not the one the frame
+	// will settle for: the floor composite exists to be reachable from wherever the loop happens to be,
+	// so arming for it where the planned tier is still available would schedule gyro to arrive too late
+	// for the tier it wants and exactly on time for the tier it gives up on.
 	[[nodiscard]] constexpr Duration Arming(const Budget& budget) const noexcept
 	{
-		return Detail::Sum(Reserve(budget, RenderMode::Planned), m_Policy.Lead);
+		return Detail::Sum(Reserve(budget, Scheduled(budget)), m_Policy.Lead);
 	}
 
 	// The instant `WakeFor` would arm for a named frame, which is the same instant read as a place in
@@ -744,7 +772,7 @@ public:
 			return { .RecordAt = solo, .Owed = alone, .Members = 1 };
 		}
 
-		const Duration owed = Detail::Sum(batch.Owed, Reserve(budget, RenderMode::Planned));
+		const Duration owed = Detail::Sum(batch.Owed, Reserve(budget, Scheduled(budget)));
 
 		return { .RecordAt = std::min(batch.RecordAt, Advanced(deadline, -owed)),
 			     .Owed = owed,
@@ -834,13 +862,13 @@ private:
 	[[nodiscard]] static constexpr Duration Cpu(const Budget& budget, RenderMode mode) noexcept
 	{
 		return Detail::Sum(
-			budget.IrreducibleCpu(), mode == RenderMode::Planned ? budget.PlannedCpu() : budget.FloorCpu()
+			budget.IrreducibleCpu(), mode == RenderMode::Planned ? budget.PlannedCpu() : budget.ReservedFloorCpu()
 		);
 	}
 
 	[[nodiscard]] static constexpr Duration Gpu(const Budget& budget, RenderMode mode) noexcept
 	{
-		return mode == RenderMode::Planned ? budget.PlannedGpu() : budget.FloorGpu();
+		return mode == RenderMode::Planned ? budget.PlannedGpu() : budget.ReservedFloorGpu();
 	}
 
 	// The two instants come from the clock and never from the caller, so that a decision cannot name a

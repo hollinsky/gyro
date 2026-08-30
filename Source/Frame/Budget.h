@@ -49,9 +49,24 @@
 // **`C_planned` is measured and `C_min` is policy, and that asymmetry is the type's shape.**
 // Architecture.md#the-floor-tier states it directly: the floor composite's cost is a design target
 // rather than a residue, because it is the size of the shock decision 35 can absorb. So it is a figure
-// the floor composite is *built to meet*, and floor-tier frames exist here to falsify it rather than
-// to produce it. The accessors are named for that — `FloorCpu()` is the target the record-time check
-// reads, `MeasuredFloorCpu()` is what a floor frame actually did.
+// the floor composite is *built to meet*, and floor-tier frames exist here to falsify it.
+//
+// **What the asymmetry is not is a rule about which figures the schedule may believe** — revised,
+// decision 168. It was one until a capture of `--composite=floor` on an Adreno 618 showed a panel
+// pinned at half its refresh rate while every frame finished in a third of a period: the record-time
+// check was pricing the floor composite at the target, the machine was delivering four times it, and
+// `FloorExceedsTarget` reported the contradiction to a log line that nothing acted on. So there are
+// three accessors per device rather than two. `FloorCpu()` is the target the floor composite is built
+// to meet and the only thing falsification is against; `MeasuredFloorCpu()` is what floor frames
+// actually did; `ReservedFloorCpu()` is the larger of the two and is what the schedule sizes with.
+//
+// **The `max` is the prior and the evidence composed the only way that is safe when reserving.** The
+// target has one job no measurement can do — it exists before the first floor frame has ever run,
+// which on a healthy machine is every frame, so the frame where the tier first matters has no sample
+// to price itself against. The measurement has the job the target cannot — it is true. Taking the
+// larger keeps the target's whole role on a machine that meets it, where the two are the target and
+// nothing moves, and stops the schedule promising a shock absorber that is not there on a machine
+// that does not.
 //
 // **Which is also why measuring it costs nothing.** Obtaining `C_min` by observation would mean
 // rendering a floor composite nothing asked for, since on a healthy machine the second branch never
@@ -78,11 +93,12 @@
 //
 // **There is one liveness obligation on the caller, and it is load-bearing rather than tidy.** A
 // planned mark comes down only when planned frames push samples through the window, and an output
-// whose mark is too high to admit a planned frame renders the floor tier instead — which files
-// nothing, leaves the mark where it was, and does the same next frame. Decision 35's answer to a
-// systematic overrun is that it steps the quality tier down (decision 34), and **that step has to
-// reach `Invalidate()`** or the output holds at the floor tier for as long as it runs. The floor tier
-// is the terminal case and needs no escape, since there is nothing below it to be held out of.
+// whose mark is too high to admit a planned frame renders the floor tier instead — which files into
+// the floor's own window, leaves the planned mark exactly where it was, and does the same thing
+// next frame. Decision 35's answer to a systematic overrun is that it steps the quality tier down
+// (decision 34), and **that step has to reach `Invalidate()`** or the output holds at the floor
+// tier for as long as it runs. The floor tier is the terminal case and needs no escape, since there
+// is nothing below it to be held out of.
 
 // The numbers this record needs and nobody has measured, `// SPEC:` throughout for the reason
 // `FrameClockPolicy` is. See Open.md, *`C_min` as a number*, *the capability probe*, and *scheduling
@@ -231,7 +247,8 @@ public:
 	constexpr Budget() noexcept : Budget{ BudgetPolicy{} } {}
 
 	constexpr explicit Budget(BudgetPolicy policy) noexcept
-		: m_Policy{ policy }, m_Cpu{ policy.Window }, m_Gpu{ policy.Window }, m_Irreducible{ policy.Window }
+		: m_Policy{ policy }, m_Cpu{ policy.Window }, m_Gpu{ policy.Window }, m_Irreducible{ policy.Window },
+		  m_FloorCpu{ policy.Window }, m_FloorGpu{ policy.Window }
 	{
 		m_Policy.FloorCpu = NonNegative(m_Policy.FloorCpu);
 		m_Policy.FloorGpu = NonNegative(m_Policy.FloorGpu);
@@ -250,7 +267,7 @@ public:
 	// can arrive between the work and its cost.
 	constexpr bool ObserveCpu(RenderMode mode, Duration cost) noexcept
 	{
-		return File(mode, NonNegative(cost), m_Cpu, m_MeasuredFloorCpu);
+		return File(mode, NonNegative(cost), m_Cpu, m_FloorCpu);
 	}
 
 	// A frame's GPU execution time, from timestamps resolved some frames after the submission that
@@ -272,7 +289,7 @@ public:
 			return false;
 		}
 
-		return File(mode, NonNegative(cost), m_Gpu, m_MeasuredFloorGpu);
+		return File(mode, NonNegative(cost), m_Gpu, m_FloorGpu);
 	}
 
 	// What producing this frame's draw list cost, before any composite was recorded.
@@ -296,8 +313,8 @@ public:
 		m_Cpu.Clear();
 		m_Gpu.Clear();
 		m_Irreducible.Clear();
-		m_MeasuredFloorCpu = Duration::zero();
-		m_MeasuredFloorGpu = Duration::zero();
+		m_FloorCpu.Clear();
+		m_FloorGpu.Clear();
 
 		Seed();
 	}
@@ -316,28 +333,44 @@ public:
 	// the only sense the schedule cares about.
 	[[nodiscard]] constexpr Duration IrreducibleCpu() const noexcept { return m_Irreducible.Mark(); }
 
-	// `C_min`, which is policy where the pair above is measurement. The record-time check's second
-	// branch reads these exactly as its first branch reads those, so the timing policy composes one
-	// pair the way it composes the other and never has to know which of them was measured.
+	// `C_min` as policy: the target the floor composite is built to meet, and the only figure
+	// `FloorExceedsTarget` is a contradiction of. Not what the schedule reserves — see
+	// `ReservedFloorCpu` and decision 168.
 	[[nodiscard]] constexpr Duration FloorCpu() const noexcept { return m_Policy.FloorCpu; }
 
 	[[nodiscard]] constexpr Duration FloorGpu() const noexcept { return m_Policy.FloorGpu; }
 
-	// The worst floor-tier frame since the last invalidation. Falsification rather than sizing, and it
-	// accumulates differently for that reason: unwindowed, because a figure whose job is to contradict
-	// a target must not forget the contradiction, where a figure whose job is to size a reservation
-	// must.
-	[[nodiscard]] constexpr Duration MeasuredFloorCpu() const noexcept { return m_MeasuredFloorCpu; }
+	// The worst floor-tier frame in the floor's own window. Evidence about the machine, held apart
+	// from the target it may contradict and from the planned mark it may never touch.
+	[[nodiscard]] constexpr Duration MeasuredFloorCpu() const noexcept { return m_FloorCpu.Mark(); }
 
-	[[nodiscard]] constexpr Duration MeasuredFloorGpu() const noexcept { return m_MeasuredFloorGpu; }
+	[[nodiscard]] constexpr Duration MeasuredFloorGpu() const noexcept { return m_FloorGpu.Mark(); }
+
+	// `C_min` as the schedule sizes it. The record-time check's second branch reads these exactly as
+	// its first branch reads the planned pair, so the timing policy composes one pair the way it
+	// composes the other and never has to know which of them was measured.
+	//
+	// **The larger of the target and the evidence**, which is decision 168 and is the whole of the
+	// change: the target alone is what the schedule used to read, and on a machine where the floor
+	// composite overruns it that is a reservation smaller than the work it is reserving for — a frame
+	// that starts too late by construction, every frame, with no sample able to correct it.
+	[[nodiscard]] constexpr Duration ReservedFloorCpu() const noexcept
+	{
+		return std::max(m_Policy.FloorCpu, m_FloorCpu.Mark());
+	}
+
+	[[nodiscard]] constexpr Duration ReservedFloorGpu() const noexcept
+	{
+		return std::max(m_Policy.FloorGpu, m_FloorGpu.Mark());
+	}
 
 	// The floor composite did not meet the target it is built to. A defect rather than a condition to
 	// handle — decision 35's second promise is conditional on this being false, and nothing downstream
 	// has a smaller composite to fall back to.
 	[[nodiscard]] constexpr bool FloorExceedsTarget() const noexcept
 	{
-		return (m_Policy.FloorCpu > Duration::zero() && m_MeasuredFloorCpu > m_Policy.FloorCpu) ||
-		       (m_Policy.FloorGpu > Duration::zero() && m_MeasuredFloorGpu > m_Policy.FloorGpu);
+		return (m_Policy.FloorCpu > Duration::zero() && m_FloorCpu.Mark() > m_Policy.FloorCpu) ||
+		       (m_Policy.FloorGpu > Duration::zero() && m_FloorGpu.Mark() > m_Policy.FloorGpu);
 	}
 
 	// How many measurements a mark is the maximum over, after clamping.
@@ -352,20 +385,20 @@ private:
 		return std::max(cost, Duration::zero());
 	}
 
-	// The return says *the figure admission control sizes with has changed*, which is why a floor
-	// observation answers false however far over the target it lands. It moves no reservation; what it
-	// moves is `FloorExceedsTarget`, and a caller or-folding this across a drain wants the two
-	// questions kept apart.
-	constexpr bool File(RenderMode mode, Duration cost, Detail::HighWater& planned, Duration& floor) noexcept
+	// The return says *the figure admission control sizes with has changed*, and a floor observation
+	// can now say it — decision 168. It used to answer false however far over the target it landed,
+	// on the reading that a floor sample moves `FloorExceedsTarget` and nothing else; what that
+	// actually described was the defect, since the reservation it moved nothing in was the one being
+	// used to schedule the frame.
+	//
+	// **The two populations still never mix**, which is the part of the old shape that was right: a
+	// floor frame's cost is filed against the floor's own window and cannot reach the planned mark.
+	// Diluting that mark with frames that did no planned work fails in the direction that compounds —
+	// a system in trouble renders the floor tier often, which would make admission optimistic exactly
+	// while the cascade decision 35 exists to stop is running.
+	constexpr bool File(RenderMode mode, Duration cost, Detail::HighWater& planned, Detail::HighWater& floor) noexcept
 	{
-		if (mode == RenderMode::Floor)
-		{
-			floor = std::max(floor, cost);
-
-			return false;
-		}
-
-		return planned.Push(cost);
+		return mode == RenderMode::Floor ? floor.Push(cost) : planned.Push(cost);
 	}
 
 	// The seed goes in as a sample rather than as a floor under one, which is what gives it a life of
@@ -384,8 +417,17 @@ private:
 	Detail::HighWater m_Gpu{};
 	Detail::HighWater m_Irreducible{};
 
-	Duration m_MeasuredFloorCpu{};
-	Duration m_MeasuredFloorGpu{};
+	// Windowed on the same terms as the three above, and it is `ReservedFloorCpu` that obliges it —
+	// decision 168. While these only contradicted a target, forgetting a contradiction was the one
+	// thing they must not do and the max was deliberately unwindowed. A figure the schedule reserves
+	// against has the opposite obligation: one outlier floor frame would otherwise size every
+	// reservation for the life of the configuration, which is the running maximum this file already
+	// rejects for the planned mark, arrived at by a different door.
+	//
+	// **They are not seeded.** The target is what `ReservedFloorCpu` falls back to with no evidence
+	// in the window, so an unmeasured floor reserves exactly what it reserved before this change.
+	Detail::HighWater m_FloorCpu{};
+	Detail::HighWater m_FloorGpu{};
 
 	// Wraps, and wrapping is harmless: what it protects against is a sample from a superseded
 	// configuration, and a sample cannot be four billion invalidations in flight.
@@ -436,6 +478,15 @@ static_assert(Budget{}.PlannedGpu() == Duration::zero());
 static_assert(Budget{}.FloorCpu() == Duration::zero());
 static_assert(Budget{}.IrreducibleCpu() == Duration::zero(), "A scene nobody has walked costs nothing to walk");
 static_assert(!Budget{}.FloorExceedsTarget());
+
+// An unmeasured floor reserves its target, which is what makes decision 168's `max` invisible on a
+// machine that meets one — and, where nobody has set one either, keeps the floor branch maximally
+// permissive exactly as `BudgetPolicy` says zero means.
+static_assert(Budget{}.ReservedFloorCpu() == Duration::zero());
+static_assert(
+	Budget{ BudgetPolicy{ .FloorGpu = std::chrono::milliseconds{ 2 } } }.ReservedFloorGpu() ==
+	std::chrono::milliseconds{ 2 }
+);
 
 // The mark is the maximum over the window, and the window is what brings it back down.
 static_assert(

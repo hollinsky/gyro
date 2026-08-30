@@ -13204,3 +13204,105 @@ somebody unplugs produces no up and no cancel — the same shape [Seam/Input.h](
 argues `Removed` into existence for, arriving from the output side instead of the device side. The
 answer is presumably a cancel, and it is the seat's to send, so it belongs with the `wl_touch` commit
 rather than with the mapping.
+
+### 168. The schedule reserves against the larger of the floor target and what floor frames cost, and it arms for the most expensive tier still reachable
+
+*(Decided 2026-08-29, from a capture of `--composite=floor` on an Adreno 618 that ran at half the panel's refresh rate while every frame finished in under half a period. Three separate defects, all of them the same shape: the schedule was pricing work it was not going to do.)*
+
+**A reservation the schedule is allowed to hold below the cost of the work it is reserving for is not
+conservative, it is a frame lost every frame.** The trace said so plainly and it took the pin to make
+it visible: 629 of 634 frames marked `landed late 1`, a `gpu mark` frozen at its seed of 1.5 ms for
+the whole run, and a measured composite of 6.49 ms sitting beside it in the same row. Nothing was
+slow. The panel was idle for two thirds of every period it dropped.
+
+#### The three figures per device, and which of them a schedule may believe
+
+[Frame/Budget.h](../Source/Frame/Budget.h) held two, and the asymmetry between them is the type's
+shape and stays: `C_planned` is measured, `C_min` is a design target the floor composite is *built to
+meet*, and Architecture.md#the-floor-tier is explicit that the second is a target rather than a
+residue because it is the size of the shock [decision 35](#35-a-miss-costs-one-frame-bounded-by-the-floor-composite)
+can absorb.
+
+What did not follow, and what this entry corrects, is that the *record-time check* should read the
+target. It read `FloorGpu()` while the machine delivered `MeasuredFloorGpu()`, and `FloorExceedsTarget`
+— which existed precisely to notice — reported the contradiction to a log line nothing acted on. A
+defect with an observer and no consumer is a defect that ships.
+
+So three accessors per device. `FloorCpu()` is the target and is the only thing falsification is
+against. `MeasuredFloorCpu()` is what floor frames actually did. `ReservedFloorCpu()` is the larger of
+the two, and it is what the schedule sizes with.
+
+**The `max` is the prior and the evidence composed the only way that is safe when reserving.** The
+target has one job no measurement can do: it exists before the first floor frame has run, which on a
+healthy machine is *every* frame — the tier is the branch taken under shock and never otherwise — so
+the frame where it first matters has no sample to price itself against. The measurement has the job
+the target cannot: it is true. Taking the larger changes nothing on a machine that meets its target,
+where the two are the target, and stops the schedule promising a shock absorber that is not there on
+a machine that does not.
+
+**Not measuring `C_min` outright and dropping the target.** That is the alternative this reverses
+into, and it fails on the frame that matters most: a machine that has never needed the floor tier has
+no figure for it at the instant it first does.
+
+**Nor filing floor observations into the planned mark**, which was the first fix considered and is
+worse than the defect. The two populations describe different work, and mixing them fails in the
+direction that compounds — one floor frame taken under momentary shock would inflate the planned
+reservation, which makes the next planned frame likelier to be refused, which files another floor
+sample. The shock becomes permanent. The rule that a floor frame's measurement never sizes the planned
+mark is untouched here; what changed is only that it now sizes the *floor's* reservation instead of
+sizing nothing.
+
+#### The floor's window, which the reservation obliges
+
+`MeasuredFloor*` was an unbounded maximum, and the comment defending that was right for the job it
+had: a figure whose purpose is to contradict a target must not forget the contradiction. A figure the
+schedule reserves against has the opposite obligation, and it is the one this file already states for
+the planned mark — without a window, the worst moment the machine ever had is reserved for as long as
+the machine runs, and a budget that only rises never recovers from a thermal event. Giving the floor
+mark the second job obliges it to age, so it is a `HighWater` on the same window as the rest.
+
+It is deliberately **not seeded**. The target is what `ReservedFloorCpu` falls back to with an empty
+window, so an unmeasured floor reserves exactly what it reserved before this entry.
+
+`FloorExceedsTarget` becomes a report of a live condition rather than of a history, which is the right
+reading for something printed beside the current budget.
+
+#### The arming names a tier, and `Planned` was the right argument in the wrong scope
+
+[Frame/Timing.h](../Source/Frame/Timing.h) wrote `RenderMode::Planned` at three places — the arming,
+the reach `WakeFor` projects, and the demand `Fold` adds for a batch's second member — and defended
+it: the floor composite exists to be reachable from wherever the loop happens to be, so arming for it
+would schedule gyro to arrive too late for the tier it wants and exactly on time for the tier it
+settles for.
+
+That is correct and its general form is *arm for the most expensive tier still reachable*. `Planned`
+is only that by the accident of usually being the larger figure, and there are two ways it is not.
+
+**A pin has already chosen.** `Assess` takes the pin and prices the mode it names; the arming did not,
+so under `--composite=floor` the loop woke for a planned composite that would never be drawn, priced
+at a seed no planned frame would ever come to correct. Every latch was missed by construction. The
+option's own documentation claimed the pin "changes what is drawn and never what is admitted" — that
+claim was false as built, and it was false in the one flag reached for to measure the governor against
+a steady load.
+
+**And before the first frame the planned pair is a seed** this file argues should be optimistic, which
+a floor target the capability probe measured may legitimately exceed. Unpinned, on any machine whose
+planned composite costs more than its floor one — which is every machine that is working — the maximum
+is `Planned` and nothing moves.
+
+So the three sites read `Scheduled(budget)`: the pinned mode where there is one, and otherwise the
+worse of the two reserves.
+
+#### What this does not fix, and it is the more interesting half
+
+The floor composite on that part measures 6.49 ms against a target it is meant to fit several times
+over inside one 16.67 ms refresh, and `FloorExceedsTarget` was true for the whole capture. The
+schedule now tells the truth about that; it does not make it smaller. Of those 6.49 ms, 4.47 are two
+shadow draws — [decision 104](#104-an-elevation-is-a-height-under-one-light-and-the-shadow-is-analytic)'s closed
+form costing 12.6 times a plain fill per fragment on a part where every `exp` and `sqrt` runs on a
+quarter-rate unit, with the corner quadrature [decision 132](#132-the-shadows-coverage-is-exact-the-rectangle-is-closed-form-and-the-corners-are-quadrature)
+added never having executed because nothing in the tree has ever set `DrawItem::Radius` to anything
+but zero. The floor tier drops materials and keeps every shadow, which is what
+[Docs/Experience.md](Experience.md) promises, and on this machine that promise is most of the floor
+composite. Sizing `C_min` for a part like this one, and whether `ShadowPhi` needs an approximation
+with no elementary-function op in it, are Open.md's.
