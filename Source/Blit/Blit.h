@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <vector>
 
@@ -171,6 +172,46 @@ public:
 	// No second device, so no second cost. Seam/Renderer.h says this is the correct report rather than
 	// a stub: this renderer's work has nowhere else to have happened.
 	[[nodiscard]] std::size_t CollectCosts(std::span<GpuCost>) override { return 0; }
+
+	// Seam/Capture.h's readback, and on this renderer it is a row copy and nothing else. There is no
+	// fence to wait for — `Record` finishes before it returns, which is what `IsComplete` already says
+	// — and no detile, because a mapped target is linear by construction: the only thing a caller can
+	// hand this is memory somebody wrote a pointer to.
+	//
+	// The rows are copied one at a time rather than in a single `memcpy` because the destination is
+	// tight and the target's own stride need not be. Where the two agree this is the same instruction
+	// stream a flat copy would be, and where they do not it is the difference between a picture and a
+	// shear.
+	[[nodiscard]] Result<void> ReadTarget(const TargetReadback& request) override
+	{
+		if (request.Target >= m_Targets.size() || m_Targets[request.Target].Pixels == nullptr)
+		{
+			return Failure(EINVAL, "reading back a target that is not bound");
+		}
+
+		const Bound& bound = m_Targets[request.Target];
+		const std::uint32_t bytesPerPixel = DecodableBytesPerPixel(bound.Format.Code);
+
+		if (bytesPerPixel == 0)
+		{
+			return Failure(EINVAL, "reading back a target whose format has no decodable sample width");
+		}
+
+		const std::size_t row = static_cast<std::size_t>(bound.Size.Width) * bytesPerPixel;
+		const std::size_t rows = static_cast<std::size_t>(bound.Size.Height);
+
+		if (request.Stride < row || request.Into.size() < rows * request.Stride)
+		{
+			return Failure(EINVAL, "reading a target back into a slab too small to hold it");
+		}
+
+		for (std::size_t y = 0; y < rows; ++y)
+		{
+			std::memcpy(request.Into.data() + y * request.Stride, bound.Pixels + y * bound.Stride, row);
+		}
+
+		return {};
+	}
 
 private:
 	// One bound target, flattened out of the variant at bind time so that `Record` never re-asks a

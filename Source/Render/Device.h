@@ -71,6 +71,18 @@ struct VulkanDevicePolicy
 	// That is the honest answer there: on a split part the two minors *never* match, and refusing to
 	// come up would be refusing to run on the hardware this arrangement is most normal on.
 	std::int64_t ScanoutMinor = -1;
+
+	// Whether composite targets are created so that Render/Readback.h can copy one back.
+	//
+	// **Off unless the composition root was asked for captures, and that default is the whole point.**
+	// A copy source needs `VK_IMAGE_USAGE_TRANSFER_SRC_BIT` and usage is fixed at allocation, so the
+	// bit has to be asked for before anybody presses the key. Asking for it always would put it into
+	// the modifier negotiation on every run — and a modifier the driver will not create under this
+	// usage is one dropped from the list a panel and a device have to agree on, which is a window that
+	// stops being scanned out directly. That is a real cost on every frame of every session, paid for
+	// a verb that fires when a person is looking for a bug. So it is a policy, `--capture` turns it
+	// on, and Input/Chord.h's screenshot verb says so where it is off rather than failing quietly.
+	bool Readable = false;
 };
 
 // What the device turned out to be, for a log line and for the two branches that read it.
@@ -476,7 +488,7 @@ public:
 		  m_Device{ std::exchange(other.m_Device, VK_NULL_HANDLE) },
 		  m_Queue{ std::exchange(other.m_Queue, VK_NULL_HANDLE) },
 		  m_QueueFamily{ std::exchange(other.m_QueueFamily, 0) }, m_Description{ other.m_Description },
-		  m_GpuClock{ std::move(other.m_GpuClock) }
+		  m_Readable{ std::exchange(other.m_Readable, false) }, m_GpuClock{ std::move(other.m_GpuClock) }
 	{}
 
 	VulkanDevice& operator=(VulkanDevice&& other) noexcept
@@ -490,6 +502,7 @@ public:
 			m_Queue = std::exchange(other.m_Queue, VK_NULL_HANDLE);
 			m_QueueFamily = std::exchange(other.m_QueueFamily, 0);
 			m_Description = other.m_Description;
+			m_Readable = std::exchange(other.m_Readable, false);
 			m_GpuClock = std::move(other.m_GpuClock);
 		}
 
@@ -516,6 +529,10 @@ public:
 	[[nodiscard]] VkQueue Queue() const noexcept { return m_Queue; }
 
 	[[nodiscard]] std::uint32_t QueueFamily() const noexcept { return m_QueueFamily; }
+
+	// Whether targets on this device were created for Render/Readback.h. See
+	// `VulkanDevicePolicy::Readable` for why this is not simply always true.
+	[[nodiscard]] bool TargetsAreReadable() const noexcept { return m_Readable; }
 
 	[[nodiscard]] const DeviceDescription& Description() const noexcept { return m_Description; }
 
@@ -720,6 +737,10 @@ private:
 
 	std::uint32_t m_QueueFamily = 0;
 	DeviceDescription m_Description{};
+
+	// `VulkanDevicePolicy::Readable` as it was asked for, kept because target usage is decided long
+	// after the policy has gone out of scope — at every bind and at every modifier query.
+	bool m_Readable = false;
 
 	// The per-driver frequency reader, resolved from `m_Description.PrimaryMinor` at `Open`. Invalid on
 	// a device gyro cannot read a clock off — `Blit`'s never gets one, since `Blit` is not a

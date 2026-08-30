@@ -78,6 +78,7 @@
 #include "Session/Control.h"
 #include "Trace/Recorder.h"
 #include "Virtual/Device.h"
+#include "Compositor/Capture.h"
 #include "Virtual/Dump.h"
 #include "Virtual/Heap.h"
 #include "Virtual/Output.h"
@@ -708,7 +709,9 @@ inline constexpr std::size_t MaxModifierOffer = 64;
 class NestedBackend final : public IBackend
 {
 public:
-	NestedBackend(const IClock& clock, bool governor) noexcept : m_Clock{ &clock }, m_Governs{ governor } {}
+	NestedBackend(const IClock& clock, bool governor, bool readable) noexcept
+		: m_Clock{ &clock }, m_Governs{ governor }, m_Readable{ readable }
+	{}
 
 	// Open the connection and the device, in that order.
 	//
@@ -729,7 +732,9 @@ public:
 		// generous by an order of magnitude and costs eight bytes an id.
 		m_Host.Connection().Reserve(256);
 
-		Result<VulkanDevice> device = VulkanDevice::Open();
+		// `Readable` is Seam/Capture.h's, and it has to be stated at device creation because target usage
+		// is fixed at allocation — see `VulkanDevicePolicy::Readable`.
+		Result<VulkanDevice> device = VulkanDevice::Open(VulkanDevicePolicy{ .Readable = m_Readable });
 
 		if (!device)
 		{
@@ -903,6 +908,10 @@ private:
 	// machine's minimum clock back. It owns no Vulkan handle — the renderer its probe drew through was
 	// built and destroyed inside `Take` — so it sits here for readability rather than for ordering.
 	bool m_Governs = true;
+
+	// Whether this backend's device creates targets Render/Readback.h can copy back. Held rather than
+	// asked of the device, because it is stated at device creation and read nowhere else.
+	bool m_Readable = false;
 	GpuGovernor m_Governor;
 
 	// `unique_ptr` because a presenter is neither copyable nor movable and the array has to be built
@@ -959,7 +968,9 @@ private:
 class DrmBackend final : public IBackend
 {
 public:
-	DrmBackend(const IClock& clock, bool governor) noexcept : m_Clock{ &clock }, m_Governs{ governor } {}
+	DrmBackend(const IClock& clock, bool governor, bool readable) noexcept
+		: m_Clock{ &clock }, m_Governs{ governor }, m_Readable{ readable }
+	{}
 
 	// The card first, for `NestedBackend::Open`'s reason exactly: it is what says whether there is a
 	// panel to drive at all, and a machine with nothing connected should answer that rather than spend
@@ -1008,7 +1019,8 @@ public:
 
 		// The card's minor, so that on a machine with two GPUs gyro composites on the one the panel is
 		// actually attached to rather than on whichever part Vulkan ranks highest.
-		Result<VulkanDevice> rendering = VulkanDevice::Open(VulkanDevicePolicy{ .ScanoutMinor = m_Card->Minor() });
+		Result<VulkanDevice> rendering =
+			VulkanDevice::Open(VulkanDevicePolicy{ .ScanoutMinor = m_Card->Minor(), .Readable = m_Readable });
 
 		if (!rendering)
 		{
@@ -1307,6 +1319,10 @@ private:
 	std::optional<VulkanTextures> m_Textures;
 
 	bool m_Governs = true;
+
+	// Whether this backend's device creates targets Render/Readback.h can copy back. Held rather than
+	// asked of the device, because it is stated at device creation and read nowhere else.
+	bool m_Readable = false;
 	GpuGovernor m_Governor;
 
 	std::array<std::unique_ptr<Drm::DrmOutput>, MaxOutputs> m_Panels{};
@@ -1404,6 +1420,35 @@ public:
 
 		m_Loop->Bind({ m_Outputs.data(), m_Count });
 		m_Loop->Listen({ m_Sources.data(), m_Sources.size() });
+
+		// **After `Bind`, because the shapes it remembers are the ones the outputs came up with.** A
+		// capture slab is sized off the frame path exactly once per configuration, which is what lets
+		// `Reserve` on the frame thread be a bounds check — see Compositor/Capture.h.
+		if (m_Options.Capture)
+		{
+			m_Capture.emplace(m_Options.CaptureDirectory, m_Count);
+
+			if (const Result<void> opened = m_Capture->Open(); !opened)
+			{
+				return opened;
+			}
+
+			for (std::size_t index = 0; index < m_Count; ++index)
+			{
+				const OutputConfiguration& configuration = m_Bound[index].Configuration;
+
+				if (const Result<void> remembered =
+				        m_Capture->Remember(index, configuration.Resolution, configuration.Format);
+				    !remembered)
+				{
+					spdlog::warn("output {} cannot be captured: {}", index, remembered.error().Sentence());
+				}
+			}
+
+			m_Loop->Capture(&*m_Capture);
+
+			spdlog::info("ctrl+alt+esc s writes a frame to {}", m_Options.CaptureDirectory);
+		}
 
 		// Last, because it lays the world out against the modes the backend *achieved* rather than the
 		// ones that were asked for, and `Configure` above is where those stop differing.
@@ -1730,6 +1775,30 @@ private:
 				else
 				{
 					spdlog::info("nothing is being recorded; start gyro with --trace");
+				}
+
+				break;
+
+			case Input::ChordAction::Screenshot:
+				if (m_Capture)
+				{
+					// **Armed here and taken by the frame thread**, which is the only party that can read a
+					// target back — and then woken, because a screen nobody is animating owes no frame and
+					// would otherwise take the picture whenever something else happened to need one. The
+					// doorbell is dispatch's existing one rather than a fourth source: what it means to the
+					// frame side is *step*, and a step is exactly what a capture is waiting for.
+					if (const std::size_t armed = m_Capture->Request(); armed != 0)
+					{
+						m_Publication.Raise();
+					}
+					else
+					{
+						spdlog::info("a capture of every output is already outstanding");
+					}
+				}
+				else
+				{
+					spdlog::info("captures are off; start gyro with --capture");
 				}
 
 				break;
@@ -2181,7 +2250,7 @@ private:
 
 			case BackendKind::Nested:
 			{
-				auto nested = std::make_unique<NestedBackend>(m_Clock, m_Options.Governor);
+				auto nested = std::make_unique<NestedBackend>(m_Clock, m_Options.Governor, m_Options.Capture);
 
 				if (const Result<void> opened = nested->Open(); !opened)
 				{
@@ -2195,7 +2264,7 @@ private:
 
 			case BackendKind::Drm:
 			{
-				auto drm = std::make_unique<DrmBackend>(m_Clock, m_Options.Governor);
+				auto drm = std::make_unique<DrmBackend>(m_Clock, m_Options.Governor, m_Options.Capture);
 
 				if (const Result<void> opened = drm->Open(m_Options.Device); !opened)
 				{
@@ -2854,6 +2923,11 @@ private:
 	// the root keeping hold of the one extra thing only the dump has — an extent per output, so the
 	// warning about frames it could not write can name the rate that would fix it.
 	DumpBackend* m_Dump = nullptr;
+
+	// Input/Chord.h's screenshot verb, or nothing where `--capture` was not passed. Held by value
+	// because its writer thread is joined in its destructor and the ordering that makes that safe is
+	// this struct's declaration order — it is destroyed before the loop that hands it pixels.
+	std::optional<PamCapture> m_Capture;
 
 	std::array<BoundOutput, MaxOutputs> m_Bound{};
 	std::array<FrameOutput, MaxOutputs> m_Outputs{};

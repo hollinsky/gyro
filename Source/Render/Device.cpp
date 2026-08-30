@@ -579,6 +579,10 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 
 	vkGetDeviceQueue(device.m_Device, device.m_QueueFamily, 0, &device.m_Queue);
 
+	// Carried out of the policy because every party that decides a target's usage — the modifier query
+	// and both allocation arms — runs long after this call has returned.
+	device.m_Readable = policy.Readable;
+
 	// Decision 142's clock reader, resolved from the DRM node the device reported. It warns and comes up
 	// invalid on a driver it does not cover rather than failing device creation — a machine whose GPU
 	// clock gyro cannot read is one that draws every frame and files a zero operating point, not one
@@ -905,12 +909,13 @@ namespace
 // the tiling lists it, for the reason the import states: demanding it unconditionally would refuse a
 // compressed modifier that renders perfectly well, and what such a modifier costs is a blur rather
 // than a screen.
-[[nodiscard]] VkImageUsageFlags ExportUsage(VkFormatFeatureFlags features) noexcept
+[[nodiscard]] VkImageUsageFlags ExportUsage(VkFormatFeatureFlags features, bool readable) noexcept
 {
 	const bool samplable = (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
 
 	return VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-	       (samplable ? VkImageUsageFlags{ VK_IMAGE_USAGE_SAMPLED_BIT } : VkImageUsageFlags{ 0 });
+	       (samplable ? VkImageUsageFlags{ VK_IMAGE_USAGE_SAMPLED_BIT } : VkImageUsageFlags{ 0 }) |
+	       (readable ? VkImageUsageFlags{ VK_IMAGE_USAGE_TRANSFER_SRC_BIT } : VkImageUsageFlags{ 0 });
 }
 
 // Whether the driver will create an *exportable* image with this modifier, usage and extent.
@@ -1022,7 +1027,7 @@ bool VulkanDevice::Exports(PixelFormat format) const noexcept
 		m_Description.StatesModifiers,
 		vulkan,
 		PixelSize<DeviceSpace>{ 1, 1 },
-		ExportUsage(Wanted),
+		ExportUsage(Wanted, m_Readable),
 		format.Modifier
 	);
 }
@@ -1118,7 +1123,7 @@ VulkanDevice::Export(PixelSize<DeviceSpace> size, std::uint32_t code, std::span<
 	// stops being readable on a machine where every modifier gyro would actually pick was fine.
 	constexpr VkFormatFeatureFlags Wanted =
 		VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-	const VkImageUsageFlags usage = ExportUsage(Wanted);
+	const VkImageUsageFlags usage = ExportUsage(Wanted, m_Readable);
 
 	for (const std::uint64_t modifier : modifiers)
 	{

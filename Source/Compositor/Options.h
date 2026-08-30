@@ -108,6 +108,12 @@ inline constexpr std::string_view DefaultDumpDirectory = "gyro-frames";
 // directory a month from now needs the extension to tell them what to do with it.
 inline constexpr std::string_view DefaultTracePath = "gyro.pftrace";
 
+// Where `--capture` puts a screenshot when the command line does not say. Relative for the dump
+// directory's reason, and a different directory from that one because the two are different things:
+// `--backend=dump` writes every frame an output presents, and this writes the frames a person asked
+// for by name.
+inline constexpr std::string_view DefaultCaptureDirectory = "gyro-captures";
+
 struct Options
 {
 	BackendKind Backend = BackendKind::Auto;
@@ -237,6 +243,19 @@ struct Options
 	// it being armed at all.
 	std::string TracePath{ DefaultTracePath };
 	bool TraceAtExit = false;
+
+	// Where `Ctrl+Alt+Esc S` writes, and whether the verb works at all.
+	//
+	// **A flag rather than always on, and Seam/Capture.h is where that argument lives.** Reading a
+	// composite back needs the target created for it, target usage is fixed at allocation, and asking
+	// for it unconditionally puts an extra bit into the modifier negotiation between the Vulkan device
+	// and the panel on every run — where a modifier dropped from that list is a window that stops being
+	// scanned out directly. That is a cost on every frame of every session, paid for a key that fires
+	// when somebody is hunting a bug. So a run says up front that it wants captures, exactly as it says
+	// up front that it wants a trace written at exit, and the chord says which flag is missing where it
+	// is off rather than doing nothing visible.
+	std::string CaptureDirectory;
+	bool Capture = false;
 
 	// Snapshot on the first frame that lands a refresh after the one it was aimed at. The miss being
 	// hunted recurs about as often as the ring is long, so waiting for it with a finger on `SIGUSR1`
@@ -762,6 +781,20 @@ inline constexpr double MaximumArcminutes = 10.0;
 			continue;
 		}
 
+		if (Detail::Matches(argument, "--capture", value))
+		{
+			// Bare is the default directory, for the reason `--trace` bare is the default path: somebody
+			// typing the flag wants the pictures rather than an argument about where they go.
+			options.Capture = true;
+
+			if (!value.empty())
+			{
+				options.CaptureDirectory = value;
+			}
+
+			continue;
+		}
+
 		if (Detail::Matches(argument, "--trace-buffer", value))
 		{
 			const Result<std::size_t> bytes = Detail::ParseBytes(value);
@@ -994,6 +1027,11 @@ inline constexpr double MaximumArcminutes = 10.0;
 	// A destination under a backend that writes nothing is the case this header refuses to accept
 	// quietly: somebody who typed `--dump` believes frames are being written, and a run that says
 	// nothing leaves them looking for a directory that will never appear.
+	if (options.Capture && options.CaptureDirectory.empty())
+	{
+		options.CaptureDirectory = DefaultCaptureDirectory;
+	}
+
 	if (!options.DumpDirectory.empty() && options.Backend != BackendKind::Dump)
 	{
 		return Failure(EINVAL, "--dump names where the dump backend writes, so it wants --backend=dump");

@@ -59,6 +59,16 @@ enum class ChordAction : std::uint8_t
 
 	// Write what the trace ring is holding, which is the same request `SIGUSR1` makes.
 	Trace,
+
+	// Write what the panel is showing, as a PAM per output.
+	//
+	// **The debug capture rather than a screenshot feature.** It forces the frame it captures to
+	// composite everything — see Frame/Loop.h's `m_Capture` — so that the file is the whole screen
+	// rather than whatever the GPU happened to be responsible for once the display engine took its
+	// share. That costs a frame drawn differently from its neighbours, which is why this is a verb
+	// behind the leader and not a thing a person does every day: if compositing and promotion ever
+	// disagree, pressing this key is *visible* as a flash. That flash is the diagnostic.
+	Screenshot,
 };
 
 // What the caller does with a key after the chord has seen it.
@@ -144,8 +154,8 @@ private:
 		held = event.Pressed ? static_cast<std::uint8_t>(held | bit) : static_cast<std::uint8_t>(held & ~bit);
 	}
 
-	// The verbs, and there are two of them on purpose: a recovery console and a gym cycle would both
-	// name things that do not exist, and a key bound to a stub is worse than one that says nothing.
+	// The verbs, and each one names something that exists: a recovery console and a gym cycle would
+	// both name things that do not, and a key bound to a stub is worse than one that says nothing.
 	// `Esc` is spelled out as *back out* rather than left to the `None` below it, because leaving a
 	// mode is the one thing a person tries first and it should not depend on a fallthrough.
 	[[nodiscard]] static constexpr ChordAction Verb(std::uint32_t code) noexcept
@@ -156,6 +166,8 @@ private:
 				return ChordAction::Quit;
 			case KEY_T:
 				return ChordAction::Trace;
+			case KEY_S:
+				return ChordAction::Screenshot;
 			default:
 				return ChordAction::None;
 		}

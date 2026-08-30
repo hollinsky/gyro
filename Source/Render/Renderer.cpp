@@ -695,6 +695,16 @@ Result<void> VulkanRenderer::BindTargets(std::span<const RenderTarget> targets, 
 		}
 	}
 
+	// Seam/Capture.h's staging, and it is reserved here for the same reason the unfused intermediates
+	// above are: this is where the shape is known and it is not inside a frame. Only where the policy
+	// asked for readback, and a failure is *not* the bind's — a machine that cannot stage a capture
+	// still composites, and refusing to come up over a debugging convenience would be the tail wagging
+	// the compositor. It is logged by whoever presses the key, through the refusal `ReadTarget` gives.
+	if (m_Device->TargetsAreReadable() && m_TargetCount > 0)
+	{
+		(void)m_Readback.Open(*m_Device, m_Slots[0].Size, targets[0].Format);
+	}
+
 	return {};
 }
 
@@ -771,9 +781,16 @@ Result<void> VulkanRenderer::Import(const RenderTarget& target, ColorState outpu
 	// copy of it, so a dressed output needs its own target legible to a shader. Asking for it
 	// unconditionally would refuse the bind on a compressed modifier that renders fine, so it is asked
 	// for where the driver lists it and the material falls to its tint where it does not.
+	//
+	// **`TRANSFER_SRC` where the policy asked for readback**, and it has to be asked for on both arms
+	// or neither: Render/Device.h's export path states the same set, and an image allocated under a
+	// narrower usage than the one it is imported under is a difference the driver is entitled to
+	// notice. Seam/Capture.h is why it is a policy rather than always on.
 	const VkImageUsageFlags usage =
 		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-		(samplable ? VkImageUsageFlags{ VK_IMAGE_USAGE_SAMPLED_BIT } : VkImageUsageFlags{ 0 });
+		(samplable ? VkImageUsageFlags{ VK_IMAGE_USAGE_SAMPLED_BIT } : VkImageUsageFlags{ 0 }) |
+		(m_Device->TargetsAreReadable() ? VkImageUsageFlags{ VK_IMAGE_USAGE_TRANSFER_SRC_BIT } :
+	                                      VkImageUsageFlags{ 0 });
 
 	// Render/Device.h owns the create info, because stating a layout the presenter already committed
 	// to is the same problem here and in Render/Textures.h and the arm that has no modifier to state
@@ -966,6 +983,11 @@ Result<void> VulkanRenderer::Settle()
 
 void VulkanRenderer::ReleaseTargets() noexcept
 {
+	// Before the early return, because a reservation outlives an empty target set: a bind that failed
+	// leaves the count at zero and the staging buffer still holding a mapping onto a device the root
+	// is about to tear down.
+	m_Readback.Reset();
+
 	if (m_Device == nullptr || !m_Device->IsValid() || m_TargetCount == 0)
 	{
 		m_TargetCount = 0;
@@ -2255,6 +2277,51 @@ bool VulkanRenderer::Reached(std::uint64_t value) const noexcept
 	}
 
 	return counter >= value;
+}
+
+Result<void> VulkanRenderer::ReadTarget(const TargetReadback& request)
+{
+	if (!m_Readback.IsOpen())
+	{
+		return Failure(ENOTSUP, "this device's targets were not created for readback; start gyro with --capture");
+	}
+
+	if (request.Target >= m_TargetCount || m_Slots[request.Target].Image == VK_NULL_HANDLE)
+	{
+		return Failure(EINVAL, "reading back a target that is not bound");
+	}
+
+	// **The composite's own work, waited for here rather than by the copy's submit.** A submit-time
+	// wait would want the timeline as a `VkSemaphore` in a `VkTimelineSemaphoreSubmitInfo`, which is
+	// the same wait one indirection further away — and this way the wait and the copy are two failures
+	// with two sentences rather than one that cannot say which half stalled.
+	//
+	// A point this renderer did not issue is treated as reached, which is `IsComplete`'s rule above and
+	// is right for the same reason: of the two answers available, the one that does not park a
+	// `SCHED_FIFO` thread forever on a descriptor nothing here will ever signal.
+	if (!request.After.IsImmediate() && m_Timeline != VK_NULL_HANDLE && request.After.Timeline == m_TimelineFd.Borrow())
+	{
+		const std::uint64_t value = request.After.Value;
+		const VkSemaphoreWaitInfo wait{ .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+			                            .pNext = nullptr,
+			                            .flags = 0,
+			                            .semaphoreCount = 1,
+			                            .pSemaphores = &m_Timeline,
+			                            .pValues = &value };
+
+		constexpr std::uint64_t Second = 1'000'000'000;
+
+		if (const Result<void> reached = Check(vkWaitSemaphores(m_Device->Handle(), &wait, Second), "vkWaitSemaphores");
+		    !reached)
+		{
+			return reached;
+		}
+	}
+
+	// `GENERAL`, which is what this renderer keeps a composite in for its whole life — see `Transfer`
+	// at the top of this file for why there is no optimal layout for an image somebody else may be
+	// scanning out.
+	return m_Readback.Read(m_Slots[request.Target].Image, VK_IMAGE_LAYOUT_GENERAL, request.Into, request.Stride);
 }
 
 bool VulkanRenderer::IsComplete(SyncPoint point) const

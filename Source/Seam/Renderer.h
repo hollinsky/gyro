@@ -17,6 +17,7 @@
 #include "Geometry/AxisTransform.h"
 #include "Geometry/Region.h"
 #include "Geometry/Space.h"
+#include "Seam/Capture.h"
 #include "Seam/Dressing.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/SyncPoint.h"
@@ -599,6 +600,26 @@ public:
 	// and the null renderer the schedulability sweep runs — writes nothing and returns zero forever,
 	// which is the correct report rather than a stub: its work has no second device to cost.
 	[[nodiscard]] virtual std::size_t CollectCosts(std::span<GpuCost> into) = 0;
+
+	// Read a target back as linear rows, for Seam/Capture.h's debug capture and nothing else.
+	//
+	// **Defaulted to a refusal rather than made pure, which is the one place this seam bends.** Every
+	// other verb here is answered by every renderer because every renderer is asked it every frame;
+	// this one is asked on the frames a person presses a key on, and there are nine implementations of
+	// this interface of which seven are test doubles that draw nothing and have nothing to read back.
+	// Obliging each of them to write the same refusal would be noise standing where a rule should be —
+	// the same argument `IPresenter::LayerCeiling` already makes for its own default one file over.
+	//
+	// **It blocks on `request.After`**, which is the opposite of `IsComplete`'s rule directly above and
+	// is deliberate: that poll exists so the frame thread never waits on the GPU, and this is the one
+	// caller that has already decided to. Seam/Capture.h carries the argument.
+	//
+	// `ENOTSUP` from a renderer with nothing to read, `EINVAL` for a target that is not bound or a slab
+	// too small for the rows, and `ENODEV` where the device is gone.
+	[[nodiscard]] virtual Result<void> ReadTarget([[maybe_unused]] const TargetReadback& request)
+	{
+		return Failure(ENOTSUP, "reading a target back on a renderer that cannot");
+	}
 };
 
 [[nodiscard]] constexpr std::string_view Name(RenderMode mode) noexcept

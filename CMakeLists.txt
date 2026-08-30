@@ -835,6 +835,7 @@ gyro_add_module(Render
 		GpuClock.cpp
 		GpuFloor.cpp
 		Pipeline.cpp
+		Readback.cpp
 		Renderer.cpp
 		Textures.cpp
 		Unfused.cpp
@@ -1127,12 +1128,14 @@ gyro_add_module(Compositor
 		Dispatch
 		Trace
 	SOURCES
+		Capture.cpp
 		Compositor.cpp
 		RealTime.cpp
 		Uring.cpp
 		Wait.cpp
 	TESTS
 		Binding.Test.cpp
+		Capture.Test.cpp
 		Options.Test.cpp
 		Schedule.Test.cpp
 		Uring.Test.cpp
@@ -1304,6 +1307,7 @@ add_executable(IntegrationTests
 	Source/Integration/SceneRoundTrip.Test.cpp
 	Source/Integration/ProtocolRoundTrip.Test.cpp
 	Source/Integration/Schedulability.Test.cpp
+	Source/Integration/TargetCapture.Test.cpp
 	Source/Integration/VirtualComposite.Test.cpp
 	Source/Integration/WaylandBindings.Test.cpp
 )

@@ -74,6 +74,32 @@ GYRO_TEST(Chord, TracesOnT)
 	GYRO_CHECK(keyboard.Press(KEY_T).Action == ChordAction::Trace);
 }
 
+GYRO_TEST(Chord, ScreenshotsOnS)
+{
+	Keyboard keyboard;
+
+	GYRO_CHECK(Arm(keyboard).Consumed);
+
+	const ChordVerdict shot = keyboard.Press(KEY_S);
+
+	GYRO_CHECK(shot.Action == ChordAction::Screenshot);
+	GYRO_CHECK(shot.Consumed);
+	GYRO_CHECK(!keyboard.IsArmed());
+}
+
+// `s` unarmed is a letter and nothing else, which is the property every verb has to have: the leader
+// is what makes a key gyro's, and a key that screenshotted whenever it was pressed would make the
+// compositor unusable for typing.
+GYRO_TEST(Chord, LeavesAnUnarmedSAlone)
+{
+	Keyboard keyboard;
+
+	const ChordVerdict typed = keyboard.Press(KEY_S);
+
+	GYRO_CHECK(typed.Action == ChordAction::None);
+	GYRO_CHECK(!typed.Consumed);
+}
+
 GYRO_TEST(Chord, SurvivesTheModifiersBeingReleasedFirst)
 {
 	// What a hand actually does on the way to the letter. A chord that disarmed here is one nobody

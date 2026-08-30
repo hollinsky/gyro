@@ -56,7 +56,11 @@ public:
 	{
 		for (std::uint32_t index = 0; index < m_Count; ++index)
 		{
-			m_Targets[index] = RenderTarget{ .Size = { 2560, 1440 }, .Format = {}, .Memory = MappedImage{} };
+			// A real format rather than an empty one, because a capture derives its slab's stride from the
+			// target's sample width and a zero there is a target nothing can be read out of.
+			m_Targets[index] = RenderTarget{ .Size = { 2560, 1440 },
+				                             .Format = PixelFormat{ FormatXrgb8888, 0, ModifierLinear },
+				                             .Memory = MappedImage{} };
 		}
 	}
 
@@ -200,7 +204,27 @@ public:
 		return count;
 	}
 
+	[[nodiscard]] Result<void> ReadTarget(const TargetReadback& request) override
+	{
+		++Reads;
+		ReadFrom = request.Target;
+		ReadStride = request.Stride;
+		ReadBytes = request.Into.size();
+
+		if (RefuseRead)
+		{
+			return Failure(ENOTSUP, "fake renderer cannot read a target back");
+		}
+
+		return {};
+	}
+
 	int Records = 0;
+	int Reads = 0;
+	bool RefuseRead = false;
+	std::uint32_t ReadFrom = 0;
+	std::uint32_t ReadStride = 0;
+	std::size_t ReadBytes = 0;
 	bool Refuse = false;
 	int Code = ENOMEM;
 	std::uint32_t RecordedTarget = 0;
@@ -2307,4 +2331,185 @@ GYRO_TEST(FrameLoop, AFullyPromotedFrameTheDriverRefusesStillFindsATarget)
 
 	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 1 });
 	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 1 });
+}
+
+namespace
+{
+// Seam/Capture.h's sink with the composition root's half replaced by a record of what happened. What
+// is being checked here is the *loop's* contribution — the forced composite, the whole-screen damage,
+// the readback between the record and the present — rather than anything about files, which is
+// Compositor/Capture.Test.cpp's.
+class RecordingCapture final : public ICaptureSink
+{
+public:
+	[[nodiscard]] bool Wanted(std::uint32_t output) const noexcept override { return Armed && output == 0; }
+
+	[[nodiscard]] std::span<std::byte>
+	Reserve(std::uint32_t, PixelSize<DeviceSpace> size, PixelFormat, std::uint32_t stride) noexcept override
+	{
+		++Reserves;
+		ReservedSize = size;
+		ReservedStride = stride;
+
+		if (Starve)
+		{
+			return {};
+		}
+
+		Slab.assign(static_cast<std::size_t>(stride) * static_cast<std::size_t>(size.Height), std::byte{});
+
+		return Slab;
+	}
+
+	void Publish(std::uint32_t, std::uint64_t sequence, bool complete) noexcept override
+	{
+		++Publishes;
+		PublishedSequence = sequence;
+		PublishedComplete = complete;
+		Armed = false;
+	}
+
+	bool Armed = false;
+	bool Starve = false;
+
+	int Reserves = 0;
+	int Publishes = 0;
+
+	PixelSize<DeviceSpace> ReservedSize{};
+	std::uint32_t ReservedStride = 0;
+	std::uint64_t PublishedSequence = 0;
+	bool PublishedComplete = false;
+
+	std::vector<std::byte> Slab;
+};
+} // namespace
+
+// The whole point of the debug capture: a frame that would have put a window on a plane draws every
+// item itself, so the target that is read back is the entire screen rather than the part the display
+// engine was not going to do.
+GYRO_TEST(FrameLoop, ACaptureForcesTheWholeScreenThroughTheComposite)
+{
+	Harness harness;
+	RecordingCapture capture;
+	const std::array<DrawItem, 2> items{ Composited(), Promotable({ { 100, 100 }, { 640, 480 } }) };
+
+	harness.Presenter.Planes = 2;
+	harness.Evaluator.Items = items;
+	capture.Armed = true;
+	harness.Loop.Capture(&capture);
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	// Both items composited, where the identical frame without a capture promotes the top one — see
+	// `PromotesTheTopItemOntoAPlaneAndLeavesTheRestToTheGpu` directly above.
+	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 2 });
+
+	GYRO_REQUIRE(harness.Presenter.PresentedLayers.size() == 1);
+	GYRO_CHECK(!harness.Presenter.PresentedLayers[0].Target.IsTexture());
+
+	// And nothing was proposed to the hardware, because there was nothing to promote.
+	GYRO_CHECK_EQ(harness.Presenter.Tests, 0);
+}
+
+GYRO_TEST(FrameLoop, ACaptureReadsTheTargetItJustRecordedInto)
+{
+	Harness harness;
+	RecordingCapture capture;
+
+	capture.Armed = true;
+	harness.Loop.Capture(&capture);
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Renderer.Reads, 1);
+	GYRO_CHECK_EQ(harness.Renderer.ReadFrom, harness.Renderer.RecordedTarget);
+
+	// The panel's own extent at a tight stride, which is what Virtual/Pam.h writes.
+	GYRO_CHECK_EQ(capture.ReservedSize.Width, 2560);
+	GYRO_CHECK_EQ(capture.ReservedSize.Height, 1440);
+	GYRO_CHECK_EQ(capture.ReservedStride, std::uint32_t{ 2560 * 4 });
+	GYRO_CHECK_EQ(harness.Renderer.ReadBytes, std::size_t{ 2560 } * 4 * 1440);
+
+	// Published as complete, and named for the frame the rest of the row is named for.
+	GYRO_CHECK_EQ(capture.Publishes, 1);
+	GYRO_CHECK(capture.PublishedComplete);
+	GYRO_CHECK_EQ(capture.PublishedSequence, harness.Output().Last().Sequence);
+}
+
+// A screen nobody is animating owes no frame. Without the damage the capture adds, the picture would
+// be taken whenever something else next happened to need one — which on an idle desktop is never.
+GYRO_TEST(FrameLoop, ACaptureWakesAnOutputThatWantedNothing)
+{
+	Harness harness;
+	RecordingCapture capture;
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+
+	// No damage and nothing published: the loop declines.
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE(harness.Renderer.Records == 0);
+
+	capture.Armed = true;
+	harness.Loop.Capture(&capture);
+
+	harness.Clock.Set(At(1012));
+
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Renderer.Records, 1);
+	GYRO_CHECK_EQ(harness.Renderer.Reads, 1);
+}
+
+// The frame still has to reach the glass. A capture perturbs the frame it takes and is allowed to; it
+// is not allowed to cost the person in front of the screen the frame itself.
+GYRO_TEST(FrameLoop, ARefusedReadbackStillPresentsTheFrame)
+{
+	Harness harness;
+	RecordingCapture capture;
+
+	capture.Armed = true;
+	harness.Renderer.RefuseRead = true;
+	harness.Loop.Capture(&capture);
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
+	GYRO_CHECK_EQ(capture.Publishes, 1);
+	GYRO_CHECK(!capture.PublishedComplete);
+}
+
+// A sink with no slab to give is an ordinary answer rather than a fault, per Seam/Capture.h — the
+// frame has already been forced to composite and the honest thing left is to draw it.
+GYRO_TEST(FrameLoop, AStarvedCaptureDrawsTheFrameAndReadsNothing)
+{
+	Harness harness;
+	RecordingCapture capture;
+
+	capture.Armed = true;
+	capture.Starve = true;
+	harness.Loop.Capture(&capture);
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Renderer.Reads, 0);
+	GYRO_CHECK_EQ(capture.Publishes, 0);
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
 }

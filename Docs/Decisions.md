@@ -13502,3 +13502,76 @@ And the corner quadrature decision 132 is mostly about *still* has never execute
 tree sets `DrawItem::Radius` to anything but zero. When the first rounded corner reaches the screen it
 brings `ShadowPanel`'s `exp`, `sin` and `cos` with it, six nodes at a time, and this entry's argument
 applies to them before they are measured rather than after.
+
+### 170. The debug capture reads the target back; a screencapture re-renders, and the two must stay separate
+
+`Ctrl+Alt+Esc S` writes what is on the glass as a PAM per output, and it does it by forcing the
+captured frame to composite the entire screen and then copying that target off the GPU. It is not the
+mechanism a person will one day use to record their desktop, and the reason to say so in an entry is
+that the obvious reading — *a screenshot is a screenshot* — leads to one path serving both, which is
+wrong in a way that only shows up when somebody is chasing the bug the verb exists to photograph.
+
+**A day-to-day capture is [decision 64](#64-the-scene-is-instantiable-an-instance-has-identity-a-clock-and-a-permission)'s instantiation and nothing else.**
+Render this subtree, under this transform, into a target the consumer owns. The panel's frame is never
+touched, so plane promotion survives: the display engine goes on scanning out a client's buffer
+directly while the GPU separately draws a flattened copy for the recorder. That mechanism can capture
+one window, capture at a rate the panel is not running at, and serve two consumers at once. It also
+costs a full composite per captured frame and takes the permission decision 64 puts on the primitive.
+
+**What it cannot do is prove its pixels are the pixels that were scanned out**, because it is a second
+computation of the same picture. That proof is the whole of what the debug verb is for, and it is what
+makes the two different mechanisms rather than one with a flag.
+
+**The perturbation is the feature.** `Assign` is called with a ceiling of zero, so every item the
+display engine would have taken onto a plane is drawn by the GPU instead. Where compositing and
+promotion agree, the captured frame is identical to its neighbours and nobody sees anything. Where
+they disagree — which is the bug class this is reached for — the person watching sees a flash at the
+instant of capture, and that flash is a finding. A shipping capture path may not behave this way, and
+that alone settles the separation without any argument about pixels.
+
+*Rejected: forcing the composite for the day-to-day path too.* This was raised and it is nearly right:
+a forced composite and a separate instance run the same draw list through the same pipeline, so the
+pixels are identical and the earlier claim that the blend arithmetic differs was about promotion
+versus compositing rather than about these two. What survives the correction is not fidelity but
+behaviour — the flash above, a recording that holds the panel out of plane promotion for its whole
+duration rather than for one frame, and the fact that a readback of the panel's own target is one size
+at one cadence with every window already flattened into it.
+
+**The frame thread blocks on the composite's fence**, between the record and the present, which is the
+only window where the pixels exist and the target is not yet something a display engine is reading.
+That very likely misses the frame. It is accepted because the verb already perturbs the frame it takes
+and one late frame at an instant a person chose is cheaper than the alternative: a deferred readback
+buys back that frame in exchange for a slab held across iterations and a target the presenter cannot
+reuse, which is machinery on the frame path paid for by a key almost nobody presses.
+
+**Readback is a device policy rather than a capability, and `--capture` is what turns it on.** A copy
+source needs `VK_IMAGE_USAGE_TRANSFER_SRC_BIT` and usage is fixed at allocation, so the bit has to be
+asked for before anybody presses the key. Asking for it on every run puts it into the modifier
+negotiation between the Vulkan device and the panel — and a modifier the driver will not create under
+that usage is one dropped from the list the two have to agree on, which is a window that stops being
+scanned out directly. That is a cost on every frame of every session, paid for a debugging
+convenience. So the policy is off by default and the chord says which flag is missing rather than
+doing nothing visible, which is the shape `--trace` already has.
+
+*Rejected: `VK_EXT_host_image_copy` in the read direction.* `vkCopyImageToMemoryEXT` needs
+`VK_IMAGE_USAGE_HOST_TRANSFER_BIT`, which is the same allocation-time problem one bit over, and it is
+an extension a target's modifier may not carry where `TRANSFER_SRC` does.
+
+*Rejected: mapping the target and reading it directly.* A scanout image is tiled under a modifier and
+its bytes are not a picture. The driver is the only party obliged to know the tiling, which is why the
+copy is `vkCmdCopyImageToBuffer` into a linear buffer rather than arithmetic on this side.
+
+**What no readback on this hardware can see** is everything downstream of the framebuffer: the CRTC's
+gamma and degamma LUTs, its colour transform matrix, panel dithering, and whatever PSR or FBC do after
+the latch. The DRM mechanism that *would* see them is a writeback connector, where the display engine
+composites and hands the result back as a framebuffer. i915 does not implement one — the machine this
+was written on lists six real connectors and nothing else — so on Intel this is the closest point to
+the glass that exists, and on a SoC that has writeback the honest version of this verb is that
+connector with this one as the fallback. [KernelWishlist.md](KernelWishlist.md) is where that belongs
+if it ever stops being a debugging convenience.
+
+**PAM rather than PNG**, which is Virtual/Pam.h's existing trade taken again rather than reopened: the
+format already has a writer in the tree, it carries alpha and more than eight bits per sample, and
+every image viewer on a Linux box opens one. What it does not open in is a browser, and a person who
+needs one elsewhere runs `magick frame-00000042.pam frame.png`. A stored-block PNG encoder is about
+eighty lines and goes beside Pam.h rather than replacing it, on the day something needs to upload one.

@@ -15,6 +15,7 @@
 #include "Render/Deadline.h"
 #include "Render/Device.h"
 #include "Render/Pipeline.h"
+#include "Render/Readback.h"
 #include "Render/Textures.h"
 #include "Render/Unfused.h"
 #include "Render/Vulkan.h"
@@ -147,6 +148,8 @@ public:
 	[[nodiscard]] Result<Submission> Record(const RecordRequest& request) override;
 
 	[[nodiscard]] bool IsComplete(SyncPoint point) const override;
+
+	[[nodiscard]] Result<void> ReadTarget(const TargetReadback& request) override;
 
 	// Decision 29's `C`, GPU half: every submission whose timestamps have resolved since the last
 	// call, oldest first.
@@ -527,6 +530,10 @@ private:
 	// One timeline for the device's whole life, which is what Seam/SyncPoint.h's borrowed descriptor
 	// requires: *the timeline outlives every point on it*. The descriptor is invalid on a device that
 	// cannot export one, and decision 108 is what that means for the points handed out.
+	// Seam/Capture.h's staging, reserved at `BindTargets` where the target shape is known and left
+	// closed on a device whose policy did not ask for readback — see Render/Readback.h.
+	TargetReadbackBuffer m_Readback;
+
 	VkSemaphore m_Timeline = VK_NULL_HANDLE;
 	Fd m_TimelineFd;
 

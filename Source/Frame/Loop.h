@@ -25,6 +25,7 @@
 #include "Publication/Reader/Reader.h"
 #include "Publication/Return.h"
 #include "Publication/Ring.h"
+#include "Seam/Capture.h"
 #include "Seam/EventSource.h"
 #include "Seam/OutputConfiguration.h"
 #include "Seam/PresentationInfo.h"
@@ -688,6 +689,15 @@ public:
 	// change to accommodate it.
 	void Listen(std::span<IEventSource* const> sources) noexcept { m_Sources = sources; }
 
+	// Where a debug capture's pixels go, or null where the run was not asked for captures.
+	//
+	// **Owned by the composition root, because the slab and the writer thread are.** Seam/Capture.h
+	// carries the whole argument for why this is not the day-to-day screencapture and must not become
+	// it; what the loop contributes is the two things only it can — forcing the captured frame to
+	// composite the entire screen, and reading the target back between the record and the present,
+	// which is the last moment the pixels are provably the ones about to be latched.
+	void Capture(ICaptureSink* sink) noexcept { m_Capture = sink; }
+
 	// One iteration. Returns the wake the next one is owed at; `Wake::Never()` arms nothing.
 	[[nodiscard]] Wake Step()
 	{
@@ -1004,6 +1014,27 @@ private:
 			return;
 		}
 
+		// **Whether this output owes a capture, asked once and used three times.** It decides the ceiling
+		// below, it forces the damage to the whole screen, and it is what the readback after the record
+		// is conditional on — and asking the sink once keeps those three from disagreeing inside one
+		// frame.
+		//
+		// **Above the `Wants` gate rather than beside its other two uses**, because a screen nobody is
+		// animating owes no frame and would otherwise never take the picture: the damage this adds is
+		// what the gate reads. It is below the three gates above it on purpose — those are *can a frame
+		// be made at all*, and a capture that jumped a full commit queue or an unscheduled clock would be
+		// a debug verb rearranging the schedule it was pressed to look at.
+		const bool capturing = m_Capture != nullptr && m_Capture->Wanted(static_cast<std::uint32_t>(index));
+
+		if (capturing)
+		{
+			// The composite is only obliged to draw the damage, and a capture wants the picture rather
+			// than the delta: without this the file is last frame's target with this frame's changes
+			// painted into it, which is *nearly* right and therefore the worst kind of wrong in an image
+			// somebody is about to reason about.
+			output.m_Damage.Add(PixelRect<DeviceSpace>{ {}, output.m_Configuration.Resolution });
+		}
+
 		// `Assess` answers whether a frame *can* be made and never whether one is *wanted* — it is
 		// decision 35's check and it never asks what anything costs to want. This is the other half, and
 		// it is the scene's `Wake` rather than a second opinion about timing.
@@ -1132,7 +1163,18 @@ private:
 
 		// **Decision 152's partition: which of these items the display engine draws and which the GPU
 		// does.** Recomputed from this frame's list alone, with nothing carried over — see Frame/Assign.h.
-		Partition partition = Assign(list.Items, output.m_Presenter->LayerCeiling(), output.m_Configuration.Color);
+		// **A ceiling of zero where a capture is owed, which is how the whole screen ends up in one
+		// image.** `Assign` promotes a suffix of the draw list onto planes, and anything it promotes is
+		// a window the composite is *not* responsible for — read the target back on such a frame and the
+		// picture has holes where the display engine was going to do the work. Zero says promote
+		// nothing, so the GPU draws every item and the target is the screen.
+		//
+		// This is the perturbation Seam/Capture.h declares and the reason the verb is a debug hatch: the
+		// captured frame is drawn by a different path from its neighbours, and if the two ever disagree
+		// the disagreement is visible on the glass at the instant of capture.
+		const std::uint32_t ceiling = capturing ? 0 : output.m_Presenter->LayerCeiling();
+
+		Partition partition = Assign(list.Items, ceiling, output.m_Configuration.Color);
 
 		// **What the count below cannot say.** A frame that promoted nothing and a frame whose top window
 		// grew a shadow read the same on a counter, and the second is the one somebody is looking for.
@@ -1363,6 +1405,20 @@ private:
 			// asks a different question of it.
 			layers[0].Acquire = submission->Point;
 			layers[0].Damage = output.m_Damage;
+
+			// **Between the record and the present, which is the only window where both facts hold**: the
+			// pixels exist, and the target is not yet the thing a display engine is reading. Reading after
+			// the present would be reading a framebuffer that has been handed to the panel and may already
+			// have been handed back out of the ring.
+			//
+			// It stalls this thread on the composite's fence — see Seam/Capture.h — so the frame it
+			// captures very likely misses its deadline. That is accepted rather than worked around: a
+			// capture perturbs the frame it takes either way, and one late frame at an instant a person
+			// chose is cheaper than a slab held across iterations and a target the presenter cannot reuse.
+			if (capturing)
+			{
+				CaptureTarget(output, index, *composite, submission->Point, decision.Sequence);
+			}
 		}
 
 		{
@@ -1700,6 +1756,54 @@ private:
 	// wakes a reserve ahead of the frame it is serving, so an instant that has not arrived yet is
 	// precisely the case this exists to admit. Testing `IsDue(now)` here would refuse every frame at
 	// exactly the moment the schedule woke up to draw it.
+	// Read the composite back and hand it over. Everything that could allocate or open a file is the
+	// sink's and happens on the sink's own thread; what runs here is a reserve, a copy and a publish.
+	void CaptureTarget(
+		FrameOutput& output,
+		std::size_t index,
+		std::uint32_t target,
+		SyncPoint point,
+		std::uint64_t sequence
+	) noexcept
+	{
+		const PixelSize<DeviceSpace> size = output.m_Presenter->Targets()[target].Size;
+		const PixelFormat format = output.m_Presenter->Targets()[target].Format;
+		const std::uint32_t bytesPerPixel = DecodableBytesPerPixel(format.Code);
+
+		if (bytesPerPixel == 0)
+		{
+			return;
+		}
+
+		// Tight, which is the stride Virtual/Pam.h writes and the one a reader of the slab can derive
+		// from the format without being told.
+		const std::uint32_t stride = static_cast<std::uint32_t>(size.Width) * bytesPerPixel;
+		const std::uint32_t at = static_cast<std::uint32_t>(index);
+		const std::span<std::byte> into = m_Capture->Reserve(at, size, format, stride);
+
+		if (into.empty())
+		{
+			// An ordinary answer rather than a fault, per Seam/Capture.h: the frame has already been
+			// forced to composite and the honest thing left is to draw it.
+			return;
+		}
+
+		const Result<void> read =
+			output.m_Renderer->ReadTarget({ .Target = target, .After = point, .Into = into, .Stride = stride });
+
+		if (!read)
+		{
+			// The refusal's own words, for the reason every other mark on this row takes them: *the
+			// capture failed* cannot tell a device with no readback usage from a copy that timed out, and
+			// those are a flag to pass at startup and a wedged GPU.
+			TraceMark(
+				read.error().Sentence(), output.m_Trace, TraceTag(static_cast<std::uint64_t>(read.error().Code()))
+			);
+		}
+
+		m_Capture->Publish(at, sequence, read.has_value());
+	}
+
 	[[nodiscard]] bool Wants(const FrameOutput& output, std::size_t index, const FrameDecision& decision) const noexcept
 	{
 		if (!output.m_Damage.IsEmpty() || output.m_Drawn != m_Held)
@@ -1837,5 +1941,9 @@ private:
 	// What the previous iteration answered, kept only so that the next one can say how much of its lead
 	// it still had. It is not read by anything that decides: the loop recomputes the fold from scratch
 	// every iteration, and a wake remembered and acted upon would be a schedule with two authors.
+	// Null on every run that was not asked for captures, which is almost all of them — the check is one
+	// predictable branch per output per frame and buys a loop that carries no capture state at all.
+	ICaptureSink* m_Capture = nullptr;
+
 	Wake m_Armed = Wake::Never();
 };
