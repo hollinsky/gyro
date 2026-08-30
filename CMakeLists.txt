@@ -1067,8 +1067,20 @@ target_link_libraries(Input
 gyro_add_module(Session DISPATCH
 	DEPENDS
 		Core
+	SOURCES
+		Control.cpp
+		Transport.cpp
 	TESTS
+		Control.Test.cpp
 		Handover.Test.cpp
+)
+
+# spdlog for the line naming each session established and each offer refused, which is the only way to
+# tell a machine whose agent never connected from one whose offer gyro would not take. PRIVATE: the
+# module's headers name nothing of it.
+target_link_libraries(Session
+	PRIVATE
+		spdlog::spdlog
 )
 
 gyro_add_module(Compositor

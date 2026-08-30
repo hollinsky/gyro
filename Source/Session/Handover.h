@@ -73,8 +73,11 @@ enum class Opcode : std::uint16_t
 	// gyro to agent, in answer to `Hello`.
 	Welcome = 3,
 
+	// gyro to agent, in answer to `Offer`. The session exists from here.
+	Accepted = 4,
+
 	// gyro to agent, in answer to anything gyro will not do. The connection closes after it.
-	Refused = 4,
+	Refused = 5,
 };
 
 [[nodiscard]] constexpr bool IsOpcode(std::uint16_t value) noexcept
@@ -290,17 +293,20 @@ struct Hello
 	}
 };
 
-// gyro to agent: *I have you, at this version, as this session.*
+// gyro to agent: *I have you, and this is the version we are speaking.*
+//
+// **It answers `Hello` and carries no session, which is the ordering rather than an omission.** A
+// session is created by an accepted offer (Docs/Architecture.md#listener-handover), so there is none
+// yet — and the version has to be settled *before* the offer rather than with it, because the version
+// is what says how the next message is encoded.
 struct Welcome
 {
 	static constexpr Opcode Op = Opcode::Welcome;
-	static constexpr std::size_t PayloadBytes = 8;
+	static constexpr std::size_t PayloadBytes = 4;
 
 	// The version in force, which is the lower of the two ends'. The agent does not compute it: one
 	// party deciding is what keeps the two from disagreeing about what they agreed.
 	std::uint32_t Version = HandoverVersion;
-
-	SessionId Id = SessionId::None;
 
 	[[nodiscard]] std::size_t Encode(std::span<std::byte> into) const noexcept
 	{
@@ -309,7 +315,6 @@ struct Welcome
 		if (total != 0)
 		{
 			StoreWord(into, HeaderBytes, Version);
-			StoreWord(into, HeaderBytes + 4, static_cast<std::uint32_t>(Id));
 		}
 
 		return total;
@@ -322,10 +327,43 @@ struct Welcome
 			return std::nullopt;
 		}
 
-		return Welcome{
-			.Version = LoadWord(message, HeaderBytes),
-			.Id = static_cast<SessionId>(LoadWord(message, HeaderBytes + 4)),
-		};
+		return Welcome{ .Version = LoadWord(message, HeaderBytes) };
+	}
+};
+
+// gyro to agent: *the listener is mine, and you are this session.*
+//
+// **Every message the agent sends is answered, and this is the one that matters.** The agent must not
+// start the session's first client until gyro holds the listener — not because a client would fail, it
+// would sit in the backlog and be served on adoption, but because *refused* and *not answered yet* are
+// otherwise the same silence, and the agent would be waiting on a timeout to tell them apart.
+struct Accepted
+{
+	static constexpr Opcode Op = Opcode::Accepted;
+	static constexpr std::size_t PayloadBytes = 4;
+
+	SessionId Id = SessionId::None;
+
+	[[nodiscard]] std::size_t Encode(std::span<std::byte> into) const noexcept
+	{
+		const std::size_t total = WriteHeader(into, Op, PayloadBytes);
+
+		if (total != 0)
+		{
+			StoreWord(into, HeaderBytes, static_cast<std::uint32_t>(Id));
+		}
+
+		return total;
+	}
+
+	[[nodiscard]] static std::optional<Accepted> Decode(std::span<const std::byte> message) noexcept
+	{
+		if (!IsMessage(message, Op, PayloadBytes))
+		{
+			return std::nullopt;
+		}
+
+		return Accepted{ .Id = static_cast<SessionId>(LoadWord(message, HeaderBytes)) };
 	}
 };
 

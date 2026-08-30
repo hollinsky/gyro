@@ -77,7 +77,7 @@ GYRO_TEST(Handover, UnknownOpcodeIsRefused)
 
 	GYRO_CHECK(!ReadHeader(unknown).has_value());
 	GYRO_CHECK(!IsOpcode(0));
-	GYRO_CHECK(!IsOpcode(5));
+	GYRO_CHECK(!IsOpcode(6));
 	GYRO_CHECK(IsOpcode(static_cast<std::uint16_t>(Opcode::Hello)));
 	GYRO_CHECK(IsOpcode(static_cast<std::uint16_t>(Opcode::Refused)));
 }
@@ -118,22 +118,32 @@ GYRO_TEST(Handover, LengthFieldMustMatchTheDatagram)
 GYRO_TEST(Handover, DecodeRefusesAnotherMessagesOpcode)
 {
 	Datagram bytes{};
-	const std::size_t written = Welcome{ .Version = 1, .Id = SessionId{ 2 } }.Encode(bytes);
+	const std::size_t written = Welcome{ .Version = 1 }.Encode(bytes);
 
-	GYRO_REQUIRE_EQ(written, std::size_t{ 12 });
+	GYRO_REQUIRE_EQ(written, std::size_t{ 8 });
 	GYRO_CHECK(!Hello::Decode(std::span<const std::byte>{ bytes }.first(written)).has_value());
 	GYRO_CHECK(!Offer::Decode(std::span<const std::byte>{ bytes }.first(written)).has_value());
 }
 
-GYRO_TEST(Handover, WelcomeCarriesVersionAndSession)
+GYRO_TEST(Handover, WelcomeCarriesTheVersionInForce)
 {
 	Datagram bytes{};
-	const std::size_t written = Welcome{ .Version = 3, .Id = SessionId{ 7 } }.Encode(bytes);
+	const std::size_t written = Welcome{ .Version = 3 }.Encode(bytes);
 	const std::optional<Welcome> welcome = Welcome::Decode(std::span<const std::byte>{ bytes }.first(written));
 
 	GYRO_REQUIRE(welcome.has_value());
 	GYRO_CHECK_EQ(welcome->Version, std::uint32_t{ 3 });
-	GYRO_CHECK(welcome->Id == SessionId{ 7 });
+}
+
+// The offer's answer, and the message the agent waits for before it starts anything.
+GYRO_TEST(Handover, AcceptedCarriesTheSession)
+{
+	Datagram bytes{};
+	const std::size_t written = Accepted{ .Id = SessionId{ 7 } }.Encode(bytes);
+	const std::optional<Accepted> accepted = Accepted::Decode(std::span<const std::byte>{ bytes }.first(written));
+
+	GYRO_REQUIRE(accepted.has_value());
+	GYRO_CHECK(accepted->Id == SessionId{ 7 });
 }
 
 // The descriptor is the whole of an offer, so the message is a header and nothing else.
@@ -195,6 +205,7 @@ GYRO_TEST(Handover, DirectionIsPartOfTheMessage)
 	GYRO_CHECK(FromAgent(Opcode::Hello));
 	GYRO_CHECK(FromAgent(Opcode::Offer));
 	GYRO_CHECK(!FromAgent(Opcode::Welcome));
+	GYRO_CHECK(!FromAgent(Opcode::Accepted));
 	GYRO_CHECK(!FromAgent(Opcode::Refused));
 }
 
@@ -203,6 +214,7 @@ GYRO_TEST(Handover, OnlyAnOfferCarriesADescriptor)
 	GYRO_CHECK_EQ(DescriptorsFor(Opcode::Offer), std::size_t{ 1 });
 	GYRO_CHECK_EQ(DescriptorsFor(Opcode::Hello), std::size_t{ 0 });
 	GYRO_CHECK_EQ(DescriptorsFor(Opcode::Welcome), std::size_t{ 0 });
+	GYRO_CHECK_EQ(DescriptorsFor(Opcode::Accepted), std::size_t{ 0 });
 	GYRO_CHECK_EQ(DescriptorsFor(Opcode::Refused), std::size_t{ 0 });
 }
 
