@@ -193,7 +193,10 @@ struct std::formatter<OutputConfiguration>
 		// Only where there is one, so the backends that have no such requirement keep the line they had.
 		// It is worth a person seeing because it is subtracted from every deadline this output predicts
 		// and a run that got it wrong looks like a run that is merely slow.
-		if (configuration.LatchLead > Duration::zero())
+		// count() rather than a comparison against Duration::zero(), as in Animation/Solve/Spring.h: some
+		// libstdc++ versions expose a rewritten candidate there that trips
+		// -Wzero-as-null-pointer-constant, which is an error under the project warning set.
+		if (configuration.LatchLead.count() > 0)
 		{
 			out = std::format_to(out, " latch {}", configuration.LatchLead);
 		}

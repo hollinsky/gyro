@@ -567,7 +567,7 @@ void CheckTheGpuCostIsReported(Fixture& fixture)
 
 	GYRO_CHECK_EQ(costs[0].Generation, Generation);
 	GYRO_CHECK(costs[0].Mode == RenderMode::Floor);
-	GYRO_CHECK(costs[0].Cost > Duration::zero());
+	GYRO_CHECK(costs[0].Cost.count() > 0);
 
 	// **The upper bound is the assertion that earns its place.** A composite of this size is
 	// microseconds on any device that has one; what a whole second catches is the failure that has
@@ -1873,7 +1873,7 @@ GYRO_TEST(RenderImport, SyncPointsMatchWhatTheDeviceCanExport)
 	GYRO_CHECK(fixture->Renderer().IsComplete(submission->Point));
 	GYRO_CHECK(fixture->Renderer().IsComplete(SyncPoint{ RawFd{ 0 }, 99999 }));
 
-	GYRO_CHECK(submission->RecordCost >= Duration::zero());
+	GYRO_CHECK(submission->RecordCost.count() >= 0);
 }
 
 GYRO_TEST(RenderImport, AFrameReportsWhatItCostTheGpu)

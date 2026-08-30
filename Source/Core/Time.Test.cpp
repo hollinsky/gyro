@@ -88,7 +88,7 @@ GYRO_TEST(Time, DeadlineArithmeticGoesNegative)
 	const Instant now = Monotonic::FromNanoseconds(1'500);
 
 	GYRO_CHECK_EQ(deadline - now, Duration{ -500 });
-	GYRO_CHECK(deadline - now < Duration::zero());
+	GYRO_CHECK((deadline - now).count() < 0);
 }
 
 GYRO_TEST(Time, ArithmeticSaturatesRatherThanWrapping)
