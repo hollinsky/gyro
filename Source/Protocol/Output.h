@@ -31,15 +31,21 @@ class SceneStore;
 // per-monitor state on, so a compositor that made one up would have applications remembering the
 // wrong window positions rather than none.
 //
-// **Two things this sends that are not the truth yet, and both are the same absence.** The mode's
-// refresh rate goes out as zero and the physical size as zero by zero, because neither is in the
-// record `Scene/Output.h` holds: decision 97 gives the panel's timing to the frame side, and decision
-// 164's whole argument is that millimetres are not a perceptual quantity until a distance is applied,
-// which has already happened by the time a scale reaches here. Zero is what the protocol says to send
-// for a physical size that does not make sense, and a client must not schedule against a refresh
-// rate in any case — the frame callback is the contract and it is answered from what actually reached
-// the glass. What it costs is a media player that reads the mode to guess a display cadence, which is
-// worth saying out loud rather than leaving as a zero somebody finds later.
+// **The physical size goes out as zero by zero, and that is a statement rather than a gap.** Decision
+// 164's whole argument is that millimetres are not a perceptual quantity until a viewing distance is
+// applied to them — which has already happened by the time a scale reaches here, and the distance is
+// gyro's to hold rather than a client's to re-derive. Zero is what the protocol says to send for a
+// physical size that does not make sense, and a client computing its own DPI off one is the practice
+// this whole axis replaces.
+//
+// **The refresh rate is not the same case and is sent.** It was zero for one commit on the reasoning
+// that timing belongs to the frame thread, which confused *a client must not schedule against this*
+// with *gyro must not say it*. The first is true — the frame callback is the contract and it is
+// answered from what reached the glass — and it argues about what a client does rather than about
+// what the mode is. What settles it is that gyro serves no `wp_presentation`, so zero here is not a
+// question answered elsewhere: it is the only cadence figure a client can obtain, withheld. A media
+// player reading it falls back to 60 and judders on a 144 Hz panel, which is worse than the truth by
+// exactly the amount a wrong number is worse than an absent one.
 inline constexpr std::uint32_t OutputVersion = 3;
 
 class HostOutput;

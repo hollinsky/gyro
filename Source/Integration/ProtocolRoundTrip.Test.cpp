@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -1253,6 +1254,7 @@ GYRO_TEST(ProtocolRoundTrip, AnOutputCarriesTheCeilingOfADerivedScale)
 	// fractional scaling exists for. There is no integer within the snapping band of it.
 	const std::array outputs{ SceneOutput{ .Bounds = { { 0.0, 0.0 }, { 2259.0, 1271.0 } },
 		                                   .Density = Scale::FromNumerator(204),
+		                                   .Period = std::chrono::nanoseconds{ 6'944'444 },
 		                                   .Grid = { 3840, 2160 } } };
 	pair.Store.SetOutputs(outputs);
 
@@ -1285,11 +1287,16 @@ GYRO_TEST(ProtocolRoundTrip, AnOutputCarriesTheCeilingOfADerivedScale)
 	GYRO_CHECK_EQ(events.Height, 2160);
 	GYRO_CHECK(Any(events.Flags & Wayland::WlOutputMode::Current));
 
-	// Zero for both of the things gyro will not claim: a refresh rate, which is the frame side's and is
-	// not in the world's record, and a physical size, which decision 164's argument is that nobody can
-	// use without a viewing distance — one that has already been applied by the time a scale gets here.
-	// Zero is what the protocol says to send for a physical size that does not make sense.
-	GYRO_CHECK_EQ(events.Refresh, 0);
+	// 144 Hz, in the thousandths the protocol states a rate in, and rounded rather than truncated: the
+	// period is 6'944'444 ns, which divides to 144'000.01 and reports a panel as 143.999 Hz to every
+	// client that prints one if the remainder is dropped. gyro serves no `wp_presentation`, so this is
+	// the only cadence figure a client can obtain — a zero here is a media player falling back to 60.
+	GYRO_CHECK_EQ(events.Refresh, 144'000);
+
+	// The physical size is zero by zero, which is a statement rather than a gap: decision 164's whole
+	// argument is that millimetres mean nothing until a viewing distance is applied, and that has
+	// already happened by the time a scale reaches a client. Zero is what the protocol says to send for
+	// a physical size that does not make sense.
 	GYRO_CHECK_EQ(events.PhysicalWidth, 0);
 	GYRO_CHECK_EQ(events.PhysicalHeight, 0);
 

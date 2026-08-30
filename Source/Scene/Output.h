@@ -4,6 +4,7 @@
 
 #include "Core/Handle.h"
 #include "Core/Session.h"
+#include "Core/Time.h"
 #include "Geometry/AxisTransform.h"
 #include "Geometry/Scale.h"
 #include "Geometry/Space.h"
@@ -74,6 +75,23 @@ struct SceneOutput
 	// integer size arithmetic and the whole of `Geometry/Scale.h` is about that arithmetic being
 	// exact — a window given half of a 1.25x screen has to come back the width it was given.
 	Scale Density{};
+
+	// The mode's nominal period, echoed from what the backend achieved.
+	//
+	// **The one field here that nothing in the world reads, and it is here because there is nowhere
+	// else it can be said from.** `wl_output.mode` carries a refresh rate and `Protocol` sees only this
+	// store, so the alternative is telling every client zero — which is not *we decline to answer*
+	// while gyro serves no `wp_presentation`, it is the only cadence figure a client can obtain,
+	// withheld. A media player reading zero falls back to 60 and judders on a 144 Hz panel, which is a
+	// wrong number rather than an absent one.
+	//
+	// **Nominal rather than measured, which is what keeps it a fact rather than a prediction.**
+	// `Frame/FrameClock.h` learns what the panel is actually doing and that number belongs to the frame
+	// thread; this one is the mode's own, filled from the same `OutputConfiguration` the fields around
+	// it are, so it is one more echo rather than a second source of truth to hold in agreement. A
+	// client must not schedule against it in any case — the frame callback is the contract, and it is
+	// answered from what reached the glass.
+	Duration Period{};
 
 	// The device grid: what the panel actually scans out, in its own pixels. Decision 54's settled snap
 	// is to this, and decision 32's cadence question — which outputs a surface intersects — is answered

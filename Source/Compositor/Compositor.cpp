@@ -2496,6 +2496,7 @@ private:
 				.Bounds = { origin, { output.Width, output.Height } },
 				.Density = output.Density,
 				.Grid = achieved.Resolution,
+				.Period = achieved.Period,
 				.Orientation = Orientation(achieved.Transform),
 			};
 

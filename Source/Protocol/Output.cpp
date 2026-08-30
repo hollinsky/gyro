@@ -10,6 +10,29 @@
 
 namespace
 {
+// The mode's rate, in the thousandths of a hertz `wl_output.mode` is stated in.
+//
+// **The nominal period rather than the cadence gyro is achieving**, which is what the event means: it
+// describes the mode, and a mode's rate does not move while frames do. Zero for an output with no
+// period — a headless sweep, a file — where it is honestly unknown rather than a rounding of
+// something.
+//
+// Rounded to nearest, because 16'666'666 ns is 60'000.002 mHz and truncating it reports a panel as
+// 59.999 Hz to every client that prints one.
+[[nodiscard]] std::int32_t Millihertz(Duration period)
+{
+	const std::int64_t nanoseconds = period.count();
+
+	if (nanoseconds <= 0)
+	{
+		return 0;
+	}
+
+	constexpr std::int64_t Thousandths = 1'000'000'000'000;
+
+	return static_cast<std::int32_t>((Thousandths + (nanoseconds / 2)) / nanoseconds);
+}
+
 // What a client is told about one output, as one group. Sent on bind and again whenever any of it
 // moves, with `done` closing the group — a client applies nothing until that arrives, which is what
 // keeps a scale and the position it belongs with from being read half apart.
@@ -32,7 +55,7 @@ void Describe(Wayland::Server::WlOutput object, const SceneOutput& output)
 		Wayland::Server::WlOutputMode::Current | Wayland::Server::WlOutputMode::Preferred,
 		output.Grid.Width,
 		output.Grid.Height,
-		0
+		Millihertz(output.Period)
 	);
 
 	// **Decision 56 in one line.** `wl_output.scale` is an integer and a derived scale routinely is
@@ -51,7 +74,7 @@ void Describe(Wayland::Server::WlOutput object, const SceneOutput& output)
 [[nodiscard]] bool Visible(const SceneOutput& before, const SceneOutput& after)
 {
 	return before.Bounds != after.Bounds || before.Density != after.Density || before.Grid != after.Grid ||
-	       before.Orientation != after.Orientation;
+	       before.Period != after.Period || before.Orientation != after.Orientation;
 }
 } // namespace
 
