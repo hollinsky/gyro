@@ -2344,7 +2344,7 @@ private:
 				spdlog::info("hosting clients on {}", m_Clients->SocketName());
 			}
 
-			// Six globals, which is a window a person can use and one thing they will reach for and not
+			// Seven globals, which is a window a person can use and one thing they will reach for and not
 			// find. Said out loud because the alternative is somebody filing the silence as a bug: a copy
 			// whose paste never arrives looks exactly like a compositor that has half died. The clipboard
 			// is named for the same reason it always was — a global that is advertised and does nothing
@@ -2354,8 +2354,9 @@ private:
 			// already done once: it claimed windows could not be moved or resized for two commits after
 			// they could, while somebody was reading the log to work out why a drag did nothing.
 			spdlog::info(
-				"wl_compositor, wl_shm, zwp_linux_dmabuf_v1, xdg_wm_base, wl_data_device_manager and wl_seat are the "
-				"globals; a window will open, be placed, redraw against the frames that reach the glass, take the "
+				"wl_compositor, wl_subcompositor, wl_shm, zwp_linux_dmabuf_v1, xdg_wm_base, "
+				"wl_data_device_manager and wl_seat are the globals; a window will open with every part its "
+				"toolkit drew separately, be placed, redraw against the frames that reach the glass, take the "
 				"keyboard and the pointer, come to the front on a click, open and dismiss its menus, and be moved and "
 				"resized by a drag it asks for, but there is nothing behind the clipboard, so nothing can be copied, "
 				"pasted or dragged"

@@ -2,9 +2,12 @@
 
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <cerrno>
 #include <cstdint>
+#include <optional>
 #include <utility>
 
 // Sealing arrived after the rest of `fcntl.h` and a toolchain may still be describing an older
@@ -35,9 +38,9 @@ constexpr std::size_t BytesPerPixel = 4;
 // Make the file unable to shrink, whether or not the client thought to.
 //
 // A client library that created the pool as a `memfd` with `MFD_ALLOW_SEALING` has usually sealed it
-// already, and the add is then a no-op that reports success. A descriptor that refuses both — a
-// `shm_open` file, a regular file, a pipe somebody sent for the fun of it — is one gyro declines to
-// map, because the compositor cannot survive the fault a truncation would raise on the frame after.
+// already, and the add is then a no-op that reports success. A descriptor that refuses both — GTK's
+// own pool, a `shm_open` file, a file on disk — is one gyro will not map, and is read rather than
+// refused.
 [[nodiscard]] bool SealAgainstShrinking(const Fd& fd) noexcept
 {
 	const int seals = ::fcntl(fd.Borrow().Value, F_GET_SEALS);
@@ -48,6 +51,21 @@ constexpr std::size_t BytesPerPixel = 4;
 	}
 
 	return ::fcntl(fd.Borrow().Value, F_ADD_SEALS, F_SEAL_SHRINK) == 0;
+}
+
+// How many bytes the file behind `fd` actually holds, or nothing where it is not a file pixels can be
+// read out of — a pipe, a socket, a directory. Both a `memfd` and a `shm_open` file are ordinary
+// files, so this refuses only what could never have worked.
+[[nodiscard]] std::optional<std::size_t> FileBytes(const Fd& fd) noexcept
+{
+	struct ::stat status = {};
+
+	if (::fstat(fd.Borrow().Value, &status) != 0 || !S_ISREG(status.st_mode) || status.st_size < 0)
+	{
+		return std::nullopt;
+	}
+
+	return static_cast<std::size_t>(status.st_size);
 }
 } // namespace
 
@@ -62,11 +80,30 @@ std::shared_ptr<PoolMapping> PoolMapping::Map(Fd fd, std::size_t size, Refusal& 
 		return nullptr;
 	}
 
-	if (!SealAgainstShrinking(fd))
+	const std::optional<std::size_t> held = FileBytes(fd);
+
+	if (!held.has_value())
 	{
-		refusal = Refusal::Unsealable;
+		refusal = Refusal::Unreadable;
 
 		return nullptr;
+	}
+
+	// The client named more of the file than there is. Refused whichever path this pool was going to
+	// take, because the mapped one would fault on the first frame and the read one would come up short
+	// on every one of them — and a client is better told now than told nothing and shown nothing.
+	if (*held < size)
+	{
+		refusal = Refusal::Short;
+
+		return nullptr;
+	}
+
+	// Everything below the seal is the *unmapped* pool: `pread` on the descriptor, where a truncation
+	// is a short read rather than a fault.
+	if (!SealAgainstShrinking(fd))
+	{
+		return std::shared_ptr<PoolMapping>{ new PoolMapping{ std::move(fd), nullptr, size } };
 	}
 
 	// Read-only, which is `MappedPixels` one layer down saying the same thing in the type system: these
@@ -80,8 +117,8 @@ std::shared_ptr<PoolMapping> PoolMapping::Map(Fd fd, std::size_t size, Refusal& 
 		return nullptr;
 	}
 
-	// Not `make_shared`: the constructor is private, and it is private because a mapping that was not
-	// sealed first is the one thing this class exists to prevent.
+	// Not `make_shared`: the constructor is private, and it is private because a mapping made without
+	// the two checks above is the one thing this class exists to prevent.
 	return std::shared_ptr<PoolMapping>{ new PoolMapping{
 		std::move(fd), static_cast<const std::byte*>(mapped), size } };
 }
@@ -103,6 +140,24 @@ bool PoolMapping::Grow(std::size_t size)
 		return false;
 	}
 
+	// **The seal does not cover this and that was the hole.** `F_SEAL_SHRINK` promises the file will
+	// not get shorter; it promises nothing about a client that asks gyro to map more of it than it ever
+	// wrote, which faults exactly the same way. So the file is measured again at every resize, and the
+	// mapped path is only ever as large as what is behind it.
+	const std::optional<std::size_t> held = FileBytes(m_Fd);
+
+	if (!held.has_value() || *held < size)
+	{
+		return false;
+	}
+
+	if (m_Pixels == nullptr)
+	{
+		m_Size = size;
+
+		return true;
+	}
+
 	void* const moved = ::mremap(const_cast<std::byte*>(m_Pixels), m_Size, size, MREMAP_MAYMOVE);
 
 	if (moved == MAP_FAILED)
@@ -116,22 +171,66 @@ bool PoolMapping::Grow(std::size_t size)
 	return true;
 }
 
-std::span<const std::byte> ClientShmBuffer::Pixels() const noexcept
+std::span<const std::byte> PoolMapping::Mapped(std::size_t offset, std::size_t bytes) const noexcept
+{
+	if (m_Pixels == nullptr || offset > m_Size || bytes > m_Size - offset)
+	{
+		return {};
+	}
+
+	return { m_Pixels + offset, bytes };
+}
+
+std::span<const std::byte> PoolMapping::Copy(std::size_t offset, std::size_t bytes) const
+{
+	if (offset > m_Size || bytes > m_Size - offset)
+	{
+		return {};
+	}
+
+	m_Scratch.resize(bytes);
+
+	std::size_t done = 0;
+
+	while (done < bytes)
+	{
+		const ssize_t read =
+			::pread(m_Fd.Borrow().Value, m_Scratch.data() + done, bytes - done, static_cast<off_t>(offset + done));
+
+		if (read < 0)
+		{
+			if (errno == EINTR)
+			{
+				continue;
+			}
+
+			return {};
+		}
+
+		// Zero is the end of the file, which is a client that truncated the pool under a buffer it had
+		// already described. The frame is lost and the compositor is not, which is the whole trade.
+		if (read == 0)
+		{
+			return {};
+		}
+
+		done += static_cast<std::size_t>(read);
+	}
+
+	return m_Scratch;
+}
+
+std::span<const std::byte> ClientShmBuffer::Pixels() const
 {
 	if (m_Pool == nullptr)
 	{
 		return {};
 	}
 
-	const std::span<const std::byte> pool = m_Pool->Bytes();
 	const auto needed = static_cast<std::size_t>(m_Stride) * static_cast<std::size_t>(m_Size.Height);
+	const std::span<const std::byte> mapped = m_Pool->Mapped(m_Offset, needed);
 
-	if (m_Offset > pool.size() || needed > pool.size() - m_Offset)
-	{
-		return {};
-	}
-
-	return pool.subspan(m_Offset, needed);
+	return mapped.empty() ? m_Pool->Copy(m_Offset, needed) : mapped;
 }
 
 Result<TextureId> ClientShmBuffer::Adopt(ITextures& textures)
@@ -232,8 +331,8 @@ void ClientShmPool::OnResize(std::int32_t size)
 
 	if (size <= 0 || !m_Mapping->Grow(static_cast<std::size_t>(size)))
 	{
-		// A pool that only grows is the protocol's own rule, and it is also the seal's: a client that
-		// asks to shrink one is asking for the fault the seal exists to make impossible.
+		// A pool only grows, which is the protocol's own rule — and it grows no further than the file
+		// behind it, which is the rule a client asking for the fault would otherwise get around.
 		Object().PostError(
 			static_cast<std::uint32_t>(Wayland::Server::WlShmError::InvalidFd),
 			"wl_shm_pool.resize to a size this pool cannot take"
@@ -265,10 +364,18 @@ Wayland::Server::WlShmPoolHandler* ClientShm::OnCreatePool(Fd fd, std::int32_t s
 	{
 		switch (refusal)
 		{
-			case PoolMapping::Refusal::Unsealable:
+			case PoolMapping::Refusal::Unreadable:
 				Object().PostError(
 					Wayland::Server::WlShmError::InvalidFd,
-					"wl_shm.create_pool with a descriptor that cannot be sealed against shrinking"
+					"wl_shm.create_pool with a descriptor gyro cannot read pixels out of"
+				);
+
+				break;
+
+			case PoolMapping::Refusal::Short:
+				Object().PostError(
+					Wayland::Server::WlShmError::InvalidFd,
+					"wl_shm.create_pool naming more bytes than the descriptor holds"
 				);
 
 				break;

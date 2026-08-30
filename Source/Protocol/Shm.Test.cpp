@@ -53,6 +53,27 @@ namespace
 	return fd;
 }
 
+// A pool the way GTK makes one: a `memfd` with no `MFD_ALLOW_SEALING`, which is a file that can never
+// take a seal and which gyro therefore reads rather than maps.
+[[nodiscard]] Fd MakeUnsealablePool(std::size_t size)
+{
+	const int descriptor = ::memfd_create("gyro-shm-test", MFD_CLOEXEC);
+
+	if (descriptor < 0)
+	{
+		return {};
+	}
+
+	Fd fd{ descriptor };
+
+	if (::ftruncate(descriptor, static_cast<off_t>(size)) != 0)
+	{
+		return {};
+	}
+
+	return fd;
+}
+
 // Write a recognisable byte into every pixel of a row, through a writable view of the same file.
 void Fill(const Fd& fd, std::size_t size, std::byte value)
 {
@@ -116,7 +137,7 @@ Cut(ClientShmPool& pool,
 }
 } // namespace
 
-GYRO_TEST(Shm, ADescriptorThatCannotBeSealedIsRefused)
+GYRO_TEST(Shm, ADescriptorThatIsNotAFileIsRefused)
 {
 	int ends[2] = { -1, -1 };
 	GYRO_REQUIRE(::pipe(ends) == 0);
@@ -126,11 +147,99 @@ GYRO_TEST(Shm, ADescriptorThatCannotBeSealedIsRefused)
 
 	PoolMapping::Refusal refusal = PoolMapping::Refusal::None;
 
-	// A pipe is the blunt case; the one that matters in the field is a `shm_open` file, which maps
-	// perfectly well and can be truncated out from under the mapping afterwards. gyro cannot survive
-	// the fault that would raise, so it declines the descriptor instead of catching the signal.
+	// The only descriptor gyro turns away now: there are no pixels at an offset in a pipe, by either
+	// path. A file that merely refuses the seal is read instead, which is the test below.
 	GYRO_CHECK(PoolMapping::Map(Fd{ ::dup(ends[0]) }, 4096, refusal) == nullptr);
-	GYRO_CHECK(refusal == PoolMapping::Refusal::Unsealable);
+	GYRO_CHECK(refusal == PoolMapping::Refusal::Unreadable);
+}
+
+GYRO_TEST(Shm, APoolNamingMoreThanItsFileHoldsIsRefused)
+{
+	constexpr std::size_t Size = 4096;
+
+	Fd fd = MakeUnsealedPool(Size);
+	GYRO_REQUIRE(fd.IsValid());
+
+	PoolMapping::Refusal refusal = PoolMapping::Refusal::None;
+
+	// **The seal says the file will not get shorter and says nothing about it being long enough.** A
+	// client that names a megabyte of a page-sized file gets a mapping whose first read past the page
+	// is the very fault the seal was taken to prevent, so the length is measured rather than assumed.
+	GYRO_CHECK(PoolMapping::Map(std::move(fd), Size * 4, refusal) == nullptr);
+	GYRO_CHECK(refusal == PoolMapping::Refusal::Short);
+}
+
+GYRO_TEST(Shm, AResizePastTheFileIsRefusedEvenThoughTheSealAllowsIt)
+{
+	constexpr std::size_t Size = 4096;
+
+	Fd fd = MakeUnsealedPool(Size);
+	GYRO_REQUIRE(fd.IsValid());
+
+	PoolMapping::Refusal refusal = PoolMapping::Refusal::None;
+	const std::shared_ptr<PoolMapping> mapping = PoolMapping::Map(std::move(fd), Size, refusal);
+	GYRO_REQUIRE(mapping != nullptr);
+
+	// `wl_shm_pool.resize` after a `ftruncate` the client never did. Growing the mapping is legal as
+	// far as the kernel is concerned and reading the new part of it is not, which makes this the same
+	// hazard as a truncation arriving from the opposite direction.
+	GYRO_CHECK(!mapping->Grow(Size * 4));
+	GYRO_CHECK_EQ(mapping->Size(), Size);
+}
+
+GYRO_TEST(Shm, APoolThatCannotTakeTheSealIsReadRatherThanRefused)
+{
+	constexpr std::size_t Size = 4096;
+
+	Fd fd = MakeUnsealablePool(Size);
+	GYRO_REQUIRE(fd.IsValid());
+
+	Fill(fd, Size, std::byte{ 0x3C });
+
+	PoolMapping::Refusal refusal = PoolMapping::Refusal::None;
+	ClientShmPool pool{ PoolMapping::Map(std::move(fd), Size, refusal) };
+
+	GYRO_CHECK(refusal == PoolMapping::Refusal::None);
+
+	// **This is every GTK application on the machine**, and refusing it was a connection ended before
+	// a window ever opened — Firefox reached the error and printed a crash report instead. The pixels
+	// come out of the descriptor rather than a mapping, and nothing above this file can tell.
+	RecordingTextures textures;
+
+	const std::unique_ptr<ClientShmBuffer> buffer = Cut(pool, 0, 16, 4, 64);
+	GYRO_REQUIRE(buffer->Adopt(textures).has_value());
+
+	GYRO_CHECK_EQ(textures.Pixels.size(), std::size_t{ 64 * 4 });
+	GYRO_CHECK(textures.Pixels.front() == std::byte{ 0x3C });
+	GYRO_CHECK(textures.Pixels.back() == std::byte{ 0x3C });
+}
+
+GYRO_TEST(Shm, TruncatingAnUnsealablePoolCostsTheFrameAndNotTheCompositor)
+{
+	constexpr std::size_t Size = 4096;
+
+	Fd fd = MakeUnsealablePool(Size);
+	GYRO_REQUIRE(fd.IsValid());
+
+	Fill(fd, Size, std::byte{ 0x7E });
+
+	const int raw = fd.Borrow().Value;
+
+	PoolMapping::Refusal refusal = PoolMapping::Refusal::None;
+	ClientShmPool pool{ PoolMapping::Map(std::move(fd), Size, refusal) };
+
+	const std::unique_ptr<ClientShmBuffer> buffer = Cut(pool, 0, 16, 4, 64);
+	GYRO_REQUIRE(!buffer->Extent().IsEmpty());
+
+	// The attack the seal exists to stop, run against the path that has no seal. Through a mapping this
+	// is a `SIGBUS` on the dispatch thread of the machine's only compositor; through `pread` it is a
+	// short read, and the client is told its buffer is bad while every other session carries on.
+	GYRO_REQUIRE(::ftruncate(raw, 0) == 0);
+
+	RecordingTextures textures;
+
+	GYRO_CHECK(buffer->Pixels().empty());
+	GYRO_CHECK(!buffer->Adopt(textures).has_value());
 }
 
 GYRO_TEST(Shm, APoolTheClientLeftUnsealedIsSealedBeforeItIsMapped)
@@ -148,8 +257,8 @@ GYRO_TEST(Shm, APoolTheClientLeftUnsealedIsSealedBeforeItIsMapped)
 	GYRO_REQUIRE(mapping != nullptr);
 	GYRO_CHECK(refusal == PoolMapping::Refusal::None);
 
-	// The seal is what makes every read below safe for the rest of the pool's life, so it is asserted
-	// against the kernel rather than inferred from the map having succeeded.
+	// The seal is what makes reading through the mapping safe for the rest of the pool's life, so it is
+	// asserted against the kernel rather than inferred from the map having succeeded.
 	const int seals = ::fcntl(raw, F_GET_SEALS);
 	GYRO_REQUIRE(seals >= 0);
 	GYRO_CHECK((seals & F_SEAL_SHRINK) != 0);

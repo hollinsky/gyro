@@ -166,11 +166,16 @@ public:
 };
 
 // A pool the way a toolkit makes one, filled with a byte a test can recognise on the far side.
+//
+// **`sealing` is which toolkit.** Mesa and libwayland ask for `MFD_ALLOW_SEALING` and GTK does not,
+// and the difference is invisible to the client and decides which of gyro's two paths its pixels take
+// — so it is a parameter here rather than two structs.
 struct ClientPool
 {
-	explicit ClientPool(std::size_t size) : Size{ size }
+	explicit ClientPool(std::size_t size, bool sealing = true) : Size{ size }
 	{
-		const int descriptor = ::memfd_create("gyro-roundtrip", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+		const int descriptor =
+			::memfd_create("gyro-roundtrip", sealing ? MFD_CLOEXEC | MFD_ALLOW_SEALING : MFD_CLOEXEC);
 
 		if (descriptor < 0 || ::ftruncate(descriptor, static_cast<off_t>(size)) != 0)
 		{
@@ -704,9 +709,9 @@ constexpr std::int32_t Height = 8;
 constexpr std::int32_t Stride = Width * 4;
 constexpr std::size_t PoolBytes = static_cast<std::size_t>(Stride) * static_cast<std::size_t>(Height) * 2;
 
-[[nodiscard]] bool Draw(BoundCompositor& bound, DrawnSurface& drawn, std::byte fill)
+[[nodiscard]] bool Draw(BoundCompositor& bound, DrawnSurface& drawn, std::byte fill, bool sealing = true)
 {
-	ClientPool pool{ PoolBytes };
+	ClientPool pool{ PoolBytes, sealing };
 
 	if (!pool.Descriptor.IsValid())
 	{
@@ -764,6 +769,37 @@ GYRO_TEST(ProtocolRoundTrip, AnAttachedBufferReachesTheTextureSpaceAndComesStrai
 	// **Released in the same step it was committed in**, which is the point of copying rather than
 	// sampling the client's memory: a toolkit with one buffer can draw its next frame immediately,
 	// instead of allocating a second one to have somewhere to draw while gyro finishes with the first.
+	GYRO_CHECK_EQ(drawn.Released.Released, std::uint32_t{ 1 });
+}
+
+GYRO_TEST(ProtocolRoundTrip, APoolNoDescriptorCanSealStillReachesTheTextureSpace)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-unsealable" };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	DrawnSurface drawn;
+	GYRO_REQUIRE(Draw(bound, drawn, std::byte{ 0x9E }, false));
+
+	drawn.Surface.Attach(drawn.Buffer, 0, 0);
+	drawn.Surface.DamageBuffer(0, 0, Width, Height);
+	drawn.Surface.Commit();
+
+	pair.Turn();
+
+	// **This is GTK, and gyro used to end the connection here.** A `memfd` made without
+	// `MFD_ALLOW_SEALING` can never take `F_SEAL_SHRINK`, and refusing it meant a person launching
+	// Firefox got a crash reporter rather than a window. The pixels come out of the descriptor with
+	// `pread` instead of a mapping, and nothing above `Protocol/Shm.h` can tell which path they took —
+	// which is what this test is for, since the unit tests can see the path and a client cannot.
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Textures.Adopted, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pair.Textures.Bytes, static_cast<std::size_t>(Stride) * static_cast<std::size_t>(Height));
+	GYRO_CHECK(pair.Textures.First == std::byte{ 0x9E });
 	GYRO_CHECK_EQ(drawn.Released.Released, std::uint32_t{ 1 });
 }
 

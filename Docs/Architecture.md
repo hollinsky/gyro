@@ -2257,8 +2257,8 @@ What the shape obliges:
 - **Targets are imported, and dmabuf only.** The rule that the backend owns the images still holds —
   an encoder has format and modifier constraints the renderer cannot know — but the
   constraint-holder is now a client, so gyro renders into foreign memory. `wl_shm` is refused: a
-  dmabuf's size is fixed at allocation, so the truncate-and-fault hazard that forces a SIGBUS
-  handler for shm has no equivalent here, and allowing shm would import it.
+  dmabuf's size is fixed at allocation, so the truncate-and-fault hazard shm has to be read around
+  has no equivalent here, and allowing shm would import it.
 - **A virtual output's frames are dropped, never deferred.** It sits in the admission set because it
   consumes real GPU time and blocks local outputs, but its period comes from flow control and a
   stall would otherwise make it unbounded. It must never be able to make a local output miss.
@@ -2789,15 +2789,22 @@ and `delete_id` semantics with the zombie window a client can send into, fd buff
 order and the 28-fd send limit, and send-buffer growth. Those were the listed hard parts and they are
 upstream's — including the fuzzing, on code that is the most-exercised in the ecosystem.
 
-**SIGBUS on `wl_shm` is inherited too, and the exposure is unchanged.** A client may truncate the fd
-backing a pool while it is mapped, faulting us on access; libwayland guards compositor access with a
-process-global signal handler and a `sigsetjmp` trampoline. [Threads](#threads) moves the fault onto
-the dispatch thread, which downgrades it from a missed frame to a client error. The exposure is
-confined to the upload of a *live* surface: shm content is copied into a compositor-owned image at
-commit in order to be sampled at all, so nothing downstream — [exit
+**SIGBUS on `wl_shm` is *not* inherited, because gyro maps the pool itself.** libwayland guards its
+own `wl_shm_buffer` access with a process-global signal handler and a `sigsetjmp` trampoline, and
+gyro never goes through it — `Protocol/Shm.h` holds the mapping. What it does instead is remove the
+condition rather than catch it, and it takes two forms. A descriptor that will take `F_SEAL_SHRINK`
+is mapped, with `fstat` at map and at every `resize` proving the file is at least as long as the pool
+the client named — the seal alone was not enough, since it says nothing about a client that grows the
+pool past a file it never grew. A descriptor that will not take the seal is not mapped at all and is
+read with `pread`, where a truncation is a short read rather than a fault. That second path is not a
+corner: GTK creates its pool with a plain `memfd_create`, and refusing it — which gyro did, for a
+while — ended the connection of every GTK application on the machine before a window ever opened.
+
+The exposure was in any case confined to the upload of a *live* surface: shm content is copied into a
+compositor-owned image at commit in order to be sampled at all, so nothing downstream — [exit
 snapshots](Animation.md#exit-pixels) included — ever touches a client mapping. Importing the mapping
 instead, via `VK_EXT_external_memory_host`, is refused for exactly this reason; it would trade a
-SIGBUS someone can catch for a GPU fault nobody can.
+fault gyro can avoid for a GPU fault nobody can.
 
 **The swap stays available.** Nothing is built on libwayland that would have to be unbuilt, which is
 the whole point of putting the seam first. Decision 2 records the three conditions that would reopen
