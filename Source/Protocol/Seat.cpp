@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 
+#include "Protocol/Floor.h"
 #include "Protocol/Surface.h"
 #include "Scene/Hit.h"
 
@@ -403,6 +404,13 @@ void SeatGlobal::SyncPointer(SceneStore& scene, Instant now)
 			if (m_ButtonsDown++ == 0)
 			{
 				m_Grab = m_Pointed;
+
+				// **The press that opens the grab is the press that focuses**, and no other: a second
+				// button going down inside a gesture, or a release ending one, must not move focus, and
+				// under the grab they are not even asking about what is under the pointer any more.
+				// Decision 162, and the policy is `Protocol/Floor.h`'s beside the placement rather than
+				// here, so that a shell takes both away in one commit.
+				FocusByClick(scene, m_Grab);
 			}
 		}
 		else if (m_ButtonsDown > 0 && --m_ButtonsDown == 0)

@@ -191,3 +191,59 @@ GYRO_TEST(SceneStore, TheOutputSetIsReplacedWholeAndTheGenerationSaysSo)
 	GYRO_CHECK_EQ(store.Outputs().size(), std::size_t{ 2 });
 	GYRO_CHECK_EQ(store.OutputGeneration(), std::uint64_t{ 2 });
 }
+
+// Raising is the z order written to: the sibling list is the paint order (55), so the raised node
+// comes out last and everything it passed keeps its own order.
+GYRO_TEST(SceneStore, RaisingAChildPutsItLastAndLeavesTheRestInOrder)
+{
+	SceneStore store{ Clock };
+
+	const EntityId floor = store.CreateContainer({}, {}).value();
+	const EntityId first = store.CreateContainer(floor, {}).value();
+	const EntityId second = store.CreateContainer(floor, {}).value();
+	const EntityId third = store.CreateContainer(floor, {}).value();
+
+	GYRO_REQUIRE(store.Raise(first));
+
+	GYRO_CHECK(store.Find(floor)->FirstChild == second);
+	GYRO_CHECK(store.Find(floor)->LastChild == first);
+	GYRO_CHECK(store.Find(second)->NextSibling == third);
+	GYRO_CHECK(store.Find(third)->NextSibling == first);
+	GYRO_CHECK(store.Find(first)->NextSibling.IsNull());
+
+	// The middle one, which is the case that exercises the predecessor repair rather than the head.
+	GYRO_REQUIRE(store.Raise(third));
+
+	GYRO_CHECK(store.Find(floor)->FirstChild == second);
+	GYRO_CHECK(store.Find(floor)->LastChild == third);
+	GYRO_CHECK(store.Find(second)->NextSibling == first);
+	GYRO_CHECK(store.Find(first)->NextSibling == third);
+	GYRO_CHECK(store.Find(third)->NextSibling.IsNull());
+
+	// Nothing moved and nothing was unlinked: the common answer, a person clicking about inside the
+	// window they are already using.
+	GYRO_CHECK(store.Raise(third));
+	GYRO_CHECK(store.Find(floor)->LastChild == third);
+	GYRO_CHECK(store.Find(second)->NextSibling == first);
+}
+
+// A root raises against the top level's own pair, which decision 111 makes a sibling list with nothing
+// distinguished above it — so the same two links are repaired and there is no parent to ask.
+GYRO_TEST(SceneStore, RaisingARootMovesItToTheFrontOfTheTopLevel)
+{
+	SceneStore store{ Clock };
+
+	const EntityId floor = store.CreateContainer({}, {}).value();
+	const EntityId cursor = store.CreateContainer({}, {}).value();
+
+	GYRO_REQUIRE(store.Raise(floor));
+
+	GYRO_CHECK(store.FirstRoot() == cursor);
+	GYRO_CHECK(store.Find(cursor)->NextSibling == floor);
+	GYRO_CHECK(store.Find(floor)->NextSibling.IsNull());
+
+	// A stale handle is a refusal rather than a reorder of whatever now holds that slot.
+	SceneStore other{ Clock };
+
+	GYRO_CHECK(!other.Raise(floor));
+}

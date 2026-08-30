@@ -165,6 +165,49 @@ LocalOn(const SceneStore& store, EntityId id, Point<GlobalSpace> point)
 	return found.Local;
 }
 
+// The window a hit belongs to, which is almost never the node that was hit.
+//
+// **A click lands on a surface and focus belongs to the window around it.** Decision 141 gives a client
+// two entities — the container is the window and the image beneath it is the pixels — and a toolkit
+// puts subsurfaces below that, so what the pointer touches is a few levels under the thing a person
+// means to bring forward. What comes back is the nearest ancestor that could take focus.
+//
+// **What *could take focus* means is read off the focus stack rather than off a kind or a depth.**
+// `Scene/Focus.h` holds exactly the set of windows that have been offered, so a rule written against it
+// cannot disagree with what `SceneFocus::Focus` will accept — whereas *the child of a floor* is a claim
+// about a shape of tree that a shell is free to change, and *the nearest container* would stop at the
+// first opacity group somebody wrapped a window in.
+//
+// Null where nothing on the way up is focusable, which is the ordinary answer over everything gyro
+// draws for itself: the splash, the recovery console, a gym's lanes, the cursor.
+//
+// Capped at `MaxReachDepth` for `LocalOn`'s reason, which also bounds a cycle a bad link could make.
+[[nodiscard]] inline EntityId FocusTargetFor(const SceneStore& store, EntityId id)
+{
+	const SceneFocus& focus = store.Focus();
+
+	EntityId at = id;
+
+	for (std::size_t depth = 0; !at.IsNull() && depth < MaxReachDepth; ++depth)
+	{
+		if (focus.Contains(at))
+		{
+			return at;
+		}
+
+		const Entity* const entity = store.Find(at);
+
+		if (entity == nullptr)
+		{
+			break;
+		}
+
+		at = entity->Parent;
+	}
+
+	return {};
+}
+
 // The topmost node accepting the pointer at this point, and where on it.
 //
 // Iterative, with an explicit chain of ancestors, for the reason `SceneStore::Retire` is: the depth is

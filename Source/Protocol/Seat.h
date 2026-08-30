@@ -206,9 +206,12 @@ public:
 	void Button(const PointerButton& event);
 	void Scroll(const PointerScroll& event);
 
-	// Route everything the devices said into the world it happened in. Called from `Advance` beside
-	// `SyncFocus`, and after it for the same reason: the commit that mapped a window is what makes it
-	// something the pointer can be on.
+	// Route everything the devices said into the world it happened in. Called from `Advance` after the
+	// dispatch — the commit that mapped a window is what makes it something the pointer can be on — and
+	// **before `SyncFocus`, because a press routed in here can move focus** (162). The other order sends
+	// the `wl_keyboard.enter` an iteration late, and what is in that gap is a keystroke: keys are
+	// delivered as the devices are drained, ahead of the step, so the first thing typed after a click
+	// would go to the window the person had just clicked away from.
 	//
 	// **The pointer is at one place for the whole iteration**, and that is a real limit rather than an
 	// implementation detail. A drain carrying a move, a press and another move delivers the press at the

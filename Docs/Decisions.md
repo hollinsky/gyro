@@ -12352,3 +12352,100 @@ means no refusal any existing frame reports changed when this arrived.
 
 **What a person gets** is nothing today and, on the day a video player tags its buffers, a window that
 does not change color when it happens to be the only thing on screen.
+
+### 162. A click focuses the window under it and raises it; focusing and raising are two verbs and the policy that calls both is a stand-in
+
+*(Decided 2026-08-29, with `wl_pointer` landed and nothing yet doing anything with a button.)*
+
+**A click focuses the window it landed on, and brings it to the front.** That is the whole of the
+behaviour. What the entry is about is where it lives, because
+[decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) makes this the shell's
+decision and there is no shell — so gyro is picking it, and the thing to get right is that the picking
+can be taken back.
+
+**It is the Floorplanner's shape a second time**, which is why it sits in the same file.
+[Decision 141](#141-a-window-is-parented-into-gyros-floor-and-shown-when-placed-the-floorplanner-stands-in-for-an-absent-shell)
+stands in for an absent shell on placement and `Scene/Focus.h` already does it for the focus order —
+newest on top, a rule with no parameter in it. Click-to-focus is the third of those and the first that
+needed the pointer, so it goes beside the placement rather than into `Scene`: two stand-ins in one
+file leave in one commit the day a shell declares a model, and a policy that had settled into the
+store would have to be found first.
+
+#### Focusing and raising are separate verbs, and only the policy joins them
+
+`SceneStore::Raise` is mechanism under decision 51 and a shell needs it whatever model it declares.
+Folding it into `SceneFocus::Focus` would read naturally and would make two ordinary arrangements
+unwritable: a tiled layout where focus moves by keyboard and nothing overlaps, and a video pinned
+above everything that must not fall behind the next window somebody clicks. So the store gains a verb,
+`SceneFocus` gains nothing, and the joining happens in the stand-in where it can be withdrawn.
+
+**The stand-in joins them because with no shell the raise is the only half a person can see.**
+[Decision 96](#96-the-frame-is-the-compositors-and-the-header-is-the-apps) gives gyro the focus ring
+and nothing authors one yet, and the Floorplanner centres every window on the same point — so two
+windows are exactly on top of each other and a click that focused without raising would have no
+visible effect at all until the next keystroke. That is the argument for coupling them *today*, and it
+is an argument that expires rather than a principle.
+
+#### The press that opens the grab, and no other
+
+Focus moves on the button going down rather than coming up, and only on the first button of a gesture.
+
+**On press, because a drag that began in an unfocused window would otherwise run its whole gesture
+with the keyboard somewhere else** — a person who presses on a window, drags, and types a modifier
+mid-drag is typing into the window they left. It is also the same instant the protocol's implicit grab
+pins the pointer, so the two mechanisms take their decision from one event and cannot disagree about
+which window it was.
+
+**Only the first button, because under the grab there is nothing else to ask.** A second button
+pressed inside a gesture and the release that ends it are routed to the grabbed surface whatever the
+pointer is over, so consulting the hit test for them would be consulting an answer that is not being
+used.
+
+**Rejected: swallowing the click that focused.** macOS does it for some background windows and it is
+not available here even in principle: `wl_pointer` gives gyro a surface and a coordinate, and nothing
+about whether the press was aimed at a button under it. Every Wayland compositor delivers the press
+and every toolkit is written against that, so eating it would be a first click that silently does
+nothing.
+
+**Rejected: clearing focus on a click that hit nothing.** A click on the background, on the floor, or
+on something gyro drew for itself leaves focus where it was. There is nothing else on this machine to
+type into — the desktop is not a window — and a person who clicks empty space and then types means
+the window they were already using. Clearing would also make the recovery console's own surface a
+focus sink, which is the machine where losing the keyboard is worst.
+
+#### The hit is a surface; the focus target is the nearest ancestor the stack already holds
+
+Decision 141 gives a client two entities and a toolkit puts subsurfaces under them, so what the
+pointer touches is several levels below the thing a person means to raise. The walk goes up until it
+finds an entity `Scene/Focus.h` is already holding.
+
+**Reading the stack is what keeps the rule from being a second model of the tree.** The stack is by
+construction the set of windows that have been offered, so nothing resolved out of it can be refused
+by `SceneFocus::Focus` afterwards. *The child of a floor* was the obvious alternative and is a claim
+about a tree shape a shell is free to change; *the nearest container* stops at the first opacity group
+a transition wrapped a window in.
+
+#### The pointer is routed before focus is compared, which is a reordering rather than an addition
+
+`ClientHost::Advance` ran `SyncFocus` and then `SyncPointer`; it now runs them the other way.
+
+**What the old order costs is a keystroke in the wrong window.** Keys are delivered as the devices are
+drained, ahead of the step — so focus moved inside `SyncPointer` would not reach a client until the
+*next* iteration, and anything typed in between goes to the window the person just clicked away from.
+It is intermittent by construction, it depends on how fast somebody types after clicking, and it is
+exactly the report that cannot be reproduced on demand. The reorder also means one iteration sends one
+`enter` however many times focus moved inside it: a window that maps and is then clicked elsewhere in
+the same wakeup produces one event rather than two.
+
+**Nothing else read focus in that gap**, which is what makes this a reordering and not a redesign —
+`SyncPointer` asks the world where the pointer is and what is under it, and neither question involves
+who has the keyboard.
+
+#### What is deliberately not decided
+
+**Follows-mouse is not here and cannot be**, because it is a preference and there is nowhere to keep
+one until there is a session. Neither is focus-on-hover with a delay, which needs a number as well as
+a preference.
+
+**Nor is the focus ring**, which decision 96 owes and nothing draws. It is what makes focus visible
+without the raise, and until it exists the coupling above is carrying it.

@@ -2012,6 +2012,85 @@ GYRO_TEST(ProtocolRoundTrip, AButtonHeldKeepsThePointerOnTheWindowItWasPressedOn
 	GYRO_CHECK(!session.Client.Fault().has_value());
 }
 
+// Decision 162's click-to-focus, from the far end of the socket: a press on a window that does not
+// have the keyboard takes it, and the `enter` arrives in the wakeup the button did.
+//
+// **The ordering is the whole of what this checks and it is not cosmetic.** Keys are delivered as the
+// devices are drained, ahead of the step that routes the button — so a focus change noticed one
+// iteration later is a first keystroke landing in the window a person has just clicked away from,
+// which is the bug a user reports as *it typed into the wrong window* and nobody can reproduce on
+// demand.
+GYRO_TEST(ProtocolRoundTrip, AClickTakesTheKeyboardBackInTheWakeupTheButtonArrivedIn)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Session session{ "gyro-roundtrip-click" };
+	GYRO_REQUIRE(session.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	session.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(session, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(session, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(session, keyboard, pointer));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Show(session, bound, toplevel, std::byte{ 0x40 }));
+
+	GYRO_REQUIRE_EQ(keyboard.Listener.Entered, std::uint32_t{ 1 });
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(session.Store);
+
+	// Focus taken away by something with no client behind it, which is what the recovery console and
+	// the greeter are — and the cheapest way to say *this window is not the focused one* without a
+	// second connection.
+	const EntityId elsewhere = session.Store.CreateContainer({}, {}).value();
+
+	session.Store.Focus().Offer(elsewhere);
+
+	session.Turn();
+
+	GYRO_REQUIRE_EQ(keyboard.Listener.Left, std::uint32_t{ 1 });
+
+	Push(session, middle.X, middle.Y);
+	(*session.Host)->OnPointerMotion(PointerMotion{ .When = session.Clock.Now() });
+
+	session.Turn();
+
+	// The pointer being on the window is not focus: hovering changes nothing, because follows-mouse is
+	// a preference nobody has and this is not it.
+	GYRO_REQUIRE_EQ(pointer.Listener.Entered, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 1 });
+
+	(*session.Host)->OnPointerButton(Click(0x110, true, session.Clock.Now()));
+
+	session.Turn();
+
+	// One turn, and the client has both: the button it was clicked with and the keyboard it was
+	// clicked for.
+	GYRO_CHECK_EQ(pointer.Listener.Buttons, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 2 });
+	GYRO_CHECK(keyboard.Listener.Focused.Id() == toplevel.Drawn.Surface.Id());
+	GYRO_CHECK(session.Store.Focus().Focused() != elsewhere);
+
+	// Clicking about inside the window it is already in sends nothing further: focus that re-entered on
+	// every press would be a `leave`/`enter` pair per click, and a toolkit redraws on those.
+	(*session.Host)->OnPointerButton(Click(0x110, false, session.Clock.Now()));
+	(*session.Host)->OnPointerButton(Click(0x110, true, session.Clock.Now()));
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 2 });
+	GYRO_CHECK_EQ(keyboard.Listener.Left, std::uint32_t{ 1 });
+	GYRO_CHECK(!session.Client.Fault().has_value());
+}
+
 // A scroll, with the three events that say what did it. The source is the one that decides whether a
 // toolkit runs kinetic scrolling at all, so it has to arrive and it has to arrive first.
 GYRO_TEST(ProtocolRoundTrip, AScrollCarriesWhatDidItBeforeItCarriesHowFar)

@@ -6,6 +6,7 @@
 
 #include "Animation/Author/Bundle.h"
 #include "Scene/Entity.h"
+#include "Scene/Hit.h"
 #include "Scene/Output.h"
 
 Result<void> SessionFloor::Open(SceneStore& scene)
@@ -54,4 +55,20 @@ void PlaceOnFloor(SceneCommit& commit, const SceneStore& scene, EntityId window,
 	// belongs instead of growing into it, and the day the catalog arrives this is the one call that
 	// changes.
 	static_cast<void>(commit.Move(window, { x, y, 0.0 }, Immediate()));
+}
+
+void FocusByClick(SceneStore& scene, EntityId hit)
+{
+	const EntityId window = FocusTargetFor(scene, hit);
+
+	if (window.IsNull())
+	{
+		return;
+	}
+
+	// Both, and in this order only because the answer reads better that way: `Focus` is refused for an
+	// entity the stack does not hold, and `FocusTargetFor` found this one in it, so neither call can
+	// fail here and neither depends on the other having run.
+	static_cast<void>(scene.Focus().Focus(window));
+	static_cast<void>(scene.Raise(window));
 }

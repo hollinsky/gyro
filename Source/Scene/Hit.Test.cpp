@@ -249,3 +249,54 @@ GYRO_TEST(Hit, ASlotThatComesBackDoesNotInheritWhatItAccepted)
 	GYRO_CHECK(store.InputFor(reclaimedFirst) == nullptr);
 	GYRO_CHECK(store.InputFor(reclaimedSecond) == nullptr);
 }
+
+// The hit is the surface and focus belongs to the window around it — decision 141's two entities, and
+// a toolkit's subsurfaces below them.
+GYRO_TEST(Hit, AHitResolvesUpToTheWindowThatCouldTakeFocus)
+{
+	SceneStore store{ Clock };
+	const Window window = Open(store, 0.0, 0.0, 400.0F, 300.0F);
+	const EntityId popup = store.CreateImage(window.Surface, { .Extent = { 40.0F, 20.0F } }, ImageContent{}).value();
+
+	// The container is what a client's toplevel offers, which is what makes it the answer for everything
+	// beneath it.
+	store.Focus().Offer(window.Frame);
+
+	GYRO_CHECK(FocusTargetFor(store, window.Surface) == window.Frame);
+	GYRO_CHECK(FocusTargetFor(store, popup) == window.Frame);
+	GYRO_CHECK(FocusTargetFor(store, window.Frame) == window.Frame);
+}
+
+// Nothing on the way up is focusable, which is every node gyro draws for itself: the splash, the
+// console, a gym's lanes, and the cursor the pointer is sitting on by construction.
+GYRO_TEST(Hit, AHitOnSomethingNobodyOfferedResolvesToNoWindow)
+{
+	SceneStore store{ Clock };
+	const Window window = Open(store, 0.0, 0.0, 400.0F, 300.0F);
+
+	GYRO_CHECK(FocusTargetFor(store, window.Surface).IsNull());
+	GYRO_CHECK(FocusTargetFor(store, {}).IsNull());
+
+	// Withdrawn rather than never offered, which is the window that is closing: decision 114 takes focus
+	// off it at retirement, so a click during its exit resolves to nothing rather than to a ghost.
+	store.Focus().Offer(window.Frame);
+	store.Focus().Withdraw(window.Frame);
+
+	GYRO_CHECK(FocusTargetFor(store, window.Surface).IsNull());
+}
+
+// The nearest one, so a window inside a group somebody offered separately does not hand focus to the
+// group. Reading the stack rather than a kind is what makes this come out right without a rule about
+// what containers mean.
+GYRO_TEST(Hit, AHitStopsAtTheNearestFocusableAncestorRatherThanTheOutermost)
+{
+	SceneStore store{ Clock };
+	const EntityId group = store.CreateContainer({}, { .Extent = { 400.0F, 300.0F } }).value();
+	const EntityId frame = store.CreateContainer(group, { .Extent = { 400.0F, 300.0F } }).value();
+	const EntityId surface = store.CreateImage(frame, { .Extent = { 400.0F, 300.0F } }, ImageContent{}).value();
+
+	store.Focus().Offer(group);
+	store.Focus().Offer(frame);
+
+	GYRO_CHECK(FocusTargetFor(store, surface) == frame);
+}

@@ -152,3 +152,24 @@ GYRO_TEST(SceneFocus, RetiringAWindowTakesFocusOffEverythingUnderIt)
 
 	GYRO_CHECK(store.Focus().Focused() == other);
 }
+
+// Membership without the order, which is what the pointer asks on the way up from what it hit.
+GYRO_TEST(SceneFocus, TheStackAnswersWhetherItHoldsAWindowWithoutMovingIt)
+{
+	SceneStore store{ Clock };
+	const EntityId first = *store.CreateContainer({}, {});
+	const EntityId second = *store.CreateContainer({}, {});
+	const EntityId never = *store.CreateContainer({}, {});
+
+	store.Focus().Offer(first);
+	store.Focus().Offer(second);
+
+	GYRO_CHECK(store.Focus().Contains(first));
+	GYRO_CHECK(store.Focus().Contains(second));
+	GYRO_CHECK(!store.Focus().Contains(never));
+	GYRO_CHECK(!store.Focus().Contains({}));
+
+	// Asking is not focusing, which is the whole reason this exists rather than the caller trying
+	// `Focus` and reading the answer.
+	GYRO_CHECK(store.Focus().Focused() == second);
+}

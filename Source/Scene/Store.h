@@ -190,6 +190,52 @@ public:
 		return &m_Input[*index];
 	}
 
+	// Put this entity in front of its siblings, which is decision 55's z order written to rather than read:
+	// the sibling list is the paint order and the last child is the frontmost, so raising is moving it to
+	// the end of the chain it is already in.
+	//
+	// **It is mechanism, and that is why it is a verb here rather than something `SceneFocus` does on the
+	// way past.** Decision 51 gives gyro the stacking and a shell the model, and a shell that focuses a
+	// window without bringing it forward is an ordinary arrangement rather than a mistake to prevent — a
+	// tiled layout where focus moves by keyboard and nothing overlaps, a video pinned above everything
+	// that must not fall behind the window a person clicks. Folding the raise into the focus would make
+	// both of those unwritable; folding them together in the policy that stands in for an absent shell
+	// (162) is a choice that can be taken back.
+	//
+	// **A link change and never a lifetime one**, which is decision 114's distinction: the entity keeps
+	// its id, its children, its channels and its coefficients, and nothing about it retires. It is the
+	// same operation on one node that a workspace switch performs on a subtree.
+	//
+	// True and untouched where the entity is already frontmost, which is the common answer — a person
+	// clicking about inside the window they are already using. False for an id that names nothing live.
+	bool Raise(EntityId id) noexcept
+	{
+		Entity* const entity = Mutable(id);
+
+		if (entity == nullptr)
+		{
+			return false;
+		}
+
+		const EntityId last = entity->Parent.IsNull() ? m_LastRoot : m_Entities[entity->Parent.Index].LastChild;
+
+		if (last == id)
+		{
+			return true;
+		}
+
+		// Out of the chain and onto the end of it, through the two halves `Destroy` and `Create` already
+		// use. The `NextSibling` is cleared in between because `Append` links onto a node it takes to be
+		// fresh, and a stale link here would be a cycle in the walk that draws the world.
+		Unlink(id, *entity);
+
+		entity->NextSibling = {};
+
+		Append(entity->Parent, id);
+
+		return true;
+	}
+
 	[[nodiscard]] bool IsLive(EntityId id) const noexcept { return m_Ids.IsValid(id); }
 
 	// The top of the tree, as the first of a sibling chain. Decision 55 makes the list order the z

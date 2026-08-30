@@ -26,8 +26,14 @@
 // (141) applied to focus rather than to placement, and for the same reason: a window that just opened
 // takes focus, and when it closes focus falls to whatever a person was using before it rather than to
 // nothing. Both take no parameter, which is the whole of what gyro can honestly decide without the
-// shell that owns the model. Click-to-focus and follows-mouse are not here because both need a pointer
-// and neither is gyro's to pick.
+// shell that owns the model.
+//
+// **Click-to-focus is the third rule of that shape and it is deliberately not here**, because it needs
+// the pointer and this class has never seen one: [Protocol/Floor.h](../Protocol/Floor.h) holds it
+// beside the placement, so both stand-ins are in one file and leave together when a shell declares a
+// model. Decision 162 also says why raising is a verb of the store's rather than something this class
+// does on the way past. Follows-mouse is still nobody's — it needs a preference and there is nowhere
+// to keep one until there is a session.
 //
 // **Rejected: focus as a flag on the entity.** It reads naturally — one `bool` beside `Retiring` — and
 // it makes *who is focused* a scan of the world, which is decision 115's rejected axis in a second
@@ -76,6 +82,18 @@ public:
 		std::rotate(at, at + 1, m_Stack.end());
 
 		return true;
+	}
+
+	// Whether this entity is one of the windows that could take focus, which is the question the pointer
+	// asks on the way up from what it hit: a click lands on a surface and focus belongs to the window
+	// around it. `Scene/Hit.h` is the caller and does the walk.
+	//
+	// **A membership test rather than a window onto the stack**, which stays private for the reason
+	// below — and rather than letting the caller try `Focus` and read the answer, which would move focus
+	// as a side effect of asking whether it could.
+	[[nodiscard]] bool Contains(EntityId id) const noexcept
+	{
+		return std::find(m_Stack.begin(), m_Stack.end(), id) != m_Stack.end();
 	}
 
 	// How many windows could take focus. The stack itself stays private: the order below the top is

@@ -8,9 +8,11 @@
 #include "Geometry/Space.h"
 #include "Scene/Commit.h"
 #include "Scene/Entity.h"
+#include "Scene/Hit.h"
 #include "Scene/Output.h"
 #include "Scene/Store.h"
 #include "Testing/Test.h"
+#include "World/Content.h"
 
 // The floor and the placement, against the store rather than over a socket.
 //
@@ -155,4 +157,83 @@ GYRO_TEST(Floor, APlacementWithNoOutputsChangesNothing)
 	// to a coordinate invented here. Nothing is drawing this scene in any case — a world with no
 	// outputs publishes a wake schedule nothing can read.
 	GYRO_CHECK_EQ(scene.Find(*window)->Translation.Model().X, 0.0);
+}
+
+namespace
+{
+// A window as the shell builds one: a container on the floor, the client's surface beneath it, and the
+// container being what takes focus. Two of these is the arrangement click-to-focus is for.
+struct Placed
+{
+	EntityId Frame;
+	EntityId Surface;
+};
+
+[[nodiscard]] Placed Add(SceneStore& scene, const SessionFloor& floor)
+{
+	const EntityId frame = scene.CreateContainer(floor.Container(), { .Extent = { 400.0F, 300.0F } }).value();
+	const EntityId surface = scene.CreateImage(frame, { .Extent = { 400.0F, 300.0F } }, ImageContent{}).value();
+
+	scene.Focus().Offer(frame);
+
+	return { .Frame = frame, .Surface = surface };
+}
+} // namespace
+
+// Decision 162: the click focuses the window under it and brings it forward, and it does both because
+// with nothing drawing a focus ring the raise is the only half a person can see.
+GYRO_TEST(Floor, AClickFocusesTheWindowUnderItAndBringsItToTheFront)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	const std::array outputs{ Panel() };
+	scene.SetOutputs(outputs);
+
+	SessionFloor floor;
+	GYRO_REQUIRE(floor.Open(scene).has_value());
+
+	const Placed below = Add(scene, floor);
+	const Placed above = Add(scene, floor);
+
+	// The newest window has both, which is the stack policy (141) and the append order (55) agreeing.
+	GYRO_REQUIRE(scene.Focus().Focused() == above.Frame);
+	GYRO_REQUIRE(scene.Find(floor.Container())->LastChild == above.Frame);
+
+	// The hit is the surface and never the container: the click is on the pixels.
+	FocusByClick(scene, below.Surface);
+
+	GYRO_CHECK(scene.Focus().Focused() == below.Frame);
+	GYRO_CHECK(scene.Find(floor.Container())->LastChild == below.Frame);
+	GYRO_CHECK(scene.Find(floor.Container())->FirstChild == above.Frame);
+}
+
+// A click on the background, on the floor, or on anything gyro drew for itself. Focus stays where it
+// was: there is nothing else on this machine to type into, and a person who clicks empty space and
+// then types means the window they were already using.
+GYRO_TEST(Floor, AClickOnNothingLeavesFocusAndTheOrderAlone)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	const std::array outputs{ Panel() };
+	scene.SetOutputs(outputs);
+
+	SessionFloor floor;
+	GYRO_REQUIRE(floor.Open(scene).has_value());
+
+	const Placed below = Add(scene, floor);
+	const Placed above = Add(scene, floor);
+
+	FocusByClick(scene, {});
+	FocusByClick(scene, floor.Container());
+
+	// A node gyro authored that is not under any window either — the cursor stands exactly here.
+	const EntityId glyph = scene.CreateContainer({}, {}).value();
+
+	FocusByClick(scene, glyph);
+
+	GYRO_CHECK(scene.Focus().Focused() == above.Frame);
+	GYRO_CHECK(scene.Find(floor.Container())->LastChild == above.Frame);
+	GYRO_CHECK(scene.Find(floor.Container())->FirstChild == below.Frame);
 }

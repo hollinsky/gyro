@@ -148,16 +148,18 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// answer to no clients at all: author nothing and wait.
 	[[maybe_unused]] const Result<void> polled = m_Server.Poll();
 
-	// **After the requests rather than before them**, which is the ordering that makes a window
-	// typeable in the wakeup it opened in: the commit that maps it is what offers it focus, so the
-	// comparison has to run downstream of the dispatch that performed it. See [Seat.h](Seat.h) for why
-	// the change is noticed by comparing rather than by a signal out of `Scene`.
-	m_Seat.SyncFocus(scene.Focus().Focused());
-
-	// **After the focus rather than before it**, and both after the dispatch for the same reason: a
-	// window that mapped in this wakeup is one the pointer may already be sitting on, and a person who
-	// clicks the instant an application opens is clicking on the window rather than through it.
+	// **After the requests**, because a window that mapped in this wakeup is one the pointer may already
+	// be sitting on: a person who clicks the instant an application opens is clicking on the window
+	// rather than through it.
 	m_Seat.SyncPointer(scene, now);
+
+	// **After the pointer, because the press this routed is one of the things that moves focus** (162),
+	// and after the requests for the reason that makes a window typeable in the wakeup it opened in: the
+	// commit that maps it is what offers it focus. Both writers run before the comparison, so one
+	// iteration sends one `enter` however many times focus changed inside it. See [Seat.h](Seat.h) for
+	// why the change is noticed by comparing rather than by a signal out of `Scene`, and for what the
+	// other order costs — a keystroke delivered to the window a person just clicked away from.
+	m_Seat.SyncFocus(scene.Focus().Focused());
 
 	return Wake::Never();
 }

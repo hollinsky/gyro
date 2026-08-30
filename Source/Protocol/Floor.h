@@ -6,7 +6,7 @@
 #include "Scene/Commit.h"
 #include "Scene/Store.h"
 
-// Where a client's window hangs, and who puts it somewhere when no shell will.
+// Where a client's window hangs, and who does the shell's job while there is none.
 //
 // **Every container a window can occupy is gyro's, and a client's window is parented into its
 // session's floor at commit (141).** The shell declares containers and moves windows between them; it
@@ -56,3 +56,23 @@ private:
 //
 // Does nothing where the world has no outputs, which is a scene nothing is drawing in any case.
 void PlaceOnFloor(SceneCommit& commit, const SceneStore& scene, EntityId window, Size<SurfaceSpace, float> natural);
+
+// Decision 162's click-to-focus: **the press that begins a gesture focuses the window under it and
+// brings it to the front.**
+//
+// The second stand-in of the Floorplanner's shape and here for that reason — a policy gyro holds only
+// because no shell has declared one, so both of them are in one file and leave in one commit.
+//
+// `hit` is the node the pointer was on when the button went down, which is a surface some way inside a
+// window; `Scene/Hit.h` resolves it to the window, since that is what focus and z order are about.
+//
+// **It focuses *and* raises, which is two verbs called by one policy.** With no shell there is nothing
+// drawing a focus ring — decision 96 gives gyro the ring and nothing authors one yet — and the
+// Floorplanner centres every window on the same point, so a click that focused without raising would
+// be a click whose whole effect is invisible until the next keystroke.
+//
+// Does nothing where the hit resolves to no window: the background, the floor itself, or anything gyro
+// drew for itself. **Focus stays where it was rather than clearing** — there is nothing else on this
+// machine to type into, and a person who clicks empty space and then types means the window they were
+// already using.
+void FocusByClick(SceneStore& scene, EntityId hit);
