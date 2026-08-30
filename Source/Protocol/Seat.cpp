@@ -382,6 +382,14 @@ void SeatGlobal::Scroll(const PointerScroll& event)
 
 void SeatGlobal::SyncPointer(SceneStore& scene, Instant now)
 {
+	// **A drag is written before anything is resolved against the world**, because the window being
+	// moved is part of that world: the hit test below, the menu a press might dismiss and the placement
+	// a popup is about to be given all read a scene in which the window has already arrived where the
+	// hand is. Doing it after would resolve this iteration's events against last iteration's picture,
+	// which is one frame of the window trailing the pointer — the exact artefact decision 51 keeps this
+	// gesture inside the compositor to avoid.
+	m_Drag.Track(scene, m_MovedAt.value_or(now));
+
 	// Where the pointer is now, before anything the devices said is routed: a press lands on what the
 	// motion in front of it moved onto, which is what makes clicking a window a person just slid onto
 	// work in the wakeup they slid onto it.
@@ -392,7 +400,7 @@ void SeatGlobal::SyncPointer(SceneStore& scene, Instant now)
 	// press even when both are in this queue.
 	const bool grabbed = !m_Grab.IsNull();
 
-	for (const SeatPointerEvent& event : m_Queue)
+	for (SeatPointerEvent& event : m_Queue)
 	{
 		if (event.What != SeatPointerEvent::Kind::Button)
 		{
@@ -404,6 +412,13 @@ void SeatGlobal::SyncPointer(SceneStore& scene, Instant now)
 			if (m_ButtonsDown++ == 0)
 			{
 				m_Grab = m_Pointed;
+
+				// **The serial belongs to the press rather than to the grab, so it is claimed here and
+				// filled in at delivery.** Cleared first because a press over gyro's own background sends
+				// nothing: leaving the last gesture's number standing would let a client quote a serial
+				// from a click that happened inside somebody else's window.
+				m_GrabSerial.reset();
+				event.OpensGrab = true;
 
 				// **Before the focus, because a press outside an open menu is first of all a press that
 				// closes it.** Dismissing retires the popup and `SceneStore::Retire` takes it off the focus
@@ -423,6 +438,12 @@ void SeatGlobal::SyncPointer(SceneStore& scene, Instant now)
 		else if (m_ButtonsDown > 0 && --m_ButtonsDown == 0)
 		{
 			m_Grab = {};
+			m_GrabSerial.reset();
+
+			// **The button coming up ends the drag, and nothing else does.** A person lets go of a window
+			// where they let go of it: there is no snap back, no commit to wait for and nothing to
+			// confirm, because the window has been at that position on every frame of the gesture already.
+			m_Drag.End();
 		}
 	}
 
@@ -447,6 +468,22 @@ SeatGlobal::PointerTarget SeatGlobal::Resolve(const SceneStore& scene) const
 	// no cursor (`Scene/Pointer.h`), and this is also what keeps a compositor that has never seen a mouse
 	// from sending an `enter` for whatever happens to be at the origin.
 	if (!scene.Pointer().IsVisible())
+	{
+		return {};
+	}
+
+	// **A window being dragged takes the pointer away from its own client**, which is the compositor
+	// grab superseding the protocol's implicit one. The client is told with a `leave` — that is what
+	// `Refocus` does with this answer — and it is the truthful thing to say: the pointer is driving the
+	// window rather than pointing into it, and a toolkit that kept receiving motion would run its own
+	// hover and drag logic underneath a gesture it is not in. The `enter` goes back out when the button
+	// comes up, from the same call at the end of `SyncPointer` an ordinary grab ends through.
+	//
+	// **So the client never sees the release that ends the drag**, having been given the press that
+	// started it. That is the protocol's own answer for a grab taken away — a `leave` is what cancels a
+	// toolkit's own tracking, and it is why it goes out rather than being suppressed — and it is the
+	// same shape every compositor's interactive move has.
+	if (m_Drag.IsActive())
 	{
 		return {};
 	}
@@ -604,39 +641,67 @@ void SeatGlobal::Deliver()
 
 	wl_client* const client = surface.WireClient();
 
-	for (ClientPointer* const pointer : m_Pointers)
+	// **The events are the outer loop and the client's pointer objects the inner one**, which is the
+	// order that makes a serial mean something: one physical press is one number, and a client holding
+	// two `wl_pointer`s on one connection — a toolkit and its portal helper in the same binary — was
+	// otherwise told a different serial on each. Every request in the protocol that quotes a serial back
+	// is asking *which event was this*, and an answer that depended on which object carried it cannot be
+	// checked.
+	bool sent = false;
+
+	for (const SeatPointerEvent& event : m_Queue)
 	{
-		if (!pointer->BelongsTo(client))
+		if (event.What == SeatPointerEvent::Kind::Button)
 		{
-			continue;
-		}
+			const std::uint32_t serial = NextSerial();
 
-		bool sent = false;
-
-		for (const SeatPointerEvent& event : m_Queue)
-		{
-			if (event.What == SeatPointerEvent::Kind::Button)
+			// The press that opened the grab, now that it has a number and has actually gone out to
+			// somebody. This one entry is the whole of the ledger `BeginMove` checks a request against.
+			if (event.OpensGrab)
 			{
+				m_GrabSerial = serial;
+			}
+
+			for (ClientPointer* const pointer : m_Pointers)
+			{
+				if (!pointer->BelongsTo(client))
+				{
+					continue;
+				}
+
 				pointer->Object().Button(
-					NextSerial(),
+					serial,
 					Milliseconds(event.Pressed.When),
 					event.Pressed.Code,
 					event.Pressed.Pressed ? Wayland::Server::WlPointerButtonState::Pressed :
 											Wayland::Server::WlPointerButtonState::Released
 				);
+			}
 
-				sent = true;
+			sent = true;
 
+			continue;
+		}
+
+		const PointerScroll& scroll = event.Scrolled;
+		const Wayland::Server::WlPointerAxis axis = WireAxis(scroll.Axis);
+		const std::uint32_t time = Milliseconds(scroll.When);
+
+		// Whole detents only. `axis_discrete` cannot say *a third of a notch*, and a high-resolution
+		// wheel reports exactly that — so the fine motion travels in the distance below, where it is
+		// expressible, and this carries the clicks a person actually felt.
+		const std::int32_t detents = static_cast<std::int32_t>(scroll.Clicks120 / 120.0);
+
+		for (ClientPointer* const pointer : m_Pointers)
+		{
+			if (!pointer->BelongsTo(client))
+			{
 				continue;
 			}
 
-			const PointerScroll& scroll = event.Scrolled;
-			const Wayland::Server::WlPointerAxis axis = WireAxis(scroll.Axis);
-			const std::uint32_t time = Milliseconds(scroll.When);
-
 			// **The source first, then the detents, then the distance**, which is the order the protocol
-			// fixes and the order a toolkit reads them in: it decides whether to run kinetic scrolling from
-			// the source, and it cannot decide that after it has already consumed the distance.
+			// fixes and the order a toolkit reads them in: it decides whether to run kinetic scrolling
+			// from the source, and it cannot decide that after it has already consumed the distance.
 			if (pointer->Grouped())
 			{
 				pointer->Object().AxisSource(WireSource(scroll.Source));
@@ -645,22 +710,16 @@ void SeatGlobal::Deliver()
 			if (scroll.Stop)
 			{
 				// The fingers left the pad, which carries no distance and is the whole of what a flick
-				// decays from. Only a `Finger` produces one, so a client below version 5 simply never hears
-				// that a gesture ended — which is what it would have had from any compositor of that era.
+				// decays from. Only a `Finger` produces one, so a client below version 5 simply never
+				// hears that a gesture ended — which is what it would have had from any compositor of
+				// that era.
 				if (pointer->Grouped())
 				{
 					pointer->Object().AxisStop(time, axis);
 				}
 
-				sent = true;
-
 				continue;
 			}
-
-			// Whole detents only. `axis_discrete` cannot say *a third of a notch*, and a high-resolution
-			// wheel reports exactly that — so the fine motion travels in the distance below, where it is
-			// expressible, and this carries the clicks a person actually felt.
-			const std::int32_t detents = static_cast<std::int32_t>(scroll.Clicks120 / 120.0);
 
 			if (pointer->Grouped() && detents != 0)
 			{
@@ -668,15 +727,54 @@ void SeatGlobal::Deliver()
 			}
 
 			pointer->Object().Axis(time, axis, Fixed(scroll.Distance));
-
-			sent = true;
 		}
 
-		if (sent && pointer->Grouped())
+		sent = true;
+	}
+
+	if (!sent)
+	{
+		return;
+	}
+
+	// The group closing everything above it: a press and the scroll that came with it are one physical
+	// event and a toolkit is entitled to see them that way. Every pointer of this client was handed the
+	// same queue, so there is one answer to whether a frame is owed rather than one per object.
+	for (ClientPointer* const pointer : m_Pointers)
+	{
+		if (pointer->BelongsTo(client) && pointer->Grouped())
 		{
 			pointer->Object().Frame();
 		}
 	}
+}
+
+bool SeatGlobal::BeginMove(SceneStore& scene, EntityId window, std::uint32_t serial)
+{
+	// One drag at a time, because there is one pointer. A second request inside the same gesture is a
+	// client asking for a grab it already holds, or asking to take one off another window.
+	if (m_Drag.IsActive())
+	{
+		return false;
+	}
+
+	// No button down, or a number that is not the one gyro sent with the press that put it down. Both
+	// are a client asking to be handed the pointer without a person having pressed anything.
+	if (m_Grab.IsNull() || !m_GrabSerial || serial != *m_GrabSerial)
+	{
+		return false;
+	}
+
+	// And the press has to have landed in the window being asked for. `FocusTargetFor` resolves the node
+	// under the pointer to the window around it, which is the walk click-to-focus already does — so a
+	// press on a client's own surface names its own window, and a press inside an open menu names the
+	// menu rather than the window behind it.
+	if (window.IsNull() || FocusTargetFor(scene, m_Grab) != window)
+	{
+		return false;
+	}
+
+	return m_Drag.Begin(scene, window);
 }
 
 std::uint32_t SeatGlobal::NextSerial() const noexcept

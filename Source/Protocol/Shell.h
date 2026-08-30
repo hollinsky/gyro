@@ -47,12 +47,21 @@ class ClientXdgSurface;
 
 // One `xdg_toplevel`: a window with a title, and the requests a person's window manager would answer.
 //
-// **Almost all of them are accepted and do nothing, and that is not a stub.** Maximise, minimise,
-// fullscreen, interactive move and resize are all *window management*, which belongs to a shell
-// (51) — gyro's answer to a client that asks for them is the same whether there is no shell yet or a
-// shell that declined: the state does not change, and the protocol's contract is that a client learns
-// what it got from the next configure rather than from a reply. So a request that changes nothing is
-// answered by changing nothing, which is a legal outcome rather than an unimplemented one.
+// **Most of them are accepted and do nothing, and that is not a stub.** Maximise, minimise and
+// fullscreen are *window management*, which belongs to a shell (51) — gyro's answer to a client that
+// asks for them is the same whether there is no shell yet or a shell that declined: the state does not
+// change, and the protocol's contract is that a client learns what it got from the next configure
+// rather than from a reply. So a request that changes nothing is answered by changing nothing, which is
+// a legal outcome rather than an unimplemented one.
+//
+// **`move` is the exception, and decision 51 is why it is not on that list.** Continuous manipulation
+// is gyro's mechanism rather than a shell's policy: a drag that round tripped through a shell would
+// reach the window two hops after the hand moved, on the interaction a person judges most harshly. So
+// the request starts a gesture the compositor runs at pointer rate ([Drag.h](Drag.h)) and the shell's
+// half of it — snap targets, tiling gravity, the edges a window may not cross — is declared ahead of
+// time rather than per event, and is empty until there is a shell to declare it. `resize` is the same
+// mechanism and is not built: it is the first thing that would make a configure carry a size, which is
+// the one number this file currently refuses to invent.
 class ClientXdgToplevel final : public Wayland::Server::XdgToplevelHandler
 {
 public:
@@ -392,6 +401,11 @@ public:
 	// Send the configure the client is waiting for. Public because a popup's `reposition` produces one
 	// outside the commit sequence that otherwise drives them.
 	void Configure();
+
+	// Start an interactive move, per `xdg_toplevel.move`. Public because the request arrives on the role
+	// object and the window it names is this one's; the seat does the deciding, and [Seat.h](Seat.h) has
+	// what it decides against.
+	void BeginMove(Wayland::Server::WlSeat seat, std::uint32_t serial);
 
 	// `ClientXdgToplevel::SetActivated` reached through the surface, which is the object the window
 	// registry holds. False — nothing changed — for a surface whose role is not a toplevel.

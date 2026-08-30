@@ -10,6 +10,7 @@
 #include "Core/Time.h"
 #include "Geometry/Space.h"
 #include "Protocol/Context.h"
+#include "Protocol/Drag.h"
 #include "Protocol/Keymap.h"
 #include "Scene/Store.h"
 #include "Wayland/Server/Wayland.h"
@@ -110,6 +111,12 @@ public:
 
 	Wayland::Server::WlTouchHandler* OnGetTouch() override;
 
+	// The seat behind this object, which is how a request that *names* a seat reaches the one thing on
+	// the machine that knows what the pointer is doing. `xdg_toplevel.move` is the caller: the protocol
+	// makes the seat an argument precisely because a grab belongs to one, so the shell resolves the id
+	// the client sent rather than reaching for a seat it assumed.
+	[[nodiscard]] SeatGlobal& Seat() const noexcept { return *m_Seat; }
+
 private:
 	SeatGlobal* m_Seat = nullptr;
 };
@@ -161,6 +168,13 @@ struct SeatPointerEvent
 
 	PointerButton Pressed{};
 	PointerScroll Scrolled{};
+
+	// Whether this is the press that opened the implicit grab, marked when the grab is settled and read
+	// when the event goes out. **It is here rather than recomputed at delivery because the serial only
+	// exists at delivery**: the grab is decided against the queue before anything is sent, and the number
+	// a client will quote back at gyro is minted on the way out. One bit on an event that already exists
+	// is what joins the two.
+	bool OpensGrab = false;
 };
 
 // The global, owned by the host and outliving every client that binds it.
@@ -221,6 +235,19 @@ public:
 	// that wakeup is late together and the alternative — replaying positions the store no longer holds —
 	// would mean a second copy of the pointer, which is the thing decision 152 refuses.
 	void SyncPointer(SceneStore& scene, Instant now);
+
+	// Start moving `window` with the pointer, per decision 51: **the client asks once and gyro runs the
+	// gesture.** Called from `xdg_toplevel.move`, and the answer is whether the drag took.
+	//
+	// **Three things have to be true, and each of them is a way a client could otherwise take the
+	// pointer without a person having touched it.** A button must be down; the serial must be the one
+	// gyro sent with the press that put it down, which is the protocol's own defence and the ledger
+	// [Popup.h](Popup.h)'s grab has no way to check against; and the window the client named must be the
+	// window that press landed in, so that an application cannot ride somebody else's click.
+	//
+	// **What is deliberately not checked is whether the client is allowed to move its own window**, which
+	// is a shell's constraint to declare and there is no shell (51). See [Drag.h](Drag.h).
+	bool BeginMove(SceneStore& scene, EntityId window, std::uint32_t serial);
 
 private:
 	// Everything a keyboard needs to know to address the focused client, or nothing where focus is on a
@@ -302,6 +329,16 @@ private:
 	// scrolling. Without it the client gets a leave mid-drag and the thumb sticks where the pointer left
 	// the frame.
 	EntityId m_Grab{};
+
+	// The serial gyro sent with the press that opened the grab, or nothing where no press has gone out
+	// under it — the pointer was over gyro's own background, or over nothing. **It is one entry rather
+	// than a history, and that is enough for the only question asked of it**: a request naming a grab
+	// names the live one, so a serial that is not this number is not a grab this client is in.
+	std::optional<std::uint32_t> m_GrabSerial;
+
+	// The window the pointer is dragging, which supersedes the implicit grab above rather than sitting
+	// beside it. See [Drag.h](Drag.h).
+	WindowDrag m_Drag;
 
 	// How many buttons are down, which is what opens and closes the grab. A count rather than a flag
 	// because a person may press a second button without releasing the first, and a grab that ended on

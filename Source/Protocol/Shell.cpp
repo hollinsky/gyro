@@ -15,6 +15,7 @@
 #include "Core/Texture.h"
 #include "Protocol/Floor.h"
 #include "Protocol/Popup.h"
+#include "Protocol/Seat.h"
 #include "Scene/Commit.h"
 #include "Scene/Entity.h"
 #include "Scene/Hit.h"
@@ -99,8 +100,19 @@ void ClientXdgToplevel::OnShowWindowMenu(
 
 void ClientXdgToplevel::OnMove(Wayland::Server::WlSeat seat, std::uint32_t serial)
 {
-	(void)seat;
-	(void)serial;
+	// **Decision 51's continuous manipulation, and the request that starts it is the whole of the round
+	// trip.** From here until the button comes up the window is moved by gyro at the rate the pointer is
+	// sampled at, with nothing going back to the client — which is what makes a dragged window stay
+	// under the cursor instead of swimming behind it.
+	//
+	// **A refusal is silence, which is the protocol's own shape.** There is no reply to this request and
+	// no error for one gyro declines: a client learns what it got from what happens next, and every
+	// toolkit already handles a compositor that ignores a move — it is the state a window in a tiling
+	// session is in permanently. [Seat.h](Seat.h) has the three things that have to be true.
+	if (m_Surface != nullptr)
+	{
+		m_Surface->BeginMove(seat, serial);
+	}
 }
 
 void ClientXdgToplevel::OnResize(
@@ -960,6 +972,32 @@ void ClientXdgSurface::Withdraw() noexcept
 	// and that is a fresh negotiation rather than a continuation of the last one.
 	m_Configured = false;
 	m_Acked = false;
+}
+
+void ClientXdgSurface::BeginMove(Wayland::Server::WlSeat seat, std::uint32_t serial)
+{
+	SceneStore* const scene = m_Context->Store();
+
+	// Unmapped, or outside a dispatch. A client is entitled to ask before its window exists — a toolkit
+	// that hands a press to its own titlebar before the first frame is ordinary — and there is nothing
+	// in the world to move.
+	if (scene == nullptr || m_Window.IsNull())
+	{
+		return;
+	}
+
+	// **The seat the client named rather than one this object went looking for.** The protocol makes it
+	// an argument because a grab belongs to a seat, and `Implementation` is what refuses an id that is
+	// not a `wl_seat` gyro made — the same check `get_popup` makes of a parent, and for the same reason:
+	// reading user data off an arbitrary id is a type confusion a client can reach on purpose.
+	Wayland::Server::WlSeatHandler* const handler = seat.Implementation();
+
+	if (handler == nullptr)
+	{
+		return;
+	}
+
+	static_cast<void>(static_cast<ClientSeat*>(handler)->Seat().BeginMove(*scene, m_Window, serial));
 }
 
 bool ClientXdgSurface::SetActivated(bool activated) noexcept

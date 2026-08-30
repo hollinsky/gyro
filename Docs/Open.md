@@ -356,7 +356,16 @@ is to do the work.
   the half most likely to break the rule, since a swipe now declares a transition binding and
   nothing per event; what is left is narrower rather than closed. The constraint set for drag and
   resize is still not enumerated, and enumerating it is what decides whether the rule holds or
-  whether the first awkward case adds a per-event request and quietly undoes it. The gesture
+  whether the first awkward case adds a per-event request and quietly undoes it. *(Annotated
+  2026-08-29.)* Drag is now built with that set **empty**, which is the honest reading of *the shell
+  declares and there is no shell*: `xdg_toplevel.move` starts a gesture gyro runs at pointer rate,
+  and the window goes exactly where the hand goes with nothing clamping it. What a person can do
+  that they should not is drag a window off the top of a screen and have to drag it back — the
+  smallest possible version of the missing declaration, and the one worth living with because every
+  alternative is gyro picking the number. That the mechanism half works with no constraints at all
+  is evidence for the split rather than against it; the question the enumeration still has to answer
+  is resize, where a minimum and a maximum size are already on the wire and arrive from the *client*
+  rather than from a shell. The gesture
   vocabulary itself — which gestures exist, and what each binds to — belongs with the scene and
   material vocabularies above and for the same reason: a gesture, the transition it drives, and the
   nodes it moves are one design problem seen three ways.
