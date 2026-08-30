@@ -3406,6 +3406,165 @@ GYRO_TEST(ProtocolRoundTrip, AResizeQuotingASerialNobodySentIsRefused)
 
 namespace
 {
+// A window shaped the way GTK4 actually shapes one, taken from a real Ptyxis capture: a shadow margin
+// inside the surface, a window geometry inset by it, and an input region that is the *geometry* grown
+// by GTK4's twelve-pixel resize handle. That band straddles the visible edge — half of it is drawn
+// shadow, which is where a person grabs a corner — and every pixel of it is inside the surface, so
+// nothing here asks a compositor to honour input past the surface edge.
+constexpr std::int32_t Margin = 25;
+constexpr std::int32_t Handle = 12;
+constexpr std::int32_t VisibleWidth = 150;
+constexpr std::int32_t VisibleHeight = 100;
+constexpr std::int32_t ShadowedWidth = VisibleWidth + (2 * Margin);
+constexpr std::int32_t ShadowedHeight = VisibleHeight + (2 * Margin);
+constexpr std::int32_t ShadowedStride = ShadowedWidth * 4;
+constexpr std::size_t ShadowedBytes =
+	static_cast<std::size_t>(ShadowedStride) * static_cast<std::size_t>(ShadowedHeight);
+
+struct Shadowed
+{
+	SurfaceEvents Events;
+	BufferEvents Released;
+	ShellEvents Shell;
+	ToplevelEvents WindowEvents;
+	Wayland::WlSurface Surface;
+	Wayland::WlShmPool Pool;
+	Wayland::WlBuffer Buffer;
+	Wayland::XdgSurface XdgSurface;
+	Wayland::XdgToplevel Window;
+};
+
+[[nodiscard]] bool ShowShadowed(Pair& pair, BoundCompositor& bound, Shadowed& window)
+{
+	ClientPool pool{ ShadowedBytes };
+
+	if (!pool.Descriptor.IsValid())
+	{
+		return false;
+	}
+
+	pool.Fill(std::byte{ 0x60 });
+
+	window.Surface = bound.Compositor.CreateSurface(window.Events);
+	window.Pool = bound.Shm.CreatePool(pool.Take(), static_cast<std::int32_t>(ShadowedBytes));
+
+	if (!window.Surface.IsValid() || !window.Pool.IsValid())
+	{
+		return false;
+	}
+
+	window.Buffer = window.Pool.CreateBuffer(
+		0, ShadowedWidth, ShadowedHeight, ShadowedStride, Wayland::WlShmFormat::Argb8888, window.Released
+	);
+
+	window.XdgSurface = bound.Shell.GetXdgSurface(window.Surface, window.Shell);
+
+	if (!window.Buffer.IsValid() || !window.XdgSurface.IsValid())
+	{
+		return false;
+	}
+
+	window.Window = window.XdgSurface.GetToplevel(window.WindowEvents);
+
+	if (!window.Window.IsValid())
+	{
+		return false;
+	}
+
+	window.Surface.Commit();
+
+	pair.Turn();
+
+	window.XdgSurface.AckConfigure(window.Shell.Serial);
+	window.XdgSurface.SetWindowGeometry(Margin, Margin, VisibleWidth, VisibleHeight);
+
+	Wayland::WlRegion input = bound.Compositor.CreateRegion();
+
+	if (!input.IsValid())
+	{
+		return false;
+	}
+
+	input.Add(Margin - Handle, Margin - Handle, VisibleWidth + (2 * Handle), VisibleHeight + (2 * Handle));
+	window.Surface.SetInputRegion(input);
+	input.Destroy();
+
+	window.Surface.Attach(window.Buffer, 0, 0);
+	window.Surface.Commit();
+
+	pair.Turn();
+
+	return true;
+}
+} // namespace
+
+// **A press in the drawn shadow, which is where GTK4 puts the corner a person grabs.** The window is
+// the one above: the visible edge is twenty-five pixels inside the surface, and the twelve pixels
+// outside that edge are still surface — still the client's pixels, still inside the region it asked
+// for. A compositor that loses them is a compositor no GTK4 window can be resized under, because that
+// band is the only place the toolkit will start a resize from.
+//
+// The coordinate matters as much as the delivery: what the client computes the edge from is the
+// surface-local number in the `enter`, and a compositor that reported it relative to the *window*
+// instead would have every toolkit resizing from twenty-five pixels off.
+GYRO_TEST(ProtocolRoundTrip, APressInTheShadowMarginReachesTheWindowInSurfaceCoordinates)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-shadow" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
+
+	Shadowed window;
+	GYRO_REQUIRE(ShowShadowed(pair, bound, window));
+
+	const Entity* const node = WindowNode(pair.Store);
+	GYRO_REQUIRE(node != nullptr);
+
+	// The container is the *window*, so its origin is the visible edge and the surface starts a margin
+	// up and to the left of it.
+	GYRO_REQUIRE(node->Extent.Width == static_cast<float>(VisibleWidth));
+
+	const Vector3<double> at = node->Translation.Model();
+
+	// Seven pixels outside the visible left edge: drawn shadow, inside the surface, inside the region.
+	Push(pair, at.X - 7.0, at.Y + 50.0);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(pointer.Listener.Entered, std::uint32_t{ 1 });
+	GYRO_CHECK(pointer.Listener.On.Id() == window.Surface.Id());
+
+	// Surface-local, so the margin is included: 25 - 7 across and 25 + 50 down.
+	GYRO_CHECK_EQ(pointer.Listener.X.ToInt(), Margin - 7);
+	GYRO_CHECK_EQ(pointer.Listener.Y.ToInt(), Margin + 50);
+
+	// And the shadow beyond the band is not the client's: twenty pixels out is outside the region it
+	// asked for, so the pointer leaves rather than sliding along a strip nobody claimed.
+	Push(pair, -13.0, 0.0);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(pointer.Listener.Left, std::uint32_t{ 1 });
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+namespace
+{
 // A window on screen, which is the four steps every test below starts from and none of them is about.
 [[nodiscard]] bool Mapped(Pair& pair, BoundCompositor& bound, Toplevel& toplevel, std::byte fill)
 {
