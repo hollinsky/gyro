@@ -7,11 +7,10 @@
 #include "Geometry/Space.h"
 
 // Where an output's scale comes from, which is decision 164: gyro stores no per-output scale. It
-// stores one angular preference — how big text should be, in logical pixels per degree of visual
-// angle — and every output derives its own scale from that, its own pixel pitch, and how far away it
-// is. What a person perceives is angular size, and a 55-inch television at three metres and a
-// 27-inch monitor at sixty centimetres report identical millimetres per pixel and want scales two
-// apart.
+// stores one angular preference — how big a logical pixel should be, in arcminutes of visual angle —
+// and every output derives its own scale from that, its own pixel pitch, and how far away it is. What a person
+// perceives is angular size, and a 55-inch television at three metres and a 27-inch monitor at sixty centimetres report
+// identical millimetres per pixel and want scales two apart.
 //
 // **Here rather than in the composition root because it is arithmetic about the world, and here
 // rather than in `Seam` for decision 87's reason**: `Scene` declares the output model it wants and
@@ -51,25 +50,65 @@ struct PanelSize
 	friend constexpr bool operator==(PanelSize, PanelSize) noexcept = default;
 };
 
-// The person's one preference, as a multiple of the reference in 120ths.
+// The person's one preference: how big a logical pixel should be, as an angle.
 //
-// **The reference is 96 DPI at 600 mm**, which is the history the whole ecosystem already assumes:
-// a pitch of 25.4 / 96 = 0.2646 mm, one degree at that distance spanning 600 · tan 1° = 10.47 mm,
-// so 39.6 logical pixels per degree, or 1.52 arcminutes to the logical pixel. Stored as a multiple
-// of it rather than as the px/degree figure itself because every use is a ratio against the
-// reference and the tangent cancels — see `DensityFromGeometry`, which has no transcendental in it.
+// **The unit is arcminutes per logical pixel, stored in thousandths.** A physical quantity declared
+// as one, so a bigger number is bigger text — the direction a person expects, needing no warning —
+// and so the value means something without a reference beside it, which matters because decision
+// 164's setup will write it to a file that outlives this codebase.
 //
-// Not a `Scale`, though it is the same exact rational in the same 120ths. A scale is an output's and
-// this is a person's, and the one mistake this whole entry is about is keeping the second in a type
-// that reads like the first.
+// **The reference is 1516**, which is 1.516 arcminutes. Decision 164 has where that came from: 96 DPI
+// at 600 mm, the pitch and distance every logical unit in the ecosystem descends from. Provenance
+// rather than definition — the reference is the *angle*, and 1516 is exact by declaration against
+// the 1515.89 that pitch and distance actually give, a difference two hundred times below the
+// rounding `DensityFromGeometry` finishes with.
+//
+// **Not 120ths, and not a `Scale`.** 120 is `wp_fractional_scale_v1`'s denominator and lives in
+// gyro's Wayland implementation; a preference never crosses a wire. Borrowing the wire's unit bought
+// steps of 0.83% in a quantity nobody resolves better than about 5%, and cost the thing this comment
+// used to apologise for — a person's number and an output's number as the same rational in the same
+// denominator.
+//
+// The useful range is about 950 to 1900. 1000 is where 20/20 acuity puts the smallest a logical pixel
+// can usefully be; 1600 is near the critical print size, below which reading speed falls off. Every
+// ladder anybody ships lands inside it — Apple's densest rung is 1140 to 1170 across their whole
+// lineup, and an iPhone's point is 1900 because a 44-point tap target has to stay wider than a
+// fingertip rather than because of anything about eyes.
 struct AngularPreference
 {
-	static constexpr std::int32_t Denominator = 120;
+	// 1.516 arcminutes per logical pixel, in thousandths.
+	static constexpr std::int32_t Reference = 1516;
 
-	// 120 is the reference. Larger is *smaller* text, and the direction is worth stating rather than
-	// inferring: more logical pixels to the degree means each one subtends less, so a glyph of a fixed
-	// logical size takes up less of the visual field. It divides into the derivation for that reason.
-	std::int32_t Multiple = Denominator;
+	// A thousand arcminutes is sixteen degrees to the logical pixel, which is past absurd in the one
+	// direction anybody could reach by typo. It is a bound on the arithmetic rather than on taste:
+	// this term multiplies into `DensityFromGeometry`'s numerator, so without it a value nobody meant
+	// is an int64 overflow instead of a scale nobody wanted.
+	static constexpr std::int32_t MaximumMilliArcminutes = 1'000'000;
+
+	std::int32_t MilliArcminutes = Reference;
+
+	// What a person writes, which is a decimal number of arcminutes. The one conversion in the story
+	// that needs a real division, kept here — at the boundary, once per preference — rather than in the
+	// derivation, which stays integer for decision 53's reason.
+	[[nodiscard]] static constexpr AngularPreference FromArcminutes(double arcminutes) noexcept
+	{
+		constexpr double Smallest = 1.0;
+		constexpr double Largest = static_cast<double>(MaximumMilliArcminutes);
+
+		const double thousandths = arcminutes * 1000.0;
+
+		if (!(thousandths >= Smallest))
+		{
+			return AngularPreference{ static_cast<std::int32_t>(Smallest) };
+		}
+
+		return AngularPreference{ static_cast<std::int32_t>(thousandths > Largest ? Largest : thousandths + 0.5) };
+	}
+
+	[[nodiscard]] constexpr double ToArcminutes() const noexcept
+	{
+		return static_cast<double>(MilliArcminutes) / 1000.0;
+	}
 
 	friend constexpr bool operator==(AngularPreference, AngularPreference) noexcept = default;
 };
@@ -131,12 +170,12 @@ inline constexpr std::int64_t DensitySnapDenominator = 8;
 //
 //     scale = (distance / 600 mm) x (0.2646 mm / pitch) / k
 //
-// where `k` is the preference as a multiple of the reference and the pitch is millimetres over a
-// pixel count. A ratio of distances times a ratio of pitches, with nothing transcendental left in
-// it — so it is integer arithmetic for decision 53's own reason. What falls out is *not* a 120th:
-// the denominator is a panel's millimetres times a person's distance and nothing makes that divide
-// 120. So the last step is a rounding to the nearest 120th, worth under 0.4% of angular size, and
-// decision 53's exact rational is what comes out of that step rather than what goes into it.
+// where `k` is the preference over the reference — a pure ratio of two angles, which is what makes
+// both tangents cancel — and the pitch is millimetres over a pixel count. A ratio of distances times a ratio of
+// pitches, with nothing transcendental left in it — so it is integer arithmetic for decision 53's own reason. What
+// falls out is *not* a 120th: the denominator is a panel's millimetres times a person's distance and nothing makes that
+// divide 120. So the last step is a rounding to the nearest 120th, worth under 0.4% of angular size, and decision 53's
+// exact rational is what comes out of that step rather than what goes into it.
 //
 // **The pitch is taken along the longer axis of each.** A panel's millimetres are the panel's and
 // the grid may be turned, so pairing width with width is wrong by the aspect ratio on a rotated
@@ -145,7 +184,8 @@ inline constexpr std::int64_t DensitySnapDenominator = 8;
 [[nodiscard]] constexpr std::optional<Scale>
 DensityFromGeometry(PanelSize size, PixelSize<DeviceSpace> grid, std::int32_t distanceMm, AngularPreference preference)
 {
-	if (!size.IsKnown() || grid.Width <= 0 || grid.Height <= 0 || distanceMm <= 0 || preference.Multiple <= 0)
+	if (!size.IsKnown() || grid.Width <= 0 || grid.Height <= 0 || distanceMm <= 0 || preference.MilliArcminutes <= 0 ||
+	    preference.MilliArcminutes > AngularPreference::MaximumMilliArcminutes)
 	{
 		return std::nullopt;
 	}
@@ -153,12 +193,22 @@ DensityFromGeometry(PanelSize size, PixelSize<DeviceSpace> grid, std::int32_t di
 	const std::int64_t millimetres = size.WidthMm > size.HeightMm ? size.WidthMm : size.HeightMm;
 	const std::int64_t pixels = grid.Width > grid.Height ? grid.Width : grid.Height;
 
-	// scale x 120 = distance x 254 x pixels / (40 x millimetres x preference), where 254 / 960 is the
-	// reference pitch in millimetres and the 960 has already been divided into the 600 mm and the two
-	// factors of 120. Every term is a panel's or a person's, so the largest product a real machine
-	// reaches — 2.5 m, an 8K grid — is about 5 x 10^9 and the rounding doubles it.
-	const std::int64_t numerator = static_cast<std::int64_t>(distanceMm) * 254 * pixels;
-	const std::int64_t denominator = 40 * millimetres * preference.Multiple;
+	// scale x 120 = distance x 254 x pixels x preference / (4800 x millimetres x reference), where
+	// 254 / 960 is the reference pitch in millimetres and the 960 has been divided into the 600 mm and
+	// the two factors of 120. The preference and the reference enter as a *ratio of two angles*, which
+	// is what cancels both tangents and keeps this integer — so what either is expressed in never
+	// reaches the arithmetic, and moving them off 120ths moved nothing here.
+	//
+	// **The preference multiplies rather than divides**, which is the whole of what the unit change
+	// was for: a logical pixel asked to subtend a wider angle is a logical pixel worth more device
+	// ones. Under the reciprocal unit this term was a divisor and the header had to warn that a larger
+	// number meant smaller text.
+	//
+	// Every term is a panel's or a person's, so the largest product a real machine reaches — 2.5 m, an
+	// 8K grid, and a preference at the far end of `MaximumMilliArcminutes` — is under 5 x 10^15, and
+	// `Nearest` doubles it.
+	const std::int64_t numerator = static_cast<std::int64_t>(distanceMm) * 254 * pixels * preference.MilliArcminutes;
+	const std::int64_t denominator = 4800 * millimetres * AngularPreference::Reference;
 
 	const std::int64_t derived = Detail::Divide(numerator, denominator, Rounding::Nearest);
 

@@ -12594,11 +12594,17 @@ and want scales two apart. So gyro stores no per-output scale. It stores **one a
 in logical pixels per degree of visual angle**, and every output derives its own scale from that and
 its own geometry.
 
-The reference falls out of the history the ecosystem already assumes. 96 DPI at 600 mm is a pitch of
-25.4 / 96 = 0.2646 mm; one degree at that distance spans 600 · tan 1° = 10.47 mm; so the reference is
-**39.6 logical pixels per degree**, or 1.52 arcminutes of arc per logical pixel. What the number
-buys is that it is *one* number for the machine rather than a table keyed by monitor: a person with a
-laptop and a television says how big text should be once, and both are right.
+**The reference is 1516 milliarcminutes per logical pixel.** *(Revised 2026-08-30: this paragraph
+stated the reference as 96 DPI at 600 mm and stored the preference as a multiple of it, which kept a
+1987 logical inch load-bearing in the one place this entry claims to have removed it. The number is
+unchanged; what it is expressed in is not. See the section on the declared unit below.)* That is
+1.516 arcminutes, and where it came from is the history the ecosystem already assumes: 96 DPI at
+600 mm is a pitch of 25.4 / 96 = 0.2646 mm, one degree at that distance spans 600 · tan 1° = 10.47 mm,
+so 39.6 logical pixels to the degree. Provenance rather than definition — the reference is the angle,
+and 1516 is exact by declaration against the 1515.89 the historical pitch and distance give, a
+difference two hundred times below the derivation's own rounding. What the number buys is that it is
+*one* number for the machine rather than a table keyed by monitor: a person with a laptop and a
+television says how big text should be once, and both are right.
 
 | Panel | distance | px/degree | derived | taken |
 | --- | --- | --- | --- | --- |
@@ -12611,6 +12617,28 @@ laptop and a television says how big text should be once, and both are right.
 That is the ladder every desktop ships as a hand-written table, derived instead — and the 27-inch 4K
 landing between two integers with no good answer either side is the whole reason fractional scaling
 exists.
+
+#### What a person actually chose, which is the first evidence this entry had
+
+*(Added 2026-08-30.)* The table above is derived and had never been checked against anybody. One
+reader's two displays, at measured distances, at the scale they had already settled on by hand:
+
+| Panel | distance | chose | arcmin / logical px |
+| --- | --- | --- | --- |
+| 34" 3440×1440 | 730 mm | 1.00 | 1.091 |
+| 14" 1920×1080 | 500 mm | 1.00 | 1.110 |
+
+Two panels 1.43× apart in pixel pitch, agreeing to **1.7%**. That is this entry's central claim
+surviving its first contact with a person: what somebody holds constant across displays is an angle,
+not a scale, so the axis is the right one. It also says the reference is not *that* person's number —
+they sit at 1.10 where the reference is 1.52 — which is what the preference is for.
+
+**The reference is not moved to meet them.** Apple's densest rung, across four panel geometries —
+MacBook Pro 14" and 16", iMac 24", Studio Display — lands between 1.14 and 1.17 arcminutes, which is
+too consistent to be anything but a chosen constant and is the closest thing the industry has to a
+considered floor. 1.52 is where the ecosystem's legacy pairings sit and where the snapping band does
+the most work; a reader at 1.10 is 5% past even Apple's floor, and is the case a knob exists for
+rather than the case a default should assume.
 
 #### The distance is the missing term, and it is not a property of a display
 
@@ -12691,6 +12719,24 @@ that ignores it throws away the best outcome available. So a derived scale snaps
 the resulting size lands inside a stated band, and takes the exact rational of
 [decision 53](#53-scale-is-an-exact-rational) where it does not.
 
+**A derived scale below 1 is ordinary, and is not clamped.** *(Added 2026-08-30.)* A preference finer
+than a panel can meet at 1× puts the derivation under one — a 14" 1366×768 at 500 mm derives 0.705
+for the reader above — and the instinct to floor it at 1 is wrong, because 1 is not where anything
+gets worse. What bounds the cost is the minification a client's buffer takes, `ceil(s) / s` under
+[decision 56](#56-clients-render-at-the-ceiling-and-gyro-downscales), and that is continuous through
+1: **1.42 at s = 0.705, against the 1.60 at s = 1.25 decision 56 already names and accepts**, and
+against a worst case approaching 2 at s just *above* an integer. If a bound exists it is near 0.5,
+where two unrelated arguments arrive together — minification reaches the 2 that s → 1⁺ already costs,
+and a 16-logical-pixel glyph falls under the nine device pixels of em where hinting collapses. Nothing
+real reaches either. So gyro derives it, logs it, and carries `ceil(s) / s` as the cost rather than
+refusing the panel.
+
+That no mainstream system offers this is a fact about **exposing scale rather than size**. Where the
+control is a scale, the artefact-free point and the size choice are the same knob, so the bottom rung
+gets pinned to the pitch of whatever panel a person happens to own — 1.59 arcminutes on a 24" 1080p,
+1.90 on an iPhone, and nothing below either. That coupling is what this entry breaks, so the floor
+goes with it.
+
 **The band is one eighth of the derived value, and the table above is what pins it there.**
 *(Revised 2026-08-29, writing the derivation: this paragraph first offered 15% as the band, taken
 from the error a person cannot see, and that number contradicts this entry's own table.)* Two rows
@@ -12725,11 +12771,14 @@ two errors in one clause.)* The reference's tangent cancels, which is worth havi
 output's pixels per degree over the preference, and both carry the same `tan 1°`, leaving
 
 ```
-scale = (distance / 600 mm) × (0.2646 mm / pitch) / k
+scale = (distance / 600 mm) × (0.2646 mm / pitch) × k
 ```
 
-where `k` is the preference as a multiple of the reference and `pitch` is EDID millimetres over a
-pixel count. A ratio of distances times a ratio of pitches, no transcendental left in it, so the
+where `k` is the preference over the reference — a pure ratio of two angles, which is what makes both
+tangents cancel — and `pitch` is EDID millimetres over a pixel count. *(Revised 2026-08-30: `k` was
+written here as a divisor, which it was while the preference was held in logical pixels per degree.
+Under arcminutes per logical pixel it multiplies, since a logical pixel asked to subtend a wider angle
+is worth more device ones. Same quantity, reciprocal unit.)* A ratio of distances times a ratio of pitches, no transcendental left in it, so the
 derivation is integer arithmetic for the same reason [decision 53](#53-scale-is-an-exact-rational)
 wants scale to be. What it is *not* is a 120th: the denominator that falls out is a panel's
 millimetres times a person's distance, and nothing makes that divide 120. So the last step of the
@@ -12737,6 +12786,47 @@ derivation is a rounding to the nearest 120th — half a step is 1/240, which is
 size at any scale a fractional value is actually taken at, against the eighth the band above is
 willing to spend — and decision 53's exact rational is what comes *out* of that step rather than
 what goes into it.
+
+#### The preference is declared in arcminutes, and 120ths belong to the wire
+
+*(Revised 2026-08-30.)* The preference shipped as a `Multiple` of the reference in 120ths, and all
+three of those words were wrong.
+
+**120ths are `wp_fractional_scale_v1`'s unit and nothing else's.**
+[Decision 53](#53-scale-is-an-exact-rational) takes that denominator for `Scale` on an argument
+entirely about the wire — gyro and a client must arrive independently at the same integer, so the
+shared unit is the stored one — and a preference never crosses a wire. Borrowing it bought a step of
+0.83% in a quantity whose smallest perceptible change is nearer 5%: a hundred settings of which a
+dozen are distinguishable. What it cost was that a person's number and an output's number became the
+same rational in the same denominator, a confusion
+[Scene/Density.h](../Source/Scene/Density.h) already carried a paragraph apologising for. **The rule
+is that 120ths live in gyro's Wayland implementation and nowhere above it**, and this was the only
+place gyro had departed from it.
+
+**A multiple of the reference is not a physical quantity.** This entry opens by arguing that DPI is
+the wrong thing to store, and then stored the angular preference as a multiple of a DPI-derived
+constant — keeping the fiction load-bearing in the one place it claimed to have removed it. The
+number is also headed for a file on a disk under the setup above, where `165` needs a footnote citing
+Microsoft's 1987 logical inch and `1.100` needs nothing.
+
+**And the direction was backwards.** A larger multiple meant *smaller* text, because the preference
+divides into the derivation, and the header had to say so out loud rather than let it be inferred. A
+unit that needs that warning is the wrong unit; arcminutes per logical pixel go the way a person
+expects, and the warning deletes itself.
+
+So the declared unit is **arcminutes per logical pixel** and the stored one is thousandths of it.
+Nothing about the arithmetic changes: the derivation consumes the *ratio* of the preference to the
+reference, which is what made the tangent cancel, and it is still that ratio — only now between two
+angles rather than between a multiple and its implied unit. The scale numerator becomes
+
+```
+scale × 120 = distance × 254 × pixels × preference / (4800 × millimetres × 1516)
+```
+
+with `preference` and the 1516 both in milliarcminutes, and the preference now multiplying where the
+multiple used to divide. The conversion from what a person writes is
+one divide by the reference, done once where the preference is parsed, so the only transcendental in
+the story stays outside the derivation, outside `constexpr`, and outside anything a hotplug runs.
 
 #### The setup is the seat's and the preference is the person's
 
