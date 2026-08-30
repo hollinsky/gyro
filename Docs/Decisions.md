@@ -12685,11 +12685,34 @@ absorbs both offsets, and nothing else absorbs either.
 
 1× and 2× are the only scales that resample nothing.
 [Decision 54](#54-settled-geometry-snaps-to-the-outputs-device-grid) exists because half a device pixel
-of offset is the most reported complaint about fractional scaling anywhere, while a 15% error in
-angular size is not something a person can see at all. The asymmetry is enormous and a derivation that
-ignores it throws away the best outcome available. So a derived scale snaps to an integer where the
-resulting size lands inside a stated band, and takes the exact rational of
+of offset is the most reported complaint about fractional scaling anywhere, while a tenth or so of
+error in angular size is not something a person can see. The asymmetry is enormous and a derivation
+that ignores it throws away the best outcome available. So a derived scale snaps to an integer where
+the resulting size lands inside a stated band, and takes the exact rational of
 [decision 53](#53-scale-is-an-exact-rational) where it does not.
+
+**The band is one eighth of the derived value, and the table above is what pins it there.**
+*(Revised 2026-08-29, writing the derivation: this paragraph first offered 15% as the band, taken
+from the error a person cannot see, and that number contradicts this entry's own table.)* Two rows
+decide it and they pull in opposite directions. The 27-inch 1440p panel derives 1.13 and is
+tabulated as **taken at 1**, which needs a band of at least 11.8%; the 55-inch television derives
+3.48 and is tabulated as **taken at 3.48**, which needs one below 13.7%. A 15% band takes the
+television to 3 — a seventh of the text size gone on the one display in the table nobody is sitting
+close to — so the figure that describes what a person cannot *see* is not the figure that decides
+what to *snap*, and using the first as the second was the mistake. One eighth is the round number
+inside the window the two rows leave, and it is in [Scene/Density.h](../Source/Scene/Density.h) as
+`DensitySnapNumerator` over `DensitySnapDenominator` with the same two rows named beside it.
+
+The two figures differ because they answer different questions. **What a person cannot see is the
+error in isolation**; what a band decides is whether to spend that error to buy exactness, against a
+scale that may be far from any integer at all. The television is the case where there is nothing to
+buy: 3.48 is not near enough to 3 for the resample to be worth a seventh of the text, and the sizes
+either side of a band edge are not equally wrong — a snap *down* makes text smaller, which is the
+direction a person notices, and 1× and 2× are where the whole of the win lives rather than 3× and
+4×. That last observation is an argument for a band that narrows as the scale grows, and it is
+deliberately not taken: it is one more shape to justify, [Open.md](Open.md) already holds the width
+as a question for a person in front of two panels, and a constant band with the table's own rows to
+check it against is the thing that is falsifiable today.
 
 **There is no 1.25 / 1.5 / 1.75 ladder.** That ladder is an artefact of exposing scale in a settings
 dropdown, and gyro exposes distance instead; under
@@ -12711,9 +12734,9 @@ derivation is integer arithmetic for the same reason [decision 53](#53-scale-is-
 wants scale to be. What it is *not* is a 120th: the denominator that falls out is a panel's
 millimetres times a person's distance, and nothing makes that divide 120. So the last step of the
 derivation is a rounding to the nearest 120th — half a step is 1/240, which is under 0.4% of angular
-size at any scale a fractional value is actually taken at, against the 15% the band above is willing
-to spend — and decision 53's exact rational is what comes *out* of that step rather than what goes
-into it.
+size at any scale a fractional value is actually taken at, against the eighth the band above is
+willing to spend — and decision 53's exact rational is what comes *out* of that step rather than
+what goes into it.
 
 #### The setup is the seat's and the preference is the person's
 
@@ -12830,6 +12853,19 @@ connector's millimetres stop at `DrmPipeline` and never cross the seam,
 composition root to fill `SceneOutput` in, and there is no store for a setup and no session agent whose
 job it would be. The near-term commit is the seeded default alone: physical size across the backend,
 a distance prior, centre alignment, internal panel below.
+
+*(Revised 2026-08-29: that commit landed, and so did the one that makes it visible.)* The derivation
+is [Scene/Density.h](../Source/Scene/Density.h), the panel's millimetres and whether its connector
+can be unplugged reach the composition root through a verb of the root's own rather than through
+`OutputConfiguration` — everything in a configuration is requested or achieved and a physical size
+is neither — and `Layout` derives, snaps, and places. What is still a prior is every viewing
+distance, because there is still nowhere to keep a correction. **The half that was not in the
+near-term list and turned out to belong with it is `wl_output`**: a scale nobody is told is a window
+drawn at a quarter of the area and magnified, which is worse than the too-small windows the
+hardcoded 1× produced, so the derivation and the global are one piece of work. A client hears the
+*ceiling* of its output's scale, per [decision
+56](#56-clients-render-at-the-ceiling-and-gyro-downscales), and the exact rational waits for
+`wp_fractional_scale_v1`.
 
 The units the store will want are settled ahead of the store, and are unexercised until there is one:
 with a single preference on the machine the reference-preference units and the session's logical

@@ -1250,15 +1250,21 @@ is to do the work.
   is not quite the angle it subtends. A segment mapping is the only proposal here that absorbs either.
   Wants two panels of different heights and a person, not an argument.
 - **The width of the band decision 164 snaps a scale to an integer inside.** The asymmetry is settled —
-  a resample is visible and a 15% error in text size is not — and the number is not. Too narrow and a
-  27-inch 1440p panel takes a fractional scale it does not need, which puts every window on the machine
-  on the minification path
+  a resample is visible and a tenth of a stop of text size is not — and the number is now bounded
+  rather than free. Too narrow and a 27-inch 1440p panel takes a fractional scale it does not need,
+  which puts every window on the machine on the minification path
   [decision 56](Decisions.md#56-clients-render-at-the-ceiling-and-gyro-downscales) describes for no
   perceptible gain; too wide and a 4K laptop panel snaps to 2 from far enough away that text is
   visibly large. What widens the stakes past text size is that the same number bounds how far a
   snapped output's placement departs from the angle it subtends, so it is also the alignment error two
-  panels sit at and feeds the crossing question above. It is one number, it is a person in front of
-  two panels, and it cannot be read out of anything.
+  panels sit at and feeds the crossing question above. **Writing the derivation settled the
+  interval and not the number**: 164's own table takes a 1.13 to 1 and leaves a 3.48 where it is,
+  which is a band of at least 11.8% and under 13.7%, and
+  [Scene/Density.h](../Source/Scene/Density.h) takes one eighth. What is left is a couple of points
+  inside that window — and the *shape*, because the whole of the win lives at 1× and 2× while a snap
+  downward is the direction a person notices, which argues for a band that narrows as the scale
+  grows. That is a second parameter rather than a correction to this one, and it wants the same two
+  panels and the same person. Now with a number to disagree with.
 
 ## Keyboard sysrq, which the input grab takes away
 
