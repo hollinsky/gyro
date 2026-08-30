@@ -1474,13 +1474,24 @@ The consistency check that makes the reading hard to dismiss is the transition t
 there is nothing to tear down and no extra vblank. Only the commit that rewrites the primary plane
 pays.
 
-**This is not settled.** That FBC was active is inferred rather than read: `enable_fbc` is `-1`, which
-is auto and means the driver decides, and the parameter is `0400` so it cannot be toggled at runtime
-and the debugfs status went unread. The kernel read is `linux-next 20260814` rather than the 7.1.9 the
-capture ran on. What closes it is one boot with `i915.enable_fbc=0` — the miss disappears or it does
-not, and either answer is worth more than the rest of this entry.
+**The cause is confirmed; what to do about it is not.** A boot with `i915.enable_fbc=0` was the
+experiment this entry asked for, and it ran. The same client under the same script promoted at the same
+transition and missed nothing: 371 frames, 371 on the refresh they were aimed at, against six captures
+out of six before. The frame that used to miss took 3.076 ms from commit to flip event where the
+median is 3.019 ms and the worst frame in the capture is 3.702 ms — where with FBC on the same frame
+took 19.684 ms and was the slowest in its trace by a full refresh.
 
-If it holds, three mitigations and none of them free. **Accept it** — one duplicated frame per window
+What makes one run enough is that the *mechanism* went with it rather than only the symptom. The
+signature this entry was written around is the commit thread sleeping twice — woken at its target
+vblank, then again for a whole refresh. With FBC off that frame sleeps once and is woken 0.011 ms after
+its target vblank, which is where every ordinary landing frame is woken. There is nothing left to
+attribute a miss to, rather than a miss that happened not to occur.
+
+So the reading holds: promoting a window rewrites the primary plane's framebuffer, the stride change
+costs the flip-nuke path, and i915 spends a vblank between the FBC disable and the plane update.
+Disabling FBC is not the answer — it is a system-wide power cost paid to dodge a once-per-window
+event, and gyro does not own that decision on a machine it is only one process on. Three mitigations,
+none of them free. **Accept it** — one duplicated frame per window
 map, spent on a driver workaround, and arguably the honest price. **Never promote onto the primary** —
 keep the composite there and promote only onto overlays, so the primary's framebuffer never changes
 shape and FBC keeps its flip-nuke path; this forfeits exactly the arrangement the partition exists for,
