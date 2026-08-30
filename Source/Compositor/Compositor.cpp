@@ -65,6 +65,7 @@
 #include "Render/Governor.h"
 #include "Render/Renderer.h"
 #include "Render/Textures.h"
+#include "Scene/Density.h"
 #include "Scene/Output.h"
 #include "Seam/EventSource.h"
 #include "Seam/Importer.h"
@@ -233,6 +234,17 @@ extern "C" void OnTraceSignal(int)
 
 	return {};
 }
+
+// What a backend knows about the display on the end of one of its outputs.
+//
+// Both fields are decision 164's, and both are ordinarily absent: a size only a connector reports and
+// a kind only a connector has. `Scene/Density.h` is where an absence turns into a prior, so this
+// record states what is known and guesses nothing.
+struct PanelFacts
+{
+	PanelSize Size{};
+	PanelKind Kind = PanelKind::Unknown;
+};
 
 // One output, and everything the root owns on its behalf.
 //
@@ -414,6 +426,16 @@ public:
 	// An empty answer is an ordinary one and means a client draws into shared memory and still gets a
 	// window, which is what every window on the machine already does.
 	[[nodiscard]] virtual std::span<const TextureFormat> ClientFormats() const noexcept { return {}; }
+
+	// What the panel behind an output physically is, where this backend can say.
+	//
+	// **Root-local rather than a seam verb, and not a field on `OutputConfiguration`.** Everything in a
+	// configuration is either requested or achieved and travels through decision 73's negotiation;
+	// millimetres are neither, and `SatisfiedBy` would have to grow an exception for a fact no caller
+	// can ask for. What this is really asking is *what is on the end of this connector*, which is a
+	// question only a backend with a connector has — a nested window, a headless sweep and a file all
+	// answer nothing and take the priors in Scene/Density.h.
+	[[nodiscard]] virtual PanelFacts Panel(std::size_t) const noexcept { return {}; }
 
 	// The display engine's own importer, or null where nothing on this backend scans out.
 	//
@@ -1037,6 +1059,21 @@ public:
 	[[nodiscard]] IEventSource& Source() noexcept override { return *m_Card; }
 
 	[[nodiscard]] std::span<const TextureFormat> ClientFormats() const noexcept override { return m_ClientFormats; }
+
+	// The connector's own answer, which is the only backend that has one. Zero millimetres is an
+	// ordinary reading rather than a failure — Drm/Device.h says so — and it travels as itself.
+	[[nodiscard]] PanelFacts Panel(std::size_t index) const noexcept override
+	{
+		if (m_Card == nullptr || index >= m_Order.size() || m_Order[index] >= m_Card->Pipelines().size())
+		{
+			return {};
+		}
+
+		const Drm::Pipeline& pipeline = m_Card->Pipelines()[m_Order[index]];
+
+		return { .Size = { pipeline.WidthMm, pipeline.HeightMm },
+			     .Kind = pipeline.Internal ? PanelKind::Internal : PanelKind::External };
+	}
 
 	// The card's own importer, which is what turns a promoted layer's `TextureId` into a framebuffer.
 	// Null before `Open`, because there is no card to make one out of.
@@ -2321,35 +2358,122 @@ private:
 		return {};
 	}
 
-	// Where the outputs sit in the space the world is laid out in.
+	// Where the outputs sit in the space the world is laid out in, and what scale each of them takes.
 	//
-	// **Left to right in the order they were configured, edge to edge.** That is a placeholder with a
-	// person behind it rather than an arbitrary choice: it is what somebody with two monitors on a desk
-	// sees before they have said anything, and it is the arrangement a window dragged off the right edge
-	// of one screen has to arrive on the next under. It becomes a real layout — read from configuration,
-	// moved by a person dragging a monitor in a settings panel — when there is anything to read it from.
-	// Decision 87 already puts the answer here, in the one place holding both the mode the backend agreed
-	// to and the arrangement the world wants.
+	// **Every scale here is derived rather than configured**, which is decision 164: gyro holds one
+	// angular preference — how big text should be, as a visual angle — and a panel's own pitch and how
+	// far away it is turn that into this output's scale. A person with a laptop and a television says
+	// how big text should be once and both are right, where a table of per-monitor scales makes them
+	// re-derive the same preference once per display and keep the results in agreement by hand.
+	//
+	// **The arrangement is a guess with no parameter in it**, in decision 141's sense, and it is the
+	// guess the entry names: externals in a row left to right in configured order, aligned on their
+	// *centres* rather than their top edges, because people align monitors by eye height and a
+	// top-aligned row is wrong for every pair of unequal panels; and an internal panel below the row
+	// and centred, because a laptop in front of an external monitor is the most common two-display
+	// arrangement on this platform and left to right never produces it. It becomes a real layout when
+	// there is a setup to read one from, which is Open.md's question about where a compositor that
+	// persists nothing would keep it.
+	//
+	// **What is not derived is the distance**, and it cannot be: the same laptop panel is at 350 mm on
+	// a lap and 700 mm shoved aside as a third screen, and nothing on the connector distinguishes
+	// them. So every output here takes `SeededDistance`'s prior, which is form factor and nothing
+	// else — right often enough to boot into, and wrong in exactly the one term a person will be able
+	// to correct in a single gesture once there is somewhere to keep the correction.
 	//
 	// **The order is load-bearing**, and `DispatchLoop::Open` says so from the other side: the snapshot's
 	// per-output wake and placement runs are positional, so index `i` here is the frame loop's output `i`.
 	[[nodiscard]] Result<void> Layout(std::span<SceneOutput> outputs)
 	{
-		double left = 0.0;
+		struct Placed
+		{
+			Scale Density{};
+			double Width = 0.0;
+			double Height = 0.0;
+			bool Internal = false;
+		};
+
+		std::array<Placed, MaxOutputs> placed{};
+
+		// The row's extent, and the internal panels' beneath it. Both are needed before anything can be
+		// positioned, because centring is what the second pass is doing and a centre is not known until
+		// the last output has been measured.
+		double row = 0.0;
+		double rowHeight = 0.0;
+		double beneath = 0.0;
 
 		for (std::size_t index = 0; index < m_Count; ++index)
 		{
 			const OutputConfiguration& achieved = m_Bound[index].Configuration;
+			const PanelFacts panel = m_Backend->Panel(index);
+			const std::int32_t distance = SeededDistance(panel.Kind, panel.Size);
 
-			// **One logical pixel per device pixel until a scale is negotiated.** No backend reports a
-			// density and `--output` does not carry one, so a fraction invented here would be a layout
-			// nobody asked for — and decision 54's settled snap is measured against it, which would put the
-			// error on every animation rather than only on the arrangement.
-			const Scale density = Scale::FromInteger(1);
-			const double width =
-				static_cast<double>(density.LogicalFromDevice(achieved.Resolution.Width, Rounding::Nearest));
-			const double height =
-				static_cast<double>(density.LogicalFromDevice(achieved.Resolution.Height, Rounding::Nearest));
+			const std::optional<Scale> derived =
+				DensityFromGeometry(panel.Size, achieved.Resolution, distance, m_Preference);
+			const Scale density = derived ? *derived : DensityFromResolution(achieved.Resolution);
+
+			if (derived)
+			{
+				spdlog::info(
+					"  output {}: {} mm x {} mm at a seeded {} mm, so {}",
+					index,
+					panel.Size.WidthMm,
+					panel.Size.HeightMm,
+					distance,
+					density
+				);
+			}
+			else
+			{
+				// Said out loud because the answer is a different *kind* of guess: no millimetres means
+				// there is no angle to derive from at all, so what is left is a prior on pixel count. A
+				// person whose projector is at 1x wants to know that is why.
+				spdlog::info(
+					"  output {}: no physical size on this connector, so {} from the pixel count alone", index, density
+				);
+			}
+
+			placed[index] = Placed{
+				.Density = density,
+				.Width = static_cast<double>(density.LogicalFromDevice(achieved.Resolution.Width, Rounding::Nearest)),
+				.Height = static_cast<double>(density.LogicalFromDevice(achieved.Resolution.Height, Rounding::Nearest)),
+				// A machine whose only display is its own panel is a row of one rather than a laptop under
+				// an empty desk, which is the case that would otherwise put the sole output below the
+				// origin and leave the world's top-left corner on nothing.
+				.Internal = panel.Kind == PanelKind::Internal,
+			};
+		}
+
+		const bool external = std::ranges::any_of(std::span{ placed.data(), m_Count }, [](const Placed& output) {
+			return !output.Internal;
+		});
+
+		for (std::size_t index = 0; index < m_Count; ++index)
+		{
+			const Placed& output = placed[index];
+
+			if (external && output.Internal)
+			{
+				beneath += output.Width;
+
+				continue;
+			}
+
+			row += output.Width;
+			rowHeight = std::max(rowHeight, output.Height);
+		}
+
+		// Centred on the row it hangs under, which is what a laptop in front of a monitor looks like from
+		// above. A negative origin is fine and is the ordinary case for a panel wider than what is behind
+		// it: global space has no privileged corner, and Geometry/Scale.h floors rather than truncates
+		// precisely so that an output to the left of the origin rounds the way one to the right does.
+		double left = 0.0;
+		double under = (row - beneath) / 2.0;
+
+		for (std::size_t index = 0; index < m_Count; ++index)
+		{
+			const OutputConfiguration& achieved = m_Bound[index].Configuration;
+			const Placed& output = placed[index];
 
 			// Generational from the day there is one, rather than an index that a hotplug would hand to a
 			// different monitor. Nothing reads it yet; what makes it worth minting now is that the
@@ -2362,16 +2486,20 @@ private:
 				return Failure(ENOSPC, "more outputs than the world has identities for");
 			}
 
+			const bool below = external && output.Internal;
+			const Point<GlobalSpace> origin = below ? Point<GlobalSpace>{ under, rowHeight } :
+			                                          Point<GlobalSpace>{ left, (rowHeight - output.Height) / 2.0 };
+
 			outputs[index] = SceneOutput{
 				.Id = *id,
 				.Generation = achieved.Generation,
-				.Bounds = { { left, 0.0 }, { width, height } },
-				.Density = density,
+				.Bounds = { origin, { output.Width, output.Height } },
+				.Density = output.Density,
 				.Grid = achieved.Resolution,
 				.Orientation = Orientation(achieved.Transform),
 			};
 
-			left += width;
+			(below ? under : left) += output.Width;
 		}
 
 		return {};
@@ -2660,6 +2788,13 @@ private:
 
 	// One identity per output, minted where hotplug will release them.
 	SlotAllocator<OutputTag> m_OutputIds{ MaxOutputs };
+
+	// How big text should be, which decision 164 makes the only density figure on the machine — and
+	// the reference until a session supplies one. It is deliberately *not* on the command line: what
+	// somebody would type there is a scale, which is the settings-panel implementation detail this
+	// axis exists to stop exposing, and the honest knob is a viewing distance per output that belongs
+	// to a setup nothing can yet keep.
+	AngularPreference m_Preference{};
 
 	bool m_RealTime = false;
 

@@ -165,6 +165,16 @@ private:
 	std::vector<Entry> m_Names;
 };
 
+// The connector types that cannot be unplugged, which is the panel a machine came with. `DPI` is a
+// parallel display on an embedded board and belongs with them for the same reason: nobody carries one
+// to another desk. `Virtual` and `Writeback` are deliberately not here — neither is a panel a person
+// sits in front of, and both would take a laptop's distance prior with no laptop.
+[[nodiscard]] bool IsInternal(std::uint32_t type) noexcept
+{
+	return type == DRM_MODE_CONNECTOR_eDP || type == DRM_MODE_CONNECTOR_LVDS || type == DRM_MODE_CONNECTOR_DSI ||
+	       type == DRM_MODE_CONNECTOR_DPI;
+}
+
 // `eDP-1`, `HDMI-A-2`: the kernel's own name for the connector, assembled the way every other tool on
 // the machine assembles it, so that what gyro logs is what `drm_info` prints.
 [[nodiscard]] std::string ConnectorName(const drmModeConnector& connector)
@@ -449,6 +459,7 @@ PlaneFormats(RawFd device, const drmModePlane& plane, const Properties& properti
 		pipeline.Name = ConnectorName(*connector);
 		pipeline.WidthMm = connector->mmWidth;
 		pipeline.HeightMm = connector->mmHeight;
+		pipeline.Internal = IsInternal(connector->connector_type);
 		pipeline.Modes.assign(connector->modes, connector->modes + connector->count_modes);
 
 		if (!AssignCrtc(device, *resources, *connector, takenCrtcs, pipeline.Crtc, pipeline.CrtcIndex))

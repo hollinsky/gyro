@@ -153,6 +153,14 @@ struct Pipeline
 	// virtual connector.
 	std::uint32_t WidthMm = 0;
 	std::uint32_t HeightMm = 0;
+
+	// Whether the panel is part of the machine rather than plugged into it: eDP, LVDS, DSI and DPI.
+	//
+	// **It is here because it is the only evidence of how far away a display is**, which decision 164
+	// makes the term every scale is derived from. A laptop panel is at arm's length because it is
+	// attached to the keyboard, and the same panel on a stand is not — nothing else on the connector
+	// distinguishes them, so the form factor is the whole of the prior.
+	bool Internal = false;
 };
 
 // What the card has, before any of it is handed out.
