@@ -356,7 +356,7 @@ GYRO_TEST(Textures, AScanoutRefusalLeavesTheImageDrawableEverywhereElse)
 	FakeImporter importer;
 	FakeScanout scanout;
 	std::array<ITextureImporter*, 1> importers{ &importer };
-	TextureRegistry registry{ importers, {}, &scanout };
+	TextureRegistry registry{ importers, {}, 0, &scanout };
 
 	scanout.Refuse(true);
 
@@ -386,7 +386,7 @@ GYRO_TEST(Textures, MappedPixelsAreNeverOfferedToTheDisplayEngine)
 	FakeImporter importer;
 	FakeScanout scanout;
 	std::array<ITextureImporter*, 1> importers{ &importer };
-	TextureRegistry registry{ importers, {}, &scanout };
+	TextureRegistry registry{ importers, {}, 0, &scanout };
 
 	const std::array<std::byte, 4U * 4U * 4U> pixels{};
 
@@ -402,7 +402,7 @@ GYRO_TEST(Textures, AReclaimForgetsTheFramebufferAndTellsWhoeverIsOwedARelease)
 	FakeScanout scanout;
 	CountingRelease release;
 	std::array<ITextureImporter*, 1> importers{ &importer };
-	TextureRegistry registry{ importers, {}, &scanout };
+	TextureRegistry registry{ importers, {}, 0, &scanout };
 
 	const Fd fd = MakeDescriptor(64U * 32U * 4U);
 
@@ -559,7 +559,7 @@ GYRO_TEST(Textures, AnAuthoredImageGoesWhereADisplayEngineCanReadIt)
 	FakeScanout scanout;
 	FakeAllocator allocator;
 	std::array<ITextureImporter*, 1> importers{ &importer };
-	TextureRegistry registry{ importers, {}, &scanout, &allocator };
+	TextureRegistry registry{ importers, {}, 0, &scanout, &allocator };
 
 	std::array<std::byte, 4U * 4U * 4U> pixels{};
 
@@ -620,7 +620,7 @@ GYRO_TEST(Textures, AnImageThatCannotBeMappedStaysInGyrosOwnMemory)
 	FakeScanout scanout;
 	Unmappable allocator;
 	std::array<ITextureImporter*, 1> importers{ &importer };
-	TextureRegistry registry{ importers, {}, &scanout, &allocator };
+	TextureRegistry registry{ importers, {}, 0, &scanout, &allocator };
 
 	const std::array<std::byte, 4U * 4U * 4U> pixels{};
 	const Result<TextureId> adopted =

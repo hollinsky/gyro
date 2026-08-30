@@ -29,6 +29,7 @@
 
 #include "Blit/Blit.h"
 #include "Compositor/Binding.h"
+#include "Compositor/Capture.h"
 #include "Compositor/RealTime.h"
 #include "Compositor/Schedule.h"
 #include "Compositor/Uring.h"
@@ -62,6 +63,7 @@
 #include "Publication/Return.h"
 #include "Publication/Ring.h"
 #include "Render/Allocator.h"
+#include "Render/Deadline.h"
 #include "Render/Device.h"
 #include "Render/Governor.h"
 #include "Render/Renderer.h"
@@ -78,7 +80,6 @@
 #include "Session/Control.h"
 #include "Trace/Recorder.h"
 #include "Virtual/Device.h"
-#include "Compositor/Capture.h"
 #include "Virtual/Dump.h"
 #include "Virtual/Heap.h"
 #include "Virtual/Output.h"
@@ -434,6 +435,16 @@ public:
 	// window, which is what every window on the machine already does.
 	[[nodiscard]] virtual std::span<const TextureFormat> ClientFormats() const noexcept { return {}; }
 
+	// The DRM node those pairs are the answer for, as a `dev_t`, or zero where this backend has no
+	// device to name.
+	//
+	// **Root-local beside `ClientFormats` and inseparable from it**, because the two are one answer: a
+	// list of layouts with no device to allocate them on is a list a client cannot act on, which is
+	// exactly the state that put every GPU client on this machine into software rendering. A backend
+	// that answers pairs and no device is a bug rather than a degradation, and the only backends that
+	// answer neither are the ones with no device at all.
+	[[nodiscard]] virtual std::uint64_t ClientDevice() const noexcept { return 0; }
+
 	// What the panel behind an output physically is, where this backend can say.
 	//
 	// **Root-local rather than a seam verb, and not a field on `OutputConfiguration`.** Everything in a
@@ -706,6 +717,40 @@ inline constexpr std::size_t MaxModifierOffer = 64;
 	return pairs;
 }
 
+// The `dev_t` a client should allocate against, or zero where the device cannot say.
+//
+// **The render node rather than the primary one**, because that is the node a client can open without
+// asking for master and it is the one every allocator wants; the protocol says the type is unspecified
+// and a client must not depend on which it gets, so the choice is free and this is the polite one. The
+// minor comes from `VK_EXT_physical_device_drm`, which is the only thing on the machine that can say
+// *which node is the device Vulkan chose* — the arithmetic everybody else does, primary plus a hundred
+// and twenty-eight, is what Render/Device.h keeps a second minor rather than doing.
+//
+// **A `stat` rather than `makedev(226, minor)`**, which would be right on every machine anybody has
+// and rests on a major number nothing in gyro otherwise knows. Zero where the node is not there, and
+// zero is the answer that keeps `zwp_linux_dmabuf_v1` at version 3 rather than one that promises a
+// device and names a wrong one.
+[[nodiscard]] std::uint64_t ClientNodeOf(const VulkanDevice& device) noexcept
+{
+	const std::int64_t minor = device.Description().RenderMinor;
+
+	if (minor < 0)
+	{
+		return 0;
+	}
+
+	const std::string path = FenceDeadline::NodePath(minor);
+
+	struct ::stat status = {};
+
+	if (::stat(path.c_str(), &status) != 0)
+	{
+		return 0;
+	}
+
+	return static_cast<std::uint64_t>(status.st_rdev);
+}
+
 class NestedBackend final : public IBackend
 {
 public:
@@ -755,6 +800,7 @@ public:
 		}
 
 		m_ClientFormats = ClientPairs(m_Device);
+		m_ClientDevice = ClientNodeOf(m_Device);
 
 		if (!m_Device.Description().CopiesFromHost)
 		{
@@ -792,6 +838,8 @@ public:
 	[[nodiscard]] IEventSource& Source() noexcept override { return m_Host; }
 
 	[[nodiscard]] std::span<const TextureFormat> ClientFormats() const noexcept override { return m_ClientFormats; }
+
+	[[nodiscard]] std::uint64_t ClientDevice() const noexcept override { return m_ClientDevice; }
 
 	[[nodiscard]] Instant NextEvent() const noexcept override { return m_Host.NextEvent(); }
 
@@ -922,6 +970,9 @@ private:
 	// What clients may allocate in, computed once at `Open` because it is a fact about the device and
 	// the device does not change under this backend.
 	std::vector<TextureFormat> m_ClientFormats;
+
+	// The node behind them, per `IBackend::ClientDevice`.
+	std::uint64_t m_ClientDevice = 0;
 };
 
 // The panel: a DRM device, one output per connected connector, and a clock that is the hardware's.
@@ -1038,6 +1089,7 @@ public:
 		}
 
 		m_ClientFormats = ClientPairs(m_Device);
+		m_ClientDevice = ClientNodeOf(m_Device);
 
 		spdlog::info("rendering on {} ({})", m_Device.Description().DeviceName(), m_Device.Description().DriverName());
 
@@ -1077,6 +1129,8 @@ public:
 	[[nodiscard]] IEventSource& Source() noexcept override { return *m_Card; }
 
 	[[nodiscard]] std::span<const TextureFormat> ClientFormats() const noexcept override { return m_ClientFormats; }
+
+	[[nodiscard]] std::uint64_t ClientDevice() const noexcept override { return m_ClientDevice; }
 
 	// The connector's own answer, which is the only backend that has one. Zero millimetres is an
 	// ordinary reading rather than a failure — Drm/Device.h says so — and it travels as itself.
@@ -1329,6 +1383,9 @@ private:
 	std::size_t m_Count = 0;
 
 	std::vector<TextureFormat> m_ClientFormats;
+
+	// The node behind them, per `IBackend::ClientDevice`.
+	std::uint64_t m_ClientDevice = 0;
 };
 
 // Everything with a lifetime, in one object, constructed in place.
@@ -2513,6 +2570,7 @@ private:
 			m_Returns,
 			std::span{ importers.data(), importing },
 			m_Backend->ClientFormats(),
+			m_Backend->ClientDevice(),
 			m_Backend->Scanout(),
 			m_Backend->AuthoredImages()
 		);

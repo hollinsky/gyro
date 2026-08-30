@@ -1,5 +1,7 @@
 #include "Protocol/Host.h"
 
+#include <spdlog/spdlog.h>
+
 #include <cerrno>
 #include <utility>
 
@@ -9,10 +11,10 @@
 
 Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 {
-	// The texture space is not touched here — nothing is adopted until a client commits, and it arrives
-	// again on every `Advance`, which is where a request that needs it runs.
-	(void)textures;
-
+	// The texture space is read once and not retained — nothing is adopted until a client commits, and
+	// it arrives again on every `Advance`, which is where a request that needs it runs. What is taken
+	// here is the pair of facts a client needs *before* it has committed anything: which layouts gyro
+	// will import and which device to allocate them on. See the dmabuf global below.
 	m_Context.SetFloors(m_Floors, m_Server);
 
 	// **A run that binds its own socket authors one floor now; a run under the handover authors one per
@@ -85,7 +87,22 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		return Failure(ENOMEM, "advertising wl_shm");
 	}
 
-	m_DmabufGlobal = Wayland::Server::ZwpLinuxDmabufV1::Advertise(*display, DmabufVersion, m_Dmabuf);
+	// **Built before the global is advertised, because the version it goes up at is an answer about
+	// what was built.** A failure here is a descriptor the kernel refused, and it degrades rather than
+	// stops: the global still appears, at version 3, carrying the pair list. What that costs is the
+	// thing this whole path exists for — a client on Mesa has no other way to learn which device to
+	// allocate against, so it falls back to software rendering — so it is a warning with the cause in
+	// it rather than a silence.
+	if (const Result<void> feedback = m_Dmabuf.Describe(textures); !feedback)
+	{
+		spdlog::warn(
+			"no dmabuf feedback, so clients cannot be told which device to allocate against and will "
+			"render in software: {}",
+			feedback.error()
+		);
+	}
+
+	m_DmabufGlobal = Wayland::Server::ZwpLinuxDmabufV1::Advertise(*display, m_Dmabuf.Version(), m_Dmabuf);
 
 	if (m_DmabufGlobal == nullptr)
 	{

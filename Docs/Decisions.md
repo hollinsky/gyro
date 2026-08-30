@@ -11879,7 +11879,7 @@ against different devices — `Render` holds the sampler's table and `Drm` would
 and a machine composites on one card and scans out on another. A single interface would put both on
 whichever device the renderer happens to be.
 
-### 154. A client hands over descriptors through `zwp_linux_dmabuf_v1` at version 3, and a borrowed buffer's release is owed to the watermark
+### 154. A client hands over descriptors through `zwp_linux_dmabuf_v1`, and a borrowed buffer's release is owed to the watermark
 
 Decision 152 partitions the draw list and decision 153 turns a promoted layer's texture id into a
 framebuffer, and neither of them can do anything on a machine where every buffer a client sends is
@@ -11898,14 +11898,64 @@ nothing else, and the author relays rather than decides. The same two numbers co
 `Formats` query so the global has something honest to advertise, computed by the composition root out
 of what the device will sample.
 
-**Version 3 rather than 4, because 4 is a promise about a device gyro cannot yet name.** From version 4
-the format and modifier events are deprecated and a compositor is expected to answer
+**Rejected, and shipped for two months: version 3 rather than 4, because 4 is a promise about a device
+gyro cannot yet name.** *(Reversed 2026-08-30; the paragraph below replaces it.)* From version 4 the
+format and modifier events are deprecated and a compositor is expected to answer
 `get_default_feedback` with a main device and format tranches. That is a *slow-loop* negotiation about
 what a client should allocate, and per decision 153 it is deliberately a different question from what
 the per-frame partition decides: offering is not promotion. Advertising 4 without honouring it is a
 toolkit blocked on a roundtrip that never completes — a window that never appears, with nothing in a
 log. Advertising 3 is a client being told the pairs gyro will take, which every toolkit still handles
 because every compositor shipped it for years. The number goes up in the commit that builds feedback.
+
+**Version 5, and the reversal is that version 3 stopped being the older path and became no path.**
+*(Added 2026-08-30.)* The paragraph above has one sentence carrying it — *which every toolkit still
+handles because every compositor shipped it for years* — and it is true and irrelevant. A toolkit
+never asks which GPU it is on. The layer underneath it does, and Mesa has deleted every way of asking
+except this one: there is no `wl_drm` string left in `libEGL_mesa.so.0`, so `get_default_feedback` is
+the whole of how a client learns which node to allocate against. A compositor that lists layouts and
+names no device does not give such a client a slower path, it gives it none — EGL falls to swrast,
+Firefox sees llvmpipe and turns WebRender's GPU path off, and what a person gets is a browser that
+burns a core to scroll a page. It was found by looking at *why* Firefox was software rendering under
+gyro and noticing that every one of its processes had zero descriptors on `/dev/dri`.
+
+What survives from the rejected paragraph is its second half, and it is the reason this took a
+mechanism rather than a number: advertising 4 and not answering really is a toolkit waiting forever.
+So the answer is to honour it, and honouring the *default* feedback is small — one format table, one
+main device, one tranche, sent at bind and never re-sent. None of that is the negotiation the
+paragraph above refused. `get_surface_feedback` is answered with the same parameters, which the
+protocol permits and which Mesa's requiring it makes mandatory: refusing that request ends the client.
+What stays deferred is a surface tranche that *means* something — the card a window is currently on,
+retargeted as it is dragged to another — and Open.md carries it.
+
+**Decision 41 had already required this, and 154 contradicted it without noticing.** Its list of what
+device migration forces at line zero says *`wp_linux_dmabuf_feedback_v1` from the start, never static
+format advertisement*, on the argument that changing device changes the modifier set and clients must
+be told to re-allocate. That is the same mechanism arrived at from the opposite end, two years of
+entries earlier, and reading it would have settled this before a person ever saw a slow browser. The
+lesson is the one this log keeps relearning in a new costume: an entry that decides *not* to build
+something owes a search for the entry that already decided to.
+
+**The version is 5 rather than 4 because 5 asks for nothing new.** Its whole addition is that
+mismatched plane modifiers must be an `invalid_format` error, which `Build` has posted since the day
+this decision was written. It is not 6: there `main_device` must stop being sent, every tranche must
+carry the sampling flag, and `set_sampling_device` becomes a request that means something — three
+promises rather than a number, per the rule that a version is a claim about what gyro sends.
+
+**Rejected: a tranche carrying the `scanout` flag.** It is the flag that would make a client allocate
+something a plane could take directly, which is what decisions 152 and 153 exist for, and gyro cannot
+honestly set it yet: what a display engine will scan out is the plane's own `IN_FORMATS` intersected
+with this list, and Open.md carries that intersection as unbuilt. A tranche that claims scanout and is
+then composited is a client paying an allocation constraint for nothing.
+
+**Rejected: staying at 3 and telling clients the device some other way.** There is no other way — that
+is the finding. `wl_drm` was the other way and it is gone from the client that mattered.
+
+**Rejected: advertising 5 unconditionally, with an empty feedback where there is no GPU.** `main_device`
+is required and there is exactly one, so a feedback object on a machine with no device would have to
+send `done` having named nothing, which is a client told an answer that is not one. The global falls
+back to 3 there instead, carrying the empty pair list — which is what it did before this existed, and
+is a client drawing into shared memory and still getting a window.
 
 **The release is owed rather than immediate, and the watermark is what says when.** This is the one
 behavioural difference from `wl_shm` and it is the whole reason the buffer object has a lifetime.

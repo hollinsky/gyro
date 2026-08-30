@@ -1,12 +1,23 @@
 #include "Protocol/Dmabuf.h"
 
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
+#include <cstring>
+#include <limits>
 #include <ranges>
 #include <utility>
 #include <vector>
+
+#include "Protocol/Sealed.h"
+
+// What `main_device` and `tranche_target_device` carry is a `dev_t`, and a client memcpys one out of
+// the array by its own `sizeof`. Eight bytes on every Linux this compiles for, and an assertion rather
+// than a comment because a mismatch would be a device number silently truncated — a client opening the
+// wrong node, or none, with nothing anywhere saying why.
+static_assert(sizeof(::dev_t) == sizeof(std::uint64_t));
 
 using namespace Wayland::Server;
 
@@ -39,6 +50,94 @@ namespace
 	return end > 0 ? static_cast<std::size_t>(end) : 0;
 }
 } // namespace
+
+Result<void> DmabufFeedback::Describe(const ITextures& textures)
+{
+	const std::span<const TextureFormat> formats = textures.Formats();
+	const std::uint64_t device = textures.MainDevice();
+
+	if (formats.empty() || device == 0)
+	{
+		// Not a failure. A machine with no GPU has no device to name and nothing to offer, and the
+		// caller reads `IsValid` and advertises version 3 with an empty list — which is a client drawing
+		// into shared memory and getting a window, exactly as it did before this existed.
+		return {};
+	}
+
+	if (formats.size() > std::numeric_limits<std::uint16_t>::max())
+	{
+		// A tranche's indices are sixteen bits each, so a list this long could not be pointed at. It is
+		// unreachable on any device anybody has — the pairs are two fourccs times a driver's modifier
+		// list — and it is checked because the alternative is a truncation that advertises the wrong
+		// layouts rather than none.
+		return Failure(E2BIG, "more format-modifier pairs than a tranche can index");
+	}
+
+	// The table as the protocol fixes it: a fourcc, four bytes that are *not* the modifier's high half
+	// and must be written rather than left as whatever the stack held, and the modifier. Native byte
+	// order, because the client maps the same memory rather than reading it off a wire.
+	std::vector<std::byte> table(formats.size() * EntryBytes, std::byte{});
+
+	m_Indices.clear();
+	m_Indices.reserve(formats.size());
+
+	for (std::size_t index = 0; index < formats.size(); ++index)
+	{
+		std::byte* const entry = table.data() + index * EntryBytes;
+		const std::uint32_t code = formats[index].Code;
+		const std::uint64_t modifier = formats[index].Modifier;
+
+		std::memcpy(entry, &code, sizeof(code));
+		std::memcpy(entry + 8, &modifier, sizeof(modifier));
+
+		m_Indices.push_back(static_cast<std::uint16_t>(index));
+	}
+
+	Result<Fd> sealed = SealedMemfd("gyro-dmabuf-formats", table);
+
+	if (!sealed)
+	{
+		m_Indices.clear();
+
+		return std::unexpected{ sealed.error() };
+	}
+
+	m_Table = std::move(*sealed);
+	m_Size = static_cast<std::uint32_t>(table.size());
+	m_Device = device;
+
+	return {};
+}
+
+void DmabufFeedback::SendTo(ZwpLinuxDmabufFeedbackV1 object) const
+{
+	if (!object.IsValid() || !IsValid())
+	{
+		return;
+	}
+
+	// **The order is the protocol's own**, and the reason it is worth stating is that `done` is what
+	// makes the set atomic: a client that has read `format_table` and no `done` is a client still
+	// waiting, which is the failure decision 154 refused version 4 to avoid. Everything before it is
+	// sent unconditionally, so there is no path through here that reaches the end without one.
+	object.FormatTable(m_Table.Borrow(), m_Size);
+
+	const std::span<const std::byte> device = std::as_bytes(std::span{ &m_Device, 1 });
+
+	object.MainDevice(device);
+
+	// **One tranche, targeting the device that composites, with no flags.** The flag that could go here
+	// is `scanout`, which says *allocate this way and a plane may take it directly* — and gyro cannot
+	// honestly say it yet: what a display engine will scan out is the plane's own `IN_FORMATS` table
+	// intersected with this list, which Open.md carries as unbuilt. A tranche claiming scanout that
+	// gyro then composites is a client paying for an allocation constraint it gets nothing for.
+	object.TrancheTargetDevice(device);
+	object.TrancheFlags(ZwpLinuxDmabufFeedbackV1TrancheFlags{});
+	object.TrancheFormats(std::as_bytes(std::span{ m_Indices }));
+	object.TrancheDone();
+
+	object.Done();
+}
 
 ClientDmabufBuffer::~ClientDmabufBuffer()
 {
@@ -320,6 +419,15 @@ void ClientDmabuf::OnBound()
 
 	const std::uint32_t version = Object().Version();
 
+	// **Nothing at all from version 4 up.** The protocol does not merely deprecate these two events
+	// there, it forbids them — a client bound at 4 has asked to be told through feedback instead, and
+	// the pair list arriving anyway is a compositor speaking a contract it did not agree to. What that
+	// client gets is `get_default_feedback`, which is answered on this same object.
+	if (version >= FeedbackFromVersion)
+	{
+		return;
+	}
+
 	// **`format` for every distinct fourcc and `modifier` for every pair**, which is what version 3
 	// asks for and is not redundant: a client bound at 1 or 2 has only the first list and reads it as
 	// *this format under whatever layout you both work out*, which in practice means linear.
@@ -347,5 +455,5 @@ void ClientDmabuf::OnBound()
 
 ZwpLinuxDmabufV1Handler* DmabufGlobal::OnBind(wl_client&, std::uint32_t)
 {
-	return new ClientDmabuf{ *m_Context };
+	return new ClientDmabuf{ *m_Context, m_Feedback };
 }

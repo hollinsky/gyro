@@ -1403,13 +1403,26 @@ What that leaves open, now that a descriptor can arrive:
   already has the data for; what has to be decided first is what a *second* panel with a different
   answer does to a list that is one per machine.
 
-- **No `zwp_linux_dmabuf_v1` feedback, so a client cannot be told which device to allocate against.**
-  Version 3's format and modifier events say what gyro will take and say nothing about *where* — and
-  on a machine that composites on one card and scans out on another, that is the difference between a
-  buffer that can be promoted and one that cannot. It is also the only way to tell a client its
-  allocation stopped being scanout-capable, which is what a window being dragged between two monitors
-  on two cards is. Decision 154 rejected advertising version 4 without honouring it; this is what
-  honouring it means.
+- **Feedback is sent once and can never be re-sent, so nothing can tell a client its allocation
+  stopped being the right one.** *(Narrowed 2026-08-30: the device half is built. Decision 154's
+  reversal has `get_default_feedback` answering with a table, a main device and one tranche, which is
+  what makes a GPU client something other than a software renderer.)* What is left is that every
+  parameter is fixed at startup. The protocol's whole shape is that a compositor builds a *new* table
+  and re-sends when the answer changes, and there are two things that change it: decision 41's device
+  migration, where `simpledrm` is replaced by the real driver and the modifier set moves under every
+  client on the machine, and a window dragged onto a monitor on another card. `DmabufFeedback` is one
+  object owned by the global and every live feedback is served from it, so the re-send is a list of
+  live objects and a second `Describe` — the mechanism is there and the *caller* is not, because
+  neither migration nor a second card exists in this tree yet. Until then a client whose device
+  changed under it is one allocating for a device that has gone, which today cannot happen and on the
+  day migration lands is the first thing that will.
+
+- **`get_surface_feedback` answers the default, so a per-window tranche says nothing.** The request
+  exists so a compositor can say *this window is on that card, and here is what its display engine
+  would take directly* — which is the same question the scanout tranche above cannot answer yet, asked
+  per surface instead of per machine. gyro composites every window on one device, so the default is
+  currently a true answer rather than a placeholder; it stops being true the moment either of the two
+  entries above does.
 
 - **One plane per buffer.** `SamplingModifiers` filters to single-plane layouts and
   `VulkanDevice::ImportImage` describes one plane, so a client handing over NV12 — which is every

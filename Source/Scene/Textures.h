@@ -230,4 +230,22 @@ public:
 	// CPU renderer that has no device to put a descriptor on, and an author that advertises nothing
 	// there is one whose clients draw into shared memory and still get a window.
 	[[nodiscard]] virtual std::span<const TextureFormat> Formats() const noexcept { return {}; }
+
+	// The device a client should allocate those layouts against, as the `dev_t` of a DRM node, or zero
+	// where there is none.
+	//
+	// **A number the author relays rather than a device it can name**, which is decision 154's carve-out
+	// in decision 87 used a second time and for the same reason: the pair list crosses this interface
+	// because the *client* chose it, and the device number crosses because the client is the party that
+	// has to open it. Neither is a thing a scene reasons about, and a `dev_t` is as opaque here as a
+	// modifier is — it exists to be handed back to `drmGetDeviceFromDevId` on the far side.
+	//
+	// **Without it the pair list is unusable, which is what made this the difference between a window
+	// that runs on the GPU and one that does not.** Mesa has no other channel left: `wl_drm` is gone
+	// from its Wayland platform, so a compositor that lists formats and names no device leaves every
+	// GL and Vulkan client on llvmpipe. See [Dmabuf.h](../Protocol/Dmabuf.h).
+	//
+	// Zero is the honest answer on a machine with no GPU, and it travels with an empty `Formats` —
+	// together they say *hand over no descriptors*, and a client draws into shared memory.
+	[[nodiscard]] virtual std::uint64_t MainDevice() const noexcept { return 0; }
 };

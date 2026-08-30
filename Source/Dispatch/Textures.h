@@ -86,11 +86,12 @@ public:
 	explicit TextureRegistry(
 		std::span<ITextureImporter* const> importers,
 		std::span<const TextureFormat> formats = {},
+		std::uint64_t mainDevice = 0,
 		IScanoutImporter* scanout = nullptr,
 		IDmabufAllocator* allocator = nullptr
 	)
 		: m_Importers{ importers.begin(), importers.end() }, m_Formats{ formats.begin(), formats.end() },
-		  m_Scanout{ scanout }, m_Allocator{ allocator }, m_Ids{ MaxTextures }
+		  m_MainDevice{ mainDevice }, m_Scanout{ scanout }, m_Allocator{ allocator }, m_Ids{ MaxTextures }
 	{}
 
 	TextureRegistry(const TextureRegistry&) = delete;
@@ -264,6 +265,8 @@ public:
 	}
 
 	[[nodiscard]] std::span<const TextureFormat> Formats() const noexcept override { return m_Formats; }
+
+	[[nodiscard]] std::uint64_t MainDevice() const noexcept override { return m_MainDevice; }
 
 	// **Retired is not gone.** The id stops being one an author draws and stays exactly where it is
 	// until `Reclaim` says the frame thread has moved past every snapshot that could name it. The slot
@@ -613,6 +616,11 @@ private:
 	// What `Formats` answers. Fixed at construction rather than derived here: the intersection is a
 	// question about devices, and this module holds importers rather than the devices behind them.
 	std::vector<TextureFormat> m_Formats;
+
+	// The node those layouts are the answer for, per `ITextures::MainDevice`. Beside the list rather
+	// than derived from an importer, because it arrives with the list and from the same party: only the
+	// composition root sees a device and this registry at once.
+	std::uint64_t m_MainDevice = 0;
 
 	IScanoutImporter* m_Scanout = nullptr;
 
