@@ -5,6 +5,12 @@ How gyro reaches the screen, where its input comes from, and how the frame loop 
 Companion documents: [Animation.md](Animation.md) for the animation system,
 [Decisions.md](Decisions.md) for the decision log including rejected alternatives.
 
+**Volatility: this document changes when a mechanism changes**, which is less often than the code
+moves and more often than the product does. What is described here is how a thing works rather than
+where it lives — [Structure.md](Structure.md) has the second and turns over faster. An interface
+quoted below is quoted for its *shape*; the header is the authority on its members, and where the two
+have drifted the header is right and this document has a bug.
+
 ## Constraints this design serves
 
 gyro is a system layer, not a session component — one compositor per machine. It runs `SCHED_FIFO`
@@ -58,11 +64,25 @@ public:
 	virtual std::span<const RenderTarget> Targets() const = 0;
 	virtual std::optional<uint32_t>       AcquireTarget()  = 0;
 
+	// How far ahead of the last completion this output may work — not a queue depth, since a
+	// host applies one commit per refresh and discards what it superseded. One by default;
+	// nested answers two, because wp_presentation_feedback arrives a refresh late and a loop
+	// that waits for it presents on every other vblank. See decision 124.
+	virtual uint32_t CommitDepth() const noexcept;
+
+	// Whether this partition of the draw list is one the hardware will actually take, and how
+	// many layers it could take at most. The assigner proposes and the backend answers: what a
+	// display engine refuses is a combination, so no capability struct gyro could publish would
+	// predict it and DRM_MODE_ATOMIC_TEST_ONLY is the only party that knows. See decision 152.
+	virtual Result<void> TestLayers(std::span<const PresentLayer> layers);
+	virtual uint32_t     LayerCeiling() const noexcept;
+
 	// May never block: no device-wide lock, no wait on another output's commit. Its cost is
 	// bounded by the composite, because it is decision 29's B(L). Layers are ordered bottom
 	// first and the composited remainder is one of them; the Result is how a commit that
-	// failed without blocking reaches a caller that can still act. See decision 78.
-	virtual Result<void> Present(std::span<const PresentLayer> layers) = 0;
+	// failed without blocking reaches a caller that can still act. The trace argument carries
+	// the row and frame number the backend draws its own commit journey on. See decision 78.
+	virtual Result<void> Present(std::span<const PresentLayer> layers, PresentTrace trace) = 0;
 
 	// Initiated on the frame thread, performed elsewhere. Returns before the hardware is
 	// programmed; completion arrives as Reconfigured. Unbounded by contract even where a
@@ -73,6 +93,7 @@ public:
 
 	Signal<const PresentationInfo&>    Presented;           // frame reached glass
 	Signal<const OutputConfiguration&> Reconfigured;        // what was achieved; targets valid again
+	Signal<>                           Missed;              // accepted, and will never be shown
 	Signal<>                           TargetsInvalidated;  // resize, mode set, modifier renegotiation
 };
 ```
@@ -82,13 +103,20 @@ the screen — it is several layers on several planes with the GPU never waking,
 spends most of its life able to do. So the composited remainder is one entry in the list rather than
 a privileged concept, and promotion is a partition rather than a fullscreen special case. A layer
 carries a source, an acquire point, damage, a source crop, a destination rectangle, a blend mode and a
-color state; z is the list order. One element is what nested and headless present today, so nothing
-is given up by saying it this way, and what is bought is that the modules written next — damage
-accumulating per *plane*, `C` as the cost of what was not offloaded, a scanout hold crossing the
-return channel — are not written on the assumption that a frame is one image. See
-[decision 78](Decisions.md#78-present-takes-a-layer-list-and-the-composite-is-one-member-of-it),
-which also records the one thing the list cannot yet express: a layer whose source is a client's
-buffer rather than one of the output's own targets.
+color state; z is the list order. Nested and headless present one element, so nothing was given up by
+saying it this way before anything used it, and what was bought is that the modules written next —
+damage accumulating per *plane*, `C` as the cost of what was not offloaded, a scanout hold crossing
+the return channel — were not written on the assumption that a frame is one image. See
+[decision 78](Decisions.md#78-present-takes-a-layer-list-and-the-composite-is-one-member-of-it).
+
+*(Taken 2026-08-25. The paragraph above ended by naming the one thing the list could not express — a
+layer whose source is a client's buffer rather than one of the output's own targets — and that is now
+what a `LayerSource` is: a target index or a texture id, resolved through a second importer on the
+same id space. See
+[decision 153](Decisions.md#153-a-promoted-layer-names-a-texture-id-and-a-scanout-framebuffer-is-a-second-importer-on-the-same-id-space).
+The DRM backend drives the primary plane plus every overlay its CRTC has and commits them together;
+`Frame/Assign.h` is the party that decides what goes on them, and what remains open is which overlay
+a layer lands on and what being wrong costs.)*
 
 **The completions arrive on a source, and the source is the device's rather than the output's.**
 Every one of those three signals begins as a readable file: page-flip events on the DRM device,
@@ -137,10 +165,15 @@ On KMS that becomes `IN_FENCE_FD` / `OUT_FENCE_PTR`; nested it becomes `wp_linux
 Damage is in the interface from the start because both paths want it — `FB_DAMAGE_CLIPS` on KMS,
 `wl_surface.damage_buffer` nested.
 
-> Written from specification rather than from a hardware prototype. The interface is deliberately
-> over-provisioned — plane assignment, per-plane fencing — so that the DRM backend has room to fit
-> without a redesign. Expect these spots to need revisiting when the DRM backend lands; they are
-> marked `// SPEC:` in the headers.
+> Written from specification rather than from a hardware prototype. The interface was deliberately
+> over-provisioned — plane assignment, per-plane fencing — so that the DRM backend would have room to
+> fit without a redesign. Remaining provisions are marked `// SPEC:` in the headers.
+>
+> *(2026-08-29: the backend landed, and the bet paid on the two it was placed on. Plane assignment
+> was taken by [decision 152](Decisions.md#152-promotion-is-a-partition-of-the-draw-list-computed-every-frame-and-a-node-is-promotable-when-its-resample-is-a-no-op-and-it-carries-no-dressing-on-itself)
+> and per-plane fencing rides in the same commit, neither costing a redesign. What the seam did not
+> have room for is below, and it is worth reading as the record of what over-provisioning does and
+> does not buy.)*
 >
 > The mode-set-versus-page-flip split was in that list until 2026-08-17, when it stopped being a
 > provision and became [decision 73](Decisions.md#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it).
@@ -1756,6 +1789,19 @@ flash and a correctness bug wearing an optimization's clothes. This is a constra
 and on plane assignment, and it is why it appears in
 [what to build before it is needed](#what-to-build-before-it-is-needed).
 
+> **This is not enforced, and promotion is live.** *(Recorded 2026-08-29.)*
+> [Decision 152](Decisions.md#152-promotion-is-a-partition-of-the-draw-list-computed-every-frame-and-a-node-is-promotable-when-its-resample-is-a-no-op-and-it-carries-no-dressing-on-itself)'s
+> predicate refuses a layer that would have to be *resampled* — a scale, a fractional offset, a turn
+> — and says nothing about color. `Frame/Assign.h` stamps a promoted layer with the output's own
+> color state and nothing compares it against the buffer's, so a client whose surface is in a
+> different space is flipped to a plane and converted by whatever the plane does, which is not what
+> the composite would have done. What a person sees is the thing this section was written to
+> prevent: a window's color shifting at the moment it is promoted, and shifting back when a shadow
+> or an animation demotes it. It costs nothing today because every surface reaching a plane is
+> sRGB — the only path in is `wl_shm` and `zwp_linux_dmabuf_v1` with no color protocol behind
+> either — and it costs the whole promise on the first client that says otherwise.
+> [Open.md](Open.md) carries what has to be decided.
+
 [Geometry](#resample-once-and-know-when-it-is-zero) asks the identical question about the *spatial*
 transform and answers it with the same classification, which damage mapping and the sharpness path
 also consume. Promotion is admissible only where both halves say yes.
@@ -2983,8 +3029,10 @@ the day the renderer is written, and everything authored against the wrong answe
 - **The composite target format is stated, and the blur chain carries no alpha.** Both are trivial
   now and are a renderer rewrite once passes are written against them.
 - **Direct scanout is conditional on the KMS pipeline expressing the same transform.** A rule
-  attached to plane assignment before plane assignment exists, rather than a special case added to
-  it afterwards.
+  attached to plane assignment before plane assignment existed, rather than a special case added to
+  it afterwards. *(2026-08-29: this is the one item on the list that was not honoured when the thing
+  it was recorded for arrived — see [direct scanout is conditional](#direct-scanout-is-conditional).
+  The advice was right and taking it was skipped, which is worth more than the advice.)*
 
 For [geometry](#geometry), which is chosen the day the scene graph is written and re-authored
 afterwards if it is chosen wrongly:
@@ -3009,7 +3057,8 @@ afterwards if it is chosen wrongly:
   un-premultiplies. Built from the encoded buffer it looks right in one screenshot and is wrong at
   every level.
 
-Recorded now, honoured when the renderer lands:
+Recorded before the renderer existed, and honoured as it was built — every item below is now in the
+tree, which is what the list was for:
 
 - **A quality parameter on every effect** — chain internal resolution and pass count — plumbed from
   the first pass and pinned to maximum. Varying it later is then choosing an argument rather than

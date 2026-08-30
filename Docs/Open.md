@@ -1362,6 +1362,40 @@ What that leaves open, now that a descriptor can arrive:
   a legacy client whose buffer genuinely has no stated layout — which is what a GBM allocation without
   modifier support produces, and there are still drivers that do it.
 
+## Promotion does not check color, and the section that says it must is older than the promotion
+
+[Architecture.md](Architecture.md#direct-scanout-is-conditional) states the rule: a client buffer
+flipped straight to a plane bypasses the composite, so every transform the composite would have
+applied has to be expressible in the KMS color pipeline, and where it is not gyro composites
+instead. Otherwise the picture changes at the moment a window is promoted — a flash, and a
+correctness bug wearing an optimization's clothes.
+
+Decision 152's predicate does not implement it. It refuses a layer that would be *resampled* and is
+silent about color; `Frame/Assign.h`'s `Promoted` stamps the layer with the output's own color state
+and nothing compares that against the buffer's.
+
+**It costs nothing today, which is exactly why it wants deciding now.** Every surface that can reach
+a plane is sRGB: `wl_shm` and `zwp_linux_dmabuf_v1` are the only ways in and neither carries a color
+description, so the stamp is accidentally correct on every client that exists. The first client to
+say otherwise — `wp_color_management_v1`, or an HDR video player — makes it wrong, and it will be
+wrong as a flash on promotion rather than as anything a test would fail on.
+
+What has to be settled is which of two shapes it takes, and they are not the same cost:
+
+- **A fourth `PromotionRefusal`**, computed the way the other three are: the item's color state
+  against the output's, refuse where they differ. Cheap, correct, and it gives up the offload on
+  precisely the content that most wants it — a fullscreen HDR video is the arrangement promotion
+  exists for, and this refuses it by construction.
+- **Ask the pipeline**, the way `TestLayers` already asks about the layer set. A plane's degamma,
+  CTM and gamma are properties `Drm/Catalog.h` could read, and the newer `COLOR_PIPELINE` property
+  describes the whole chain. Then the question is whether *this* conversion is expressible on *this*
+  plane, which is the honest form, and it puts a color decision behind an ioctl the assigner already
+  has a reason to cache.
+
+The second is right and the first is what ships if nobody decides. Sizing: it blocks nothing until
+there is a color protocol, and the color protocol is what makes it urgent, so the trigger is
+whichever of the two lands first.
+
 ## The batch reserve is folded from the frames outputs are owed *now*, and a scene wake is not one
 
 `FrameLoop::Schedule` builds a device's batch from the outputs that are immediately owed a frame —
