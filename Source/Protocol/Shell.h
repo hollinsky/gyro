@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -10,6 +11,7 @@
 #include "Protocol/Context.h"
 #include "Protocol/Drag.h"
 #include "Protocol/Positioner.h"
+#include "Protocol/Seat.h"
 #include "Protocol/Surface.h"
 #include "Wayland/Server/Wayland.h"
 #include "Wayland/Server/XdgShell.h"
@@ -571,6 +573,10 @@ private:
 	// the pass its last channel settles.
 	void Unmap();
 
+	// Say out loud what became of an `xdg_toplevel.move` or `xdg_toplevel.resize`, which is otherwise
+	// invisible from both ends — see [Seat.h](Seat.h) for why that is worth a log line at all.
+	void Report(std::string_view request, std::uint32_t serial, GestureRefusal why);
+
 	// The window's natural size in its own space: what the client declared as its geometry, or the
 	// whole surface where it declared none.
 	[[nodiscard]] Size<SurfaceSpace, float> Natural(const ClientSurface& surface) const noexcept;
@@ -594,6 +600,12 @@ private:
 
 	// The popups hanging off this surface. Borrowed, and each removes itself as it dies.
 	std::vector<ClientXdgPopup*> m_Children;
+
+	// The press a gesture request was last reported against, so that a client retrying a refused request
+	// says it once rather than once per frame. **A refusal is worth a line and a client's retry loop is
+	// not**, and the two are told apart by the serial: a retry quotes the same press, and the next thing
+	// worth hearing about is by definition a different one.
+	std::optional<std::uint32_t> m_ReportedGesture;
 
 	// The window's own two nodes. Null while unmapped.
 	EntityId m_Window{};

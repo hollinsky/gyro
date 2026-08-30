@@ -1,5 +1,6 @@
 #include "Protocol/Shell.h"
 
+#include <spdlog/spdlog.h>
 #include <wayland-server-core.h>
 
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <optional>
 #include <span>
 
@@ -71,6 +73,23 @@ namespace
 // not one the enumeration has. It is written as a switch rather than as bit tests precisely so that a
 // value like *left and right together* — which the mask can express and the protocol does not define —
 // falls through to the refusal instead of being interpreted.
+// The edges as a person would say them, for the log line. Diagnostic gold when a toolkit turns out to
+// be asking for a side nobody grabbed.
+[[nodiscard]] std::string_view Names(ResizeEdges edges) noexcept
+{
+	if (edges.Top)
+	{
+		return edges.Left ? "top-left" : edges.Right ? "top-right" : "top";
+	}
+
+	if (edges.Bottom)
+	{
+		return edges.Left ? "bottom-left" : edges.Right ? "bottom-right" : "bottom";
+	}
+
+	return edges.Left ? "left" : edges.Right ? "right" : "no edge";
+}
+
 [[nodiscard]] std::optional<ResizeEdges> Sides(Wayland::Server::XdgToplevelResizeEdge edges) noexcept
 {
 	using Edge = Wayland::Server::XdgToplevelResizeEdge;
@@ -1205,6 +1224,29 @@ void ClientXdgSurface::Withdraw() noexcept
 	m_AckedSerial = 0;
 }
 
+void ClientXdgSurface::Report(std::string_view request, std::uint32_t serial, GestureRefusal why)
+{
+	if (why == GestureRefusal::None)
+	{
+		m_ReportedGesture = serial;
+
+		spdlog::info("{} (serial {}): {}", request, serial, Describe(why));
+
+		return;
+	}
+
+	// A client that retries the same press says it once. See the member for why the serial is the right
+	// thing to compare: a retry quotes the press it already quoted, and anything else is a new gesture.
+	if (m_ReportedGesture == serial)
+	{
+		return;
+	}
+
+	m_ReportedGesture = serial;
+
+	spdlog::warn("{} (serial {}): {}", request, serial, Describe(why));
+}
+
 void ClientXdgSurface::BeginMove(Wayland::Server::WlSeat seat, std::uint32_t serial)
 {
 	SceneStore* const scene = m_Context->Store();
@@ -1213,25 +1255,47 @@ void ClientXdgSurface::BeginMove(Wayland::Server::WlSeat seat, std::uint32_t ser
 	// Unmapped, outside a dispatch, or an id that is not a seat. A client is entitled to ask before its
 	// window exists — a toolkit that hands a press to its own titlebar before the first frame is
 	// ordinary — and there is nothing in the world to move.
-	if (scene == nullptr || from == nullptr || m_Window.IsNull())
+	if (scene == nullptr || m_Window.IsNull())
 	{
+		Report("xdg_toplevel.move", serial, GestureRefusal::Unmapped);
+
 		return;
 	}
 
-	static_cast<void>(from->BeginMove(*scene, m_Window, serial));
+	if (from == nullptr)
+	{
+		Report("xdg_toplevel.move", serial, GestureRefusal::NoSeat);
+
+		return;
+	}
+
+	Report("xdg_toplevel.move", serial, from->BeginMove(*scene, m_Window, serial));
 }
 
 void ClientXdgSurface::BeginResize(Wayland::Server::WlSeat seat, std::uint32_t serial, ResizeEdges edges)
 {
+	// The edges are in the line because they are the half a person cannot infer: a corner that does
+	// nothing and a corner the toolkit asked for as an *edge* look identical from the outside.
+	const std::string request = std::format("xdg_toplevel.resize {}", Names(edges));
+
 	SceneStore* const scene = m_Context->Store();
 	SeatGlobal* const from = SeatOf(seat);
 
-	if (scene == nullptr || from == nullptr || m_Window.IsNull())
+	if (scene == nullptr || m_Window.IsNull())
 	{
+		Report(request, serial, GestureRefusal::Unmapped);
+
 		return;
 	}
 
-	static_cast<void>(from->BeginResize(*scene, m_Window, serial, edges));
+	if (from == nullptr)
+	{
+		Report(request, serial, GestureRefusal::NoSeat);
+
+		return;
+	}
+
+	Report(request, serial, from->BeginResize(*scene, m_Window, serial, edges));
 }
 
 bool ClientXdgSurface::SetActivated(bool activated) noexcept
