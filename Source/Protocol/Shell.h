@@ -427,6 +427,14 @@ public:
 
 	void OnSurfaceGone() override;
 
+	// Where a subsurface of this window hangs, and the node it stacks against. Decision 111's toplevel
+	// answered as two questions: the container is the window, and the image under it is the client's
+	// own pixels — which `wl_subsurface.place_below` names as a legal reference, and which is the whole
+	// reason the window is a container rather than the image itself.
+	[[nodiscard]] EntityId RoleContainer() const noexcept override { return m_Window; }
+
+	[[nodiscard]] EntityId RoleContent() const noexcept override { return m_Content; }
+
 	// The window in the scene, or null while the surface is unmapped. A test's way of asking whether a
 	// window exists without inferring it from a node count.
 	[[nodiscard]] EntityId Window() const noexcept { return m_Window; }

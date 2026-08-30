@@ -291,3 +291,63 @@ GYRO_TEST(SceneStore, RaisingARootMovesItToTheFrontOfTheTopLevel)
 
 	GYRO_CHECK(!other.Raise(floor));
 }
+
+// `wl_subsurface.place_above` and `place_below` as a link edit, which is what decision 55 makes them:
+// the sibling list is the z order, so a client restacking its own parts moves nothing else.
+GYRO_TEST(SceneStore, OrderingPutsASiblingWhereItWasAskedFor)
+{
+	SceneStore store{ Clock };
+
+	const EntityId window = store.CreateContainer({}, {}).value();
+	const EntityId first = store.CreateContainer(window, {}).value();
+	const EntityId second = store.CreateContainer(window, {}).value();
+	const EntityId third = store.CreateContainer(window, {}).value();
+
+	// To the front, which is what a null reference means and is `place_below` naming the first entry
+	// there is.
+	GYRO_REQUIRE(store.Order(third, {}));
+
+	GYRO_CHECK(store.Find(window)->FirstChild == third);
+	GYRO_CHECK(store.Find(third)->NextSibling == first);
+	GYRO_CHECK(store.Find(window)->LastChild == second);
+
+	// And into the middle, which is the case that exercises both repairs at once: the predecessor it
+	// left and the one it arrived after.
+	GYRO_REQUIRE(store.Order(third, first));
+
+	GYRO_CHECK(store.Find(window)->FirstChild == first);
+	GYRO_CHECK(store.Find(first)->NextSibling == third);
+	GYRO_CHECK(store.Find(third)->NextSibling == second);
+	GYRO_CHECK(store.Find(window)->LastChild == second);
+
+	// To the very end, where the last link is the one that has to move.
+	GYRO_REQUIRE(store.Order(first, second));
+
+	GYRO_CHECK(store.Find(window)->LastChild == first);
+	GYRO_CHECK(store.Find(first)->NextSibling.IsNull());
+
+	// Already there, which is what a toolkit restating its stacking on every commit asks for.
+	GYRO_CHECK(store.Order(first, second));
+	GYRO_CHECK(store.Find(window)->LastChild == first);
+}
+
+// A reference in somebody else's chain is refused rather than adopted, because moving the node anyway
+// would reparent a subsurface into a window that never asked for it.
+GYRO_TEST(SceneStore, OrderingRefusesAReferenceThatIsNotASibling)
+{
+	SceneStore store{ Clock };
+
+	const EntityId window = store.CreateContainer({}, {}).value();
+	const EntityId other = store.CreateContainer({}, {}).value();
+	const EntityId child = store.CreateContainer(window, {}).value();
+	const EntityId stranger = store.CreateContainer(other, {}).value();
+
+	GYRO_CHECK(!store.Order(child, stranger));
+	GYRO_CHECK(store.Find(window)->FirstChild == child);
+	GYRO_CHECK(store.Find(other)->FirstChild == stranger);
+
+	// Naming itself is refused too, which is what `place_above` calls a protocol error and what would
+	// otherwise be a node linked after itself — a cycle in the walk that draws the world.
+	GYRO_CHECK(!store.Order(child, child));
+	GYRO_CHECK(store.Find(child)->NextSibling.IsNull());
+}

@@ -1116,6 +1116,14 @@ void ClientXdgSurface::Unmap()
 		m_Popup->Leave();
 	}
 
+	// The subsurfaces go first, while the tree is still readable: each of them has a binding of its own
+	// to take out, and the retire below takes the whole subtree at once — after which a child could not
+	// tell an id that has been freed from one it never had.
+	if (m_Surface != nullptr)
+	{
+		m_Surface->UnmapChildren();
+	}
+
 	m_Context->Unbind(m_Content);
 	m_Context->Unbind(m_Window);
 	m_Context->Remove(*this);

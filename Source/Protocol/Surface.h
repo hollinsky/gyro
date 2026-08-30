@@ -102,6 +102,7 @@ struct SurfaceState
 };
 
 class ClientSurface;
+class ClientSubsurface;
 
 // What a `wl_surface` becomes when something gives it one.
 //
@@ -132,6 +133,35 @@ public:
 	// The `wl_surface` is going away underneath the role, which the protocol calls a client error and
 	// still requires the compositor to survive. The role has whatever it authored to take down.
 	virtual void OnSurfaceGone() = 0;
+
+	// Whether a commit on this surface is *cached* rather than applied, which is `wl_subsurface`'s
+	// synchronized mode and the only role that has one.
+	//
+	// **It is a question for the role because only the role knows the answer**: a subsurface is
+	// synchronized if it says so or if anything above it does, and the surface itself has no parent to
+	// ask. Every other role answers false, which is the state a toplevel and a popup are permanently in.
+	[[nodiscard]] virtual bool IsSynchronized() const noexcept { return false; }
+
+	// The container this surface's subsurfaces are ordered inside, and the node its own pixels are.
+	//
+	// **The pair is decision 111's toplevel stated as two questions**: a surface in the world is a
+	// container holding its below-subsurfaces, its own image, and its above-subsurfaces, so a child
+	// parents into the first and stacks relative to the second. `wl_subsurface.place_below` naming the
+	// parent surface itself as a legal reference is the whole reason the second one has to be
+	// addressable at all.
+	//
+	// Both are null while the role has nothing in the world, which is a surface nobody can hang a
+	// subsurface off yet rather than an error — a child of an unmapped window waits for it, exactly as
+	// a popup waits for the window it is anchored on.
+	[[nodiscard]] virtual EntityId RoleContainer() const noexcept { return {}; }
+
+	[[nodiscard]] virtual EntityId RoleContent() const noexcept { return {}; }
+
+	// The surface this one hangs off, which only a subsurface has. It is what
+	// `wl_subcompositor.get_subsurface` walks to refuse a parent that is the surface itself or
+	// something under it — a cycle in the scene tree, which is a preorder walk that never terminates on
+	// the frame thread.
+	[[nodiscard]] virtual ClientSurface* RoleParent() const noexcept { return nullptr; }
 };
 
 class ClientSurface final : public Wayland::Server::WlSurfaceHandler
@@ -176,6 +206,83 @@ public:
 	[[nodiscard]] std::uint32_t Entered() const noexcept { return m_Entered; }
 
 	void SetEntered(std::uint32_t outputs) noexcept { m_Entered = outputs; }
+
+	// The implementation behind an id a client named, or null where the id was not a `wl_surface` gyro
+	// made. `ClientBuffer::Of`'s argument exactly: `Implementation` checks the interface and the
+	// dispatch table before it touches any user data, and gyro creates exactly one kind of thing
+	// against `wl_surface`'s table.
+	[[nodiscard]] static ClientSurface* Of(Wayland::Server::WlSurface surface) noexcept
+	{
+		return static_cast<ClientSurface*>(surface.Implementation());
+	}
+
+	// The subsurfaces hanging off this surface, in the two runs `wl_subsurface.place_below` divides
+	// them into.
+	//
+	// **Two lists rather than one with a marker in it**, because the thing being ordered against is the
+	// parent's own pixels and it is not a subsurface: `place_below` names the parent surface itself as
+	// a legal reference, so what a client states is *before mine* or *after mine* and the two runs say
+	// exactly that. Published, the pair becomes one sibling chain — below, the parent's image, above —
+	// which is decision 111's toplevel and is what `Restack` writes.
+	//
+	// Borrowed, and each subsurface takes itself out as it goes.
+	struct SurfaceStack
+	{
+		std::vector<ClientSubsurface*> Below;
+		std::vector<ClientSubsurface*> Above;
+	};
+
+	// What the client has stated and what the world has, which are the same double buffering every
+	// other request on this object gets: **z order and position are state on the *parent*, applied by
+	// the parent's commit**, which is the protocol's own rule and the reason a toolkit can move three
+	// subsurfaces and have them arrive as one change.
+	[[nodiscard]] const SurfaceStack& Stack() const noexcept { return m_Stack; }
+
+	[[nodiscard]] SurfaceStack& Pending() noexcept { return m_PendingStack; }
+
+	// A new subsurface, which the protocol puts topmost. Into the pending run, so it appears with the
+	// parent commit that maps it rather than the moment the object was made.
+	void AddChild(ClientSubsurface& child);
+
+	// Out of every run that names it, current and pending both. A subsurface being destroyed, and a
+	// client that destroyed the `wl_surface` under one.
+	void RemoveChild(const ClientSubsurface& child) noexcept;
+
+	// Whether a commit on this surface caches rather than applies, which is the role's answer and is
+	// asked here because the surface is what a commit arrives on.
+	[[nodiscard]] bool IsSynchronized() const noexcept { return m_Role != nullptr && m_Role->IsSynchronized(); }
+
+	// Where a subsurface of this surface hangs, and the node it stacks against. The role's answers,
+	// reached through the surface because a child holds its parent as a surface rather than as a role —
+	// a `wl_subsurface` names a `wl_surface` and never what claimed it.
+	[[nodiscard]] EntityId Container() const noexcept
+	{
+		return m_Role != nullptr ? m_Role->RoleContainer() : EntityId{};
+	}
+
+	[[nodiscard]] EntityId ContentNode() const noexcept
+	{
+		return m_Role != nullptr ? m_Role->RoleContent() : EntityId{};
+	}
+
+	// The surface this one is a subsurface of, or null for every surface that is not one.
+	[[nodiscard]] ClientSurface* ParentSurface() const noexcept
+	{
+		return m_Role != nullptr ? m_Role->RoleParent() : nullptr;
+	}
+
+	// The state a synchronized commit cached becomes current, and this surface's own children commit
+	// behind it. Called by the parent's commit and by nothing else.
+	//
+	// **The role is deliberately not told from here.** The party applying a cache is the parent, and it
+	// is the parent that acts on the whole of the change at once — the position, the stacking and the
+	// content are one arrangement, and a role told halfway through would map a subsurface where it used
+	// to be.
+	void ApplyCached();
+
+	// Everything under this surface goes off screen, because this surface has. A window unmapping, a
+	// role let go, a client destroying a surface with children still on it.
+	void UnmapChildren() noexcept;
 
 	// Claim this surface. False where something already has it, which is every role object's own
 	// `role` error and is raised by the caller because only it knows which one to name.
@@ -242,6 +349,25 @@ private:
 	// Drop a callback from whichever list holds it. Called by the callback itself as it goes away.
 	void Forget(const FrameCallback& callback) noexcept;
 
+	// Pending becomes *cached* instead of current, which is a synchronized subsurface's commit: the
+	// client has stated an arrangement and the parent decides when the world sees it.
+	//
+	// **Damage accumulates and everything else replaces**, which is the same asymmetry `Apply` has one
+	// level down: two cached commits describe one arrangement and two sets of changed pixels, and a
+	// cache that dropped the first commit's damage would leave a patch of a video frame nobody
+	// repainted.
+	void Cache();
+
+	// The subsurface stack the client stated becomes the one the world has, every child under it
+	// commits, and the sibling chain is rewritten to match. The tail of both `Apply` and `ApplyCached`,
+	// because a synchronized surface's cache landing *is* its commit.
+	void CommitChildren();
+
+	// The published order: below, this surface's own image, above. One relink per child through
+	// `SceneStore::Order`, and nothing at all where there are no children — which is every window on an
+	// ordinary machine, so the walk is not paid for by the case that does not have one.
+	void Restack();
+
 	// Pending becomes current, and pending's per-commit accumulations reset.
 	//
 	// **Damage resets and the rest does not**, which is the asymmetry the protocol actually specifies
@@ -287,6 +413,16 @@ private:
 
 	SurfaceState m_Pending;
 	SurfaceState m_Current;
+
+	// What a synchronized commit staged and the parent has not yet applied. **`m_HasCached` rather than
+	// an `optional`, because the cache is the size of a whole surface state and a surface that has ever
+	// been synchronized would otherwise pay an allocation every time it goes empty and fills again.**
+	SurfaceState m_Cached;
+	bool m_HasCached = false;
+
+	// The subsurfaces, stated and applied.
+	SurfaceStack m_Stack;
+	SurfaceStack m_PendingStack;
 
 	// Callbacks the client has asked for since the last commit, and the ones a commit has made due.
 	// The handler rather than the resource, because the handler is what has a lifetime — the resource

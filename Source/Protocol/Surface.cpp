@@ -6,6 +6,7 @@
 
 #include "Protocol/Buffer.h"
 #include "Protocol/Region.h"
+#include "Protocol/Subcompositor.h"
 
 namespace
 {
@@ -81,9 +82,39 @@ ClientSurface::~ClientSurface()
 	if (ITextures* const textures = m_Context->Textures(); textures != nullptr)
 	{
 		textures->Retire(m_Current.Content);
+
+		// **And the id a cache is holding, which is a second live name rather than the same one.** A
+		// synchronized subsurface that committed and was never applied has adopted pixels the world has
+		// not seen; nobody else will ever give that name up.
+		if (m_Pending.Content != m_Current.Content)
+		{
+			textures->Retire(m_Pending.Content);
+		}
 	}
 
 	ReleaseStaged();
+
+	// The children are told before anything else goes, while the tree is still readable: each of them
+	// has a subtree in the world hanging off this surface's own, and a `wl_subsurface` outliving the
+	// `wl_surface` it was parented onto is a client error the compositor still has to survive.
+	const SurfaceStack applied = m_Stack;
+	const SurfaceStack stated = m_PendingStack;
+
+	m_Stack = {};
+	m_PendingStack = {};
+
+	for (const SurfaceStack* const run : { &applied, &stated })
+	{
+		for (ClientSubsurface* const child : run->Below)
+		{
+			child->ForgetParent();
+		}
+
+		for (ClientSubsurface* const child : run->Above)
+		{
+			child->ForgetParent();
+		}
+	}
 
 	// Destroying a callback runs its `OnGone`, which calls `Forget` back into this object and erases
 	// from the list being walked. So the lists are emptied first and the resources destroyed out of
@@ -320,7 +351,188 @@ Wayland::Server::WlCallbackHandler* ClientSurface::OnGetRelease()
 
 void ClientSurface::OnCommit()
 {
+	// **A synchronized subsurface's commit changes nothing a person can see, and that is the whole of
+	// the mode.** A toolkit moving a video and the controls over it commits each of them and then the
+	// window, and what it is buying is that the three arrive together — a compositor that applied each
+	// one as it landed would show the controls a frame away from the video they belong to, on every
+	// frame of a drag.
+	if (IsSynchronized())
+	{
+		Cache();
+
+		return;
+	}
+
 	Apply();
+}
+
+void ClientSurface::AddChild(ClientSubsurface& child)
+{
+	// Topmost, which is where the protocol puts a new subsurface: above every sibling and above the
+	// parent's own pixels.
+	m_PendingStack.Above.push_back(&child);
+}
+
+void ClientSurface::RemoveChild(const ClientSubsurface& child) noexcept
+{
+	const auto matches = [&child](const ClientSubsurface* held) noexcept { return held == &child; };
+
+	std::erase_if(m_Stack.Below, matches);
+	std::erase_if(m_Stack.Above, matches);
+	std::erase_if(m_PendingStack.Below, matches);
+	std::erase_if(m_PendingStack.Above, matches);
+}
+
+void ClientSurface::UnmapChildren() noexcept
+{
+	// Out of a copy, because a child taking itself off screen may end up destroying a `wl_buffer` or a
+	// resource whose teardown edits these runs. The same rule the callback lists are walked under.
+	const SurfaceStack stack = m_Stack;
+
+	for (ClientSubsurface* const child : stack.Below)
+	{
+		child->Unmap();
+	}
+
+	for (ClientSubsurface* const child : stack.Above)
+	{
+		child->Unmap();
+	}
+}
+
+void ClientSurface::ApplyCached()
+{
+	if (!m_HasCached)
+	{
+		// **Nothing cached is nothing to cascade into.** A surface that has not committed since its own
+		// parent last did has stated no arrangement, and its children's caches are waiting on *its*
+		// commit rather than on this one — which is what makes the mode compose down a tree at all.
+		return;
+	}
+
+	const TextureId shown = m_Current.Content;
+
+	m_Current = std::move(m_Cached);
+	m_Cached = {};
+	m_HasCached = false;
+
+	if (shown != m_Current.Content)
+	{
+		if (ITextures* const textures = m_Context->Textures(); textures != nullptr)
+		{
+			textures->Retire(shown);
+		}
+	}
+
+	// The callbacks stayed pending while the state was cached, which is what makes a client that asked
+	// to be paced and was never applied go on waiting rather than being told about a frame its pixels
+	// were not in.
+	m_DueCallbacks.insert(m_DueCallbacks.end(), m_PendingCallbacks.begin(), m_PendingCallbacks.end());
+	m_PendingCallbacks.clear();
+
+	CommitChildren();
+}
+
+void ClientSurface::Cache()
+{
+	if (m_Attached.has_value())
+	{
+		if (ITextures* const textures = m_Context->Textures(); textures != nullptr)
+		{
+			TakeContent(*textures);
+		}
+		else
+		{
+			ReleaseStaged();
+		}
+	}
+
+	// Damage survives the replacement and nothing else does. The older rectangles go first, which is
+	// the order they were drawn in.
+	std::vector<PixelRect<SurfaceSpace>> surface;
+	std::vector<PixelRect<BufferSpace>> buffer;
+
+	if (m_HasCached)
+	{
+		surface = std::move(m_Cached.SurfaceDamage);
+		buffer = std::move(m_Cached.BufferDamage);
+	}
+
+	m_Cached = m_Pending;
+	m_HasCached = true;
+
+	surface.insert(surface.end(), m_Cached.SurfaceDamage.begin(), m_Cached.SurfaceDamage.end());
+	buffer.insert(buffer.end(), m_Cached.BufferDamage.begin(), m_Cached.BufferDamage.end());
+
+	m_Cached.SurfaceDamage = std::move(surface);
+	m_Cached.BufferDamage = std::move(buffer);
+
+	m_Pending.SurfaceDamage.clear();
+	m_Pending.BufferDamage.clear();
+}
+
+void ClientSurface::CommitChildren()
+{
+	if (m_Stack.Below.empty() && m_Stack.Above.empty() && m_PendingStack.Below.empty() && m_PendingStack.Above.empty())
+	{
+		return;
+	}
+
+	m_Stack = m_PendingStack;
+
+	// Out of a copy for `UnmapChildren`'s reason: a child mapping can end its own client, which unwinds
+	// through every object that client holds and edits these runs underneath the walk.
+	const SurfaceStack stack = m_Stack;
+
+	for (ClientSubsurface* const child : stack.Below)
+	{
+		child->ParentCommitted();
+	}
+
+	for (ClientSubsurface* const child : stack.Above)
+	{
+		child->ParentCommitted();
+	}
+
+	Restack();
+}
+
+void ClientSurface::Restack()
+{
+	SceneStore* const scene = m_Context->Store();
+	const EntityId container = Container();
+	const EntityId content = ContentNode();
+
+	if (scene == nullptr || container.IsNull() || content.IsNull())
+	{
+		return;
+	}
+
+	// Each node is placed after the last one that took its place, so the chain comes out in exactly the
+	// order it is walked here — and a child with no node yet, which is one whose client has not drawn
+	// into it, is skipped rather than reserving a gap.
+	EntityId after{};
+
+	for (const ClientSubsurface* const child : m_Stack.Below)
+	{
+		if (const EntityId node = child->Node(); !node.IsNull() && scene->Order(node, after))
+		{
+			after = node;
+		}
+	}
+
+	if (scene->Order(content, after))
+	{
+		after = content;
+	}
+
+	for (const ClientSubsurface* const child : m_Stack.Above)
+	{
+		if (const EntityId node = child->Node(); !node.IsNull() && scene->Order(node, after))
+		{
+			after = node;
+		}
+	}
 }
 
 void ClientSurface::ReleaseStaged() noexcept
@@ -362,7 +574,15 @@ void ClientSurface::TakeContent(ITextures& textures)
 
 	// Retired after the new id exists rather than before, so a device that fails the import leaves the
 	// surface holding nothing rather than holding a name it has already given up.
-	textures.Retire(replaced);
+	//
+	// **Except the one the world is still drawing**, which is what a cache makes possible: a
+	// synchronized subsurface adopts a frame the parent has not applied, so the id under it is still on
+	// screen and giving up its name here would be a window sampling memory the registry has reclaimed.
+	// `ApplyCached` retires it at the instant the scene stops naming it.
+	if (replaced != m_Current.Content)
+	{
+		textures.Retire(replaced);
+	}
 
 	// **A copied buffer goes back now and a borrowed one does not.** `wl_shm` pixels are gyro's the
 	// moment `Adopt` returns, so the client may draw the next frame into the same memory immediately —
@@ -405,7 +625,19 @@ void ClientSurface::Apply()
 		}
 	}
 
+	const TextureId shown = m_Current.Content;
+
 	m_Current = m_Pending;
+
+	// The id the world has just stopped naming, for `TakeContent`'s reason: it declines to retire one
+	// that is still on screen, and this is where it stops being.
+	if (shown != m_Current.Content)
+	{
+		if (ITextures* const textures = m_Context->Textures(); textures != nullptr)
+		{
+			textures->Retire(shown);
+		}
+	}
 
 	// Damage is consumed by the commit and everything else is sticky, which is the protocol's own
 	// asymmetry. The assignment above is a copy rather than a move for the same reason: pending has to
@@ -421,4 +653,8 @@ void ClientSurface::Apply()
 	{
 		m_Role->OnSurfaceCommitted(*this);
 	}
+
+	// **And last of all the children, because a subsurface needs the surface it hangs off to be in the
+	// world before it can be.** The role above is what puts it there.
+	CommitChildren();
 }

@@ -438,10 +438,17 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 	// never answered waits on a roundtrip forever. See Protocol/Dmabuf.h.
 	GYRO_CHECK_EQ(dmabuf->Version, std::uint32_t{ 3 });
 
-	// Exactly six: three a window is built out of, one a toolkit demands before it will look for them,
-	// the seat that makes the window typeable, and the one that lets a client hand over a buffer a
-	// panel can scan out instead of pixels gyro has to copy.
-	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 6 });
+	const Registry::Global* const subcompositor = bound.Listener.Find(Wayland::WlSubcompositor::WireName);
+	GYRO_REQUIRE(subcompositor != nullptr);
+
+	// One, because `wl_subcompositor` has never been revised.
+	GYRO_CHECK_EQ(subcompositor->Version, std::uint32_t{ 1 });
+
+	// Exactly seven: three a window is built out of, one a toolkit demands before it will look for
+	// them, the seat that makes the window typeable, the one that lets a client hand over a buffer a
+	// panel can scan out instead of pixels gyro has to copy, and the one that lets it say how the
+	// parts of its own window are stacked.
+	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 7 });
 }
 
 // What a GTK client actually does with the clipboard global before it has a seat, which is bind it,
@@ -3358,4 +3365,285 @@ GYRO_TEST(ProtocolRoundTrip, AResizeQuotingASerialNobodySentIsRefused)
 	GYRO_CHECK_EQ(toplevel.WindowEvents.Width, 0);
 	GYRO_CHECK_EQ(pointer.Listener.Left, std::uint32_t{ 0 });
 	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+namespace
+{
+// A window on screen, which is the four steps every test below starts from and none of them is about.
+[[nodiscard]] bool Mapped(Pair& pair, BoundCompositor& bound, Toplevel& toplevel, std::byte fill)
+{
+	if (!Role(bound, toplevel, fill))
+	{
+		return false;
+	}
+
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	if (toplevel.SurfaceEvents.Serial == 0)
+	{
+		return false;
+	}
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.DamageBuffer(0, 0, Width, Height);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	return true;
+}
+
+[[nodiscard]] Wayland::WlSubcompositor Subcompositor(BoundCompositor& bound)
+{
+	const Registry::Global* const global = bound.Listener.Find(Wayland::WlSubcompositor::WireName);
+
+	if (global == nullptr)
+	{
+		return {};
+	}
+
+	return bound.Listener.Object().Bind<Wayland::WlSubcompositor>(global->Name, global->Version);
+}
+
+// The window's own id, which `WindowNode` has and does not return: the floor is the only root and a
+// window is a child of it.
+[[nodiscard]] EntityId WindowId(const SceneStore& scene)
+{
+	const Entity* const floor = scene.Find(scene.FirstRoot());
+
+	return floor == nullptr ? EntityId{} : floor->FirstChild;
+}
+
+// The nodes under a window's container, in the order the frame walk visits them — which decision 55
+// makes the order they are drawn in, so this list is literally back to front on screen.
+[[nodiscard]] std::vector<EntityId> Children(const SceneStore& scene, EntityId parent)
+{
+	std::vector<EntityId> children;
+	const Entity* const node = scene.Find(parent);
+
+	for (EntityId at = node == nullptr ? EntityId{} : node->FirstChild; !at.IsNull();)
+	{
+		children.push_back(at);
+
+		const Entity* const child = scene.Find(at);
+
+		at = child == nullptr ? EntityId{} : child->NextSibling;
+	}
+
+	return children;
+}
+} // namespace
+
+GYRO_TEST(ProtocolRoundTrip, ASubsurfaceReachesTheWorldWhenItsParentCommits)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-subsurface" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	const Wayland::WlSubcompositor subcompositor = Subcompositor(bound);
+	GYRO_REQUIRE(subcompositor.IsValid());
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Mapped(pair, bound, toplevel, std::byte{ 0x33 }));
+
+	GYRO_REQUIRE(!WindowId(pair.Store).IsNull());
+
+	// The floor, the window and its pixels: three, which is where every test that maps a window ends.
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 3 });
+
+	DrawnSurface child;
+	GYRO_REQUIRE(Draw(bound, child, std::byte{ 0x77 }));
+
+	const Wayland::WlSubsurface role = subcompositor.GetSubsurface(child.Surface, toplevel.Drawn.Surface);
+	GYRO_REQUIRE(role.IsValid());
+
+	role.SetPosition(3, 4);
+	child.Surface.Attach(child.Buffer, 0, 0);
+	child.Surface.DamageBuffer(0, 0, Width, Height);
+	child.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// **The child committed and nothing is on screen**, which is the synchronized default doing its
+	// job: a toolkit states every part of its window and the window is what publishes them.
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 3 });
+
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// Two more nodes, which is decision 111's pair a second time: a container to hang the child's own
+	// subsurfaces off and the image that is its pixels.
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 5 });
+
+	const std::vector<EntityId> children = Children(pair.Store, WindowId(pair.Store));
+	GYRO_REQUIRE_EQ(children.size(), std::size_t{ 2 });
+
+	// The parent's own pixels first and the child over them, which is where a new subsurface starts.
+	GYRO_CHECK(pair.Store.Find(children.front())->Kind == NodeKind::Image);
+
+	const Entity* const node = pair.Store.Find(children.back());
+	GYRO_REQUIRE(node != nullptr);
+
+	// In the parent surface's own coordinates, which for a window that declared no geometry is the
+	// window's own origin.
+	GYRO_CHECK_EQ(node->Translation.Model().X, 3.0);
+	GYRO_CHECK_EQ(node->Translation.Model().Y, 4.0);
+	GYRO_CHECK_EQ(node->Extent.Width, static_cast<float>(Width));
+}
+
+GYRO_TEST(ProtocolRoundTrip, ASubsurfacePlacedBelowItsParentIsDrawnUnderIt)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-substack" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	const Wayland::WlSubcompositor subcompositor = Subcompositor(bound);
+	GYRO_REQUIRE(subcompositor.IsValid());
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Mapped(pair, bound, toplevel, std::byte{ 0x33 }));
+
+	DrawnSurface child;
+	GYRO_REQUIRE(Draw(bound, child, std::byte{ 0x77 }));
+
+	const Wayland::WlSubsurface role = subcompositor.GetSubsurface(child.Surface, toplevel.Drawn.Surface);
+	GYRO_REQUIRE(role.IsValid());
+
+	child.Surface.Attach(child.Buffer, 0, 0);
+	child.Surface.Commit();
+
+	// **Naming the parent surface itself**, which is the request the container shape exists for: a
+	// child may sit under its parent's pixels, and a preorder run whose sibling order is the z order
+	// has no other way to say it.
+	role.PlaceBelow(toplevel.Drawn.Surface);
+
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	const std::vector<EntityId> children = Children(pair.Store, WindowId(pair.Store));
+	GYRO_REQUIRE_EQ(children.size(), std::size_t{ 2 });
+
+	// The child first, so it is painted first and the parent's own pixels land on top of it.
+	const Entity* const first = pair.Store.Find(children.front());
+	GYRO_REQUIRE(first != nullptr);
+	GYRO_CHECK(first->Kind == NodeKind::Container);
+
+	const Entity* const second = pair.Store.Find(children.back());
+	GYRO_REQUIRE(second != nullptr);
+	GYRO_CHECK(second->Kind == NodeKind::Image);
+
+	// And back over the top, which is the same edit in the other direction.
+	role.PlaceAbove(toplevel.Drawn.Surface);
+
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	const std::vector<EntityId> restacked = Children(pair.Store, WindowId(pair.Store));
+	GYRO_REQUIRE_EQ(restacked.size(), std::size_t{ 2 });
+	GYRO_CHECK(pair.Store.Find(restacked.front())->Kind == NodeKind::Image);
+	GYRO_CHECK(pair.Store.Find(restacked.back())->Kind == NodeKind::Container);
+}
+
+GYRO_TEST(ProtocolRoundTrip, AWindowThatUnmapsTakesItsSubsurfacesWithIt)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-subunmap" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	const Wayland::WlSubcompositor subcompositor = Subcompositor(bound);
+	GYRO_REQUIRE(subcompositor.IsValid());
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Mapped(pair, bound, toplevel, std::byte{ 0x33 }));
+
+	DrawnSurface child;
+	GYRO_REQUIRE(Draw(bound, child, std::byte{ 0x77 }));
+
+	const Wayland::WlSubsurface role = subcompositor.GetSubsurface(child.Surface, toplevel.Drawn.Surface);
+	GYRO_REQUIRE(role.IsValid());
+
+	child.Surface.Attach(child.Buffer, 0, 0);
+	child.Surface.Commit();
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 5 });
+
+	// The window takes itself off the screen, and the part of it a subsurface holds cannot stay: a
+	// rectangle of an application that is no longer showing anything is worse than nothing at all,
+	// because a person can click on it.
+	const std::vector<EntityId> children = Children(pair.Store, WindowId(pair.Store));
+	GYRO_REQUIRE_EQ(children.size(), std::size_t{ 2 });
+
+	const EntityId subsurface = children.back();
+
+	toplevel.Drawn.Surface.Attach({}, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// **Retiring rather than gone**, per decision 114 and for the window's own reason: the subtree
+	// keeps its links and its place while whatever is still moving on it finishes, and the store frees
+	// it on the pass its last channel settles. What matters here is that the child is in that state
+	// too, rather than being a live node hanging off a dead window.
+	const Entity* const under = pair.Store.Find(subsurface);
+	GYRO_REQUIRE(under != nullptr);
+	GYRO_CHECK(under->Retiring);
+
+	// And the child maps again with the window, rather than being an object the client has to rebuild.
+	// The window negotiates from the start — a configure, an ack, then a buffer — which is what
+	// unmapping cost it; the subsurface negotiates nothing and is simply there again.
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	// Four more on top of the five that are retiring: a window and its pixels, and the subsurface's own
+	// pair under them. The client rebuilt no objects and gyro reused no nodes — the ones that went down
+	// are still on their way out, which is decision 114's whole point.
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 9 });
 }

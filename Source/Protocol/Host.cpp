@@ -50,6 +50,18 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		return Failure(ENOMEM, "advertising wl_compositor");
 	}
 
+	m_SubcompositorGlobal =
+		Wayland::Server::WlSubcompositor::Advertise(*display, SubcompositorVersion, m_Subcompositor);
+
+	if (m_SubcompositorGlobal == nullptr)
+	{
+		// Fatal for `wl_compositor`'s reason. A toolkit that finds no `wl_subcompositor` mostly still
+		// draws — GTK falls back to compositing its own decorations — but a video player will not put a
+		// frame on a plane, and a compositor whose behaviour depends on which global happened to be
+		// advertised is one nobody can reason about from a bug report.
+		return Failure(ENOMEM, "advertising wl_subcompositor");
+	}
+
 	m_ShmGlobal = Wayland::Server::WlShm::Advertise(*display, ShmVersion, m_Shm);
 
 	if (m_ShmGlobal == nullptr)

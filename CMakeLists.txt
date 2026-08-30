@@ -990,6 +990,7 @@ gyro_add_module(Protocol DISPATCH
 		Server.cpp
 		Shell.cpp
 		Shm.cpp
+		Subcompositor.cpp
 		Surface.cpp
 	TESTS
 		Dmabuf.Test.cpp
@@ -1000,6 +1001,7 @@ gyro_add_module(Protocol DISPATCH
 		Server.Test.cpp
 		Shell.Test.cpp
 		Shm.Test.cpp
+		Subcompositor.Test.cpp
 		Surface.Test.cpp
 )
 

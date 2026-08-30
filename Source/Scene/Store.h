@@ -237,6 +237,61 @@ public:
 		return true;
 	}
 
+	// Move one entity to sit directly after `after` among its siblings, or to the front of the chain
+	// where `after` is null. `Raise` is this with the last sibling named, and it is kept separate
+	// because the two are asked by different parties for different reasons.
+	//
+	// **What this is for is `wl_subsurface.place_above` and `place_below`**, which is the one thing in
+	// the protocol that names a z order directly. Decision 55 makes the sibling list the z order, so a
+	// client restacking its own parts is a relink here and nothing else — no lifetime, no channel, and
+	// nothing published that was not published before.
+	//
+	// **A reference in another chain is refused rather than adopted.** `place_above` names *a sibling
+	// surface or the parent*, so a reference that is neither is a client error the caller posts; moving
+	// the node anyway would reparent a subsurface into somebody else's window, which is a rectangle
+	// drawn over an application that never asked for it.
+	//
+	// True and untouched where the entity is already there, which is the common answer: a toolkit
+	// restates its stacking on every commit and almost never changes it.
+	bool Order(EntityId id, EntityId after) noexcept
+	{
+		Entity* const entity = Mutable(id);
+
+		if (entity == nullptr || id == after)
+		{
+			return false;
+		}
+
+		if (!after.IsNull())
+		{
+			const Entity* const sibling = Find(after);
+
+			if (sibling == nullptr || sibling->Parent != entity->Parent)
+			{
+				return false;
+			}
+		}
+
+		const bool root = entity->Parent.IsNull();
+		const EntityId first = root ? m_FirstRoot : m_Entities[entity->Parent.Index].FirstChild;
+
+		if (after.IsNull() ? first == id : m_Entities[after.Index].NextSibling == id)
+		{
+			return true;
+		}
+
+		// Out of the chain and back into it, through the same two halves `Raise` uses. The `NextSibling`
+		// is cleared in between because `Insert` links onto a node it takes to be loose, and a stale link
+		// here would be a cycle in the walk that draws the world.
+		Unlink(id, *entity);
+
+		entity->NextSibling = {};
+
+		Insert(entity->Parent, id, after);
+
+		return true;
+	}
+
 	[[nodiscard]] bool IsLive(EntityId id) const noexcept { return m_Ids.IsValid(id); }
 
 	// The top of the tree, as the first of a sibling chain. Decision 55 makes the list order the z
@@ -683,6 +738,35 @@ private:
 		}
 
 		last = id;
+	}
+
+	// The same link, at a stated position rather than at the end: after `after`, or at the front of the
+	// chain where it is null. The caller has already checked that the two share a parent.
+	void Insert(EntityId parent, EntityId id, EntityId after)
+	{
+		EntityId& first = parent.IsNull() ? m_FirstRoot : m_Entities[parent.Index].FirstChild;
+		EntityId& last = parent.IsNull() ? m_LastRoot : m_Entities[parent.Index].LastChild;
+
+		if (after.IsNull())
+		{
+			m_Entities[id.Index].NextSibling = first;
+			first = id;
+
+			if (last.IsNull())
+			{
+				last = id;
+			}
+
+			return;
+		}
+
+		m_Entities[id.Index].NextSibling = m_Entities[after.Index].NextSibling;
+		m_Entities[after.Index].NextSibling = id;
+
+		if (last == after)
+		{
+			last = id;
+		}
 	}
 
 	// Take one entity out of the chain it sits in, repairing the three links that can name it: its

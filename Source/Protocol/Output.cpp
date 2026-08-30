@@ -4,6 +4,7 @@
 
 #include "Protocol/Context.h"
 #include "Protocol/Shell.h"
+#include "Protocol/Subcompositor.h"
 #include "Protocol/Surface.h"
 #include "Scene/Reach.h"
 #include "Scene/Store.h"
@@ -244,6 +245,111 @@ void HostOutputs::Sync(wl_display& display, std::span<const SceneOutput> outputs
 	m_Outputs = std::move(ordered);
 }
 
+namespace
+{
+// Tell one surface what it has entered and left, from the outputs its own node reaches.
+//
+// **The node is a container rather than the image under it**, which is what `Protocol/Floor.h` places
+// and therefore the entity that has a position in the world at all — and for a subsurface it is the
+// container decision 111's shape gives it, for the same reason. A surface that is not on screen
+// reaches nothing, which is the answer that takes it off every output it was on.
+void SyncEntry(
+	ClientSurface& surface,
+	EntityId node,
+	const SceneStore& scene,
+	std::span<const std::unique_ptr<HostOutput>> advertised
+)
+{
+	const OutputReach reach = node.IsNull() ? 0 : Reach(scene, node);
+	const OutputReach entered = surface.Entered();
+
+	if (reach == entered)
+	{
+		return;
+	}
+
+	wl_client* const client = surface.Object().WireClient();
+
+	if (client == nullptr)
+	{
+		return;
+	}
+
+	// What was actually told, which is not always what is true: an `enter` names an object, and a
+	// client that has not bound this output has none to name.
+	OutputReach applied = entered;
+
+	for (std::size_t index = 0; index < advertised.size() && index < MaxReachableOutputs; ++index)
+	{
+		const OutputReach bit = OutputReach{ 1 } << index;
+
+		if (((reach ^ entered) & bit) == 0)
+		{
+			continue;
+		}
+
+		const Wayland::Server::WlOutput object = advertised[index]->ResourceFor(*client);
+		const bool entering = (reach & bit) != 0;
+
+		if (!object.IsValid())
+		{
+			// **An enter with nothing to name stays owed and a leave does not.** A client that has
+			// not walked the registry yet — or has bound only what it uses — has to hear about this
+			// output the moment it binds one, so the bit is left unentered and the comparison sends
+			// it on the next iteration. A leave, by contrast, is a client that let its own resource
+			// go: it already knows, and holding the bit would compare unequal forever.
+			applied = entering ? applied : (applied & ~bit);
+
+			continue;
+		}
+
+		if (entering)
+		{
+			surface.Object().Enter(object);
+		}
+		else
+		{
+			surface.Object().Leave(object);
+		}
+
+		applied = (applied & ~bit) | (reach & bit);
+	}
+
+	surface.SetEntered(applied);
+}
+
+// The same, for every subsurface under one surface.
+//
+// **Each one is asked on its own node rather than inheriting its parent's answer**, because a
+// subsurface is not clipped to its parent: a video that overhangs the window it is in, or a
+// decoration drawn outside the geometry, is genuinely on an output the window is not — and the scale
+// a client picks its next buffer at comes from exactly this.
+void SyncSubsurfaces(
+	ClientSurface& surface,
+	const SceneStore& scene,
+	std::span<const std::unique_ptr<HostOutput>> advertised
+)
+{
+	const ClientSurface::SurfaceStack stack = surface.Stack();
+
+	for (const std::vector<ClientSubsurface*>* const run : { &stack.Below, &stack.Above })
+	{
+		for (ClientSubsurface* const child : *run)
+		{
+			ClientSurface* const pixels = child->Content();
+
+			if (pixels == nullptr)
+			{
+				continue;
+			}
+
+			SyncEntry(*pixels, child->Node(), scene, advertised);
+			SyncSubsurfaces(*pixels, scene, advertised);
+		}
+	}
+}
+} // namespace
+
 void SyncOutputEntry(HostContext& context, const HostOutputs& outputs, const SceneStore& scene)
 {
 	const std::span<const std::unique_ptr<HostOutput>> advertised = outputs.All();
@@ -267,65 +373,7 @@ void SyncOutputEntry(HostContext& context, const HostOutputs& outputs, const Sce
 			continue;
 		}
 
-		// **The window's container rather than the image under it**, which is what
-		// `Protocol/Floor.h` places and therefore the entity that has a position in the world at all.
-		// An unmapped window reaches nothing, which is the answer that takes it off every output it
-		// was on — a client whose window is gone is not on a display.
-		const OutputReach reach = window->IsMapped() ? Reach(scene, window->Window()) : 0;
-		const OutputReach entered = surface->Entered();
-
-		if (reach == entered)
-		{
-			continue;
-		}
-
-		wl_client* const client = surface->Object().WireClient();
-
-		if (client == nullptr)
-		{
-			continue;
-		}
-
-		// What was actually told, which is not always what is true: an `enter` names an object, and a
-		// client that has not bound this output has none to name.
-		OutputReach applied = entered;
-
-		for (std::size_t index = 0; index < advertised.size() && index < MaxReachableOutputs; ++index)
-		{
-			const OutputReach bit = OutputReach{ 1 } << index;
-
-			if (((reach ^ entered) & bit) == 0)
-			{
-				continue;
-			}
-
-			const Wayland::Server::WlOutput object = advertised[index]->ResourceFor(*client);
-			const bool entering = (reach & bit) != 0;
-
-			if (!object.IsValid())
-			{
-				// **An enter with nothing to name stays owed and a leave does not.** A client that has
-				// not walked the registry yet — or has bound only what it uses — has to hear about this
-				// output the moment it binds one, so the bit is left unentered and the comparison sends
-				// it on the next iteration. A leave, by contrast, is a client that let its own resource
-				// go: it already knows, and holding the bit would compare unequal forever.
-				applied = entering ? applied : (applied & ~bit);
-
-				continue;
-			}
-
-			if (entering)
-			{
-				surface->Object().Enter(object);
-			}
-			else
-			{
-				surface->Object().Leave(object);
-			}
-
-			applied = (applied & ~bit) | (reach & bit);
-		}
-
-		surface->SetEntered(applied);
+		SyncEntry(*surface, window->IsMapped() ? window->Window() : EntityId{}, scene, advertised);
+		SyncSubsurfaces(*surface, scene, advertised);
 	}
 }

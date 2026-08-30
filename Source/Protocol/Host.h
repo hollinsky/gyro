@@ -22,6 +22,7 @@
 #include "Protocol/Server.h"
 #include "Protocol/Shell.h"
 #include "Protocol/Shm.h"
+#include "Protocol/Subcompositor.h"
 #include "Scene/Author.h"
 #include "Scene/Return.h"
 
@@ -230,6 +231,9 @@ private:
 
 	CompositorGlobal m_Compositor{ m_Context };
 	wl_global* m_CompositorGlobal = nullptr;
+
+	SubcompositorGlobal m_Subcompositor{ m_Context };
+	wl_global* m_SubcompositorGlobal = nullptr;
 
 	ShmGlobal m_Shm;
 	wl_global* m_ShmGlobal = nullptr;
