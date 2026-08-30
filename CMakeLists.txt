@@ -1130,6 +1130,7 @@ gyro_add_module(Compositor
 		Uring.cpp
 		Wait.cpp
 	TESTS
+		Binding.Test.cpp
 		Options.Test.cpp
 		Schedule.Test.cpp
 		Uring.Test.cpp

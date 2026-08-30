@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "Blit/Blit.h"
+#include "Compositor/Binding.h"
 #include "Compositor/RealTime.h"
 #include "Compositor/Schedule.h"
 #include "Compositor/Uring.h"
@@ -244,6 +245,11 @@ struct PanelFacts
 {
 	PanelSize Size{};
 	PanelKind Kind = PanelKind::Unknown;
+
+	// What the connector is called, which is the string a udev rule's `GYRO_OUTPUT` names and the only
+	// stable handle a person has on a particular screen. Empty for every backend that has no connector.
+	// Borrowed from whatever the backend holds its panel list in, which outlives every caller here.
+	std::string_view Connector{};
 };
 
 // One output, and everything the root owns on its behalf.
@@ -1072,7 +1078,8 @@ public:
 		const Drm::Pipeline& pipeline = m_Card->Pipelines()[m_Order[index]];
 
 		return { .Size = { pipeline.WidthMm, pipeline.HeightMm },
-			     .Kind = pipeline.Internal ? PanelKind::Internal : PanelKind::External };
+			     .Kind = pipeline.Internal ? PanelKind::Internal : PanelKind::External,
+			     .Connector = pipeline.Name };
 	}
 
 	// The card's own importer, which is what turns a promoted layer's `TextureId` into a framebuffer.
@@ -1666,11 +1673,14 @@ private:
 		m_PointerButton.ConnectTo<&Compositor::OnPointerButton>(m_Input->Button, *this);
 		m_PointerScroll.ConnectTo<&Compositor::OnPointerScroll>(m_Input->Scroll, *this);
 
-		// **A device leaving is the only thing about a device the host is told**, and it is told because
-		// nothing else can discover it: a touchscreen unplugged with a finger on it produces no up and no
-		// cancel, so a client tracking that contact keeps it forever. Contacts themselves do not arrive
-		// here yet — a fraction of a device's own glass is not a place on a screen until the binding
-		// decision 167 settles is built, which is where `IInput::Touch` gets wired.
+		// **The two ends of a device's life, and this root is the only party that can use either.** A
+		// touchscreen states a fraction of its own glass; turning that into a place on a screen needs an
+		// output, which `Input` may not name, and a device, which `Scene` may not. So the arrival is
+		// where decision 167's binding is resolved and the contact is where it is spent. A device leaving
+		// is told to the host as well, because nothing else can discover it: a touchscreen unplugged with
+		// a finger on it produces no up and no cancel, so a client tracking that contact keeps it forever.
+		m_DeviceAdded.ConnectTo<&Compositor::OnDeviceAdded>(m_Input->Added, *this);
+		m_Touch.ConnectTo<&Compositor::OnTouch>(m_Input->Touch, *this);
 		m_DeviceRemoved.ConnectTo<&Compositor::OnDeviceRemoved>(m_Input->Removed, *this);
 
 		if (const Result<void> watched = m_DispatchWait.Watch(m_Input->Descriptor().Value); !watched)
@@ -1763,8 +1773,87 @@ private:
 		}
 	}
 
+	// A device arrived, and if it states positions rather than displacements it needs a screen.
+	//
+	// **A device that resolves to nothing produces nothing, and says so once.** A touch that goes
+	// nowhere is better than a touch on the wrong screen: a press that lands on a monitor a person is
+	// not looking at operates controls they cannot see, and nothing indicates where the finger went.
+	// An unresponsive touchscreen is the first thing anybody reports, and this line has the fix in it.
+	// It is per device rather than per event, because the honest version of it is a message per finger
+	// per frame on the thread a keystroke travels.
+	void OnDeviceAdded(const InputDevice& device)
+	{
+		if (!device.Absolute)
+		{
+			return;
+		}
+
+		const std::span<const AbsolutePanel> panels{ m_Panels.data(), m_Count };
+		const DeviceBinding bound = Bind(device, panels);
+
+		if (!bound.IsBound())
+		{
+			std::array<std::size_t, MaxOutputs> candidates{};
+			const std::size_t ambiguous = SizeCandidates(device, panels, candidates);
+
+			// Named individually where the size match tied, because *these two and no way to choose* is
+			// the situation `GYRO_OUTPUT` exists to settle and the person has to know which two.
+			std::string between;
+
+			for (std::size_t index = 0; index < std::min(ambiguous, candidates.size()); ++index)
+			{
+				between += between.empty() ? "" : ", ";
+				between += m_Panels[candidates[index]].Connector;
+			}
+
+			spdlog::warn(
+				"input: {} is on no output{}{}, so it produces nothing; set GYRO_OUTPUT=<connector> on it "
+				"in the udev rule that admits it",
+				device.Name,
+				between.empty() ? "" : " — it could be ",
+				between
+			);
+
+			return;
+		}
+
+		m_Bindings.emplace_back(device.Id, bound.Output);
+
+		spdlog::info(
+			"input: {} is on {} ({})",
+			device.Name,
+			m_Panels[bound.Output].Connector.empty() ? "output 0" : m_Panels[bound.Output].Connector,
+			bound.Rung == BindRung::Property ? "GYRO_OUTPUT" :
+			bound.Rung == BindRung::Sole     ? "the only output" :
+											   "the same size of glass"
+		);
+	}
+
+	// One contact, turned into a place on a screen and handed on as two arguments.
+	//
+	// **The point travels beside the event rather than inside it.** A field on `TouchEvent` would put a
+	// coordinate space in a header whose opening paragraph forbids one, and it would be unset on every
+	// event from an unbound device — a representable state meaning *this finger is nowhere*. Dropping
+	// here is what that state is instead.
+	void OnTouch(const TouchEvent& event)
+	{
+		const auto found = std::ranges::find(m_Bindings, event.Device, &Binding::Device);
+
+		if (found == m_Bindings.end())
+		{
+			return;
+		}
+
+		if (m_Clients)
+		{
+			m_Clients->OnTouch(event, Land(m_Panels[found->Output], event.NormalizedX, event.NormalizedY));
+		}
+	}
+
 	void OnDeviceRemoved(InputDeviceId device)
 	{
+		std::erase_if(m_Bindings, [device](const Binding& binding) { return binding.Device == device; });
+
 		if (m_Clients)
 		{
 			m_Clients->OnDeviceGone(device);
@@ -2255,18 +2344,21 @@ private:
 				spdlog::info("hosting clients on {}", m_Clients->SocketName());
 			}
 
-			// Six globals, which is a window a person can use and two things they will reach for and not
-			// find. Said out loud because the alternative is somebody filing the silence as a bug: a
-			// titlebar dragged across the screen that leaves the window where it was, and a copy whose
-			// paste never arrives, both look exactly like a compositor that has half died. The clipboard
+			// Six globals, which is a window a person can use and one thing they will reach for and not
+			// find. Said out loud because the alternative is somebody filing the silence as a bug: a copy
+			// whose paste never arrives looks exactly like a compositor that has half died. The clipboard
 			// is named for the same reason it always was — a global that is advertised and does nothing
 			// is the kind of silence somebody would spend an afternoon on.
+			//
+			// **This line is a promise and goes stale the moment one stops being true**, which it has
+			// already done once: it claimed windows could not be moved or resized for two commits after
+			// they could, while somebody was reading the log to work out why a drag did nothing.
 			spdlog::info(
 				"wl_compositor, wl_shm, zwp_linux_dmabuf_v1, xdg_wm_base, wl_data_device_manager and wl_seat are the "
 				"globals; a window will open, be placed, redraw against the frames that reach the glass, take the "
-				"keyboard and the pointer, come to the front on a click, and open and dismiss its menus, but it cannot "
-				"yet be moved or resized and there is nothing behind the clipboard, so a titlebar drag goes nowhere "
-				"and nothing can be copied, pasted or dragged"
+				"keyboard and the pointer, come to the front on a click, open and dismiss its menus, and be moved and "
+				"resized by a drag it asks for, but there is nothing behind the clipboard, so nothing can be copied, "
+				"pasted or dragged"
 			);
 
 			author = std::move(*made);
@@ -2414,6 +2506,10 @@ private:
 			double Width = 0.0;
 			double Height = 0.0;
 			bool Internal = false;
+			// Carried through the two passes for the binding below rather than asked of the backend a
+			// second time, since the second pass is where the placement they go beside is finally known.
+			std::string_view Connector{};
+			PanelSize Millimetres{};
 		};
 
 		std::array<Placed, MaxOutputs> placed{};
@@ -2464,6 +2560,8 @@ private:
 				// an empty desk, which is the case that would otherwise put the sole output below the
 				// origin and leave the world's top-left corner on nothing.
 				.Internal = panel.Kind == PanelKind::Internal,
+				.Connector = panel.Connector,
+				.Millimetres = panel.Size,
 			};
 		}
 
@@ -2521,6 +2619,18 @@ private:
 				.Period = achieved.Period,
 				.Grid = achieved.Resolution,
 				.Orientation = Orientation(achieved.Transform),
+			};
+
+			// **Kept, because the outputs themselves are not.** Everything above goes into the snapshot
+			// and this root holds none of it afterwards — which is right, since the world is the frame
+			// side's. What an absolute device needs is the connector's name, its millimetres and the
+			// placement, and those are the four facts `Compositor/Binding.h` names rather than a copy of
+			// the record they are drawn from.
+			m_Panels[index] = AbsolutePanel{
+				.Connector = output.Connector,
+				.Size = output.Millimetres,
+				.Grid = outputs[index].Grid,
+				.Placement = outputs[index].Placement(),
 			};
 
 			(below ? under : left) += output.Width;
@@ -2780,7 +2890,26 @@ private:
 	Connection<const PointerMotion&> m_PointerMotion;
 	Connection<const PointerButton&> m_PointerButton;
 	Connection<const PointerScroll&> m_PointerScroll;
+	Connection<const InputDevice&> m_DeviceAdded;
+	Connection<const TouchEvent&> m_Touch;
 	Connection<InputDeviceId> m_DeviceRemoved;
+
+	// Which output each absolute device is on, and the four facts about each output that answers it.
+	//
+	// **A list rather than a map, because it is one entry per touchscreen on the machine.** A linear
+	// scan over what is almost always zero or one entry beats a hash of a generational id, and the
+	// vector allocates when somebody plugs a device in rather than when somebody touches one.
+	//
+	// A device with no binding is absent rather than present-and-null: the drop in `OnTouch` is then
+	// the same lookup that would have found it, and there is no second state to keep consistent.
+	struct Binding
+	{
+		InputDeviceId Device{};
+		std::size_t Output = 0;
+	};
+
+	std::vector<Binding> m_Bindings;
+	std::array<AbsolutePanel, MaxOutputs> m_Panels{};
 	bool m_InputFailed = false;
 
 	// Whether this run drives a panel, which is the one condition under which gyro takes the machine's
