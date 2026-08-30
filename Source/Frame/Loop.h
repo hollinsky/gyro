@@ -1103,7 +1103,7 @@ private:
 
 		// **Decision 152's partition: which of these items the display engine draws and which the GPU
 		// does.** Recomputed from this frame's list alone, with nothing carried over — see Frame/Assign.h.
-		Partition partition = Assign(list.Items, output.m_Presenter->LayerCeiling());
+		Partition partition = Assign(list.Items, output.m_Presenter->LayerCeiling(), output.m_Configuration.Color);
 
 		// **What the count below cannot say.** A frame that promoted nothing and a frame whose top window
 		// grew a shadow read the same on a counter, and the second is the one somebody is looking for.
@@ -1170,8 +1170,7 @@ private:
 
 		for (std::uint32_t promoted = 0; promoted < partition.Count; ++promoted)
 		{
-			layers[count++] =
-				Promoted(list.Items[partition.ItemIndexForPromoted(promoted)], output.m_Configuration.Color);
+			layers[count++] = Promoted(list.Items[partition.ItemIndexForPromoted(promoted)]);
 		}
 
 		// **Asked only where something would be promoted**, so a machine that promotes nothing pays no

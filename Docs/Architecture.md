@@ -1789,7 +1789,7 @@ flash and a correctness bug wearing an optimization's clothes. This is a constra
 and on plane assignment, and it is why it appears in
 [what to build before it is needed](#what-to-build-before-it-is-needed).
 
-> **This is not enforced, and promotion is live.** *(Recorded 2026-08-29.)*
+> **Enforced since 2026-08-29, and it was not for the four days promotion was live before it.**
 > [Decision 152](Decisions.md#152-promotion-is-a-partition-of-the-draw-list-computed-every-frame-and-a-node-is-promotable-when-its-resample-is-a-no-op-and-it-carries-no-dressing-on-itself)'s
 > predicate refuses a layer that would have to be *resampled* — a scale, a fractional offset, a turn
 > — and says nothing about color. `Frame/Assign.h` stamps a promoted layer with the output's own
@@ -1799,8 +1799,12 @@ and on plane assignment, and it is why it appears in
 > prevent: a window's color shifting at the moment it is promoted, and shifting back when a shadow
 > or an animation demotes it. It costs nothing today because every surface reaching a plane is
 > sRGB — the only path in is `wl_shm` and `zwp_linux_dmabuf_v1` with no color protocol behind
-> either — and it costs the whole promise on the first client that says otherwise.
-> [Open.md](Open.md) carries what has to be decided.
+> either — and it would have cost the whole promise on the first client that said otherwise.
+> [Decision 161](Decisions.md#161-promotion-refuses-an-item-that-is-not-already-in-the-outputs-color-state-and-equality-is-the-question-rather-than-expressibility)
+> closes it with the conservative half of the rule: a fourth `PromotionRefusal`, comparing the item's
+> state against the output's and refusing where they differ. What is still not asked is the better
+> question — whether *this* plane can express *this* conversion — which needs a plane's colour
+> properties read and belongs behind `TestLayers` beside the question the assigner already asks.
 
 [Geometry](#resample-once-and-know-when-it-is-zero) asks the identical question about the *spatial*
 transform and answers it with the same classification, which damage mapping and the sharpness path
@@ -3031,8 +3035,10 @@ the day the renderer is written, and everything authored against the wrong answe
 - **Direct scanout is conditional on the KMS pipeline expressing the same transform.** A rule
   attached to plane assignment before plane assignment existed, rather than a special case added to
   it afterwards. *(2026-08-29: this is the one item on the list that was not honoured when the thing
-  it was recorded for arrived — see [direct scanout is conditional](#direct-scanout-is-conditional).
-  The advice was right and taking it was skipped, which is worth more than the advice.)*
+  it was recorded for arrived — plane assignment shipped without it and it was taken four days later,
+  by [decision 161](Decisions.md#161-promotion-refuses-an-item-that-is-not-already-in-the-outputs-color-state-and-equality-is-the-question-rather-than-expressibility).
+  The advice was right, was written down, and was still walked past, which is worth more than the
+  advice.)*
 
 For [geometry](#geometry), which is chosen the day the scene graph is written and re-authored
 afterwards if it is chosen wrongly:

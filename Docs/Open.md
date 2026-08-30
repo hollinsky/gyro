@@ -1396,6 +1396,15 @@ The second is right and the first is what ships if nobody decides. Sizing: it bl
 there is a color protocol, and the color protocol is what makes it urgent, so the trigger is
 whichever of the two lands first.
 
+**Answered by [decision 161](Decisions.md#161-promotion-refuses-an-item-that-is-not-already-in-the-outputs-color-state-and-equality-is-the-question-rather-than-expressibility)
+— the first, deliberately, and the second is what is left here.** *(2026-08-29.)* The refusal is in,
+because it is four lines and because the alternative was a guard first reached in front of a person.
+What stays open is the shape that does not give up the offload: asking a plane whether it can express
+the conversion, which needs `Drm/Catalog.h` to read the colour properties and belongs behind
+`TestLayers`. Its trigger is unchanged — a client that can be in another space — and its stakes went
+up rather than down, since the conservative clause now refuses exactly the fullscreen HDR video that
+promotion exists for.
+
 ## The batch reserve is folded from the frames outputs are owed *now*, and a scene wake is not one
 
 `FrameLoop::Schedule` builds a device's batch from the outputs that are immediately owed a frame —

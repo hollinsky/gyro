@@ -12302,3 +12302,53 @@ measured figure.
 **What a person gets** is a second monitor whose pointer is as current as the first one's: a frame
 recorded within the card's own composite time of the glass rather than a refresh ahead of it, on any
 card with room to spare — which is every card that is not already dropping frames.
+
+### 161. Promotion refuses an item that is not already in the output's color state, and equality is the question rather than expressibility
+
+[Architecture.md](Architecture.md#direct-scanout-is-conditional) has stated the rule since before there
+were planes to break it: a client buffer flipped straight to a plane bypasses the composite, so every
+transform the composite would have applied has to be expressible in the KMS color pipeline, and where it
+is not, gyro composites instead. Otherwise the picture changes at the moment a window is promoted.
+[Decision 152](#152-promotion-is-a-partition-of-the-draw-list-computed-every-frame-and-a-node-is-promotable-when-its-resample-is-a-no-op-and-it-carries-no-dressing-on-itself)
+built the partition and did not implement it. The predicate refused a *resample* and was silent about
+color, and `Frame/Assign.h` stamped a promoted layer with the output's own state without comparing it
+against anything — so a surface in another space would have been handed to the display engine relabelled
+as the panel's, which is the flash the rule exists to forbid, arriving on promotion and leaving again
+when a shadow demotes it.
+
+**The clause is equality, and the better question is deliberately not asked yet.** The honest form is
+*can this plane express this conversion* — a plane's degamma, CTM and gamma are properties
+`Drm/Catalog.h` could read, and `COLOR_PIPELINE` describes the whole chain — and it belongs behind
+`TestLayers`, beside the question the assigner already asks the hardware. Equality is the conservative
+subset of it: it gives up the offload where the pipeline might have coped, and it never gets the picture
+wrong. Only one of those two failure modes is visible to a person, and the one that is has no test that
+would catch it, because both frames either side of the flash are individually correct.
+
+**Reference luminance counts, which is the half that would have been easy to drop.** Two states agreeing
+on primaries and transfer still produce different pixels at different reference white, so a comparison
+that ignored it would report a promotion as free on precisely the content — an HDR video against an SDR
+desktop — where it changes the picture most. `Core/ColorState.h`'s equality was already exact for this
+reason and the clause simply uses it.
+
+**Rejected: leaving it until there is a client that can be in another space.** Nothing in the tree
+produces a non-sRGB surface — `wl_shm` and `zwp_linux_dmabuf_v1` are the only ways in and neither
+carries a color description — so the guard refuses nothing today and is, on the face of it, code with no
+caller. What that reading misses is *when* it would first be reached: on the first `wp_color_management_v1`
+client, in front of a person, as a flicker nobody can attribute. The clause is four lines and the tests
+that exercise it construct the mismatch directly, so the path is executed on every build rather than
+first executed in the field. This is [decision 79](#79-the-console-is-a-renderer-not-a-presenter)'s
+argument about the floor tier applied to a predicate: the path needed when things are unusual must not
+be the path nobody has run.
+
+**Rejected: refusing in `Promoted` rather than in the predicate.** It is one call later and it is the
+wrong shape — the partition would count the item as promoted, the layer list would be short, and the
+count and the list would disagree. The predicate is where a refusal is a *reason*, which is what
+`PromotionRefusal` is for, and the reason is now recorded on the partition and drawn on the trace row
+like the other four.
+
+**It is the last clause rather than the first**, so an item refusable for more than one reason reports
+the one a person can act on: a shadow is gyro's own choice and a color state is the client's. It also
+means no refusal any existing frame reports changed when this arrived.
+
+**What a person gets** is nothing today and, on the day a video player tags its buffers, a window that
+does not change color when it happens to be the only thing on screen.

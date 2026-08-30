@@ -18,6 +18,10 @@
 
 namespace
 {
+// What the composite targets. Every item below is in it unless a test says otherwise, which is the
+// arrangement on every machine gyro runs on today.
+constexpr ColorState Output = ColorState::Srgb();
+
 // A plain textured item: still, opaque, undressed, landing texel for pixel. The thing a plane wants.
 [[nodiscard]] DrawItem Promotable()
 {
@@ -47,7 +51,7 @@ GYRO_TEST(FrameAssign, PromotesTheStillPlainTopOfTheList)
 {
 	const std::vector<DrawItem> items{ Composited(), Promotable() };
 
-	const Partition partition = Assign(items, 4);
+	const Partition partition = Assign(items, 4, Output);
 
 	GYRO_REQUIRE(partition.Count == 1);
 	GYRO_CHECK(partition.ItemIndexForPromoted(0) == 1);
@@ -63,7 +67,7 @@ GYRO_TEST(FrameAssign, WillNotPromoteUnderSomethingComposited)
 {
 	const std::vector<DrawItem> items{ Promotable(), Composited() };
 
-	const Partition partition = Assign(items, 4);
+	const Partition partition = Assign(items, 4, Output);
 
 	GYRO_CHECK(partition.Count == 0);
 	GYRO_CHECK(partition.Composited == 2);
@@ -77,7 +81,7 @@ GYRO_TEST(FrameAssign, LeavesNoCompositeWhereEverythingPromoted)
 {
 	const std::vector<DrawItem> items{ Promotable(), Promotable() };
 
-	const Partition partition = Assign(items, 2);
+	const Partition partition = Assign(items, 2, Output);
 
 	GYRO_REQUIRE(partition.Count == 2);
 	GYRO_CHECK(partition.ItemIndexForPromoted(0) == 0);
@@ -93,7 +97,7 @@ GYRO_TEST(FrameAssign, KeepsAPlaneForTheComposite)
 {
 	const std::vector<DrawItem> items{ Composited(), Promotable(), Promotable() };
 
-	const Partition partition = Assign(items, 2);
+	const Partition partition = Assign(items, 2, Output);
 
 	GYRO_REQUIRE(partition.Count == 1);
 	GYRO_CHECK(partition.ItemIndexForPromoted(0) == 2);
@@ -107,19 +111,19 @@ GYRO_TEST(FrameAssign, PromotesNothingOntoOnePlane)
 {
 	const std::vector<DrawItem> items{ Promotable(), Promotable() };
 
-	const Partition partition = Assign(items, 1);
+	const Partition partition = Assign(items, 1, Output);
 
 	GYRO_CHECK(partition.Count == 0);
 	GYRO_CHECK(partition.Composited == 2);
-	GYRO_CHECK(Assign(items, 0).Count == 0);
-	GYRO_CHECK(Assign({}, 4).Layers() == 0);
+	GYRO_CHECK(Assign(items, 0, Output).Count == 0);
+	GYRO_CHECK(Assign({}, 4, Output).Layers() == 0);
 }
 
 // Each clause of the predicate, one at a time, because every one of them is a thing a display engine
 // cannot do and would silently drop.
 GYRO_TEST(FrameAssign, RefusesWhatAPlaneCannotDraw)
 {
-	const auto promotes = [](const DrawItem& item) { return IsPromotable(item); };
+	const auto promotes = [](const DrawItem& item) { return IsPromotable(item, Output); };
 
 	GYRO_CHECK(promotes(Promotable()));
 
@@ -162,19 +166,19 @@ GYRO_TEST(FrameAssign, RefusesAResample)
 	scaled.Sampling.UnitScale = false;
 
 	GYRO_CHECK(scaled.Sampling.IsPlaneExpressible());
-	GYRO_CHECK(!IsPromotable(scaled));
+	GYRO_CHECK(!IsPromotable(scaled, Output));
 
 	DrawItem offset = Promotable();
 	offset.Sampling.IntegerOffset = false;
 
 	GYRO_CHECK(!offset.Sampling.IsPlaneExpressible());
-	GYRO_CHECK(!IsPromotable(offset));
+	GYRO_CHECK(!IsPromotable(offset, Output));
 
 	// A general affine that did not reduce reports the whole ladder unset, and is refused with it.
 	DrawItem spun = Promotable();
 	spun.Sampling = TransformClass{};
 
-	GYRO_CHECK(!IsPromotable(spun));
+	GYRO_CHECK(!IsPromotable(spun, Output));
 }
 
 // The clause that stopped the walk comes back with the partition, because a plane count of zero is the
@@ -184,29 +188,31 @@ GYRO_TEST(FrameAssign, SaysWhichClauseStoppedTheWalk)
 	DrawItem lifted = Promotable();
 	lifted.Lift.Opacity = 0.4F;
 
-	GYRO_CHECK(Assign(std::vector<DrawItem>{ lifted }, 4).Stopped == PromotionRefusal::Shadow);
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ lifted }, 4, Output).Stopped == PromotionRefusal::Shadow);
 
 	DrawItem rounded = Promotable();
 	rounded.Radius = 8.0F;
 
-	GYRO_CHECK(Assign(std::vector<DrawItem>{ rounded }, 4).Stopped == PromotionRefusal::Dressing);
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ rounded }, 4, Output).Stopped == PromotionRefusal::Dressing);
 
 	DrawItem scaled = Promotable();
 	scaled.Sampling.UnitScale = false;
 
-	GYRO_CHECK(Assign(std::vector<DrawItem>{ scaled }, 4).Stopped == PromotionRefusal::Sampling);
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ scaled }, 4, Output).Stopped == PromotionRefusal::Sampling);
 
-	GYRO_CHECK(Assign(std::vector<DrawItem>{ Composited() }, 4).Stopped == PromotionRefusal::Content);
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ Composited() }, 4, Output).Stopped == PromotionRefusal::Content);
 
 	// The walk stops at the *top* of the list, so what is named is the highest item that refused rather
 	// than the first one that would have been promoted from the bottom.
 	const std::vector<DrawItem> stack{ Promotable(), rounded };
 
-	GYRO_CHECK(Assign(stack, 4).Stopped == PromotionRefusal::Dressing);
+	GYRO_CHECK(Assign(stack, 4, Output).Stopped == PromotionRefusal::Dressing);
 
 	// Running out of list, and running out of planes, are both a walk nothing refused.
-	GYRO_CHECK(Assign(std::vector<DrawItem>{ Promotable() }, 4).Stopped == PromotionRefusal::None);
-	GYRO_CHECK(Assign(std::vector<DrawItem>{ Promotable(), Promotable() }, 1).Stopped == PromotionRefusal::None);
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ Promotable() }, 4, Output).Stopped == PromotionRefusal::None);
+	GYRO_CHECK(
+		Assign(std::vector<DrawItem>{ Promotable(), Promotable() }, 1, Output).Stopped == PromotionRefusal::None
+	);
 }
 
 // The reason is not part of what makes two frames the same partition, and the loop depends on that: it
@@ -220,9 +226,64 @@ GYRO_TEST(FrameAssign, TheReasonIsNotPartOfTheAnswer)
 	DrawItem lifted = Promotable();
 	lifted.Lift.Opacity = 0.4F;
 
-	const Partition one = Assign(std::vector<DrawItem>{ rounded }, 4);
-	const Partition other = Assign(std::vector<DrawItem>{ lifted }, 4);
+	const Partition one = Assign(std::vector<DrawItem>{ rounded }, 4, Output);
+	const Partition other = Assign(std::vector<DrawItem>{ lifted }, 4, Output);
 
 	GYRO_CHECK(one.Stopped != other.Stopped);
 	GYRO_CHECK(one == other);
+}
+
+// **A window whose texels do not mean what the panel's do stays in the composite.** A composite
+// converts per draw and a plane does not, so promoting one hands the display engine pixels it reads
+// as something else. What that looks like is the thing this refusal exists to prevent: the window's
+// colour shifting at the instant it goes to a plane, and shifting back when a shadow or an animation
+// takes it off one — a flash nothing logs and no other test would catch, since both frames are
+// individually correct.
+//
+// Nothing in the tree produces a non-sRGB surface yet, so this is the only place the clause is
+// exercised. That is the point of writing it here rather than waiting: a guard first reached by a
+// client that does not exist is a guard first reached in front of a person.
+GYRO_TEST(FrameAssign, RefusesAnItemThatIsNotInTheOutputsColorState)
+{
+	DrawItem elsewhere = Promotable();
+	elsewhere.Color = ColorState::Composite();
+
+	GYRO_CHECK(!IsPromotable(elsewhere, Output));
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ elsewhere }, 4, Output).Stopped == PromotionRefusal::Color);
+
+	// The same item against a panel that *is* in that state promotes, which is what says the clause
+	// compares the two rather than hardcoding one of them.
+	GYRO_CHECK(IsPromotable(elsewhere, ColorState::Composite()));
+}
+
+// Reference luminance is part of the comparison, and it is the half that would be easy to drop. Two
+// states agreeing on primaries and transfer still produce different pixels at different reference
+// white, so a promotion across them changes the picture while looking like a no-op.
+GYRO_TEST(FrameAssign, RefusesOnLuminanceAloneBecauseThatChangesThePicture)
+{
+	DrawItem brighter = Promotable();
+	brighter.Color.ReferenceLuminance = 400.0F;
+
+	GYRO_CHECK(!IsPromotable(brighter, Output));
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ brighter }, 4, Output).Stopped == PromotionRefusal::Color);
+}
+
+// The clause is last, so an item that is refusable for more than one reason reports the one a person
+// can act on. A shadow is gyro's own choice; a colour state is the client's.
+GYRO_TEST(FrameAssign, ReportsTheActionableRefusalWhenAnItemHasBoth)
+{
+	DrawItem both = Promotable();
+	both.Color = ColorState::Composite();
+	both.Lift.Opacity = 0.4F;
+
+	GYRO_CHECK(Assign(std::vector<DrawItem>{ both }, 4, Output).Stopped == PromotionRefusal::Shadow);
+}
+
+// What a promoted layer says about itself is its own state rather than the panel's. They are equal for
+// anything that reaches here, and saying it this way is what keeps them equal.
+GYRO_TEST(FrameAssign, APromotedLayerCarriesTheItemsOwnColorState)
+{
+	const DrawItem item = Promotable();
+
+	GYRO_CHECK(Promoted(item).Color == item.Color);
 }

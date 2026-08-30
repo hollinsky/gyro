@@ -1093,7 +1093,7 @@ GYRO_TEST(Evaluator, AnImageThatStatesItsTexelsIsClassifiedAndPromotes)
 
 	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
 	GYRO_CHECK(list.Items[0].Sampling.IsResampleFree());
-	GYRO_CHECK_EQ(WhyNotPromoted(list.Items[0]), PromotionRefusal::None);
+	GYRO_CHECK_EQ(WhyNotPromoted(list.Items[0], ColorState::Srgb()), PromotionRefusal::None);
 }
 
 // And the same node with nothing said about its texels, which is every image the walk cannot count:
@@ -1117,5 +1117,5 @@ GYRO_TEST(Evaluator, AnImageThatStatesNoTexelsIsRefusedForSampling)
 	const DrawList list = evaluator.Evaluate(Frame(snapshot));
 
 	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
-	GYRO_CHECK_EQ(WhyNotPromoted(list.Items[0]), PromotionRefusal::Sampling);
+	GYRO_CHECK_EQ(WhyNotPromoted(list.Items[0], ColorState::Srgb()), PromotionRefusal::Sampling);
 }

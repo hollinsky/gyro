@@ -57,6 +57,12 @@ enum class PromotionRefusal : std::uint8_t
 	// A scale, a fractional offset, or a turn: the display engine would have to resample, and where it
 	// can it changes how sharp the window looks on the frame it takes over.
 	Sampling,
+
+	// The item's texels do not mean what this output's do. A composite converts per draw and a plane
+	// does not, so promoting one would hand the display engine pixels it will interpret as something
+	// else — which is a colour shift at the instant a window is promoted, and back again when a shadow
+	// demotes it.
+	Color,
 };
 
 // The name this refusal is recorded under. A string rather than a number, because `Core/Trace.h` interns
@@ -74,6 +80,8 @@ enum class PromotionRefusal : std::uint8_t
 			return "unpromotable: dressing";
 		case PromotionRefusal::Sampling:
 			return "unpromotable: sampling";
+		case PromotionRefusal::Color:
+			return "unpromotable: color";
 		case PromotionRefusal::None:
 			break;
 	}
@@ -138,10 +146,10 @@ struct Partition
 
 // Whether this item could be handed to a plane at all, before any hardware is asked.
 //
-// **Two clauses, and both of them are the display engine's rather than gyro's taste.** A plane has no
-// corner radius, no material and no shadow, and it samples its source through a fixed-function path
-// that is not decision 56's mip chain. So the set of promotable items is not a policy this function
-// picks — it is what Seam/Dressing.h can express that a plane cannot, which is nearly all of it.
+// **Most of these clauses are the display engine's rather than gyro's taste.** A plane has no corner
+// radius, no material and no shadow, and it samples its source through a fixed-function path that is
+// not decision 56's mip chain. So the set of promotable items is not a policy this function picks —
+// it is what Seam/Dressing.h can express that a plane cannot, which is nearly all of it.
 //
 // **The scale clause is gyro's, and it is the one that is still argued.**
 // `TransformClass::IsPlaneExpressible` deliberately admits a fractional scale, on the reading that
@@ -150,7 +158,12 @@ struct Partition
 // visible sharpness change on the frame a window is handed over — so the geometric question and the
 // sharpness question are asked separately here rather than folded into one predicate. When there is a
 // panel to measure the scaler against, this is the one line that moves.
-[[nodiscard]] constexpr PromotionRefusal WhyNotPromoted(const DrawItem& item) noexcept
+// **`output` is what the composite would have converted the item into, and it is a parameter rather
+// than an assumption.** There is deliberately no default: sRGB is what every surface in the tree
+// happens to be today, so a call site that omitted it would get the accidentally-correct answer and
+// keep getting it until the first client that is not, which is precisely the failure this clause
+// exists to catch.
+[[nodiscard]] constexpr PromotionRefusal WhyNotPromoted(const DrawItem& item, ColorState output) noexcept
 {
 	// Only a texture has anything a plane could scan out. A solid could be a plane's background colour
 	// on hardware that has one, a group is an offscreen the GPU has to produce, and a dressing draws
@@ -185,13 +198,27 @@ struct Partition
 		return PromotionRefusal::Sampling;
 	}
 
+	// **Last, so that the refusal a person reads is the one they can do something about.** An item that
+	// is both shadowed and in the wrong space is reported as shadowed, because a shadow is gyro's own
+	// choice and a colour state is the client's. It also means no existing refusal changed when this
+	// clause arrived.
+	//
+	// Equality rather than *is the conversion expressible*, which is the better question and needs a
+	// plane's colour properties read before it can be asked. Refusing where they differ gives up the
+	// offload; converting where the plane cannot gets the picture wrong, and only one of those is
+	// visible to a person. See Docs/Decisions.md decision 161.
+	if (item.Color != output)
+	{
+		return PromotionRefusal::Color;
+	}
+
 	return PromotionRefusal::None;
 }
 
 // The same question asked as a predicate, which is what the walk below and every test of it wants.
-[[nodiscard]] constexpr bool IsPromotable(const DrawItem& item) noexcept
+[[nodiscard]] constexpr bool IsPromotable(const DrawItem& item, ColorState output) noexcept
 {
-	return WhyNotPromoted(item) == PromotionRefusal::None;
+	return WhyNotPromoted(item, output) == PromotionRefusal::None;
 }
 
 // One promoted item as the layer a presenter is handed.
@@ -201,7 +228,7 @@ struct Partition
 // texels it samples are the same count as the pixels it covers — which is what lets a source rectangle
 // stated in the client's buffer be handed to a plane as-is. An item that did not satisfy
 // `IsPromotable` would need a scale here, and there is deliberately nowhere to put one.
-[[nodiscard]] inline PresentLayer Promoted(const DrawItem& item, ColorState color) noexcept
+[[nodiscard]] inline PresentLayer Promoted(const DrawItem& item) noexcept
 {
 	const DrawTexture& content = std::get<DrawTexture>(item.Content);
 	const PixelRect<DeviceSpace> destination = item.Shape.PixelBounds();
@@ -236,14 +263,20 @@ struct Partition
 	// plane property Drm/Output.h does not program.
 	layer.Damage.Add(PixelRect<DeviceSpace>{ {}, destination.Extent });
 
-	layer.Color = color;
+	// The item's own state rather than the output's, which is what `PresentLayer::Color` means: what
+	// these texels are. They are the same number for anything that reaches here — `WhyNotPromoted`
+	// refuses a mismatch — and saying it this way is what keeps them the same, since a layer stamped
+	// with the output's state would go on describing itself correctly if the guard were ever removed.
+	layer.Color = item.Color;
 
 	return layer;
 }
 
 // Split a frame's draw list. `ceiling` is `IPresenter::LayerCeiling` — the planes this output has —
-// and nothing wider than it is ever proposed.
-[[nodiscard]] constexpr Partition Assign(std::span<const DrawItem> items, std::uint32_t ceiling) noexcept
+// and nothing wider than it is ever proposed. `output` is the colour state the composite targets,
+// which every promoted item has to already be in.
+[[nodiscard]] constexpr Partition
+Assign(std::span<const DrawItem> items, std::uint32_t ceiling, ColorState output) noexcept
 {
 	Partition partition{};
 	partition.Composited = static_cast<std::uint32_t>(items.size());
@@ -264,7 +297,7 @@ struct Partition
 	{
 		const std::uint32_t index = static_cast<std::uint32_t>(items.size()) - 1 - taken;
 
-		const PromotionRefusal refusal = WhyNotPromoted(items[index]);
+		const PromotionRefusal refusal = WhyNotPromoted(items[index], output);
 
 		if (refusal != PromotionRefusal::None)
 		{
