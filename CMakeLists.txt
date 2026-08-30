@@ -982,6 +982,7 @@ gyro_add_module(Protocol DISPATCH
 		Host.cpp
 		Keymap.cpp
 		Popup.cpp
+		Output.cpp
 		Positioner.cpp
 		Region.cpp
 		Seat.cpp

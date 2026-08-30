@@ -17,6 +17,7 @@
 #include "Protocol/Data.h"
 #include "Protocol/Dmabuf.h"
 #include "Protocol/Floor.h"
+#include "Protocol/Output.h"
 #include "Protocol/Seat.h"
 #include "Protocol/Server.h"
 #include "Protocol/Shell.h"
@@ -225,3 +226,18 @@ private:
 // because the root needs `PollFd` to wire the wait, which is before the loop calls `Open` at all.
 [[nodiscard]] Result<std::unique_ptr<ClientHost>>
 MakeClientHost(HostListener listener = HostListener::Own, std::string_view socket = {});
+
+	// One global per output, kept in step with the world inside `Advance`.
+	//
+	// **Not advertised in `Open` beside the others, because there are no outputs yet when it runs.**
+	// The composition root lays the outputs out after the author is built, and a monitor plugged in an
+	// hour later has to arrive by the same path as the ones that were there at boot — so this is a
+	// comparison per iteration against what the store holds rather than a list built once.
+	//
+	// **Declared after the server, and the position is load-bearing.** These are the only globals here
+	// that are ever withdrawn, so this is the only one whose destructor touches the display — and
+	// members die in reverse, so anywhere above this line is a `wl_global_destroy` on a display that
+	// has already been torn down. The same ordering is what lets a binding's own destructor reach back
+	// here: the display outlives nothing else, so it is destroyed after every resource it owns has been
+	// cut loose from the output it named.
+	HostOutputs m_Outputs;

@@ -665,9 +665,23 @@ namespace
 {
 // A surface with one committed frame behind it, which is as far as a client can get before there is a
 // role to say the surface is a window at all.
+// A client's `wl_surface`, recording which outputs it has been told it is on. That pair is the whole
+// of what a `wl_surface` receives below version 6, and it is how a toolkit learns what scale to draw
+// at — so a surface that hears nothing lays out at 1x whatever the outputs said when it bound them.
+class SurfaceEvents final : public Wayland::WlSurfaceIgnoring
+{
+public:
+	void OnEnter(Wayland::WlOutput output) override { Entered.push_back(output); }
+
+	void OnLeave(Wayland::WlOutput output) override { Left.push_back(output); }
+
+	std::vector<Wayland::WlOutput> Entered;
+	std::vector<Wayland::WlOutput> Left;
+};
+
 struct DrawnSurface
 {
-	Wayland::WlSurfaceIgnoring Events;
+	SurfaceEvents Events;
 	Wayland::WlSurface Surface;
 	BufferEvents Released;
 	Wayland::WlShmPool Pool;
@@ -1168,6 +1182,178 @@ GYRO_TEST(ProtocolRoundTrip, AnAcknowledgedFrameBecomesAWindowCentredOnTheOutput
 	GYRO_REQUIRE(content != nullptr);
 	GYRO_CHECK(content->Kind == NodeKind::Image);
 	GYRO_CHECK_EQ(content->Extent.Width, static_cast<float>(Width));
+}
+
+namespace
+{
+// A client's `wl_output`, recording everything the bind burst carried.
+class OutputEvents final : public Wayland::WlOutputListener
+{
+public:
+	void OnGeometry(
+		std::int32_t x,
+		std::int32_t y,
+		std::int32_t physicalWidth,
+		std::int32_t physicalHeight,
+		Wayland::WlOutputSubpixel subpixel,
+		std::string_view make,
+		std::string_view model,
+		Wayland::WlOutputTransform transform
+	) override
+	{
+		(void)subpixel;
+		(void)make;
+		(void)model;
+
+		X = x;
+		Y = y;
+		PhysicalWidth = physicalWidth;
+		PhysicalHeight = physicalHeight;
+		Transform = transform;
+	}
+
+	void OnMode(Wayland::WlOutputMode flags, std::int32_t width, std::int32_t height, std::int32_t refresh) override
+	{
+		Flags = flags;
+		Width = width;
+		Height = height;
+		Refresh = refresh;
+	}
+
+	void OnDone() override { ++Done; }
+
+	void OnScale(std::int32_t factor) override { Factor = factor; }
+
+	void OnName(std::string_view name) override { (void)name; }
+
+	void OnDescription(std::string_view description) override { (void)description; }
+
+	std::int32_t X = -1;
+	std::int32_t Y = -1;
+	std::int32_t PhysicalWidth = -1;
+	std::int32_t PhysicalHeight = -1;
+	std::int32_t Width = -1;
+	std::int32_t Height = -1;
+	std::int32_t Refresh = -1;
+	std::int32_t Factor = -1;
+	std::uint32_t Done = 0;
+	Wayland::WlOutputMode Flags{};
+	Wayland::WlOutputTransform Transform = Wayland::WlOutputTransform::Normal;
+};
+} // namespace
+
+GYRO_TEST(ProtocolRoundTrip, AnOutputCarriesTheCeilingOfADerivedScale)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-output" };
+	GYRO_REQUIRE(pair.Opened);
+
+	// A 27-inch 4K panel at arm's length, which is what decision 164 derives 1.7x for and is the panel
+	// fractional scaling exists for. There is no integer within the snapping band of it.
+	const std::array outputs{ SceneOutput{ .Bounds = { { 0.0, 0.0 }, { 2259.0, 1271.0 } },
+		                                   .Density = Scale::FromNumerator(204),
+		                                   .Grid = { 3840, 2160 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	const Registry::Global* const advertised = bound.Listener.Find(Wayland::WlOutput::WireName);
+	GYRO_REQUIRE(advertised != nullptr);
+
+	// Version 3 is `geometry`, `mode`, `done`, `scale` and `release`. Four would oblige a `name` and a
+	// `description`, which are supposed to be the connector's and stop at Drm/Device.h — and an
+	// invented name is worse than none, because it is what a client keys per-monitor state on.
+	GYRO_CHECK_EQ(advertised->Version, std::uint32_t{ 3 });
+
+	OutputEvents events;
+	const Wayland::WlOutput output =
+		bound.Listener.Object().Bind<Wayland::WlOutput>(advertised->Name, advertised->Version, events);
+	GYRO_REQUIRE(output.IsValid());
+
+	pair.Turn();
+
+	// **Decision 56.** `wl_output.scale` is an integer and 1.7 is not, so the client is told 2, renders
+	// at 2, and gyro downscales — the direction that degrades gracefully. A client told 1 would be
+	// magnified onto the panel, which is the artefact this whole global exists to prevent.
+	GYRO_CHECK_EQ(events.Factor, 2);
+
+	// The mode is the panel's own grid rather than its logical size, which is what the protocol asks
+	// for and the one number here the scale does not touch.
+	GYRO_CHECK_EQ(events.Width, 3840);
+	GYRO_CHECK_EQ(events.Height, 2160);
+	GYRO_CHECK(Any(events.Flags & Wayland::WlOutputMode::Current));
+
+	// Zero for both of the things gyro will not claim: a refresh rate, which is the frame side's and is
+	// not in the world's record, and a physical size, which decision 164's argument is that nobody can
+	// use without a viewing distance — one that has already been applied by the time a scale gets here.
+	// Zero is what the protocol says to send for a physical size that does not make sense.
+	GYRO_CHECK_EQ(events.Refresh, 0);
+	GYRO_CHECK_EQ(events.PhysicalWidth, 0);
+	GYRO_CHECK_EQ(events.PhysicalHeight, 0);
+
+	// One `done`, which is what makes the group atomic: a client applies nothing it has read until that
+	// arrives, so a scale and the position it belongs with are never read half apart.
+	GYRO_CHECK_EQ(events.Done, std::uint32_t{ 1 });
+}
+
+GYRO_TEST(ProtocolRoundTrip, AMappedWindowIsToldWhichOutputItIsOn)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-enter" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(2), .Grid = { 3840, 2160 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	const Registry::Global* const advertised = bound.Listener.Find(Wayland::WlOutput::WireName);
+	GYRO_REQUIRE(advertised != nullptr);
+
+	OutputEvents events;
+	const Wayland::WlOutput output =
+		bound.Listener.Object().Bind<Wayland::WlOutput>(advertised->Name, advertised->Version, events);
+	GYRO_REQUIRE(output.IsValid());
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x52 }));
+
+	toplevel.Drawn.Surface.Commit();
+	pair.Turn();
+
+	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
+
+	// Nothing yet: a surface with no window in the world is on no output, and it is the map rather than
+	// the bind that puts it on one.
+	GYRO_CHECK(toplevel.Drawn.Events.Entered.empty());
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.DamageBuffer(0, 0, Width, Height);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// **This is the event that carries the scale to the client.** A toolkit takes the largest scale
+	// among the outputs it has entered and redraws at it; one that is never entered stays at 1x however
+	// many outputs it bound, which on a 2x panel is every window on the machine drawn at a quarter of
+	// the area and magnified.
+	GYRO_REQUIRE_EQ(toplevel.Drawn.Events.Entered.size(), std::size_t{ 1 });
+	GYRO_CHECK(toplevel.Drawn.Events.Entered.front().Id() == output.Id());
+	GYRO_CHECK(toplevel.Drawn.Events.Left.empty());
+
+	// And once, rather than once per iteration: the comparison is against what the client has been told
+	// rather than against nothing.
+	pair.Turn();
+
+	GYRO_CHECK_EQ(toplevel.Drawn.Events.Entered.size(), std::size_t{ 1 });
 }
 
 GYRO_TEST(ProtocolRoundTrip, AMappedWindowIsToldWhenItsFrameReachedTheGlass)

@@ -374,6 +374,11 @@ public:
 	void Orphan() noexcept;
 
 	// Take the window off the screen while the role object stays. **The difference from `Orphan` is
+	// The `wl_surface` under this role, or null where the client named something that was not one.
+	// Public because `wl_surface.enter` is the surface's event while the reach that decides it is the
+	// *window's*, and [Output.h](Output.h) is the one party holding both questions.
+	[[nodiscard]] ClientSurface* Content() const noexcept { return m_Surface; }
+
 	// who is still there afterwards**: a dismissed popup keeps its `xdg_popup` until the client
 	// destroys it, and a compositor that dropped the role pointer here would answer that destroy
 	// against nothing.

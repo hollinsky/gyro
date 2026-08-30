@@ -165,6 +165,18 @@ public:
 	// presented on every frame the panel scans and asks to be told about the ones it drew for.
 	void Present(Instant at) noexcept;
 
+	// The outputs this surface has been told it is on, as `Scene/Reach.h`'s mask over the world's output
+	// set. Held here rather than on the role because `wl_surface.enter` is the surface's event, and read
+	// back by the comparison in [Output.h](Output.h) that decides what to send.
+	//
+	// **It is what a client has been told rather than what is true**, which is the same distinction the
+	// seat draws about focus: a window on an output whose global that client never bound is on it in the
+	// world and not in the conversation, and the difference is what makes the entry arrive when the bind
+	// does.
+	[[nodiscard]] std::uint32_t Entered() const noexcept { return m_Entered; }
+
+	void SetEntered(std::uint32_t outputs) noexcept { m_Entered = outputs; }
+
 	// Claim this surface. False where something already has it, which is every role object's own
 	// `role` error and is raised by the caller because only it knows which one to name.
 	[[nodiscard]] bool AdoptRole(SurfaceRole& role) noexcept;
@@ -262,6 +274,10 @@ private:
 
 	// True once the client has been ended for overrunning `MaxDamageRects`.
 	bool m_Overrun = false;
+
+	// Which outputs this surface has been sent an `enter` for and not a `leave`. Zero is a surface
+	// nobody has told anything, which is where every surface starts and where an unmapped one returns.
+	std::uint32_t m_Entered = 0;
 
 	// The buffer `wl_surface.attach` staged, if it staged one. **The `optional` is the attach and the
 	// resource inside it is the buffer**, which is not the same question: attaching nothing is a client

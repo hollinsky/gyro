@@ -159,6 +159,20 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// commit that maps it is what offers it focus. Both writers run before the comparison, so one
 	// iteration sends one `enter` however many times focus changed inside it. See [Seat.h](Seat.h) for
 	// why the change is noticed by comparing rather than by a signal out of `Scene`, and for what the
+	// **Before the pointer and before anything reads a window's position**, because the outputs are what
+	// a position means: a client that has just bound `wl_output` is one whose first window is about to be
+	// placed, and the scale it lays out at comes from the entry below rather than from the bind.
+	//
+	// Cheap when nothing moved — the store's outputs are compared by identity and a group is re-sent
+	// only where something a client can see has changed — which is what lets it sit on a path that runs
+	// on every wakeup.
+	if (wl_display* const display = m_Server.Display(); display != nullptr)
+	{
+		m_Outputs.Sync(*display, scene.Outputs());
+
+		SyncOutputEntry(m_Context, m_Outputs, scene);
+	}
+
 	// other order costs — a keystroke delivered to the window a person just clicked away from.
 	const EntityId focused = scene.Focus().Focused();
 
