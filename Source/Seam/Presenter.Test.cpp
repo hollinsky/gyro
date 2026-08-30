@@ -370,3 +370,51 @@ GYRO_TEST(Presenter, AnObserverSurvivesThePresenterItWatched)
 
 	GYRO_CHECK_EQ(watcher.Frames.size(), std::size_t{ 1 });
 }
+
+// **The default `TestLayers` and the default `Present` have to refuse the same partitions**, and the
+// half that shipped missing is the promotion. A backend with no planes says so in `Present` — `Nested`
+// and `Virtual` both refuse a layer whose pixels are a client's texture, because a nested output's
+// planes belong to the host and a virtual one's consumer is a file — and a test that accepted what the
+// commit then refuses is a frame thrown away every refresh.
+//
+// It reaches on the commonest screen there is rather than on an exotic one: `Frame/Assign.h` promotes a
+// suffix and reserves a layer for the composite *unless the whole list promoted*, so a single window
+// with no pointer over it and a ceiling of one promotes whole and leaves no composite at all. Under the
+// nested backend that was a black host window whose client also stopped redrawing, because no frame
+// reached the glass and so no frame callback was ever answered.
+GYRO_TEST(Presenter, APromotedTextureIsRefusedByABackendWithNoPlanes)
+{
+	FakePresenter presenter;
+
+	PresentLayer promoted = Layer(0, { { 0, 0 }, { 1920, 1080 } });
+
+	promoted.Target = LayerSource{ TextureId{ 0, 1 } };
+
+	const PresentLayer alone[] = { promoted };
+
+	const Result<void> refused = presenter.TestLayers(alone);
+
+	GYRO_REQUIRE(!refused.has_value());
+	GYRO_CHECK_EQ(refused.error().Code(), EINVAL);
+
+	// And the composite it is the alternative to still passes, so the refusal is about what the layer
+	// is rather than about there being one.
+	const PresentLayer composite[] = { Layer(0, { { 0, 0 }, { 1920, 1080 } }) };
+
+	GYRO_CHECK(presenter.TestLayers(composite).has_value());
+}
+
+// The other half of the same default, which was already right and is asserted beside it so that a
+// change to either is a change to a pair.
+GYRO_TEST(Presenter, MoreThanOneLayerIsRefusedByABackendWithNoPlanes)
+{
+	FakePresenter presenter;
+
+	const PresentLayer two[] = {
+		Layer(0, { { 0, 0 }, { 1920, 1080 } }),
+		Layer(0, { { 100, 100 }, { 64, 64 } }),
+	};
+
+	GYRO_CHECK(!presenter.TestLayers(two).has_value());
+	GYRO_CHECK_EQ(presenter.LayerCeiling(), std::uint32_t{ 1 });
+}

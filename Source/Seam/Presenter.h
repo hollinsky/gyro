@@ -187,9 +187,28 @@ public:
 	// whole point is to find out. A backend that has not implemented promotion inherits the default,
 	// which is the same rule its `Present` already holds, so an assigner running against it proposes
 	// once, is refused, and composites everything.
+	//
+	// **Both halves of that rule, and the second one shipped missing.** A backend with no planes refuses
+	// a layer count above one *and* a layer that is a client's texture, because it has nothing to scan a
+	// client's buffer out on — which is what `Nested` and `Virtual` both say in `Present`. Answering only
+	// the first half here is a partition the test accepts and the commit then refuses, and the one that
+	// reaches is the commonest screen there is: a single window with nothing over it promotes whole,
+	// leaving no composite, so the frame is refused every refresh and the panel keeps the last picture it
+	// had. Under the nested backend that picture is the host window's initial black, and the window in it
+	// never redraws either — no frame ever reaches the glass, so no frame callback is ever answered.
 	[[nodiscard]] virtual Result<void> TestLayers(std::span<const PresentLayer> layers)
 	{
-		return layers.size() == 1 ? Result<void>{} : Failure(EINVAL, "this output scans out one layer");
+		if (layers.size() != 1)
+		{
+			return Failure(EINVAL, "this output scans out one layer");
+		}
+
+		if (layers.front().Target.IsTexture())
+		{
+			return Failure(EINVAL, "this output has no scanout for a promoted texture");
+		}
+
+		return {};
 	}
 
 	// How many layers this output could take at most, which is the ceiling the assigner stops at
