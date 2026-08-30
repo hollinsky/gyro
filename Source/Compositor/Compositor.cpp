@@ -2136,16 +2136,18 @@ private:
 				spdlog::info("hosting clients on {}", m_Clients->SocketName());
 			}
 
-			// Four globals, which is a window and nothing a person can do to it. Said out loud because
-			// the alternative is somebody filing the silence as a bug: an application will open, appear
-			// centred, and then ignore every click and keystroke and never repaint. The clipboard is
-			// named the same way, because a global that is advertised and does nothing is the other kind
-			// of silence somebody would spend an afternoon on.
+			// Six globals, which is a window a person can use and two things they will reach for and not
+			// find. Said out loud because the alternative is somebody filing the silence as a bug: a
+			// titlebar dragged across the screen that leaves the window where it was, and a copy whose
+			// paste never arrives, both look exactly like a compositor that has half died. The clipboard
+			// is named for the same reason it always was — a global that is advertised and does nothing
+			// is the kind of silence somebody would spend an afternoon on.
 			spdlog::info(
-				"wl_compositor, wl_shm, xdg_wm_base and wl_data_device_manager are the globals; a window will open, be "
-				"placed and redraw against the frames that reach the glass, and there is no seat to route input and "
-				"nothing behind the clipboard, so it will not respond to a click or a keystroke and cannot copy or "
-				"paste"
+				"wl_compositor, wl_shm, zwp_linux_dmabuf_v1, xdg_wm_base, wl_data_device_manager and wl_seat are the "
+				"globals; a window will open, be placed, redraw against the frames that reach the glass, take the "
+				"keyboard and the pointer, come to the front on a click, and open and dismiss its menus, but it cannot "
+				"yet be moved or resized and there is nothing behind the clipboard, so a titlebar drag goes nowhere "
+				"and nothing can be copied, pasted or dragged"
 			);
 
 			author = std::move(*made);
