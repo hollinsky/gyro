@@ -3843,3 +3843,500 @@ GYRO_TEST(ProtocolRoundTrip, AWindowThatUnmapsTakesItsSubsurfacesWithIt)
 	// are still on their way out, which is decision 114's whole point.
 	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 9 });
 }
+
+namespace
+{
+// What the compositor tells a client about a menu. **A position as well as a size**, which is the one
+// thing gyro answers *where* to: a toplevel is told `0 x 0` for pick your own, and a popup is told
+// exactly where it goes, because only the compositor knows where the parent is and where the screen
+// ends.
+class PopupEvents final : public Wayland::XdgPopupListener
+{
+public:
+	void OnConfigure(std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height) override
+	{
+		X = x;
+		Y = y;
+		Width = width;
+		Height = height;
+
+		++Configured;
+	}
+
+	void OnPopupDone() override { ++Done; }
+
+	void OnRepositioned(std::uint32_t token) override
+	{
+		Token = token;
+
+		++Repositioned;
+	}
+
+	std::int32_t X = -1;
+	std::int32_t Y = -1;
+	std::int32_t Width = -1;
+	std::int32_t Height = -1;
+	std::uint32_t Configured = 0;
+	std::uint32_t Done = 0;
+	std::uint32_t Repositioned = 0;
+	std::uint32_t Token = 0;
+};
+
+// A client's menu, one step at a time for the same reason `Toplevel` is: the positioner is built
+// before the popup exists and a test has to be able to stop between the two.
+struct Menu
+{
+	DrawnSurface Drawn;
+	ShellEvents SurfaceEvents;
+	PopupEvents Events;
+	Wayland::XdgPositioner Rules;
+	Wayland::XdgSurface XdgSurface;
+	Wayland::XdgPopup Popup;
+};
+
+// A window at a size of its own choosing, which every case below needs and `Mapped` cannot give: the
+// harness buffer is sixteen by eight, and an anchor rectangle on a window that small says nothing
+// about the edge of a screen. **Real pixels rather than a declared geometry over the small buffer**,
+// because a person has to be able to press the middle of it — `Scene/Hit.h` asks what is drawn there,
+// and a window that claims four hundred and paints sixteen is transparent to the pointer.
+[[nodiscard]] bool
+Sized(Pair& pair, BoundCompositor& bound, Toplevel& toplevel, std::byte fill, std::int32_t width, std::int32_t height)
+{
+	const std::int32_t stride = width * 4;
+	const auto bytes = static_cast<std::size_t>(stride) * static_cast<std::size_t>(height);
+
+	ClientPool pool{ bytes, true };
+
+	if (!pool.Descriptor.IsValid())
+	{
+		return false;
+	}
+
+	pool.Fill(fill);
+
+	DrawnSurface& drawn = toplevel.Drawn;
+
+	drawn.Surface = bound.Compositor.CreateSurface(drawn.Events);
+	drawn.Pool = bound.Shm.CreatePool(pool.Take(), static_cast<std::int32_t>(bytes));
+
+	if (!drawn.Surface.IsValid() || !drawn.Pool.IsValid())
+	{
+		return false;
+	}
+
+	drawn.Buffer = drawn.Pool.CreateBuffer(0, width, height, stride, Wayland::WlShmFormat::Argb8888, drawn.Released);
+	toplevel.XdgSurface = bound.Shell.GetXdgSurface(drawn.Surface, toplevel.SurfaceEvents);
+
+	if (!drawn.Buffer.IsValid() || !toplevel.XdgSurface.IsValid())
+	{
+		return false;
+	}
+
+	toplevel.Window = toplevel.XdgSurface.GetToplevel(toplevel.WindowEvents);
+
+	if (!toplevel.Window.IsValid())
+	{
+		return false;
+	}
+
+	drawn.Surface.Commit();
+
+	pair.Turn();
+
+	if (toplevel.SurfaceEvents.Serial == 0)
+	{
+		return false;
+	}
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	drawn.Surface.Attach(drawn.Buffer, 0, 0);
+	drawn.Surface.Commit();
+
+	pair.Turn();
+
+	return true;
+}
+
+// The desk these cases are measured on, and it is small on purpose: a menu has to reach the edge of a
+// screen for anything about constraining to be visible, and a 1920 panel with a 400 window on it
+// leaves so much room that every case below would agree.
+constexpr double DeskWidth = 800.0;
+constexpr double DeskHeight = 600.0;
+
+// The window a person is holding, and the numbers the arithmetic in each case is written against: it
+// is centred, so its origin is (200, 150) and the right-hand edge of the desk is 600 in its own
+// coordinates.
+constexpr std::int32_t WindowWidth = 400;
+constexpr std::int32_t WindowHeight = 300;
+
+constexpr std::int32_t MenuWidth = 200;
+constexpr std::int32_t MenuHeight = 100;
+
+// The positioner every case below starts from: a menu two hundred by one hundred hanging off the
+// right of a one-pixel control, which is a toolkit opening a submenu. The caller states where that
+// control is and what it will accept at the edge of a screen, because that is the whole of what these
+// cases differ in.
+[[nodiscard]] Wayland::XdgPositioner Rules(BoundCompositor& bound, std::int32_t anchorX)
+{
+	const Wayland::XdgPositioner rules = bound.Shell.CreatePositioner();
+
+	if (!rules.IsValid())
+	{
+		return rules;
+	}
+
+	rules.SetSize(MenuWidth, MenuHeight);
+	rules.SetAnchorRect(anchorX, 100, 1, 1);
+	rules.SetAnchor(Wayland::XdgPositionerAnchor::Right);
+	rules.SetGravity(Wayland::XdgPositionerGravity::Right);
+	rules.SetConstraintAdjustment(Wayland::XdgPositionerConstraintAdjustment::SlideX);
+
+	return rules;
+}
+
+// The popup taken as far as a configure, which is where its position arrives. Stops there rather than
+// mapping, because two of the cases below are only about the number in that event.
+[[nodiscard]] bool Raise(Pair& pair, BoundCompositor& bound, Toplevel& toplevel, Menu& menu, std::byte fill)
+{
+	if (!menu.Rules.IsValid() || !Draw(bound, menu.Drawn, fill))
+	{
+		return false;
+	}
+
+	menu.XdgSurface = bound.Shell.GetXdgSurface(menu.Drawn.Surface, menu.SurfaceEvents);
+
+	if (!menu.XdgSurface.IsValid())
+	{
+		return false;
+	}
+
+	menu.Popup = menu.XdgSurface.GetPopup(toplevel.XdgSurface, menu.Rules, menu.Events);
+
+	if (!menu.Popup.IsValid())
+	{
+		return false;
+	}
+
+	menu.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	return menu.SurfaceEvents.Serial != 0;
+}
+
+// The rest of the sequence, for the one case that needs the menu on screen: a menu gyro is not
+// drawing is one `SyncPopups` walks past.
+[[nodiscard]] bool Show(Pair& pair, Menu& menu)
+{
+	menu.XdgSurface.AckConfigure(menu.SurfaceEvents.Serial);
+	menu.Drawn.Surface.Attach(menu.Drawn.Buffer, 0, 0);
+	menu.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	return true;
+}
+
+} // namespace
+
+// **Where a menu goes, end to end**, which nothing else asserts: `Protocol/Positioner.Test.cpp` checks
+// the arithmetic against rectangles a test wrote, and this checks that the rectangles it is given are
+// the ones the client described — the anchor in the parent's own coordinates, and a position that
+// comes back in them too. A compositor that carried the anchor into global space and answered in it
+// would pass every arithmetic case and open every menu the width of the desk away from its control.
+GYRO_TEST(ProtocolRoundTrip, AMenuIsPlacedWhereItsPositionerAskedAndHangsUnderItsWindow)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-menu" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { DeskWidth, DeskHeight } }, .Density = Scale::FromInteger(1), .Grid = { 800, 600 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Sized(pair, bound, toplevel, std::byte{ 0x40 }, WindowWidth, WindowHeight));
+
+	Menu menu;
+	menu.Rules = Rules(bound, 300);
+
+	GYRO_REQUIRE(Raise(pair, bound, toplevel, menu, std::byte{ 0x80 }));
+
+	// Hanging off the right of a control at 300 that is one pixel wide, so the near edge is at 301 —
+	// and vertically centred on it, which is half the menu above the control's own middle.
+	GYRO_CHECK_EQ(menu.Events.Configured, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(menu.Events.X, 301);
+	GYRO_CHECK_EQ(menu.Events.Y, 100 - (MenuHeight / 2));
+	GYRO_CHECK_EQ(menu.Events.Width, MenuWidth);
+	GYRO_CHECK_EQ(menu.Events.Height, MenuHeight);
+
+	// **The size is not negotiable and the position is not a suggestion**, so the `xdg_surface.configure`
+	// that closes the sequence is the client's cue to draw — and only then is there a menu in the world.
+	GYRO_REQUIRE(!WindowId(pair.Store).IsNull());
+	GYRO_CHECK_EQ(Children(pair.Store, WindowId(pair.Store)).size(), std::size_t{ 1 });
+
+	GYRO_REQUIRE(Show(pair, menu));
+
+	// Under the window rather than under the floor, which is what makes a menu move with the window it
+	// belongs to, draw over it, and not be clipped by it.
+	GYRO_CHECK_EQ(Children(pair.Store, WindowId(pair.Store)).size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(menu.Events.Configured, std::uint32_t{ 1 });
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+// **A menu opened in the middle of a drag, which is the one case `set_parent_size` exists for.** The
+// client is answering a configure it has not drawn yet: it has been asked for a wider window, it says
+// so in the positioner, and the anchor rectangle it gives is measured on that wider window rather than
+// on the one currently on screen. Decision 166 holds the edge a person is *not* holding, so a window
+// pulled by its left edge has an origin that moves with every size its client produces — and the
+// screen, in that window's coordinates, moves the opposite way.
+//
+// What it looks like when this is not done is a menu that flips or slides on the frame it opens and
+// jumps back on the frame the client redraws, which is the single most visible artefact a menu can
+// have: it lands somewhere other than where the hand is.
+GYRO_TEST(ProtocolRoundTrip, AMenuOpenedMidResizeIsPlacedAgainstTheSizeItsClientNamed)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-menu-ahead" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { DeskWidth, DeskHeight } }, .Density = Scale::FromInteger(1), .Grid = { 800, 600 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Sized(pair, bound, toplevel, std::byte{ 0x40 }, WindowWidth, WindowHeight));
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+
+	pair.Turn();
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
+
+	Push(pair, middle.X, middle.Y);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	(*pair.Host)->OnPointerButton(Click(0x110, true, pair.Clock.Now()));
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pointer.Listener.ButtonSerial != 0);
+
+	toplevel.Window.Resize(keyboard.Seat, pointer.Listener.ButtonSerial, Wayland::XdgToplevelResizeEdge::Left);
+
+	pair.Turn();
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+
+	// A hundred pixels of the near edge pulled away from the far one, which the client has been asked
+	// for and has not drawn.
+	constexpr std::int32_t Grown = 100;
+
+	Push(pair, -static_cast<double>(Grown), 0.0);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	GYRO_REQUIRE(toplevel.WindowEvents.Width == WindowWidth + Grown);
+
+	// The control is 450 across a window the client says will be 500 wide, so the menu wants to be at
+	// 451 and stretch to 651.
+	Menu menu;
+	menu.Rules = Rules(bound, 450);
+
+	menu.Rules.SetParentSize(WindowWidth + Grown, WindowHeight);
+	menu.Rules.SetParentConfigure(toplevel.SurfaceEvents.Serial);
+
+	GYRO_REQUIRE(Raise(pair, bound, toplevel, menu, std::byte{ 0x80 }));
+
+	// **Which fits, and only against the window the client is about to draw.** Against the one on
+	// screen the desk ends at 600 in the window's coordinates and the menu would slide back to 400; the
+	// wider window's origin is a hundred further left, so the same desk edge is at 700 and nothing has
+	// to move. The three numbers are distinct on purpose — a shift applied the wrong way round lands on
+	// neither.
+	GYRO_CHECK_EQ(menu.Events.Configured, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(menu.Events.X, 451);
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+// **The other half of the same rule, and it is the half that was wrong first.** A positioner carries a
+// serial rather than a promise, and a client that has already acknowledged that configure is no longer
+// ahead of the world — it is describing a size it has agreed to and may already have drawn. Adjusting
+// for it anyway is an offset that keeps growing for as long as a person drags, which on screen is a
+// menu walking away from the window it belongs to.
+//
+// Mutter is the authority here and it is a list rather than a comparison: the configure has to still be
+// unacknowledged. Serials only go up, so the newest ack is the whole of the lower bound.
+GYRO_TEST(ProtocolRoundTrip, AMenuQuotingAConfigureItsClientAnsweredIsPlacedAgainstTheWindowAsItStands)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-menu-behind" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { DeskWidth, DeskHeight } }, .Density = Scale::FromInteger(1), .Grid = { 800, 600 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Sized(pair, bound, toplevel, std::byte{ 0x40 }, WindowWidth, WindowHeight));
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+
+	pair.Turn();
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
+
+	Push(pair, middle.X, middle.Y);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	(*pair.Host)->OnPointerButton(Click(0x110, true, pair.Clock.Now()));
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pointer.Listener.ButtonSerial != 0);
+
+	toplevel.Window.Resize(keyboard.Seat, pointer.Listener.ButtonSerial, Wayland::XdgToplevelResizeEdge::Left);
+
+	pair.Turn();
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+
+	constexpr std::int32_t Grown = 100;
+
+	Push(pair, -static_cast<double>(Grown), 0.0);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	GYRO_REQUIRE(toplevel.WindowEvents.Width == WindowWidth + Grown);
+
+	// The whole of the difference from the case above: the client answers the configure it is about to
+	// quote. It has said what it will be and it has not drawn it, which is a client gyro must not run
+	// ahead of twice.
+	const std::uint32_t answered = toplevel.SurfaceEvents.Serial;
+
+	toplevel.XdgSurface.AckConfigure(answered);
+
+	pair.Turn();
+
+	Menu menu;
+	menu.Rules = Rules(bound, 450);
+
+	menu.Rules.SetParentSize(WindowWidth + Grown, WindowHeight);
+	menu.Rules.SetParentConfigure(answered);
+
+	GYRO_REQUIRE(Raise(pair, bound, toplevel, menu, std::byte{ 0x80 }));
+
+	// So the desk ends at 600 in the window's own coordinates, the menu at 451 would run 51 past it, and
+	// sliding is what the client said it would accept.
+	GYRO_CHECK_EQ(menu.Events.Configured, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(menu.Events.X, 600 - MenuWidth);
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+// **`set_reactive`, which is a menu that stays put while the window under it does not.** A client that
+// asks for it is saying *keep this where I put it relative to my window* — and the case a person sees
+// is a window dragged towards the edge of a screen with a menu already open on it: without the
+// recompute the menu goes off the side of the desk and the items on it become unclickable.
+GYRO_TEST(ProtocolRoundTrip, AReactiveMenuIsPlacedAgainWhenItsWindowMovesUnderIt)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-menu-reactive" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { DeskWidth, DeskHeight } }, .Density = Scale::FromInteger(1), .Grid = { 800, 600 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Pointer pointer;
+	GYRO_REQUIRE(Grip(pair, keyboard, pointer));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Sized(pair, bound, toplevel, std::byte{ 0x40 }, WindowWidth, WindowHeight));
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+
+	pair.Turn();
+
+	Menu menu;
+	menu.Rules = Rules(bound, 300);
+
+	menu.Rules.SetReactive();
+
+	GYRO_REQUIRE(Raise(pair, bound, toplevel, menu, std::byte{ 0x80 }));
+	GYRO_REQUIRE(Show(pair, menu));
+
+	// Room to spare: the menu runs to 501 and the desk ends at 600.
+	GYRO_CHECK_EQ(menu.Events.Configured, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(menu.Events.X, 301);
+
+	const Point<GlobalSpace> middle = MiddleOfTheWindow(pair.Store);
+
+	Push(pair, middle.X, middle.Y);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	(*pair.Host)->OnPointerButton(Click(0x110, true, pair.Clock.Now()));
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pointer.Listener.ButtonSerial != 0);
+
+	toplevel.Window.Move(keyboard.Seat, pointer.Listener.ButtonSerial);
+
+	pair.Turn();
+
+	// A hundred and fifty to the right, which takes the window's origin to 350 and leaves 450 of desk in
+	// front of it — fifty less than the menu needs.
+	Push(pair, 150.0, 0.0);
+	(*pair.Host)->OnPointerMotion(PointerMotion{ .When = pair.Clock.Now() });
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(menu.Events.Configured, std::uint32_t{ 2 });
+	GYRO_CHECK_EQ(menu.Events.X, 450 - MenuWidth);
+
+	// **And it stops when nothing more changes**, which is what makes this a recompute rather than a
+	// per-iteration event: a menu reconfigured on every wakeup is a toolkit redrawing on every wakeup.
+	pair.Turn();
+	pair.Turn();
+
+	GYRO_CHECK_EQ(menu.Events.Configured, std::uint32_t{ 2 });
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
