@@ -1054,6 +1054,23 @@ target_link_libraries(Input
 		spdlog::spdlog
 )
 
+# The listener handover, and today it is the ABI alone.
+#
+# **Not PORTABLE, and it is declared that way before it earns it.** What is here is a wire format with
+# no I/O in it, which the portable tier would accept; what arrives next is `SO_PEERCRED`, `SO_DOMAIN`
+# and an epoll set, none of which it would. A module that entered the tier and left again would say
+# something about the design that is not true — CMake/Module.cmake makes the keyword a build rule
+# rather than documentation, and the rule this module will live under is the platform one.
+#
+# DISPATCH because a listener arriving is a change to the world, and the world is written on the
+# dispatch thread. Nothing on the frame side has any business naming a session.
+gyro_add_module(Session DISPATCH
+	DEPENDS
+		Core
+	TESTS
+		Handover.Test.cpp
+)
+
 gyro_add_module(Compositor
 	DEPENDS
 		Core
