@@ -95,7 +95,11 @@ void ClientKeyboard::OnBound()
 	const Keymap& layout = m_Seat->Layout();
 
 	Object().Keymap(Wayland::Server::WlKeyboardKeymapFormat::XkbV1, layout.Descriptor(), layout.Size());
-	Object().RepeatInfo(RepeatRate, RepeatDelay);
+
+	if (Repeats())
+	{
+		Object().RepeatInfo(RepeatRate, RepeatDelay);
+	}
 }
 
 bool ClientKeyboard::BelongsTo(wl_client* client) const noexcept

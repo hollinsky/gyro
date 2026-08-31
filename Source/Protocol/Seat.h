@@ -113,13 +113,19 @@ public:
 
 	// **The keymap is owed the moment the object exists**, which is what `OnBound` is for: a client
 	// binds a keyboard and expects the layout to be on its way without asking. `repeat_info` goes with
-	// it for the same reason.
+	// it for the same reason, where the client bound high enough to have it.
 	void OnBound() override;
 
 	// Whether this keyboard belongs to the client behind `surface`, which is how focus selects the
 	// keyboards an event goes to. Two clients never see each other's keystrokes, and libwayland refuses
 	// to marshal an event naming another client's surface in any case.
 	[[nodiscard]] bool BelongsTo(wl_client* client) const noexcept;
+
+	// Whether this object can be told the repeat rate, which arrived at `wl_seat` version 4. A client
+	// that bound below it — wl-clipboard binds at 1 — repeats keys on its own account or not at all,
+	// and sending it an opcode it has no entry for is a message it cannot parse rather than one it
+	// ignores.
+	[[nodiscard]] bool Repeats() const noexcept { return Object().IsValid() && Object().Version() >= 4; }
 
 private:
 	SeatGlobal* m_Seat = nullptr;
