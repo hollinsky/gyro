@@ -61,6 +61,7 @@ struct ControlBuffer
 // ever sent; nothing on the client side compares two of these, so one number is enough for the
 // argument to be present and for a wrong-order read to show up.
 constexpr std::uint32_t PointerSerial = 900;
+constexpr std::uint32_t KeyboardSerial = 901;
 
 [[nodiscard]] PeerObject KindFor(std::string_view interface) noexcept
 {
@@ -341,8 +342,8 @@ void Peer::Dispatch(Wire::MessageHeader header, Wire::MessageReader& reader)
 			return;
 
 		case PeerObject::Seat:
-			// `get_pointer`. The keyboard and the touch device are not modelled, so asking for one is an
-			// unhandled request rather than a silent agreement — which is the whole of this peer's rule.
+			// `get_pointer`. The touch device is not modelled, so asking for one is an unhandled request
+			// rather than a silent agreement — which is the whole of this peer's rule.
 			if (reader.Opcode() == 0)
 			{
 				m_Pointer = reader.GetNewId();
@@ -351,10 +352,20 @@ void Peer::Dispatch(Wire::MessageHeader header, Wire::MessageReader& reader)
 				return;
 			}
 
+			// `get_keyboard`.
+			if (reader.Opcode() == 1)
+			{
+				m_Keyboard = reader.GetNewId();
+				Bind(m_Keyboard, PeerObject::Keyboard);
+
+				return;
+			}
+
 			// `release`.
 			if (reader.Opcode() == 3)
 			{
 				m_Pointer = Wire::ObjectId::None;
+				m_Keyboard = Wire::ObjectId::None;
 
 				return;
 			}
@@ -382,6 +393,16 @@ void Peer::Dispatch(Wire::MessageHeader header, Wire::MessageReader& reader)
 			if (reader.Opcode() == 1)
 			{
 				m_Pointer = Wire::ObjectId::None;
+
+				return;
+			}
+			break;
+
+		case PeerObject::Keyboard:
+			// `release`, its only request.
+			if (reader.Opcode() == 0)
+			{
+				m_Keyboard = Wire::ObjectId::None;
 
 				return;
 			}
@@ -1116,6 +1137,136 @@ Result<void> Peer::SendPointerAxisStop(std::uint32_t axis)
 	Wire::MessageWriter event{ m_Out, m_Pointer, 7 };
 	event.PutUint(0);
 	event.PutUint(axis);
+	event.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendSeatCapabilities(std::uint32_t capabilities)
+{
+	if (m_Seat == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending seat capabilities to a client with no wl_seat");
+	}
+
+	Wire::MessageWriter event{ m_Out, m_Seat, 0 };
+	event.PutUint(capabilities);
+	event.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendKeyboardKeymap()
+{
+	if (m_Keyboard == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending a keymap to a client with no wl_keyboard");
+	}
+
+	// A real descriptor with a plausible keymap in it. What it says does not matter — gyro reads none
+	// of it — and what does is that there is a live fd on the wire for the client to drop.
+	constexpr std::string_view Keymap = "xkb_keymap {};";
+
+	const int descriptor = ::memfd_create("peer-keymap", MFD_CLOEXEC);
+
+	if (descriptor < 0)
+	{
+		return Failure(errno, "creating a keymap descriptor for the peer");
+	}
+
+	Fd owned{ descriptor };
+
+	if (::write(owned.Get(), Keymap.data(), Keymap.size()) != static_cast<ssize_t>(Keymap.size()))
+	{
+		return Failure(errno, "writing the peer's keymap");
+	}
+
+	Wire::MessageWriter event{ m_Out, m_Keyboard, 0 };
+	// `xkb_v1`.
+	event.PutUint(1);
+	event.PutFd(std::move(owned));
+	event.PutUint(static_cast<std::uint32_t>(Keymap.size()));
+	event.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendKeyboardEnter(std::span<const std::uint32_t> keys)
+{
+	if (m_Keyboard == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending keyboard enter to a client with no wl_keyboard");
+	}
+
+	Wire::MessageWriter event{ m_Out, m_Keyboard, 1 };
+	event.PutUint(KeyboardSerial);
+	event.PutObject(m_Surface);
+	event.PutArray(std::as_bytes(keys));
+	event.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendKeyboardLeave()
+{
+	if (m_Keyboard == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending keyboard leave to a client with no wl_keyboard");
+	}
+
+	Wire::MessageWriter event{ m_Out, m_Keyboard, 2 };
+	event.PutUint(KeyboardSerial);
+	event.PutObject(m_Surface);
+	event.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendKeyboardKey(std::uint32_t key, std::uint32_t state)
+{
+	if (m_Keyboard == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending a key to a client with no wl_keyboard");
+	}
+
+	Wire::MessageWriter event{ m_Out, m_Keyboard, 3 };
+	event.PutUint(KeyboardSerial);
+	event.PutUint(0);
+	event.PutUint(key);
+	event.PutUint(state);
+	event.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendKeyboardModifiers(std::uint32_t depressed)
+{
+	if (m_Keyboard == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending modifiers to a client with no wl_keyboard");
+	}
+
+	Wire::MessageWriter event{ m_Out, m_Keyboard, 4 };
+	event.PutUint(KeyboardSerial);
+	event.PutUint(depressed);
+	event.PutUint(0);
+	event.PutUint(0);
+	event.PutUint(0);
+	event.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendKeyboardRepeatInfo(std::int32_t rate, std::int32_t delay)
+{
+	if (m_Keyboard == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending repeat info to a client with no wl_keyboard");
+	}
+
+	Wire::MessageWriter event{ m_Out, m_Keyboard, 5 };
+	event.PutInt(rate);
+	event.PutInt(delay);
 	event.Send();
 
 	return Flush();

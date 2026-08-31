@@ -1839,13 +1839,11 @@ private:
 		// Said out loud on every run that has a keyboard, because a chord nobody knows about is a chord
 		// nobody uses, and this one is the only exit.
 		//
-		// **Not said where the seat came from a host**, because it would not be true: the chord is read
-		// off the machine's own devices and a nested run has none, so the way out of that window is the
-		// window's own close button. Decision 173 carries what that costs.
-		if (m_Devices)
-		{
-			spdlog::info("ctrl+alt+esc then q quits, t writes a trace");
-		}
+		// **Said on a nested run too, now that the host's keyboard is gyro's** *(decision 175; this was
+		// suppressed there)* — with the one caveat that a nested gyro is behind another compositor's
+		// bindings, so a host that claims `Ctrl+Alt+Esc` for itself swallows it and the way out of that
+		// window stays the window's own close button.
+		spdlog::info("ctrl+alt+esc then q quits, t writes a trace");
 
 		return {};
 	}

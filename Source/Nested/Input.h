@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 
 #include "Core/Clock.h"
@@ -32,6 +33,20 @@
 // the binding is exact rather than inferred — the device *is* the window — so a device is minted per
 // window and named for it, and the root's `GYRO_OUTPUT` rung matches by construction.
 //
+// **A keyboard is the connection's rather than a window's, because the host says so.** There is one
+// `wl_keyboard` on the seat and its focus is a fact about the whole client, so unlike the pointer
+// there is nothing to bind and nothing to name an output with — a keystroke means the same thing
+// whichever window gyro opened is in front. What it does need is the thing an absolute device does
+// not: a record of what is held down, so that focus leaving gyro's window releases it. A person who
+// alt-tabs out while holding `Alt` never sends gyro the release, and a modifier stuck down inside a
+// compositor is a machine that types nothing anybody meant.
+//
+// **The host's keymap is read and discarded, and gyro's own is what its clients get.** A key crosses
+// as the kernel numbered it — `Seam/Input.h` forbids a layout in this path in as many words — so the
+// layer that turns a keycode into a letter is `Protocol/Keymap.h` at the far end, exactly as it is on
+// a real seat. The cost is that a person who selected Dvorak in the surrounding session types QWERTY
+// inside a nested gyro unless `XKB_DEFAULT_LAYOUT` says otherwise, which Open.md carries.
+//
 // **The events are read on the frame thread and emitted on the dispatch thread**, which is the
 // handoff decision 81 recorded as nested's price for one connection. Reading is
 // `NestedHost::Drain`'s, because the socket carrying `wl_pointer.motion` is the socket carrying
@@ -59,6 +74,16 @@ inline constexpr std::size_t NestedInputQueue = 512;
 // because a window can be tracked after the fact and *no focus* must not become *window zero*.
 inline constexpr std::size_t NoFocus = MaxNestedOutputs;
 
+// The slot the keyboard's device id is minted from, one past the windows. A keyboard is the
+// connection's rather than a window's — the host has one focus for the whole client — so it needs an
+// identity that no window can collide with and that binds to no output.
+inline constexpr std::size_t KeyboardDevice = MaxNestedOutputs;
+
+// How many keycodes the down-set covers. `KEY_MAX` is 767 and is stable kernel ABI, so the set is 96
+// bytes and a host that sends something past it is out of contract rather than a case to grow for —
+// which is checked, because the alternative is a stray write on the frame thread.
+inline constexpr std::size_t MaxKeycode = 768;
+
 // One thing the host said, in the vocabulary it will be emitted in. A flat record rather than a
 // variant: it crosses a thread boundary in a fixed array, so it is trivially copyable by
 // construction and the ring holds no indirection at all.
@@ -72,18 +97,20 @@ struct NestedInputEvent
 		Position,
 		Button,
 		Scroll,
+		Key,
 	};
 
 	Kind What = Kind::Added;
 
-	// Which window, which is which device and which output.
+	// Which window, which is which device and which output — or `KeyboardDevice`, which is neither.
 	std::uint32_t Window = 0;
 
 	// `Position`: the fraction of that window's own surface.
 	double NormalizedX = 0.0;
 	double NormalizedY = 0.0;
 
-	// `Button`: evdev's numbering, which is what `wl_pointer.button` already carries.
+	// `Button` and `Key`: evdev's numbering, which is what `wl_pointer.button` and `wl_keyboard.key`
+	// both already carry.
 	std::uint32_t Code = 0;
 	bool Pressed = false;
 
@@ -139,7 +166,7 @@ public:
 	void Notify() noexcept;
 
 private:
-	// The seat, which exists to answer one question: does this host have a pointer.
+	// The seat, which exists to answer one question: what does this host have on it.
 	class Seat final : public Wayland::WlSeatListener
 	{
 	public:
@@ -195,6 +222,48 @@ private:
 		NestedInput* m_Input = nullptr;
 	};
 
+	// The keyboard. Frame thread, like the pointer, and it holds the one piece of state a key path
+	// needs that a pointer path does not: what is down.
+	class Keyboard final : public Wayland::WlKeyboardListener
+	{
+	public:
+		explicit Keyboard(NestedInput& input) noexcept : m_Input{ &input } {}
+
+		// **The host's keymap is taken and dropped**, and the descriptor closes with the argument
+		// because `Fd` owns it — which is the whole of the handling and is why there is no body. What a
+		// key means is `Protocol/Keymap.h`'s at the far end of gyro's own seat, compiled from
+		// `XKB_DEFAULT_*` exactly as it is on a machine with real devices; forwarding the host's would
+		// mean carrying a layout through a path `Seam/Input.h` keeps keycodes in on purpose.
+		void OnKeymap(Wayland::WlKeyboardKeymapFormat, Fd, std::uint32_t) override {}
+
+		// **The keys already held are *not* replayed as presses.** `wl_keyboard`'s own text says a
+		// client must not emulate presses from this list, and the reason is exactly gyro's case: a
+		// synthetic press reaches a terminal inside the nested session as a character nobody typed. So
+		// focus arriving starts from nothing held, and a modifier a person was holding when they
+		// alt-tabbed in is invisible until they let go of it — which the host does send, because it put
+		// the key in this list and owes the release.
+		void OnEnter(std::uint32_t serial, Wayland::WlSurface surface, std::span<const std::byte> keys) override;
+
+		void OnLeave(std::uint32_t serial, Wayland::WlSurface surface) override;
+
+		void
+		OnKey(std::uint32_t serial, std::uint32_t time, std::uint32_t key, Wayland::WlKeyboardKeyState state) override;
+
+		// **Not forwarded, because gyro derives them itself.** The host states its own modifier state
+		// against its own layout, and gyro's clients are told about gyro's — one `xkb_state` fed the
+		// keycodes that arrive below, which is the same machinery a real seat runs. Taking the host's
+		// numbers instead would be two layouts' idea of `Shift` reaching one client.
+		void OnModifiers(std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) override {}
+
+		// **Not forwarded, because repeat is the client's.** Under Wayland a compositor states a rate
+		// and every client repeats for itself, so what a nested gyro's clients need is gyro's number
+		// rather than the host's — and gyro is the compositor for them.
+		void OnRepeatInfo(std::int32_t, std::int32_t) override {}
+
+	private:
+		NestedInput* m_Input = nullptr;
+	};
+
 	// One host window, as the input path sees it.
 	struct Window
 	{
@@ -219,6 +288,15 @@ private:
 	// Frame thread. Push one event, or count a drop.
 	void Push(const NestedInputEvent& event) noexcept;
 
+	// Frame thread. Push one key transition and remember it, or forget it. `Instant` is the caller's so
+	// that a whole release sweep carries the instant the focus left rather than a different one each.
+	void Transition(std::uint32_t code, bool pressed, Instant when) noexcept;
+
+	// Frame thread. Release everything still held. What a `wl_keyboard.leave` means in as many words —
+	// the protocol says the event resets the logical state — and what a seat losing its keyboard means
+	// as well.
+	void ReleaseHeld(Instant when) noexcept;
+
 	[[nodiscard]] std::size_t Find(Wire::ObjectId surface) const noexcept;
 
 	const IClock* m_Clock = nullptr;
@@ -227,9 +305,11 @@ private:
 
 	Seat m_Seat{ *this };
 	Pointer m_Pointer{ *this };
+	Keyboard m_Keyboard{ *this };
 
 	Wayland::WlSeat m_SeatObject;
 	Wayland::WlPointer m_PointerObject;
+	Wayland::WlKeyboard m_KeyboardObject;
 
 	std::array<Window, MaxNestedOutputs> m_Windows{};
 	std::size_t m_Count = 0;
@@ -253,6 +333,18 @@ private:
 
 	std::atomic<std::uint64_t> m_Dropped{ 0 };
 	std::uint64_t m_Reported = 0;
+
+	// Frame thread. What the host has told gyro is down, so that focus leaving can put it back up.
+	//
+	// **Kept here rather than left to whatever is downstream**, because the parties that hold key state
+	// — the chord and the seat's `xkb_state` — are each holding it for their own purpose and neither is
+	// in a position to be told *the keyboard went away, assume nothing*. What they can be told is a
+	// release per key, which is a fact they already know how to take.
+	std::array<std::uint64_t, MaxKeycode / 64> m_Down{};
+
+	// Frame thread. Whether the root has been told the keyboard exists, which is once per bind rather
+	// than once per focus.
+	bool m_KeyboardAnnounced = false;
 
 	// Frame thread. Whether anything has been queued since the doorbell was last rung.
 	bool m_Queued = false;

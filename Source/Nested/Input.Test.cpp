@@ -1,5 +1,6 @@
 #include "Nested/Input.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -41,6 +42,7 @@ struct Watcher
 		m_Position.ConnectTo<&Watcher::OnPosition>(input.Position, *this);
 		m_Button.ConnectTo<&Watcher::OnButton>(input.Button, *this);
 		m_Scroll.ConnectTo<&Watcher::OnScroll>(input.Scroll, *this);
+		m_Key.ConnectTo<&Watcher::OnKey>(input.Key, *this);
 	}
 
 	// The strings on an `InputDevice` are borrowed for the duration of the emit, per `Core/Input.h`,
@@ -63,10 +65,31 @@ struct Watcher
 
 	void OnScroll(const PointerScroll& event) { Scrolls.push_back(event); }
 
+	void OnKey(const KeyEvent& event) { Keys.push_back(event); }
+
+	// The devices that are a window's pointer. The keyboard is announced when the seat admits it has
+	// one, so it is already in `Devices` before any of these tests move a mouse — and it is neither
+	// absolute nor bound to an output, which is the difference this filter is named for.
+	[[nodiscard]] std::vector<InputDevice> Pointers() const
+	{
+		std::vector<InputDevice> pointers;
+
+		for (const InputDevice& device : Devices)
+		{
+			if (device.Absolute)
+			{
+				pointers.push_back(device);
+			}
+		}
+
+		return pointers;
+	}
+
 	std::vector<InputDevice> Devices;
 	std::vector<PointerPosition> Positions;
 	std::vector<PointerButton> Buttons;
 	std::vector<PointerScroll> Scrolls;
+	std::vector<KeyEvent> Keys;
 
 	// Reserved so that a view handed out on one emit is not left dangling by the next push. A deque
 	// would say the same thing without the number; this is one line and the counts here are tiny.
@@ -88,6 +111,7 @@ private:
 	Connection<const PointerPosition&> m_Position;
 	Connection<const PointerButton&> m_Button;
 	Connection<const PointerScroll&> m_Scroll;
+	Connection<const KeyEvent&> m_Key;
 };
 
 // A host, a connection to it, and one surface standing in for a window.
@@ -184,13 +208,13 @@ GYRO_TEST(NestedInput, EnteringAWindowAnnouncesADeviceNamedForItAndHidesTheHostC
 
 	session.Turn();
 
-	GYRO_REQUIRE_EQ(session.Observed.Devices.size(), std::size_t{ 1 });
-	GYRO_CHECK(session.Observed.Devices.front().Absolute);
-	GYRO_CHECK_EQ(session.Observed.Devices.front().Output, std::string_view{ "nested-0" });
+	GYRO_REQUIRE_EQ(session.Observed.Pointers().size(), std::size_t{ 1 });
+	GYRO_CHECK(session.Observed.Pointers().front().Absolute);
+	GYRO_CHECK_EQ(session.Observed.Pointers().front().Output, std::string_view{ "nested-0" });
 
 	// No millimetres, so `Compositor/Binding.h`'s size rung is offered no evidence and the connector is
 	// what binds this device.
-	GYRO_CHECK(!session.Observed.Devices.front().Size.has_value());
+	GYRO_CHECK(!session.Observed.Pointers().front().Size.has_value());
 
 	// gyro draws its own pointer, so the host's has to go.
 	static_cast<void>(session.Host.Pump());
@@ -220,7 +244,7 @@ GYRO_TEST(NestedInput, AMotionIsAFractionOfTheWindowItArrivedIn)
 
 	// One device however many events it produced: the window is the device, and a second announcement
 	// would be a second binding for the composition root to resolve.
-	GYRO_CHECK_EQ(session.Observed.Devices.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(session.Observed.Pointers().size(), std::size_t{ 1 });
 }
 
 GYRO_TEST(NestedInput, AButtonCarriesTheKernelsCodeUnconverted)
@@ -241,7 +265,7 @@ GYRO_TEST(NestedInput, AButtonCarriesTheKernelsCodeUnconverted)
 	GYRO_CHECK_EQ(session.Observed.Buttons.front().Code, std::uint32_t{ 0x110 });
 	GYRO_CHECK(session.Observed.Buttons.front().Pressed);
 	GYRO_CHECK(!session.Observed.Buttons.back().Pressed);
-	GYRO_CHECK_EQ(session.Observed.Buttons.front().Device, session.Observed.Devices.front().Id);
+	GYRO_CHECK_EQ(session.Observed.Buttons.front().Device, session.Observed.Pointers().front().Id);
 }
 
 GYRO_TEST(NestedInput, AScrollTakesItsSourceFromTheGroupAndItsDetentFromValue120)
@@ -313,7 +337,7 @@ GYRO_TEST(NestedInput, AnEventBeforeAnyWindowIsTrackedIsDropped)
 	session.Turn();
 
 	GYRO_CHECK(session.Observed.Positions.empty());
-	GYRO_CHECK(session.Observed.Devices.empty());
+	GYRO_CHECK(session.Observed.Pointers().empty());
 }
 
 GYRO_TEST(NestedInput, AResizeChangesWhatAFractionIsTakenAgainstAndNotTheDevice)
@@ -338,6 +362,164 @@ GYRO_TEST(NestedInput, AResizeChangesWhatAFractionIsTakenAgainstAndNotTheDevice)
 
 	// Still one device, still called what it was called: a window that changed size is the same piece
 	// of glass, and re-announcing it would leave the root with two bindings for one pointer.
-	GYRO_REQUIRE_EQ(session.Observed.Devices.size(), std::size_t{ 1 });
+	GYRO_REQUIRE_EQ(session.Observed.Pointers().size(), std::size_t{ 1 });
 	GYRO_CHECK_EQ(session.Client.Input().Connector(0), std::string_view{ "nested-0" });
+}
+
+// The keyboard.
+//
+// **What is checked here is mostly what is *not* forwarded**, because that is where a nested keyboard
+// goes wrong: a keymap that leaks a descriptor, an enter that types characters nobody pressed, and a
+// focus change that leaves a modifier down for the rest of the session. Each of those is a test
+// below, and the plain *a key crosses* one is the shortest of them.
+
+GYRO_TEST(NestedInput, AHostWithASeatGivesTheClientAKeyboardAndNamesItAtOnce)
+{
+	Session session;
+
+	GYRO_REQUIRE(session.Open().has_value());
+	GYRO_CHECK(session.Host.HasKeyboard());
+
+	session.Turn();
+
+	// Announced when the seat admits it has one rather than at the first keystroke, which is the
+	// opposite of the pointer's rule: a pointer has a window to be bound to and a keyboard has nothing,
+	// so there is nothing to wait for.
+	GYRO_REQUIRE_EQ(session.Observed.Devices.size(), std::size_t{ 1 });
+	GYRO_CHECK(!session.Observed.Devices.front().Absolute);
+	GYRO_CHECK(session.Observed.Devices.front().Output.empty());
+	GYRO_CHECK_EQ(session.Host.Unhandled, std::uint32_t{ 0 });
+}
+
+GYRO_TEST(NestedInput, AKeyCarriesTheKernelsCodeUnconverted)
+{
+	Session session;
+
+	GYRO_REQUIRE(session.Open().has_value());
+	GYRO_REQUIRE(session.Host.SendKeyboardEnter({}).has_value());
+
+	// `KEY_A`, which is what the wire carries and what `Core/Input.h` carries. No keymap is consulted
+	// on the way, which is the rule `Seam/Input.h` states and the reason the escape chord cannot be
+	// moved by somebody selecting Dvorak in the surrounding session.
+	GYRO_REQUIRE(session.Host.SendKeyboardKey(30, 1).has_value());
+	GYRO_REQUIRE(session.Host.SendKeyboardKey(30, 0).has_value());
+
+	session.Turn();
+
+	GYRO_REQUIRE_EQ(session.Observed.Keys.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(session.Observed.Keys.front().Code, std::uint32_t{ 30 });
+	GYRO_CHECK(session.Observed.Keys.front().Pressed);
+	GYRO_CHECK(!session.Observed.Keys.back().Pressed);
+
+	// One device for the whole connection, and it is not a window's.
+	GYRO_CHECK_EQ(session.Observed.Keys.front().Device, session.Observed.Devices.front().Id);
+	GYRO_CHECK(session.Observed.Pointers().empty());
+}
+
+GYRO_TEST(NestedInput, TheKeysHeldOnEntryAreNotTypedIntoAnything)
+{
+	Session session;
+
+	GYRO_REQUIRE(session.Open().has_value());
+
+	// `KEY_LEFTSHIFT` and `KEY_A` already down when focus arrives. `wl_keyboard` says in as many words
+	// that a client must not replay these as presses, and gyro's reason for obeying is concrete: the
+	// replay would reach a terminal inside the nested session as a character nobody typed.
+	const std::array<std::uint32_t, 2> held{ 42, 30 };
+
+	GYRO_REQUIRE(session.Host.SendKeyboardEnter(held).has_value());
+
+	session.Turn();
+
+	GYRO_CHECK(session.Observed.Keys.empty());
+}
+
+GYRO_TEST(NestedInput, FocusLeavingReleasesEverythingStillHeld)
+{
+	Session session;
+
+	GYRO_REQUIRE(session.Open().has_value());
+	GYRO_REQUIRE(session.Host.SendKeyboardEnter({}).has_value());
+
+	// `KEY_LEFTALT` down, and then the person alt-tabs away — so the release happens somewhere gyro
+	// cannot see it. A compositor that kept `Alt` down here turns every keystroke after it into a
+	// shortcut nobody asked for.
+	GYRO_REQUIRE(session.Host.SendKeyboardKey(56, 1).has_value());
+	GYRO_REQUIRE(session.Host.SendKeyboardLeave().has_value());
+
+	session.Turn();
+
+	GYRO_REQUIRE_EQ(session.Observed.Keys.size(), std::size_t{ 2 });
+	GYRO_CHECK(session.Observed.Keys.front().Pressed);
+	GYRO_CHECK_EQ(session.Observed.Keys.back().Code, std::uint32_t{ 56 });
+	GYRO_CHECK(!session.Observed.Keys.back().Pressed);
+
+	// And released once: a second leave has nothing left to put up.
+	GYRO_REQUIRE(session.Host.SendKeyboardLeave().has_value());
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(session.Observed.Keys.size(), std::size_t{ 2 });
+}
+
+GYRO_TEST(NestedInput, ASeatThatLosesItsKeyboardPutsWhatWasHeldBackUp)
+{
+	Session session;
+
+	GYRO_REQUIRE(session.Open().has_value());
+	GYRO_REQUIRE(session.Host.SendKeyboardEnter({}).has_value());
+	GYRO_REQUIRE(session.Host.SendKeyboardKey(56, 1).has_value());
+
+	session.Turn();
+
+	// The pointer capability alone. Nothing further will ever arrive on the keyboard, so the release
+	// that would have come has to be manufactured here or never happen at all.
+	GYRO_REQUIRE(session.Host.SendSeatCapabilities(0x1U).has_value());
+
+	session.Turn();
+
+	GYRO_REQUIRE_EQ(session.Observed.Keys.size(), std::size_t{ 2 });
+	GYRO_CHECK(!session.Observed.Keys.back().Pressed);
+	GYRO_CHECK_EQ(session.Observed.Keys.back().Code, std::uint32_t{ 56 });
+}
+
+GYRO_TEST(NestedInput, AKeymapIsTakenAndDropped)
+{
+	Session session;
+
+	GYRO_REQUIRE(session.Open().has_value());
+
+	// A real descriptor on the wire, which the client owns the moment it reads the message. What is
+	// checked is that it goes nowhere: gyro compiles its own keymap from `XKB_DEFAULT_*` and a host's
+	// layout has no way into `Seam/Input.h`, which carries keycodes on purpose.
+	GYRO_REQUIRE(session.Host.SendKeyboardKeymap().has_value());
+	GYRO_REQUIRE(session.Host.SendKeyboardRepeatInfo(25, 600).has_value());
+	GYRO_REQUIRE(session.Host.SendKeyboardModifiers(0x1U).has_value());
+	GYRO_REQUIRE(session.Host.SendKeyboardEnter({}).has_value());
+	GYRO_REQUIRE(session.Host.SendKeyboardKey(30, 1).has_value());
+
+	session.Turn();
+
+	// The key still arrives, and none of the three events before it turned into one.
+	GYRO_REQUIRE_EQ(session.Observed.Keys.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(session.Observed.Keys.front().Code, std::uint32_t{ 30 });
+	GYRO_CHECK_EQ(session.Host.Unhandled, std::uint32_t{ 0 });
+}
+
+GYRO_TEST(NestedInput, ARepeatedKeyIsNotASecondPress)
+{
+	Session session;
+
+	GYRO_REQUIRE(session.Open().has_value());
+	GYRO_REQUIRE(session.Host.SendKeyboardEnter({}).has_value());
+	GYRO_REQUIRE(session.Host.SendKeyboardKey(30, 1).has_value());
+
+	// A host at version ten may send `repeated`. gyro's own clients repeat for themselves against
+	// gyro's rate, so forwarding this would be a key held down twice as fast as the hand holding it.
+	GYRO_REQUIRE(session.Host.SendKeyboardKey(30, 2).has_value());
+	GYRO_REQUIRE(session.Host.SendKeyboardKey(30, 2).has_value());
+
+	session.Turn();
+
+	GYRO_CHECK_EQ(session.Observed.Keys.size(), std::size_t{ 1 });
 }

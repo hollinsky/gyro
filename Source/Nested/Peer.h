@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -68,6 +69,7 @@ enum class PeerObject : std::uint8_t
 	Decoration,
 	Seat,
 	Pointer,
+	Keyboard,
 };
 
 // One global the peer advertises, and the version it claims.
@@ -188,6 +190,29 @@ public:
 
 	[[nodiscard]] Result<void> SendPointerFrame();
 
+	// The keyboard's five, which is everything `wl_keyboard` can say. The keymap goes out with a real
+	// sealed descriptor rather than an invalid one, because the thing worth proving about gyro's
+	// handling is that it takes the fd and lets go of it — a client that leaked one would run out of
+	// descriptors after a few hundred layout changes and nothing else would say why.
+	[[nodiscard]] Result<void> SendKeyboardKeymap();
+
+	// The keys already held, which the protocol says a client must not replay as presses.
+	[[nodiscard]] Result<void> SendKeyboardEnter(std::span<const std::uint32_t> keys);
+
+	[[nodiscard]] Result<void> SendKeyboardLeave();
+
+	[[nodiscard]] Result<void> SendKeyboardKey(std::uint32_t key, std::uint32_t state);
+
+	[[nodiscard]] Result<void> SendKeyboardModifiers(std::uint32_t depressed);
+
+	[[nodiscard]] Result<void> SendKeyboardRepeatInfo(std::int32_t rate, std::int32_t delay);
+
+	// Say what the seat has, after the bind that already claimed a pointer and a keyboard. What a
+	// capability going away tests is the half of the handling nothing else reaches.
+	[[nodiscard]] Result<void> SendSeatCapabilities(std::uint32_t capabilities);
+
+	[[nodiscard]] bool HasKeyboard() const noexcept { return m_Keyboard != Wire::ObjectId::None; }
+
 	// Whether the client has a pointer object at all, which is what says it read the capability.
 	[[nodiscard]] bool HasPointer() const noexcept { return m_Pointer != Wire::ObjectId::None; }
 
@@ -255,6 +280,7 @@ private:
 	Wire::ObjectId m_Toplevel = Wire::ObjectId::None;
 	Wire::ObjectId m_Seat = Wire::ObjectId::None;
 	Wire::ObjectId m_Pointer = Wire::ObjectId::None;
+	Wire::ObjectId m_Keyboard = Wire::ObjectId::None;
 	Wire::ObjectId m_XdgSurface = Wire::ObjectId::None;
 	Wire::ObjectId m_SyncSurface = Wire::ObjectId::None;
 

@@ -5,8 +5,10 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <bit>
 #include <cerrno>
 #include <format>
+#include <optional>
 
 namespace Nested
 {
@@ -15,6 +17,10 @@ namespace
 // What one detent is worth where the host does not say. `wl_pointer.axis` carries a distance in
 // surface units already, so this is only ever the fallback for the `value120` bookkeeping below.
 constexpr double DetentsPer120 = 120.0;
+
+// The keyboard's name in the log, fixed because there is nothing to vary: one seat, one keyboard,
+// and the host does not say what is plugged into it.
+constexpr std::string_view KeyboardName = "the host's keyboard";
 
 [[nodiscard]] ScrollAxis Axis(Wayland::WlPointerAxis axis) noexcept
 {
@@ -41,9 +47,10 @@ Result<void> NestedInput::Open()
 void NestedInput::Bind(const Wayland::WlRegistry& registry, std::uint32_t name, std::uint32_t version)
 {
 	// Five is where `axis_source` and `axis_stop` arrive, which is the difference between a two-finger
-	// flick that decays and one that stops dead — `Core/Input.h` has why that is not a detail. Above
-	// that nothing here reads, so the ceiling is what these bindings were generated against and the
-	// floor is what the host has.
+	// flick that decays and one that stops dead — `Core/Input.h` has why that is not a detail. It is
+	// also past `wl_keyboard.repeat_info`, which gyro does not forward but a host below version four
+	// would not send anyway. Above that nothing here reads, so the ceiling is what these bindings were
+	// generated against and the floor is what the host has.
 	m_SeatObject = registry.Bind<Wayland::WlSeat>(name, std::min(version, 5U), m_Seat);
 }
 
@@ -148,12 +155,41 @@ Result<void> NestedInput::Drain()
 		m_Head.store(head + 1, std::memory_order_release);
 		++head;
 
-		const Window& window = m_Windows[event.Window];
+		// The keyboard's slot is one past the windows, so it is the one event whose `Window` is not an
+		// index into them.
+		const bool keyboard = event.Window == KeyboardDevice;
+		const Window& window = m_Windows[keyboard ? 0 : event.Window];
 		const InputDeviceId device{ static_cast<std::uint32_t>(event.Window), 1 };
 
 		switch (event.What)
 		{
 			case NestedInputEvent::Kind::Added:
+				if (keyboard)
+				{
+					// **Said here rather than by the root**, which is where a pointer's line comes from:
+					// the root announces a device it *bound*, and a keyboard is bound to nothing, so it
+					// would arrive and log nothing at all. A person nesting gyro inside their desktop
+					// needs to see that keys are coming through before they press one, because the other
+					// way to find out is to type into a window that ignores them.
+					spdlog::info("input: {} reaches this nested session", KeyboardName);
+
+					// **No output and not absolute**, which is the whole difference from a window's
+					// pointer: a keystroke is the connection's and means the same thing whichever window
+					// is in front, so there is nothing for `Compositor/Binding.h` to bind and nothing it
+					// would bind against.
+					Added.Emit(
+						InputDevice{
+							.Id = device,
+							.Name = KeyboardName,
+							.Absolute = false,
+							.Size = std::nullopt,
+							.Output = {},
+						}
+					);
+
+					break;
+				}
+
 				Added.Emit(
 					InputDevice{
 						.Id = device,
@@ -206,6 +242,17 @@ Result<void> NestedInput::Drain()
 					}
 				);
 				break;
+
+			case NestedInputEvent::Kind::Key:
+				Key.Emit(
+					KeyEvent{
+						.Code = event.Code,
+						.Pressed = event.Pressed,
+						.When = event.When,
+						.Device = device,
+					}
+				);
+				break;
 		}
 	}
 
@@ -226,6 +273,39 @@ Result<void> NestedInput::Drain()
 
 void NestedInput::Seat::OnCapabilities(Wayland::WlSeatCapability capabilities)
 {
+	const bool keyboard = (capabilities & Wayland::WlSeatCapability::Keyboard) == Wayland::WlSeatCapability::Keyboard;
+
+	if (keyboard)
+	{
+		if (!m_Input->m_KeyboardObject.IsValid())
+		{
+			m_Input->m_KeyboardObject = Object().GetKeyboard(m_Input->m_Keyboard);
+
+			// Announced at bind rather than at the first focus, which is the opposite of the pointer's
+			// rule and for the same reason underneath it: a pointer device is bound to a window and
+			// there is no window until the host says which one, while a keyboard is bound to nothing and
+			// is as real the moment the seat admits it has one.
+			if (!m_Input->m_KeyboardAnnounced)
+			{
+				m_Input->m_KeyboardAnnounced = true;
+				m_Input->Push(
+					NestedInputEvent{
+						.What = NestedInputEvent::Kind::Added,
+						.Window = static_cast<std::uint32_t>(KeyboardDevice),
+					}
+				);
+			}
+		}
+	}
+	else if (m_Input->m_KeyboardObject.IsValid())
+	{
+		// A seat that has lost its keyboard is one gyro will hear nothing more from, so whatever was
+		// held has to go up here — the release that would have arrived never will.
+		m_Input->ReleaseHeld(m_Input->m_Clock->Now());
+		m_Input->m_KeyboardObject.Release();
+		m_Input->m_KeyboardObject = {};
+	}
+
 	const bool pointer = (capabilities & Wayland::WlSeatCapability::Pointer) == Wayland::WlSeatCapability::Pointer;
 
 	if (!pointer)
@@ -418,5 +498,83 @@ void NestedInput::Pointer::OnAxisStop(std::uint32_t, Wayland::WlPointerAxis axis
 			.When = m_Input->m_Clock->Now(),
 		}
 	);
+}
+
+void NestedInput::Transition(std::uint32_t code, bool pressed, Instant when) noexcept
+{
+	if (code >= MaxKeycode)
+	{
+		// Out of the kernel's own range, so it is out of the down-set's — dropped rather than tracked,
+		// because the alternative is a write past the end of an array on the frame thread.
+		return;
+	}
+
+	const std::uint64_t bit = std::uint64_t{ 1 } << (code % 64);
+	std::uint64_t& word = m_Down[code / 64];
+
+	if (pressed)
+	{
+		word |= bit;
+	}
+	else
+	{
+		word &= ~bit;
+	}
+
+	Push(
+		NestedInputEvent{
+			.What = NestedInputEvent::Kind::Key,
+			.Window = static_cast<std::uint32_t>(KeyboardDevice),
+			.Code = code,
+			.Pressed = pressed,
+			.When = when,
+		}
+	);
+}
+
+void NestedInput::ReleaseHeld(Instant when) noexcept
+{
+	for (std::size_t index = 0; index < m_Down.size(); ++index)
+	{
+		while (m_Down[index] != 0)
+		{
+			const auto bit = static_cast<std::uint32_t>(std::countr_zero(m_Down[index]));
+
+			Transition(static_cast<std::uint32_t>(index * 64 + bit), false, when);
+		}
+	}
+}
+
+void NestedInput::Keyboard::OnEnter(std::uint32_t, Wayland::WlSurface, std::span<const std::byte>)
+{
+	// Nothing is replayed and nothing is remembered — the header has why — so what is left to do is
+	// make sure gyro is not still holding something from the last time it had focus. It should not be,
+	// because the leave released it, but a host that skipped one would otherwise stick a modifier down
+	// for the rest of the session.
+	m_Input->ReleaseHeld(m_Input->m_Clock->Now());
+}
+
+void NestedInput::Keyboard::OnLeave(std::uint32_t, Wayland::WlSurface)
+{
+	// **This is the event the whole down-set exists for.** A person holding `Alt` to switch away from
+	// gyro's window releases it somewhere gyro cannot see, and a compositor that kept `Alt` down would
+	// turn every subsequent keystroke into a shortcut nobody asked for. `wl_keyboard.leave` says the
+	// logical state resets, so the releases are what that sentence means downstream.
+	m_Input->ReleaseHeld(m_Input->m_Clock->Now());
+}
+
+void NestedInput::Keyboard::OnKey(std::uint32_t, std::uint32_t, std::uint32_t key, Wayland::WlKeyboardKeyState state)
+{
+	// `wl_keyboard.key` carries the kernel's own code, the same space `wl_pointer.button` uses and the
+	// same one `Core/Input.h` promises — so this crosses unconverted and no keymap is consulted on the
+	// way. The `Repeated` state a host at version ten may send is deliberately not a press: gyro's
+	// clients repeat for themselves against gyro's own rate, so forwarding the host's repeats would be
+	// a key held down twice as fast as the person is holding it.
+	if (state == Wayland::WlKeyboardKeyState::Repeated)
+	{
+		return;
+	}
+
+	m_Input->Transition(key, state == Wayland::WlKeyboardKeyState::Pressed, m_Input->m_Clock->Now());
 }
 } // namespace Nested
