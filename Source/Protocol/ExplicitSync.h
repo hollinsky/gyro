@@ -23,8 +23,15 @@ class ClientSurface;
 // preempt it: preemption preempts work that is running and does nothing to a dependency that has not
 // resolved. So a client that is late finishing its frame is today a client that holds up the composite
 // for every window on the machine, on a `SCHED_FIFO` thread whose whole promise is hitting the next
-// refresh. This protocol is what makes that visible and then removes it — the spec lets a compositor
-// ignore implicit synchronization for a surface carrying one of these objects, and gyro does.
+// refresh. This protocol is what makes that visible and then removes it.
+//
+// **And it removes it by holding rather than by opting out.** The spec permits a compositor to ignore
+// implicit synchronization for a surface carrying one of these objects; gyro does not, because there is
+// no per-submission opt-out for an image imported from a descriptor and nothing here touches the
+// buffer's `dma-resv`. What protects the composite is that gyro never publishes a buffer whose acquire
+// point has not signalled — so the implicit fence is already signalled when a submission names the
+// image, and the driver's wait resolves immediately. The distinction matters: *gyro ignores implicit
+// sync* would predict protection with the hold removed, and there is none.
 //
 // **A client's fence never reaches gyro's queue or a plane's `IN_FENCE_FD`.** The commit is held on the
 // dispatch thread instead: the acquire point is watched with `DRM_IOCTL_SYNCOBJ_EVENTFD` on the

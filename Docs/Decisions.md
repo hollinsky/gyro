@@ -13825,8 +13825,17 @@ cannot see that wait, cannot schedule around it, and cannot preempt it: preempti
 is running and does nothing to a dependency that has not resolved. So a client that is late finishing
 its frame holds up the composite for every window on the machine, on a `SCHED_FIFO` thread whose whole
 promise is hitting the next refresh — and nothing in the trace says so, because the wait is inside a
-submission gyro made. The protocol is what removes it: the spec lets a compositor ignore implicit
-synchronization for a surface carrying one of these objects, and gyro does.
+submission gyro made.
+
+**What removes it is the hold rather than an opt-out, which is worth being exact about.** *(Corrected
+2026-08-30, on reading the submit path this entry had just been written against.)* The spec permits a
+compositor to ignore implicit synchronization for a surface carrying one of these objects, and gyro
+does not — there is no per-submission opt-out for an image imported from a descriptor, `Record` passes
+no wait semaphores, and nothing here touches the buffer's `dma-resv`. What protects the composite is
+that gyro never publishes a buffer whose acquire point has not signalled: by the time a submission
+names that image the client's write fence is already signalled, so whatever wait the driver inserts
+resolves immediately. Same outcome, and the distinction is load-bearing — *gyro ignores implicit sync*
+would predict protection with the hold removed, and there is none.
 
 ***Rejected: plumbing the acquire point through to the renderer and to KMS.*** This is what the
 protocol was designed for and what every other compositor with somewhere to put a fence does — the
