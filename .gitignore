@@ -23,3 +23,10 @@
 
 # Gyro captures
 /gyro-captures
+
+# Per-machine notes: what a test machine is, how to reach it, which udev rules and users are on it,
+# and the figures its hardware actually produced. One file per host, named for the host. Not in git
+# because every line of it is either a fact about somebody's own machine or a credential-adjacent
+# detail about how to get onto it, and neither is something the tree should carry — a `Machines/`
+# that were checked in would be a list of hosts and their access paths for anyone who cloned it.
+/Machines/
