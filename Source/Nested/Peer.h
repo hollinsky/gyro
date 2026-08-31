@@ -66,6 +66,8 @@ enum class PeerObject : std::uint8_t
 	SyncobjTimeline,
 	DecorationManager,
 	Decoration,
+	Seat,
+	Pointer,
 };
 
 // One global the peer advertises, and the version it claims.
@@ -162,6 +164,38 @@ public:
 
 	[[nodiscard]] Result<void> SendPing(std::uint32_t serial);
 
+	// The pointer, which is the half of a seat gyro reads. Each of these is one wire event and nothing
+	// more — the grouping a real host puts around them with `frame` is the caller's to send, because a
+	// test about grouping and a test about a click want different ones.
+	//
+	// The coordinates are surface-local doubles, as `wl_fixed`. There is no *which surface*: this peer
+	// has one window, and a second would be a second everything.
+	[[nodiscard]] Result<void> SendPointerEnter(double x, double y);
+
+	[[nodiscard]] Result<void> SendPointerLeave();
+
+	[[nodiscard]] Result<void> SendPointerMotion(double x, double y);
+
+	[[nodiscard]] Result<void> SendPointerButton(std::uint32_t button, bool pressed);
+
+	[[nodiscard]] Result<void> SendPointerAxis(std::uint32_t axis, double value);
+
+	[[nodiscard]] Result<void> SendPointerAxisSource(std::uint32_t source);
+
+	[[nodiscard]] Result<void> SendPointerAxisStop(std::uint32_t axis);
+
+	[[nodiscard]] Result<void> SendPointerAxisValue120(std::uint32_t axis, std::int32_t value120);
+
+	[[nodiscard]] Result<void> SendPointerFrame();
+
+	// Whether the client has a pointer object at all, which is what says it read the capability.
+	[[nodiscard]] bool HasPointer() const noexcept { return m_Pointer != Wire::ObjectId::None; }
+
+	// How many times the client asked for a null cursor surface. gyro draws its own glyph, so a nested
+	// window that leaves the host's arrow visible is two pointers on screen — this is what proves it
+	// asked for one.
+	std::uint32_t CursorsHidden = 0;
+
 	[[nodiscard]] Result<void> SendClose();
 
 	// The last thing a host does. `Drain` on the client answers `EPIPE`, which is what
@@ -176,6 +210,8 @@ public:
 	std::uint32_t Acked = 0;
 
 	[[nodiscard]] Wire::ObjectId Surface() const noexcept { return m_Surface; }
+
+	[[nodiscard]] Wire::ObjectId PointerId() const noexcept { return m_Pointer; }
 
 	[[nodiscard]] Wire::ObjectId Toplevel() const noexcept { return m_Toplevel; }
 
@@ -217,6 +253,8 @@ private:
 	Wire::ObjectId m_Registry = Wire::ObjectId::None;
 	Wire::ObjectId m_Surface = Wire::ObjectId::None;
 	Wire::ObjectId m_Toplevel = Wire::ObjectId::None;
+	Wire::ObjectId m_Seat = Wire::ObjectId::None;
+	Wire::ObjectId m_Pointer = Wire::ObjectId::None;
 	Wire::ObjectId m_XdgSurface = Wire::ObjectId::None;
 	Wire::ObjectId m_SyncSurface = Wire::ObjectId::None;
 

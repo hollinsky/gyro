@@ -903,12 +903,14 @@ gyro_add_module(Nested
 	SOURCES
 		Feedback.cpp
 		Host.cpp
+		Input.cpp
 		Output.cpp
 		Peer.cpp
 		Sync.cpp
 	TESTS
 		Feedback.Test.cpp
 		Host.Test.cpp
+		Input.Test.cpp
 		Output.Test.cpp
 		Sync.Test.cpp
 )

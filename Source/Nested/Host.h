@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -43,12 +44,15 @@
 // thread in the process; `std::thread`'s construction is the happens-before that hands the whole of
 // it over. After that the socket has exactly one reader for the rest of its life.
 //
-// **There is no input path and this file does not pretend there is.** Decision 81 records what it
-// will cost when there is one — a frame-to-dispatch handoff, nested's alone, shaped like decision
-// 83's queue-behind-a-source — and that nothing crosses until then. `wl_seat` is not bound.
+// **Input is bound here and handed across.** *(Decision 173; this said there was no input path.)*
+// `wl_seat` is one of the globals, the pointer's events are decoded on this thread with everything
+// else on the socket, and `Nested/Input.h` is the queue and the doorbell that carry them to the
+// dispatch thread — which is the handoff decision 81 recorded as the price of one connection, built
+// in the direction that owes no deadline.
 
 namespace Nested
 {
+class NestedInput;
 class NestedOutput;
 
 // How many host windows one connection carries. Matched to Frame's `MaxOutputs` the way
@@ -58,7 +62,8 @@ inline constexpr std::size_t MaxNestedOutputs = 16;
 
 // The globals a nested output drives, bound once.
 //
-// `wl_seat` is absent by decision rather than by omission, per the file header. `wp_viewporter` is
+// `wl_seat` is not here because it is not one *object*: what a seat gives is a pointer, a keyboard
+// and a touch device, and `Nested/Input.h` owns all four. `wp_viewporter` is
 // absent because nothing scales a nested surface yet: gyro's composite is the mode's resolution and
 // the window is that size, so a viewport would be an identity transform the host still has to apply.
 // It comes back with fractional output scale, which is what it is for.
@@ -77,7 +82,9 @@ struct HostGlobals
 class NestedHost final : public IEventSource
 {
 public:
-	NestedHost() = default;
+	// The clock is the input path's: a pointer event is stamped when the socket produced it, which is
+	// the `t₀` decision 26 has an animation start from. The host itself reads no time.
+	explicit NestedHost(const IClock& clock);
 
 	~NestedHost() override;
 
@@ -155,6 +162,21 @@ public:
 	// output is neither copyable nor movable — it is an `IPresenter` — so this takes its address and
 	// the composition root is what keeps it alive.
 	void Adopt(NestedOutput& output);
+
+	// Tell the input path what this window is now: which surface carries it, and how big that surface
+	// is. Called when the window takes its role and again on every resize.
+	//
+	// **It goes through the host rather than from the output straight to the input**, because the index
+	// is the host's — an output does not know which window it is, and the index is what makes the
+	// pointer's device the one bound to that output.
+	void Track(const NestedOutput& output);
+
+	// The host's seat, as gyro's own device set. Always present, even where the host has no seat: what
+	// is then absent is the pointer rather than the source, so the composition root registers one
+	// descriptor either way and a host that gains a seat later needs no second path.
+	[[nodiscard]] NestedInput& Input() noexcept { return *m_Input; }
+
+	[[nodiscard]] const NestedInput& Input() const noexcept { return *m_Input; }
 
 	// What the host said before it hung up, where `Drain` came back `EPROTO`. The connection carries
 	// the text; this is only where a reader is pointed at it.
@@ -245,6 +267,10 @@ private:
 	Wayland::ZwpLinuxDmabufFeedbackV1 m_FeedbackObject;
 
 	DrmSyncobjDevice m_SyncDevice;
+
+	// By pointer because `Nested/Input.h` names this file for `MaxNestedOutputs` and a member would
+	// close the include cycle. It exists for the whole of the host's life either way.
+	std::unique_ptr<NestedInput> m_Input;
 
 	std::array<NestedOutput*, MaxNestedOutputs> m_Outputs{};
 	std::size_t m_Count = 0;

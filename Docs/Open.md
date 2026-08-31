@@ -381,17 +381,19 @@ is to do the work.
   pass (much cheaper, but the renderer grows a YUV output path it otherwise would not have), or both
   can be offered. HDR sharpens it — P010 and transfer functions. This is the one part of decision 26
   with a real performance number attached and it should not be decided from the armchair.
-- **Nested's frame-to-dispatch handoff for input.**
-  [Decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread)
-  puts the host connection on the frame thread, so `wl_seat` events are decoded there and have to
-  reach dispatch — a third channel where
-  [the design turns on there being two](Architecture.md#the-publication-boundary). What is settled is
-  that it is nested's alone and not a general mechanism, and that the shape to reach for first is
-  [decision 83](Decisions.md#83-dispatchs-publication-is-an-event-source)'s: a queue behind an
-  `IEventSource` the dispatch thread already drains. What is not settled is the queue's discipline —
-  input is the one stream where newest-wins is wrong, so it cannot be a `Ring`, and a bounded queue
-  needs an answer for what a full one means. This does not bite until there is an input path at all;
-  today the connection carries feedback and configure and nothing crosses.
+- **A nested session's keyboard, and whether its pointer should be relative.** *(The handoff itself
+  is answered by
+  [decision 173](Decisions.md#173-nested-gyro-takes-input-from-the-hosts-seat-and-a-host-window-is-an-absolute-device-bound-to-the-output-it-is):
+  a bounded oldest-wins ring behind an `IEventSource`, rung once per host drain, dropping at the tail
+  because the producer runs where allocating is an abort. What is left is what rides it.)* The
+  keyboard is not bound, so the daily driver has no `Ctrl+Alt+Esc` and no way to write a trace from
+  inside the window — and binding one raises a question the pointer did not: gyro compiles its own
+  layout from `XKB_DEFAULT_*` while the host sends a keymap of its own, and a session where the two
+  disagree types the wrong letters. Ignoring the host's is probably right and means nested tests
+  gyro's layout rather than the session's, which should be said out loud rather than discovered.
+  Separately, the host's motion has already been through the host's acceleration curve, so gyro's own
+  curve and warp path are unexercised under the backend everything is developed on;
+  `zwp_relative_pointer_v1` with a lock is the fix and costs a pointer that cannot leave the window.
 
 - **Clock offset for injected input.** Decision 26 keeps the claim that `t₀` is the event timestamp,
   but a remote client's timestamps come from another machine's clock. Used naively they start

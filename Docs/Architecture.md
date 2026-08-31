@@ -394,8 +394,13 @@ Two features to build deliberately rather than let emerge:
   event queue instead, which is what libwayland-client does, costs a lock that the frame thread meets
   and the dispatch thread holds. So one connection, one reader, and the reader is the thread whose
   deadline depends on what arrives. The price is that input decoded frame-side needs a handoff to
-  dispatch — a third channel, nested's alone, and not needed until there is an input path at all. See
-  [decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread).
+  dispatch — a third channel, nested's alone. See
+  [decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread),
+  and
+  [decision 173](Decisions.md#173-nested-gyro-takes-input-from-the-hosts-seat-and-a-host-window-is-an-absolute-device-bound-to-the-output-it-is)
+  for the handoff as built: a bounded ring and an eventfd, with the host's `wl_seat` standing in for
+  the machine's own devices because a nested gyro reading `/dev/input` would be reading the
+  surrounding session's keyboard behind its back.
 
 What a session comes up on, in the order it is decided. The host's `zwp_linux_dmabuf_v1` feedback
 says which format-and-modifier pairs it can import; the whole set goes to the Vulkan device at once,

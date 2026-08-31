@@ -12,6 +12,7 @@
 #include <cerrno>
 
 #include "Core/Clock.h"
+#include "Nested/Input.h"
 #include "Nested/Output.h"
 
 namespace Nested
@@ -50,6 +51,7 @@ void NestedHost::Registry::OnGlobal(std::uint32_t name, std::string_view interfa
 		Wayland::WpPresentation::WireName,
 		Wayland::WpLinuxDrmSyncobjManagerV1::WireName,
 		Wayland::ZxdgDecorationManagerV1::WireName,
+		Wayland::WlSeat::WireName,
 	};
 
 	if (std::ranges::find(Wanted, interface) == std::ranges::end(Wanted) || m_Count >= m_Slots.size())
@@ -110,6 +112,9 @@ NestedHost::Registry::Advertised NestedHost::Registry::Find(std::string_view int
 	return {};
 }
 
+NestedHost::NestedHost(const IClock& clock) : m_Input{ std::make_unique<NestedInput>(clock) }
+{}
+
 NestedHost::~NestedHost() = default;
 
 RawFd NestedHost::Descriptor() const noexcept
@@ -119,6 +124,14 @@ RawFd NestedHost::Descriptor() const noexcept
 
 Result<void> NestedHost::Open()
 {
+	// The handoff first, because it is the one thing here that can fail for a reason having nothing to
+	// do with the host — and a descriptor the composition root is going to poll on should exist before
+	// anything is bound behind it.
+	if (const Result<void> opened = m_Input->Open(); !opened)
+	{
+		return opened;
+	}
+
 	if (const Result<void> opened = m_Connection.Open(); !opened)
 	{
 		return opened;
@@ -270,6 +283,19 @@ Result<void> NestedHost::Bind()
 		m_Globals.Decoration = registry.Bind<Wayland::ZxdgDecorationManagerV1>(decoration.Name, 1);
 	}
 
+	// **A host with no seat is a host gyro still nests in.** It is the third optional global and the
+	// one whose absence is most visible — no pointer at all — but a compositor that refuses to start
+	// because there is no mouse is useless on the machine you most want to look at a frame on, and the
+	// session that has one is announced below rather than by silence.
+	if (const Registry::Advertised seat = m_Registry.Find(Wayland::WlSeat::WireName); seat.Version != 0)
+	{
+		m_Input->Bind(registry, seat.Name, seat.Version);
+	}
+	else
+	{
+		spdlog::warn("the wayland host offers no seat, so this nested session takes no input at all");
+	}
+
 	if (!m_Globals.Compositor.IsValid() || !m_Globals.Shell.IsValid() || !m_Globals.Dmabuf.IsValid() ||
 	    !m_Globals.Presentation.IsValid())
 	{
@@ -285,6 +311,19 @@ void NestedHost::Adopt(NestedOutput& output)
 	{
 		m_Outputs[m_Count] = &output;
 		++m_Count;
+	}
+}
+
+void NestedHost::Track(const NestedOutput& output)
+{
+	for (std::size_t index = 0; index < m_Count; ++index)
+	{
+		if (m_Outputs[index] == &output)
+		{
+			m_Input->Track(index, output.SurfaceId(), output.Configuration().Resolution);
+
+			return;
+		}
 	}
 }
 
@@ -305,6 +344,13 @@ Result<void> NestedHost::Drain()
 	{
 		m_Outputs[index]->Settle();
 	}
+
+	// **The doorbell is rung once for the whole drain**, before the failure is carried out and before
+	// the flush: a mouse reporting at a kilohertz against a sixty-hertz host puts seventeen events in
+	// the queue per read, and ringing per event would be seventeen syscalls on the thread that owes a
+	// frame. A read that failed still hands over whatever arrived ahead of the failure, for the same
+	// reason the outputs are settled above it.
+	m_Input->Notify();
 
 	if (!read)
 	{

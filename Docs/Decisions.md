@@ -13722,3 +13722,87 @@ asked. `Protocol/Compositor.h`'s rule holds: the number goes up in the commit th
 **What is still missing for nesting is not this.** gyro serves no `wp_linux_drm_syncobj_v1`, which is
 optional — an inner gyro warns, holds each commit until its composite lands, and says its pacing
 figures are not to be trusted. That is a real frame of latency and its own commit.
+
+### 173. Nested gyro takes input from the host's seat, and a host window is an absolute device bound to the output it is
+
+*(Decided 2026-08-30, after a session under the nested backend where the mouse did nothing at all.
+The pointer arm is built; the keyboard is not.)*
+
+**Where input comes from is decided by which backend was built, not by a flag.** `IBackend::Input()`
+answers a device set or null; the nested backend answers the host's `wl_seat`, and every other
+backend answers null, which is what makes the composition root open `/dev/input` instead. The two are
+exclusive by construction rather than by a rule somebody has to remember.
+
+**The alternative was already in the tree, and it is the wrong one.** `Compositor::OpenInput` opened
+libinput only on a run that drives a panel, which is why a nested session had no pointer, no cursor
+and no escape chord — and the guard was right: libinput's udev backend takes every device on the
+seat, so a nested gyro reading `/dev/input` would be logging every keystroke in the surrounding
+session, whatever has focus, while the host went on moving its own pointer with the same mouse. What
+was missing was not permission to open the devices. It was the observation that gyro is a Wayland
+client and every other Wayland client already knows where its input comes from.
+
+**A host window is a piece of glass with a pointer on it.** The host says *the pointer is at this
+place inside this surface*, which is a position rather than a displacement — and
+[decision 167](#167-an-absolute-device-is-bound-to-one-output-and-the-fraction-it-reports-lands-on-that-outputs-grid-rather-than-on-its-place-in-the-layout)
+already has the whole vocabulary for that: a fraction of a device's own active area, bound to one
+output, landed on that output's grid by the composition root because neither the input module nor the
+scene may name both halves. So the pointer is minted as one absolute device *per window*, and what is
+different from a touchscreen is only that the binding is exact — the device and the output are the
+same object, so `AbsolutePanel::Connector` carries a name gyro gave the window and the property rung
+matches by construction rather than by inference. *Rejected: accumulating the host's motion into
+displacements and letting `ScenePointer::Move` confine it.* It needs no binding at all and it is a
+worse picture: gyro's cursor and the host's would agree only until the first time the pointer left
+the window and came back somewhere else, and gyro's own confinement would be fighting the host's at
+every edge. *Rejected: a synthetic connector as a pretence.* It would be one if the name were
+carrying a guess; it is carrying a fact the root already holds, and the entry above widens the rung's
+description rather than sneaking past it.
+
+**One device per window rather than one per seat.** A seat has one pointer and gyro turns it into N,
+which reads oddly until the alternative is written down: a single device would report a fraction of
+*something*, and the only honest something is the window the pointer is in — which is a fact that
+changes on every `wl_pointer.enter`, so the device would have to carry a binding that moves. Decision
+167's binding is per device and resolved once, and it is resolved by the root at arrival. Minting a
+device per window is what keeps that machinery unchanged, and it costs one `InputDevice` per host
+window on a backend that has at most sixteen.
+
+**The events are decoded on the frame thread and emitted on the dispatch thread, through a fixed ring
+and an eventfd.** This is the handoff
+[decision 81](#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread)
+recorded as the price of one connection, built to the shape that entry named:
+[decision 83](#83-dispatchs-publication-is-an-event-source)'s queue behind an `IEventSource` the
+dispatch thread already drains. What [Open.md](Open.md) left unsettled was the queue's discipline,
+and the answer is **bounded, oldest-wins, dropping at the tail with a counter**. Newest-wins is wrong
+for input and the entry said so; what it did not say is what a full queue means, and the answer is
+that the producer runs inside the frame loop's step, where `Core/FrameSection.h` aborts on an
+allocation — so growing is not available and blocking would put the thread that owes a frame behind
+the thread that does not. Five hundred and twelve events is around thirty refreshes of a
+kilohertz mouse. The doorbell is rung **once per host drain** rather than once per event, because the
+alternative is a syscall per report on the `SCHED_FIFO` thread, and the drop count is reported from
+the consumer side because that is the side where formatting a line is legal.
+
+**The host's cursor is hidden and gyro draws its own**, with `wl_pointer.set_cursor` naming a null
+surface on every enter. [Decision 152](#152-promotion-is-a-partition-of-the-draw-list-computed-every-frame-and-a-node-is-promotable-when-its-resample-is-a-no-op-and-it-carries-no-dressing-on-itself) has gyro drawing the glyph;
+leaving the host's arrow visible would put two pointers on screen a few pixels apart, which reads as a
+broken compositor rather than as a nested one.
+
+**A pointer that leaves the window emits nothing, and the cursor stays where it was left.** There is
+no *the pointer is gone* in `Seam/Input.h` and this does not add one: what a person sees is a cursor
+parked against the edge they took the mouse off, which is what a cursor does at the edge of a
+monitor. Hiding it instead would make gyro's glyph blink out every time the mouse crossed a title bar.
+
+**What this does not do, stated rather than discovered.** The keyboard is not bound, so a nested
+session still has no `Ctrl+Alt+Esc` and the way out of the window is the window's own close button —
+the startup line that advertises the chord is suppressed on a run whose seat came from a host, because
+saying it would be a lie. The host's motion has already been through *its* acceleration curve, so
+gyro's own curve and its warp path are not exercised under the daily driver; the fix when that matters
+is `zwp_relative_pointer_v1` with a lock, which gives raw deltas at the cost of a pointer that cannot
+leave the window, and it is its own commit. And surface-local coordinates are divided by the window's
+own pixel size, which is correct exactly while a nested output commits at scale one with no viewport
+on it — the day `wp_fractional_scale_v1` lands on this backend, that division is what has to learn
+about it.
+
+**`wl_seat` is optional and a host without one is a host gyro still nests in.** It is announced with a
+warning rather than refused, for `wp_linux_drm_syncobj_v1`'s reason and a stronger one: a compositor
+that will not start because there is no mouse is useless on the machine you most want to look at a
+frame on. The source exists either way, so the composition root wires one descriptor whatever the host
+turned out to offer.

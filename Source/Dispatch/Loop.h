@@ -334,15 +334,32 @@ public:
 	// a desk are one pointer that two hands can push, which [Scene/Pointer.h](../Scene/Pointer.h) states
 	// and `Move` is written to accumulate.
 	//
-	// **`IInput::Position` is deliberately not connected**, and the absence is a missing fact rather than
-	// an omission: it carries a fraction of a *device's* active area, and turning that into a place on a
-	// screen needs a tablet-to-output binding that nothing in the tree holds yet. Connecting it against
-	// the first output would put a stylus somewhere arbitrary on a two-monitor desk and look like a warp
-	// bug rather than like absent configuration.
+	// **`IInput::Position` is deliberately not connected here**, and the absence is a routing decision
+	// rather than an omission: it carries a fraction of a *device's* active area, and turning that into
+	// a place on a screen needs the device-to-output binding that only the composition root holds —
+	// `Compositor/Binding.h` is where decision 167 resolves it. Connecting it against the first output
+	// would put a stylus somewhere arbitrary on a two-monitor desk and look like a warp bug rather than
+	// like absent configuration. What arrives instead is `WarpTo` below, called by the root with the
+	// fraction already landed on a screen.
 	void Observe(IInput& input)
 	{
 		m_Motion.ConnectTo<&DispatchLoop::OnMotion>(input.Motion, *this);
 		m_Touch.ConnectTo<&DispatchLoop::OnTouch>(input.Touch, *this);
+	}
+
+	// Put the pointer somewhere, which is what an absolute device produces: a touchscreen standing in
+	// for a mouse, a tablet mapped onto a panel, and the host's own pointer under the nested backend,
+	// where the window gyro is drawing into *is* the glass.
+	//
+	// **The root calls this rather than observing a signal**, which is the whole difference between
+	// this and `OnMotion` beside it. A displacement is meaningful with no output in the world; a
+	// position is not meaningful until somebody has said which output the fraction was a fraction of,
+	// and that party is the one holding both the device set and the outputs. It arrives already landed
+	// so that this loop names no device and that root names no store.
+	void WarpPointer(Point<GlobalSpace> at)
+	{
+		static_cast<void>(m_Store.Pointer().WarpTo(at, m_Store.Outputs()));
+		m_Store.Pointer().Show();
 	}
 
 	// The pointer as something on screen, so a test can ask whether there is one rather than count

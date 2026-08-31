@@ -169,6 +169,12 @@ public:
 	void OnPointerButton(const PointerButton& event);
 	void OnPointerScroll(const PointerScroll& event);
 
+	// The pointer was *placed* rather than pushed: a device that states a position, which under the
+	// nested backend is the host compositor moving its own pointer over gyro's window. The root has
+	// already landed it on an output and moved the world's pointer, so what is left here is the same
+	// thing a displacement leaves — the instant, which is what the seat routes against in `Advance`.
+	void OnPointerPosition(const PointerPosition& event);
+
 	// One contact, and the place on the screen the root resolved it to — two arguments rather than one,
 	// which is decision 167's rule about a device fraction never becoming a coordinate until somebody
 	// knows which output the glass is in front of. Held until `Advance` for the buttons' reason.

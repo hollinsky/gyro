@@ -159,6 +159,10 @@ public:
 
 	[[nodiscard]] const OutputConfiguration& Configuration() const noexcept { return m_Configuration; }
 
+	// The surface this window is, which is how the host's pointer events are attributed to it —
+	// `wl_pointer.enter` names a surface and nothing else. Invalid before `Open`.
+	[[nodiscard]] Wire::ObjectId SurfaceId() const noexcept { return m_Surface.Id(); }
+
 	// **Two while the host has asked for a frame, one otherwise — and the condition is the entire
 	// fix.** See decision 135.
 	//

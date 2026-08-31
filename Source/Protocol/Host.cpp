@@ -181,6 +181,11 @@ void ClientHost::OnPointerMotion(const PointerMotion& event)
 	m_Seat.Moved(event.When);
 }
 
+void ClientHost::OnPointerPosition(const PointerPosition& event)
+{
+	m_Seat.Moved(event.When);
+}
+
 void ClientHost::OnPointerButton(const PointerButton& event)
 {
 	m_Seat.Button(event);

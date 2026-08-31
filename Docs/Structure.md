@@ -326,12 +326,17 @@ rule met rather than bent — two implementations, two consumers in different mo
 composition root the only thing that knows both sides. `Virtual` still owns the `udmabuf` provider,
 which is still the one that runs where there is no GPU.
 
-**Only `Nested`'s frame half exists, and the table says `split` anyway.** Input is dispatch-side and
-[decision 81](Decisions.md#81-a-source-is-pumped-by-one-thread-nested-opens-one-connection-pumped-by-the-frame-thread)
-has the host connection pumped by the *frame* thread, so what the module owes when input lands is a
-handoff across the publication boundary rather than a second reader. Until there is a dispatch thread
-on the far end of that handoff there is nothing to declare: `gyro_add_module` refuses a
-`DISPATCH_HALF` that names no directory, which is the right moment for the declaration to appear.
+**`Nested` is split and declares no `DISPATCH_HALF`, which is decision 81's rule being *per object*
+rather than per module.** The host connection is pumped by the frame thread and
+[Nested/Input.h](../Source/Nested/Input.h) is drained by the dispatch thread, so the module genuinely
+straddles the boundary — and nothing in it needs the declaration, because the partition exists to stop
+an *include* crossing where the graph calls it legal, and the input path names nothing a frame-side
+file may not. What crosses between the two threads is a bounded ring and an eventfd, which is
+[decision 173](Decisions.md#173-nested-gyro-takes-input-from-the-hosts-seat-and-a-host-window-is-an-absolute-device-bound-to-the-output-it-is)
+and is a handoff rather than a second reader. *(Revised 2026-08-30; this said only the frame half
+existed and that a `DISPATCH_HALF` would appear when input landed. Input landed and no directory did
+— the declaration names a subdirectory and the honest answer here is a per-object thread rule, which
+is what `Wire`'s own row has said all along.)*
 
 ### Drm runs a thread per output, and it is the one "own" thread that is not off to the side
 

@@ -58,6 +58,7 @@
 #include "Input/Chord.h"
 #include "Input/Devices.h"
 #include "Nested/Host.h"
+#include "Nested/Input.h"
 #include "Nested/Output.h"
 #include "Protocol/Host.h"
 #include "Publication/Return.h"
@@ -397,6 +398,15 @@ public:
 	IBackend& operator=(IBackend&&) = delete;
 
 	[[nodiscard]] virtual IEventSource& Source() noexcept = 0;
+
+	// The device set this backend brings with it, or null where it brings none.
+	//
+	// **Root-local for `ClientFormats`' reason, and it answers a question only this file can act on.**
+	// A backend that is a client of another compositor already has a seat — the host's — and taking the
+	// machine's own devices instead would mean reading every keystroke in somebody's session behind
+	// their back. So *where input comes from* is a property of the backend rather than a switch, and
+	// null here is what makes a run open `/dev/input` instead. Decision 173.
+	[[nodiscard]] virtual IInput* Input() noexcept { return nullptr; }
 
 	// When the simulated hardware next moves, or `Duration::max()` for never.
 	[[nodiscard]] virtual Instant NextEvent() const noexcept = 0;
@@ -755,7 +765,7 @@ class NestedBackend final : public IBackend
 {
 public:
 	NestedBackend(const IClock& clock, bool governor, bool readable) noexcept
-		: m_Clock{ &clock }, m_Governs{ governor }, m_Readable{ readable }
+		: m_Clock{ &clock }, m_Host{ clock }, m_Governs{ governor }, m_Readable{ readable }
 	{}
 
 	// Open the connection and the device, in that order.
@@ -836,6 +846,22 @@ public:
 	}
 
 	[[nodiscard]] IEventSource& Source() noexcept override { return m_Host; }
+
+	// The host's seat is this run's device set. Always answered, even where the host offered no
+	// `wl_seat`: what is missing then is the pointer rather than the source, so the wait is wired once
+	// either way.
+	[[nodiscard]] IInput* Input() noexcept override { return &m_Host.Input(); }
+
+	// **A host window has no connector and is given one**, which is the whole of what this override is
+	// for. `Compositor/Binding.h`'s first rung binds an absolute device to the output whose connector it
+	// names, and under this backend the device and the output are the same window — so the name is
+	// correct by construction rather than inferred, and it is minted where the pointer's own copy of it
+	// is minted so the two cannot drift. No millimetres: a window is not a slab of glass, and offering
+	// the size rung a number would be offering it evidence.
+	[[nodiscard]] PanelFacts Panel(std::size_t index) const noexcept override
+	{
+		return PanelFacts{ .Connector = m_Host.Input().Connector(index) };
+	}
 
 	[[nodiscard]] std::span<const TextureFormat> ClientFormats() const noexcept override { return m_ClientFormats; }
 
@@ -1747,25 +1773,37 @@ private:
 	// the log line is what tells them apart before somebody spends an afternoon on it.
 	[[nodiscard]] Result<void> OpenInput()
 	{
-		if (!m_Panel)
+		// **A backend that brought a seat is the whole of this run's input**, and it is asked first
+		// because the two are exclusive: a nested gyro reading `/dev/input` as well would be moving its
+		// pointer from two places at once and reading the host session's keyboard while it did.
+		if (IInput* const supplied = m_Backend->Input(); supplied != nullptr)
 		{
-			return {};
+			m_Input = supplied;
+		}
+		else
+		{
+			if (!m_Panel)
+			{
+				return {};
+			}
+
+			Result<std::unique_ptr<Input::Devices>> devices = Input::Devices::Open();
+
+			if (!devices)
+			{
+				spdlog::warn(
+					"no input: {}. gyro holds the panel and there is no way to reach it from this keyboard; "
+					"check the udev rules for /dev/input",
+					devices.error()
+				);
+
+				return {};
+			}
+
+			m_Devices = std::move(*devices);
+			m_Input = m_Devices.get();
 		}
 
-		Result<std::unique_ptr<Input::Devices>> devices = Input::Devices::Open();
-
-		if (!devices)
-		{
-			spdlog::warn(
-				"no input: {}. gyro holds the panel and there is no way to reach it from this keyboard; "
-				"check the udev rules for /dev/input",
-				devices.error()
-			);
-
-			return {};
-		}
-
-		m_Input = std::move(*devices);
 		m_Key.ConnectTo<&Compositor::OnKey>(m_Input->Key, *this);
 
 		// **The pointer's three go straight to the host and never past the chord.** The escape hatch is
@@ -1773,6 +1811,13 @@ private:
 		// resting a thumb on a side button, and the way out of a compositor holding the panel may not be
 		// something a hand finds by accident.
 		m_PointerMotion.ConnectTo<&Compositor::OnPointerMotion>(m_Input->Motion, *this);
+
+		// **The fourth is the one that needs an output**, which is why it is this root's and not the
+		// dispatch loop's: a displacement means something with no screen in the world and a position does
+		// not. Decision 167 already resolves the binding for a touchscreen, and a nested window is the
+		// same shape of fact — the device is a piece of glass, the fraction is of that glass, and the
+		// party that knows which screen it is bonded to is the one that laid the screens out.
+		m_PointerPosition.ConnectTo<&Compositor::OnPointerPosition>(m_Input->Position, *this);
 		m_PointerButton.ConnectTo<&Compositor::OnPointerButton>(m_Input->Button, *this);
 		m_PointerScroll.ConnectTo<&Compositor::OnPointerScroll>(m_Input->Scroll, *this);
 
@@ -1793,7 +1838,14 @@ private:
 
 		// Said out loud on every run that has a keyboard, because a chord nobody knows about is a chord
 		// nobody uses, and this one is the only exit.
-		spdlog::info("ctrl+alt+esc then q quits, t writes a trace");
+		//
+		// **Not said where the seat came from a host**, because it would not be true: the chord is read
+		// off the machine's own devices and a nested run has none, so the way out of that window is the
+		// window's own close button. Decision 173 carries what that costs.
+		if (m_Devices)
+		{
+			spdlog::info("ctrl+alt+esc then q quits, t writes a trace");
+		}
 
 		return {};
 	}
@@ -1884,6 +1936,34 @@ private:
 		}
 	}
 
+	// The pointer was placed rather than pushed, and this is the one input event the root resolves
+	// instead of forwarding.
+	//
+	// **A fraction of a device's glass is not a coordinate until somebody says which screen**, which is
+	// `Core/Input.h`'s rule and decision 167's binding. So the device is looked up, the fraction is
+	// landed on that output's grid, and the world's pointer is moved to it — after which the seat gets
+	// what it gets from a displacement, which is the instant. A device bound to nothing produces
+	// nothing, exactly as a touch from one does.
+	void OnPointerPosition(const PointerPosition& event)
+	{
+		const auto found = std::ranges::find(m_Bindings, event.Device, &Binding::Device);
+
+		if (found == m_Bindings.end())
+		{
+			return;
+		}
+
+		if (m_Dispatch)
+		{
+			m_Dispatch->WarpPointer(Land(m_Panels[found->Output], event.NormalizedX, event.NormalizedY));
+		}
+
+		if (m_Clients)
+		{
+			m_Clients->OnPointerPosition(event);
+		}
+	}
+
 	void OnPointerButton(const PointerButton& event)
 	{
 		if (m_Clients)
@@ -1950,7 +2030,7 @@ private:
 			"input: {} is on {} ({})",
 			device.Name,
 			m_Panels[bound.Output].Connector.empty() ? "output 0" : m_Panels[bound.Output].Connector,
-			bound.Rung == BindRung::Property ? "GYRO_OUTPUT" :
+			bound.Rung == BindRung::Property ? "the connector the device names" :
 			bound.Rung == BindRung::Sole     ? "the only output" :
 											   "the same size of glass"
 		);
@@ -3026,10 +3106,17 @@ private:
 	// The device set, the compositor's own keys, and the connection between them. Declared beside the
 	// host rather than with the backend because both are the dispatch thread's, and destroyed before
 	// the wait that borrows the descriptor.
-	std::unique_ptr<Input::Devices> m_Input;
+	std::unique_ptr<Input::Devices> m_Devices;
+
+	// What everything below is wired to, which is the device set above where this run opened one and
+	// the backend's own where it brought one. Borrowed either way: a nested backend's seat belongs to
+	// the host connection and dies with it.
+	IInput* m_Input = nullptr;
+
 	Input::Chord m_Chord;
 	Connection<const KeyEvent&> m_Key;
 	Connection<const PointerMotion&> m_PointerMotion;
+	Connection<const PointerPosition&> m_PointerPosition;
 	Connection<const PointerButton&> m_PointerButton;
 	Connection<const PointerScroll&> m_PointerScroll;
 	Connection<const InputDevice&> m_DeviceAdded;

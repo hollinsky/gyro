@@ -57,6 +57,11 @@ struct ControlBuffer
 // Which interface a name binds to. The peer learns most of its object kinds from the requests that
 // create them; `wl_registry.bind` is the one that names the interface on the wire, which is exactly
 // what the untyped `new_id` is for.
+// The serial a peer stamps its pointer events with. A real host's is a counter over everything it has
+// ever sent; nothing on the client side compares two of these, so one number is enough for the
+// argument to be present and for a wrong-order read to show up.
+constexpr std::uint32_t PointerSerial = 900;
+
 [[nodiscard]] PeerObject KindFor(std::string_view interface) noexcept
 {
 	if (interface == WlCompositor::WireName)
@@ -83,6 +88,10 @@ struct ControlBuffer
 	{
 		return PeerObject::DecorationManager;
 	}
+	if (interface == WlSeat::WireName)
+	{
+		return PeerObject::Seat;
+	}
 
 	return PeerObject::Unknown;
 }
@@ -108,7 +117,8 @@ Result<void> Peer::Open()
 			        PeerGlobal{ ZwpLinuxDmabufV1::WireName, 5 },
 			        PeerGlobal{ WpPresentation::WireName, 1 },
 			        PeerGlobal{ WpLinuxDrmSyncobjManagerV1::WireName, 1 },
-			        PeerGlobal{ ZxdgDecorationManagerV1::WireName, 1 } };
+			        PeerGlobal{ ZxdgDecorationManagerV1::WireName, 1 },
+			        PeerGlobal{ WlSeat::WireName, 5 } };
 	}
 
 	if (Offered.empty() && !OfferNothing)
@@ -330,6 +340,53 @@ void Peer::Dispatch(Wire::MessageHeader header, Wire::MessageReader& reader)
 			DispatchRegistry(reader);
 			return;
 
+		case PeerObject::Seat:
+			// `get_pointer`. The keyboard and the touch device are not modelled, so asking for one is an
+			// unhandled request rather than a silent agreement — which is the whole of this peer's rule.
+			if (reader.Opcode() == 0)
+			{
+				m_Pointer = reader.GetNewId();
+				Bind(m_Pointer, PeerObject::Pointer);
+
+				return;
+			}
+
+			// `release`.
+			if (reader.Opcode() == 3)
+			{
+				m_Pointer = Wire::ObjectId::None;
+
+				return;
+			}
+			break;
+
+		case PeerObject::Pointer:
+			// `set_cursor`, and what is recorded is the one thing a nested compositor has to get right:
+			// a null surface, which is how a client says *draw no cursor over my window*.
+			if (reader.Opcode() == 0)
+			{
+				(void)reader.GetUint();
+
+				if (reader.GetObject() == Wire::ObjectId::None)
+				{
+					++CursorsHidden;
+				}
+
+				(void)reader.GetInt();
+				(void)reader.GetInt();
+
+				return;
+			}
+
+			// `release`.
+			if (reader.Opcode() == 1)
+			{
+				m_Pointer = Wire::ObjectId::None;
+
+				return;
+			}
+			break;
+
 		case PeerObject::Compositor:
 			if (reader.Opcode() == 0)
 			{
@@ -540,6 +597,22 @@ void Peer::DispatchRegistry(Wire::MessageReader& reader)
 	const Wire::ObjectId id = reader.GetNewId();
 
 	Bind(id, kind);
+
+	if (kind == PeerObject::Seat)
+	{
+		m_Seat = id;
+
+		// Capabilities the moment the global is bound, which is what a real host does and what the
+		// client reads before it asks for anything. A keyboard is claimed as well as a pointer, because
+		// a seat that has one is the ordinary case and a client that ignores it is what is being tested.
+		Wire::MessageWriter capabilities{ m_Out, id, 0 };
+		capabilities.PutUint(0x1U | 0x2U);
+		capabilities.Send();
+
+		Wire::MessageWriter name{ m_Out, id, 1 };
+		name.PutString("seat0");
+		name.Send();
+	}
 
 	if (kind == PeerObject::Presentation)
 	{
@@ -921,6 +994,144 @@ Result<void> Peer::SendRelease(Wire::ObjectId buffer)
 {
 	Wire::MessageWriter release{ m_Out, buffer, 0 };
 	release.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendPointerEnter(double x, double y)
+{
+	if (m_Pointer == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending pointer enter to a client with no wl_pointer");
+	}
+
+	Wire::MessageWriter enter{ m_Out, m_Pointer, 0 };
+	enter.PutUint(PointerSerial);
+	enter.PutObject(m_Surface);
+	enter.PutFixed(Wire::Fixed::FromDouble(x));
+	enter.PutFixed(Wire::Fixed::FromDouble(y));
+	enter.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendPointerLeave()
+{
+	if (m_Pointer == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending pointer leave to a client with no wl_pointer");
+	}
+
+	Wire::MessageWriter leave{ m_Out, m_Pointer, 1 };
+	leave.PutUint(PointerSerial);
+	leave.PutObject(m_Surface);
+	leave.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendPointerMotion(double x, double y)
+{
+	if (m_Pointer == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending pointer motion to a client with no wl_pointer");
+	}
+
+	Wire::MessageWriter motion{ m_Out, m_Pointer, 2 };
+	motion.PutUint(0);
+	motion.PutFixed(Wire::Fixed::FromDouble(x));
+	motion.PutFixed(Wire::Fixed::FromDouble(y));
+	motion.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendPointerButton(std::uint32_t button, bool pressed)
+{
+	if (m_Pointer == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending a pointer button to a client with no wl_pointer");
+	}
+
+	Wire::MessageWriter event{ m_Out, m_Pointer, 3 };
+	event.PutUint(PointerSerial);
+	event.PutUint(0);
+	event.PutUint(button);
+	event.PutUint(pressed ? 1U : 0U);
+	event.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendPointerAxis(std::uint32_t axis, double value)
+{
+	if (m_Pointer == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending a pointer axis to a client with no wl_pointer");
+	}
+
+	Wire::MessageWriter event{ m_Out, m_Pointer, 4 };
+	event.PutUint(0);
+	event.PutUint(axis);
+	event.PutFixed(Wire::Fixed::FromDouble(value));
+	event.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendPointerFrame()
+{
+	if (m_Pointer == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending a pointer frame to a client with no wl_pointer");
+	}
+
+	Wire::MessageWriter event{ m_Out, m_Pointer, 5 };
+	event.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendPointerAxisSource(std::uint32_t source)
+{
+	if (m_Pointer == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending a pointer axis source to a client with no wl_pointer");
+	}
+
+	Wire::MessageWriter event{ m_Out, m_Pointer, 6 };
+	event.PutUint(source);
+	event.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendPointerAxisStop(std::uint32_t axis)
+{
+	if (m_Pointer == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending a pointer axis stop to a client with no wl_pointer");
+	}
+
+	Wire::MessageWriter event{ m_Out, m_Pointer, 7 };
+	event.PutUint(0);
+	event.PutUint(axis);
+	event.Send();
+
+	return Flush();
+}
+
+Result<void> Peer::SendPointerAxisValue120(std::uint32_t axis, std::int32_t value120)
+{
+	if (m_Pointer == Wire::ObjectId::None)
+	{
+		return Failure(EINVAL, "sending a pointer value120 to a client with no wl_pointer");
+	}
+
+	Wire::MessageWriter event{ m_Out, m_Pointer, 9 };
+	event.PutUint(axis);
+	event.PutInt(value120);
+	event.Send();
 
 	return Flush();
 }

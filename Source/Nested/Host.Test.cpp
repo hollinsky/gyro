@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 
+#include "Core/Clock.h"
 #include "Core/Result.h"
 #include "Nested/Peer.h"
 #include "Seam/RenderTarget.h"
@@ -33,7 +34,8 @@ using namespace Wayland;
 struct Session
 {
 	Nested::Peer Host;
-	Nested::NestedHost Client;
+	MonotonicClock Clock;
+	Nested::NestedHost Client{ Clock };
 
 	[[nodiscard]] Result<void> Open()
 	{

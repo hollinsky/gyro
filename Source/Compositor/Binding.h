@@ -33,8 +33,13 @@
 struct AbsolutePanel
 {
 	// The connector, as `GYRO_OUTPUT` would name it. Empty for a backend that has no connector — a
-	// nested window, a headless sweep, a file — which is *not* a match for an empty property, since a
-	// device with no property set does not have one to match with.
+	// headless sweep, a file — which is *not* a match for an empty property, since a device with no
+	// property set does not have one to match with.
+	//
+	// **A nested window has one, and it is not a pretence.** *(Decision 173; this listed one as having
+	// none.)* Under that backend the absolute device and the output are the same host window, so the
+	// name is what carries a fact the root already knows rather than a guess at one — which is exactly
+	// what the first rung below is for.
 	std::string_view Connector{};
 
 	// The panel's own image size, from EDID. Zero on either axis is no evidence rather than a size,
@@ -54,7 +59,9 @@ struct AbsolutePanel
 // wants to know which property fixes it.
 enum class BindRung : std::uint8_t
 {
-	// `GYRO_OUTPUT` named a connector and it exists. Correct by construction rather than by inference.
+	// The device named a connector and it exists. Correct by construction rather than by inference,
+	// which is true of both parties that fill it: `GYRO_OUTPUT` on a udev rule, where a person stated
+	// it, and a nested window, where the device *is* the output.
 	Property,
 	// There is one output on this machine, so the ambiguity does not exist. The laptop, the tablet and
 	// the kiosk, which is almost every machine with a touchscreen on it.

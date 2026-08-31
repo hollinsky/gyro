@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "Core/Clock.h"
 #include "Core/ColorState.h"
 #include "Core/Result.h"
 #include "Core/Signal.h"
@@ -192,7 +193,8 @@ constexpr PixelSize<DeviceSpace> Extent{ 640, 360 };
 struct Session
 {
 	Nested::Peer Host;
-	Nested::NestedHost Client;
+	MonotonicClock Clock;
+	Nested::NestedHost Client{ Clock };
 	MemfdAllocator Allocator;
 	Composite Renderer;
 	Observer Watcher;

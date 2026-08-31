@@ -239,6 +239,11 @@ Result<void> NestedOutput::Open()
 	m_Resize = false;
 	m_Status = BuildTargets();
 
+	// The input path learns which surface this window is and how big it is, and it learns it here
+	// rather than in the constructor because there is no surface until now. Repeated at every resize
+	// below, since a pointer position is a fraction of the size it arrived against.
+	m_Host->Track(*this);
+
 	if (m_Status)
 	{
 		// What the host should treat as the window rather than as shadow. Sent once the extent is
@@ -495,6 +500,7 @@ void NestedOutput::Settle()
 
 		m_Configuration = m_Wanted;
 		m_Status = BuildTargets();
+		m_Host->Track(*this);
 
 		// **The window's size follows the buffer gyro attaches**, so there is nothing to program and
 		// nothing to wait for — which is why there is no latency here where Headless/Output.h has one.

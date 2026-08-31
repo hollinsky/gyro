@@ -138,16 +138,20 @@ public:
 
 	[[nodiscard]] bool IsStopping() const noexcept { return m_Stopping.load(std::memory_order_acquire); }
 
-	// The Wayland event loop, the session control socket, and libinput: the run with everything in it.
+	// The Wayland event loop, the session control socket, and the seat: the run with everything in it.
+	// Four rather than three because the seat is two descriptors that are never both present — libinput
+	// on a run that drives a panel, and the nested backend's handoff on one that is a client of another
+	// compositor — and a bound sized to the exclusion would be one nobody could check.
+	//
 	// Public because Wait.cpp sizes its `pollfd` array off it — the two were independent numbers that
 	// had to agree, which is half of how the third descriptor went missing.
-	static constexpr std::size_t MaxWatched = 3;
+	static constexpr std::size_t MaxWatched = 4;
 
 private:
 	Fd m_Fd;
 
 	// Borrowed rather than owned, which is why they are plain `int`s beside an `Fd`.
-	std::array<int, MaxWatched> m_Watched{ -1, -1, -1 };
+	std::array<int, MaxWatched> m_Watched{ -1, -1, -1, -1 };
 	std::size_t m_Watching = 0;
 
 	std::atomic<bool> m_Stopping{ false };
