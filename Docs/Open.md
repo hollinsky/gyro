@@ -1740,3 +1740,19 @@ constantly and the eager fetch that makes the clipboard survive an application w
 source for its text on every drag of a mouse across a paragraph. Whether the primary selection is
 cached at all, or is the one selection that lives and dies with its client, is the question to settle
 before the global goes up.
+
+## `Alt+Tab` has no switcher, so a person walks the windows blind
+
+Decision 177 binds the gesture and moves focus, and the only feedback is the window it raises. Nothing
+says how many windows there are, what they are called, or where in the list the walk has got to — so
+stepping past four windows to reach the fifth is four full raises, each one a whole window appearing
+and covering the screen, which is what everybody else replaced with a row of thumbnails for a reason.
+
+What it needs exists: `Scene` authors nodes, `Text` draws a label, and a window's title is already held
+for `ext_foreign_toplevel_list_v1`. What is not settled is what the thing *is*. A row of live
+thumbnails needs a node that samples another subtree's pixels, which is decision 60's group flattening
+pointed at a second consumer and is the expensive answer. A list of titles needs none of that and is
+what a person actually reads. And either one is a piece of shell UI drawn by the compositor, which is
+the thing 141, 162 and 177 are each careful to say they are only doing because nothing else can yet —
+so the question is whether the switcher is the fourth stand-in or the point at which gyro stops adding
+them and grows the surface a shell draws its own on.

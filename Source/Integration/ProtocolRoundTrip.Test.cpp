@@ -3002,6 +3002,57 @@ GYRO_TEST(ProtocolRoundTrip, AWindowIsToldItHasTheKeyboardAndTheOneItTookItFromI
 	GYRO_CHECK(!pair.Client.Fault().has_value());
 }
 
+// `Alt+Tab` end to end: the keys the root read, through the walk, out as the events a toolkit lights a
+// titlebar from. The chord itself is `Input/Chord.Test.cpp`'s and the walk is `Scene/Focus.Test.cpp`'s;
+// what is only visible here is that a client hears about the window a person landed on and not about
+// every window they passed through on the way.
+GYRO_TEST(ProtocolRoundTrip, CyclingFocusLightsTheWindowItLandsOnAndRaisesIt)
+{
+	Pair pair{ "gyro-roundtrip-cycle" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel first;
+	GYRO_REQUIRE(Show(pair, bound, first, std::byte{ 0x40 }));
+
+	Toplevel second;
+	GYRO_REQUIRE(Show(pair, bound, second, std::byte{ 0x55 }));
+
+	GYRO_REQUIRE(second.WindowEvents.Has(Wayland::XdgToplevelState::Activated));
+
+	const std::uint32_t configured = first.WindowEvents.Configured;
+
+	// One step and the hand coming off `Alt`, both inside one turn — which is what a person's hand
+	// produces on a compositor that wakes for every key.
+	(*pair.Host)->OnFocusCycle(FocusCycle::Next);
+	(*pair.Host)->OnFocusCycle(FocusCycle::End);
+
+	pair.Turn();
+
+	GYRO_CHECK(first.WindowEvents.Has(Wayland::XdgToplevelState::Activated));
+	GYRO_CHECK(!second.WindowEvents.Has(Wayland::XdgToplevelState::Activated));
+
+	// One configure for the whole gesture: the walk is applied before the comparison the events come
+	// out of, so a client hears where a person stopped rather than every window they went past.
+	GYRO_CHECK_EQ(first.WindowEvents.Configured, configured + 1);
+
+	// And it is in front, which is the half a person sees rather than reads: the floor's last child is
+	// the topmost window (55), and with every window centred on the same point a step that only moved
+	// focus would be a gesture with nothing on screen behind it.
+	const Entity* const floor = pair.Store.Find(pair.Store.FirstRoot());
+	GYRO_REQUIRE(floor != nullptr);
+
+	GYRO_CHECK(pair.Store.Focus().Focused() == floor->LastChild);
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
 // The pointer, moved the way `Dispatch/Loop.h` moves it: a displacement against the outputs, with no
 // rounding anywhere on the way.
 void Push(Pair& pair, double x, double y)

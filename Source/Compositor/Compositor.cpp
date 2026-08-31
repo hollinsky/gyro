@@ -1848,6 +1848,19 @@ private:
 		return {};
 	}
 
+	// One of the chord's three walking actions as the host's own vocabulary. A function rather than a
+	// third enumeration read straight across, because `Input` may not name `Protocol` and the root is
+	// the only party that sees both.
+	[[nodiscard]] static FocusCycle Stepped(Input::ChordAction action) noexcept
+	{
+		if (action == Input::ChordAction::CycleFocus)
+		{
+			return FocusCycle::Next;
+		}
+
+		return action == Input::ChordAction::CycleFocusBack ? FocusCycle::Previous : FocusCycle::End;
+	}
+
 	// One key, on the dispatch thread that drained it.
 	//
 	// **The compositor looks first and clients get what is left**, which is the ordering the escape
@@ -1906,6 +1919,19 @@ private:
 				else
 				{
 					spdlog::info("captures are off; start gyro with --capture");
+				}
+
+				break;
+
+			case Input::ChordAction::CycleFocus:
+			case Input::ChordAction::CycleFocusBack:
+			case Input::ChordAction::CycleFocusEnd:
+				// **Handed on rather than acted on**, because who the keyboard is on is a fact about the
+				// world and the world is only in hand inside `Advance` — which is the same reason a click
+				// is routed there. `--gym` has nothing to hand it to and nothing to focus.
+				if (m_Clients)
+				{
+					m_Clients->OnFocusCycle(Stepped(verdict.Action));
 				}
 
 				break;

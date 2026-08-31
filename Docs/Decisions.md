@@ -14045,3 +14045,48 @@ negotiation between two clients — [Drag.h](../Source/Protocol/Drag.h)-shaped w
 with the selection but a factory. `start_drag` answers `wl_data_source.cancelled` rather than silence,
 because a toolkit told nothing waits for an `enter` that never arrives and leaves a person holding a
 button on a drag that began nowhere.
+
+### 177. Focus cycling is `Alt+Tab` held, and the walk moves focus without rewriting the order underneath it
+
+*(Decided 2026-08-30. The fourth policy gyro holds only because no shell has declared one, beside
+decision 141's placement and decision 162's click.)*
+
+**A person with two windows open has to be able to get to the other one from the keyboard.** gyro
+already decides where a window opens, which window a click focuses, and where focus falls when one
+closes; *which window a person meant next* is the same question with a keyboard in front of it, and
+leaving it unanswered means a machine where the only way to reach a window is the mouse.
+
+**It is not a verb behind the leader, and the reason is the gesture rather than the key.**
+`Ctrl+Alt+Esc` disarms after one verb, so it can step exactly once — and one step against a
+most-recently-used stack is a swap between the two newest windows, which never reaches a third. Cycling
+needs somewhere to stop, and a held modifier is the only thing on a keyboard that says *I am still
+choosing* and then says *this one*. So `Alt` held and `Tab` pressed steps, `Shift` reverses it, and
+letting `Alt` go lands. Every Wayland compositor takes this combination, so no client loses a key it
+could have expected to keep.
+
+**The walk does not reorder the stack, which is the difference between cycling and swapping.** The
+cursor is a *window* rather than a position, and nothing under it moves until the release writes the
+landing in as the most recent. Two things follow. An application that exits mid-gesture takes its entry
+out of the stack, and a name that is no longer there resumes the walk from the focused window — where
+an index would have been left pointing at somebody else. And the next gesture starts from where the
+last one stopped, so one press goes back to the window a person just came from, which is the behaviour
+everybody already has in their hands.
+
+**Focus moves with each step rather than at the release, and each step raises.** With no shell there is
+no switcher to draw, and the Floorplanner centres every window on the same point (141), so a step that
+only moved focus would be a gesture with nothing on screen behind it — the argument decision 162
+already makes about a click whose whole effect is invisible. Moving the keyboard with it is what keeps
+the window a person is looking at the one they would type into, and it is also what makes a *lost*
+release harmless: nested gyro loses one routinely (175), and the alternative leaves somebody typing
+into a window they cannot see.
+
+**Rejected: leaving it to the shell.** It is the shell's, and so were the other three. A compositor with
+no shell that also has no way to change windows from the keyboard is not one anybody can use to develop
+the shell.
+
+**What is missing is the part a person would call alt-tab: there is no switcher.** No row of thumbnails,
+no titles, nothing that says how many windows there are or where in the list the walk has got to — the
+raise is the whole of the feedback. That wants the scene vocabulary and a text label per window, both of
+which exist, and it is [Open.md](Open.md)'s rather than this entry's. The caveat that is not fixable
+here is the leader's own one level worse: a nested gyro is behind another compositor's bindings, and
+`Alt+Tab` is the first thing a host claims — so this works on a panel and not inside a window.

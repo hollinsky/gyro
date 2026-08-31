@@ -223,6 +223,11 @@ void ClientHost::OnKey(const KeyEvent& event, bool consumed)
 	m_Seat.Key(event, consumed);
 }
 
+void ClientHost::OnFocusCycle(FocusCycle step)
+{
+	m_FocusCycle.push_back(step);
+}
+
 void ClientHost::OnPointerMotion(const PointerMotion& event)
 {
 	m_Seat.Moved(event.When);
@@ -341,6 +346,29 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// devices are usually read in — the two queues are independent, and a hand cannot be on a mouse and
 	// a screen in the same wakeup often enough for the order to be a policy.
 	m_Seat.SyncTouch(scene);
+
+	// **`Alt+Tab`, applied here rather than where the key was read**, for the reason the buttons are: the
+	// stack it walks is the world's, and the world is only in hand inside this call. After the requests,
+	// so a window that mapped in this wakeup is already somewhere the walk can reach — and before the
+	// comparison below, so one iteration tells a client about the window a person landed on rather than
+	// about every window they passed through on the way.
+	//
+	// **Each step raises what it lands on**, which is the same argument `FocusByClick` makes one line
+	// further down: with every window centred on the same point by the Floorplanner and no shell drawing
+	// a switcher, a step that only moved focus would be a gesture with nothing on screen behind it.
+	for (const FocusCycle step : m_FocusCycle)
+	{
+		const EntityId landed = step == FocusCycle::End  ? scene.Focus().EndCycle() :
+		                        step == FocusCycle::Next ? scene.Focus().CycleNext() :
+		                                                   scene.Focus().CyclePrevious();
+
+		if (!landed.IsNull())
+		{
+			static_cast<void>(scene.Raise(landed));
+		}
+	}
+
+	m_FocusCycle.clear();
 
 	// **After the pointer, because the press this routed is one of the things that moves focus** (162),
 	// and after the requests for the reason that makes a window typeable in the wakeup it opened in: the

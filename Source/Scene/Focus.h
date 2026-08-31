@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <vector>
 
 #include "Core/Handle.h"
@@ -35,6 +36,12 @@
 // does on the way past. Follows-mouse is still nobody's — it needs a preference and there is nowhere
 // to keep one until there is a session.
 //
+// **Cycling is the fourth rule of that shape and it *is* here**, unlike the click, because it needs
+// nothing this class has not got: `Alt+Tab` walks the same stack the fallback already reads, in the
+// order a person's own history put it in. [Input/Chord.h](../Input/Chord.h) carries why the binding is
+// a held modifier and not a verb behind the leader; what it costs here is a cursor, and the argument
+// for it being a window rather than a position is at `CycleNext`.
+//
 // **Rejected: focus as a flag on the entity.** It reads naturally — one `bool` beside `Retiring` — and
 // it makes *who is focused* a scan of the world, which is decision 115's rejected axis in a second
 // place. Worse, two flags set at once is a representable state, and the bug it produces is two windows
@@ -43,7 +50,22 @@ class SceneFocus
 {
 public:
 	// The window the keyboard is on, or null where nothing is focusable.
-	[[nodiscard]] EntityId Focused() const noexcept { return m_Stack.empty() ? EntityId{} : m_Stack.back(); }
+	//
+	// **A cycle in flight answers here rather than somewhere else**, which is the whole of what makes
+	// `Alt+Tab` feel like one gesture: the window a person has stepped onto is lit, has the keyboard and
+	// is drawn in front, and letting go of `Alt` changes nothing they can see. The alternative — leaving
+	// focus behind until the release — puts the keyboard on one window while another is raised in front
+	// of it, and a cycle whose release is never seen leaves a person typing into something they cannot
+	// see. Nested gyro loses that release routinely (175), so this is the case rather than the corner.
+	[[nodiscard]] EntityId Focused() const noexcept
+	{
+		if (!m_Candidate.IsNull() && Contains(m_Candidate))
+		{
+			return m_Candidate;
+		}
+
+		return m_Stack.empty() ? EntityId{} : m_Stack.back();
+	}
 
 	// A window became focusable, which is *mapped* for a client's toplevel. Takes focus, per the stack
 	// policy above, and moves an entity already in the stack to the top rather than adding it twice.
@@ -56,6 +78,11 @@ public:
 
 		std::erase(m_Stack, id);
 		m_Stack.push_back(id);
+
+		// A window opening ends a walk through the windows, because the walk is about which of the ones
+		// already there a person meant and this is a new answer to that. Without it the cycle's cursor
+		// would go on holding focus and the application somebody just launched would open behind it.
+		m_Candidate = EntityId{};
 	}
 
 	// A window stopped being focusable: unmapped, retired, or destroyed. Focus falls to the entity
@@ -81,7 +108,41 @@ public:
 
 		std::rotate(at, at + 1, m_Stack.end());
 
+		// Anything that names a window outright — a click, a shell, the landing of a cycle — settles where
+		// focus is, so there is nothing left to be walking. It matters for the click: a person who
+		// abandons a half-finished `Alt+Tab` by reaching for the mouse would otherwise keep typing into
+		// the window the cursor was left on.
+		m_Candidate = EntityId{};
+
 		return true;
+	}
+
+	// One step of `Alt+Tab`: the window after the one the cycle is on, and the one before it. The answer
+	// is what the caller raises, and it is null only where there are no windows at all.
+	//
+	// **The walk does not reorder anything, which is the difference between cycling and swapping.**
+	// `Focus` moves its target to the top, so stepping with it would make every second press go back
+	// where it came from and a third window would be unreachable. So the cursor is a window rather than
+	// a position in the stack, and the order underneath it stays exactly as a person's history left it
+	// until `EndCycle` writes the landing into it.
+	//
+	// **A cursor that is a window rather than an index is also what survives a window closing under it.**
+	// An application that exits mid-gesture takes its entry out of the stack, and an index into it would
+	// then be pointing at somebody else — where a name that is no longer there simply resumes the walk
+	// from the focused window, which is what a person would expect of the one that just vanished.
+	EntityId CycleNext() noexcept { return Step(true); }
+	EntityId CyclePrevious() noexcept { return Step(false); }
+
+	// The hand came off `Alt`. Where the cycle landed becomes the most recent window, so the *next*
+	// gesture starts from here — and where nothing was cycling, or where the window it was on has gone,
+	// this is null and changes nothing.
+	EntityId EndCycle()
+	{
+		const EntityId landed = m_Candidate;
+
+		m_Candidate = EntityId{};
+
+		return (!landed.IsNull() && Focus(landed)) ? landed : EntityId{};
 	}
 
 	// Whether this entity is one of the windows that could take focus, which is the question the pointer
@@ -101,7 +162,29 @@ public:
 	[[nodiscard]] std::size_t Count() const noexcept { return m_Stack.size(); }
 
 private:
+	// Both directions of the walk. Forward is *down* the stack, which is towards the window a person used
+	// before this one, and both ends wrap.
+	EntityId Step(bool forward) noexcept
+	{
+		if (m_Stack.empty())
+		{
+			return EntityId{};
+		}
+
+		const auto count = static_cast<std::ptrdiff_t>(m_Stack.size());
+		const auto at = std::find(m_Stack.begin(), m_Stack.end(), m_Candidate);
+		const std::ptrdiff_t from = (at == m_Stack.end()) ? count - 1 : at - m_Stack.begin();
+
+		m_Candidate = m_Stack[static_cast<std::size_t>((from + (forward ? count - 1 : 1)) % count)];
+
+		return m_Candidate;
+	}
+
 	// Newest last. A vector and a scan, because the length is the windows on the machine and every verb
 	// here runs when one opens or closes rather than per frame or per keystroke.
 	std::vector<EntityId> m_Stack;
+
+	// Where a walk through the windows has got to, and null when nobody is walking. It is deliberately
+	// not a position: see `CycleNext`.
+	EntityId m_Candidate;
 };

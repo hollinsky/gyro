@@ -4,6 +4,7 @@
 #include <memory>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "Core/Fd.h"
 #include "Core/Input.h"
@@ -100,6 +101,20 @@ enum class HostListener : std::uint8_t
 	Handover,
 };
 
+// What one `Alt+Tab` key did, on its way to the world. Three values rather than a signed step, because
+// the end of a gesture is not a distance and a person walking backwards is not walking minus one.
+enum class FocusCycle : std::uint8_t
+{
+	// The window a person used before this one, and the one before that.
+	Next,
+
+	// Back towards the window they started on.
+	Previous,
+
+	// The hand came off `Alt`: where the walk stopped is where they meant to be.
+	End,
+};
+
 class ClientHost final : public ISceneAuthor
 {
 public:
@@ -183,6 +198,13 @@ public:
 	// listening. [Seat.h](Seat.h) carries the routing.
 	void OnKey(const KeyEvent& event, bool consumed);
 
+	// One step of `Alt+Tab`, or the hand coming off `Alt`. The root's to call, because the chord that
+	// read the key is its own — and it is a verb of this host's rather than something the root does to
+	// the world directly, because the world is only in hand inside `Advance`, which is the pointer's
+	// argument below applied to a keystroke. [Input/Chord.h](../Input/Chord.h) has why the binding is
+	// what it is; [Scene/Focus.h](../Scene/Focus.h) has what the walk does.
+	void OnFocusCycle(FocusCycle step);
+
 	// The pointer's three, and they are the root's to call for `OnKey`'s reason. None of them routes
 	// anything: a displacement has already moved `Scene/Pointer.h`, and what the seat takes from a
 	// motion is only the instant it happened at — the buttons and the scroll increments are held until
@@ -232,6 +254,12 @@ public:
 	[[nodiscard]] Wake Advance(SceneStore& scene, ITextures& textures, Instant now) override;
 
 private:
+	// The `Alt+Tab` keys of this wakeup, in the order they arrived, applied at the top of `Advance` where
+	// the store is. A vector rather than a step count and a flag, so that a walk which ends and another
+	// which begins inside one iteration stay two gestures rather than becoming one — which a person can
+	// produce with a fast enough hand and nothing else would catch.
+	std::vector<FocusCycle> m_FocusCycle;
+
 	// One entity's pixels reached the glass. Everything a client is owed for that is a surface's, and
 	// the table that turns the id into one is `HostContext`'s.
 	//

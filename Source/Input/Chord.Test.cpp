@@ -209,3 +209,98 @@ GYRO_TEST(Chord, DoesNotStickWhenAModifierIsHeldTwice)
 	GYRO_CHECK(!released.Press(KEY_LEFTALT).Consumed);
 	GYRO_CHECK(!released.Press(KEY_ESC).Consumed);
 }
+
+// `Alt+Tab`, which is the one binding here that is not behind the leader: the walk, the direction, the
+// keys it must not take, and the release that lands it.
+
+GYRO_TEST(Chord, AltTabStepsForEveryPressAndLandsWhenAltComesUp)
+{
+	Keyboard keyboard;
+
+	GYRO_CHECK(!keyboard.Press(KEY_LEFTALT).Consumed);
+
+	// Every press is a step, because a person walking past three windows presses three times.
+	const ChordVerdict first = keyboard.Press(KEY_TAB);
+	const ChordVerdict second = keyboard.Press(KEY_TAB);
+
+	GYRO_CHECK(first.Action == ChordAction::CycleFocus);
+	GYRO_CHECK(first.Consumed);
+	GYRO_CHECK(second.Action == ChordAction::CycleFocus);
+	GYRO_CHECK(second.Consumed);
+
+	// The release is swallowed for its press's sake, exactly as an armed chord's is.
+	GYRO_CHECK(keyboard.Release(KEY_TAB).Consumed);
+
+	const ChordVerdict landed = keyboard.Release(KEY_LEFTALT);
+
+	GYRO_CHECK(landed.Action == ChordAction::CycleFocusEnd);
+
+	// The modifier itself is never taken from the client: what a person is holding is a fact about their
+	// hands rather than about who the compositor decided was listening.
+	GYRO_CHECK(!landed.Consumed);
+}
+
+GYRO_TEST(Chord, ShiftWalksTheOtherWay)
+{
+	Keyboard keyboard;
+
+	GYRO_CHECK(!keyboard.Press(KEY_LEFTALT).Consumed);
+	GYRO_CHECK(keyboard.Press(KEY_TAB).Action == ChordAction::CycleFocus);
+
+	GYRO_CHECK(!keyboard.Press(KEY_RIGHTSHIFT).Consumed);
+	GYRO_CHECK(keyboard.Press(KEY_TAB).Action == ChordAction::CycleFocusBack);
+
+	// And letting go of `Shift` in the middle of a gesture goes on walking forwards, because the hand
+	// that reached for it is still on `Alt`.
+	GYRO_CHECK(keyboard.Release(KEY_RIGHTSHIFT).Action == ChordAction::None);
+	GYRO_CHECK(keyboard.Press(KEY_TAB).Action == ChordAction::CycleFocus);
+}
+
+GYRO_TEST(Chord, TabIsTheClientsWhenNobodyIsHoldingAlt)
+{
+	Keyboard keyboard;
+
+	const ChordVerdict bare = keyboard.Press(KEY_TAB);
+
+	GYRO_CHECK(bare.Action == ChordAction::None);
+	GYRO_CHECK(!bare.Consumed);
+
+	// Which is the key this mechanism most has to leave alone: it is how a person moves between the
+	// fields of a form.
+	GYRO_CHECK(!keyboard.Release(KEY_TAB).Consumed);
+
+	// And a stray `Alt` release with nothing walking is not a landing.
+	GYRO_CHECK(!keyboard.Press(KEY_LEFTALT).Consumed);
+	GYRO_CHECK(keyboard.Release(KEY_LEFTALT).Action == ChordAction::None);
+}
+
+GYRO_TEST(Chord, TheWalkOutlivesOneOfTwoAltKeys)
+{
+	// Both `Alt` keys down and one released is still `Alt` held, so the walk is still in flight — the
+	// same argument the leader's own modifiers rest on.
+	Keyboard keyboard;
+
+	GYRO_CHECK(!keyboard.Press(KEY_LEFTALT).Consumed);
+	GYRO_CHECK(!keyboard.Press(KEY_RIGHTALT).Consumed);
+	GYRO_CHECK(keyboard.Press(KEY_TAB).Action == ChordAction::CycleFocus);
+
+	GYRO_CHECK(keyboard.Release(KEY_LEFTALT).Action == ChordAction::None);
+	GYRO_CHECK(keyboard.Release(KEY_RIGHTALT).Action == ChordAction::CycleFocusEnd);
+}
+
+GYRO_TEST(Chord, TheLeaderSwallowsTabRatherThanWalking)
+{
+	// `Ctrl+Alt+Esc` and then `Tab` is a verb that does not exist, and the key is taken for the reason
+	// every mistyped verb is: a stray `Tab` must not reach a client out of a chord it did not complete.
+	Keyboard keyboard;
+
+	GYRO_CHECK(Arm(keyboard).Consumed);
+
+	const ChordVerdict verb = keyboard.Press(KEY_TAB);
+
+	GYRO_CHECK(verb.Action == ChordAction::None);
+	GYRO_CHECK(verb.Consumed);
+
+	// And nothing is walking, so the hand coming off `Alt` lands nothing.
+	GYRO_CHECK(keyboard.Release(KEY_LEFTALT).Action == ChordAction::None);
+}

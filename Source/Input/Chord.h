@@ -37,6 +37,22 @@
 // escape hatch must not depend on the layer above it working. A keymap that failed to compile, a
 // layout somebody selected, a seat that has not been created yet — none of them may take the way out
 // away, and a physical key is the only thing none of them can move.
+//
+// **Alt+Tab is the one binding here that is not behind the leader**, and it is not debugging: it is
+// the third stand-in for the shell that does not exist yet, beside the two in
+// [Protocol/Floor.h](../Protocol/Floor.h) — where a window opens and where a click puts focus is
+// already gyro's to decide, and *which window a person meant next* is the same question with a
+// keyboard in front of it. It cannot be a verb behind the leader for a reason about the gesture
+// rather than about the key: cycling needs somewhere to stop, and a held modifier is the only thing
+// on a keyboard that says *I am still choosing* and then says *this one*. The leader disarms after
+// one verb, so it can only ever step once — and one step against a most-recently-used stack is a swap
+// between the last two windows, which never reaches a third.
+//
+// **`Alt` held and `Tab` pressed steps, `Shift` reverses it, and letting `Alt` go lands.** Every
+// Wayland compositor takes this combination, so no client is losing a key it could have expected to
+// keep, and it is where a person's hand already goes. The caveat is the leader's own, one level worse:
+// a nested gyro is behind another compositor's bindings and `Alt+Tab` is the *first* thing a host
+// claims, so this works on a panel and not inside a window.
 
 namespace Input
 {
@@ -59,6 +75,18 @@ enum class ChordAction : std::uint8_t
 
 	// Write what the trace ring is holding, which is the same request `SIGUSR1` makes.
 	Trace,
+
+	// Move focus to the next window, and to the previous one. Both raise what they land on, because
+	// with no shell drawing a switcher the raise *is* the switcher — the Floorplanner centres every
+	// window on the same point, so a step that only moved focus would be a gesture a person cannot see.
+	CycleFocus,
+	CycleFocusBack,
+
+	// The hand came off `Alt`: whatever the cycle is on is where a person meant to be. It is a separate
+	// action rather than something the steps do themselves because that is the whole reason the binding
+	// is a held modifier — until this arrives the walk can still go further, and the order it is walking
+	// must not be rewritten underneath it.
+	CycleFocusEnd,
 
 	// Write what the panel is showing, as a PAM per output.
 	//
@@ -95,6 +123,16 @@ public:
 		{
 			Hold(event);
 
+			// **The last `Alt` coming up is what ends a cycle**, and it is the one thing a modifier here
+			// produces an action for. Both sides are watched together, so a person holding both and
+			// releasing one goes on choosing.
+			if (m_Cycling && m_Alt == 0)
+			{
+				m_Cycling = false;
+
+				return { .Action = ChordAction::CycleFocusEnd };
+			}
+
 			// Never consumed and never disarming. Releasing `Ctrl+Alt` between the leader and its verb is
 			// what a person's hand does on the way to pressing a letter, and a chord that cancelled there
 			// would be one nobody could complete.
@@ -104,8 +142,9 @@ public:
 		if (!event.Pressed)
 		{
 			// A release while armed is swallowed for its press's sake: the press was, so a client that
-			// received neither is consistent and one that received only the release is not.
-			return { .Action = ChordAction::None, .Consumed = m_Armed };
+			// received neither is consistent and one that received only the release is not. A `Tab` coming
+			// up mid-cycle is the same debt.
+			return { .Action = ChordAction::None, .Consumed = m_Armed || (m_Cycling && event.Code == KEY_TAB) };
 		}
 
 		if (m_Armed && Elapsed(m_ArmedAt, event.When) > ChordTimeout)
@@ -118,6 +157,16 @@ public:
 			m_Armed = false;
 
 			return { .Action = Verb(event.Code), .Consumed = true };
+		}
+
+		// **Before the leader and after it**, which is to say it is neither: the leader is a mode and this
+		// is a modifier a person is holding, so a `Tab` that arrives while a verb is being waited for was
+		// already swallowed above as a key that named none.
+		if (event.Code == KEY_TAB && m_Alt != 0)
+		{
+			m_Cycling = true;
+
+			return { .Action = m_Shift != 0 ? ChordAction::CycleFocusBack : ChordAction::CycleFocus, .Consumed = true };
 		}
 
 		if (event.Code == KEY_ESC && m_Control != 0 && m_Alt != 0)
@@ -139,19 +188,31 @@ private:
 	// somebody reports as intermittent.
 	[[nodiscard]] static constexpr bool IsModifier(std::uint32_t code) noexcept
 	{
-		return code == KEY_LEFTCTRL || code == KEY_RIGHTCTRL || code == KEY_LEFTALT || code == KEY_RIGHTALT;
+		return code == KEY_LEFTCTRL || code == KEY_RIGHTCTRL || code == KEY_LEFTALT || code == KEY_RIGHTALT ||
+		       code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT;
 	}
 
 	// A bitmask per modifier rather than a count, so that a lost release — a key held across whatever
 	// takes a device away — cannot leave a modifier stuck down at a depth nothing brings back to zero.
 	void Hold(const KeyEvent& event) noexcept
 	{
-		const bool left = event.Code == KEY_LEFTCTRL || event.Code == KEY_LEFTALT;
+		const bool left = event.Code == KEY_LEFTCTRL || event.Code == KEY_LEFTALT || event.Code == KEY_LEFTSHIFT;
 		const std::uint8_t bit = left ? 0x1 : 0x2;
 
-		std::uint8_t& held = (event.Code == KEY_LEFTCTRL || event.Code == KEY_RIGHTCTRL) ? m_Control : m_Alt;
+		std::uint8_t& held = Held(event.Code);
 
 		held = event.Pressed ? static_cast<std::uint8_t>(held | bit) : static_cast<std::uint8_t>(held & ~bit);
+	}
+
+	// Which of the three a code belongs to. `IsModifier` has already said it is one of them.
+	[[nodiscard]] std::uint8_t& Held(std::uint32_t code) noexcept
+	{
+		if (code == KEY_LEFTCTRL || code == KEY_RIGHTCTRL)
+		{
+			return m_Control;
+		}
+
+		return (code == KEY_LEFTALT || code == KEY_RIGHTALT) ? m_Alt : m_Shift;
 	}
 
 	// The verbs, and each one names something that exists: a recovery console and a gym cycle would
@@ -175,6 +236,11 @@ private:
 
 	std::uint8_t m_Control = 0;
 	std::uint8_t m_Alt = 0;
+	std::uint8_t m_Shift = 0;
+
+	// Whether a walk through the windows is in flight, which is only ever true with `Alt` down. It says
+	// nothing about *where* the walk is: that is the world's, and this class has never seen one.
+	bool m_Cycling = false;
 
 	bool m_Armed = false;
 	Instant m_ArmedAt{};
