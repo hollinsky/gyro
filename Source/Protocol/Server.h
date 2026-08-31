@@ -142,6 +142,12 @@ public:
 	// things it says it is.
 	[[nodiscard]] wl_display* Display() const noexcept { return m_Display; }
 
+	// The loop `PollFd` is the file of. Handed out so that a party with a descriptor of its own to
+	// watch — a client's acquire point, per [ExplicitSync.h](ExplicitSync.h) — lands behind the same
+	// number the root already sleeps on, rather than becoming a second thing the composition root has
+	// to be told to wait for.
+	[[nodiscard]] wl_event_loop* EventLoop() const noexcept { return m_EventLoop; }
+
 	// Read from every client that has data waiting and run the handlers their requests reach. Returns
 	// at once when nothing is ready — the root's wait is what parks the thread. A refused client is
 	// ended inside libwayland and is not a failure here; a failure is the loop itself faulting.

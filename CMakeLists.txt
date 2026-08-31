@@ -982,6 +982,7 @@ gyro_add_module(Protocol DISPATCH
 		Data.cpp
 		Dmabuf.cpp
 		Drag.cpp
+		ExplicitSync.cpp
 		Floor.cpp
 		Host.cpp
 		Keymap.cpp
@@ -997,10 +998,12 @@ gyro_add_module(Protocol DISPATCH
 		Shm.cpp
 		Subcompositor.cpp
 		Surface.cpp
+		Sync.cpp
 		Viewporter.cpp
 	TESTS
 		Dmabuf.Test.cpp
 		Drag.Test.cpp
+		ExplicitSync.Test.cpp
 		Floor.Test.cpp
 		Host.Test.cpp
 		Positioner.Test.cpp

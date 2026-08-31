@@ -233,8 +233,13 @@ std::span<const std::byte> ClientShmBuffer::Pixels() const
 	return mapped.empty() ? m_Pool->Copy(m_Offset, needed) : mapped;
 }
 
-Result<TextureId> ClientShmBuffer::Adopt(ITextures& textures)
+Result<TextureId> ClientShmBuffer::Adopt(ITextures& textures, SyncTimelinePoint release)
 {
+	// **Never set, and the assertion is the comment.** A `wl_shm` buffer answers `SupportsExplicitSync`
+	// with false, so a client that named a timeline point for one was ended with `unsupported_buffer`
+	// before the commit reached here. The parameter exists because the verb is one verb.
+	static_cast<void>(release);
+
 	const std::span<const std::byte> pixels = Pixels();
 
 	if (pixels.empty())

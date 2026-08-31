@@ -207,7 +207,7 @@ GYRO_TEST(Shm, APoolThatCannotTakeTheSealIsReadRatherThanRefused)
 	RecordingTextures textures;
 
 	const std::unique_ptr<ClientShmBuffer> buffer = Cut(pool, 0, 16, 4, 64);
-	GYRO_REQUIRE(buffer->Adopt(textures).has_value());
+	GYRO_REQUIRE(buffer->Adopt(textures, {}).has_value());
 
 	GYRO_CHECK_EQ(textures.Pixels.size(), std::size_t{ 64 * 4 });
 	GYRO_CHECK(textures.Pixels.front() == std::byte{ 0x3C });
@@ -239,7 +239,7 @@ GYRO_TEST(Shm, TruncatingAnUnsealablePoolCostsTheFrameAndNotTheCompositor)
 	RecordingTextures textures;
 
 	GYRO_CHECK(buffer->Pixels().empty());
-	GYRO_CHECK(!buffer->Adopt(textures).has_value());
+	GYRO_CHECK(!buffer->Adopt(textures, {}).has_value());
 }
 
 GYRO_TEST(Shm, APoolTheClientLeftUnsealedIsSealedBeforeItIsMapped)
@@ -398,7 +398,7 @@ GYRO_TEST(Shm, AnOpaqueBufferSaysSoRatherThanCostingAPassOverItsPixels)
 	RecordingTextures textures;
 
 	const std::unique_ptr<ClientShmBuffer> opaque = Cut(pool, 0, 4, 4, 16, Wayland::Server::WlShmFormat::Xrgb8888);
-	GYRO_REQUIRE(opaque->Adopt(textures).has_value());
+	GYRO_REQUIRE(opaque->Adopt(textures, {}).has_value());
 
 	// The top byte of an `xrgb8888` pixel is whatever the toolkit left there. Carrying that as a word
 	// rather than fixing it up is the difference between a window you can see the desktop through and
@@ -409,7 +409,7 @@ GYRO_TEST(Shm, AnOpaqueBufferSaysSoRatherThanCostingAPassOverItsPixels)
 	GYRO_CHECK_EQ(textures.Pixels.size(), std::size_t{ 64 });
 
 	const std::unique_ptr<ClientShmBuffer> translucent = Cut(pool, 0, 4, 4, 16, Wayland::Server::WlShmFormat::Argb8888);
-	GYRO_REQUIRE(translucent->Adopt(textures).has_value());
+	GYRO_REQUIRE(translucent->Adopt(textures, {}).has_value());
 
 	GYRO_CHECK(textures.Alpha == TextureAlpha::Premultiplied);
 }

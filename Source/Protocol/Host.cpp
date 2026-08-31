@@ -128,6 +128,36 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		return Failure(ENOMEM, "advertising zwp_linux_dmabuf_v1");
 	}
 
+	// **Explicit synchronization, and its absence is a degradation rather than a failure.** The global
+	// exists only where a DRM node opened and the kernel can arm a wait on a syncobj point; on a machine
+	// with neither there is nothing to synchronize — no dmabuf clients, because the feedback above named
+	// no device — and a global that would have to break the ordering it promises is worse than none.
+	//
+	// The node is the one clients were just told to allocate against, which is the same number for the
+	// same reason it is in [Nested/Sync.h](../Nested/Sync.h): a syncobj is DRM core, so any node can
+	// import a handle, and matching the client's own device is a courtesy rather than a requirement.
+	if (const Result<void> sync = m_Sync.Open(textures.MainDevice(), *m_Server.EventLoop()); !sync)
+	{
+		spdlog::info(
+			"no explicit synchronization, so clients fall back to implicit fences and a late one can "
+			"hold up the composite: {}",
+			sync.error()
+		);
+	}
+	else
+	{
+		m_Context.SetSync(m_Sync);
+
+		m_SyncobjGlobal = Wayland::Server::WpLinuxDrmSyncobjManagerV1::Advertise(*display, SyncobjVersion, m_Syncobj);
+
+		if (m_SyncobjGlobal == nullptr)
+		{
+			return Failure(ENOMEM, "advertising wp_linux_drm_syncobj_manager_v1");
+		}
+
+		spdlog::info("explicit synchronization on {}", m_Sync.Path());
+	}
+
 	m_ShellGlobal = Wayland::Server::XdgWmBase::Advertise(*display, ShellVersion, m_Shell);
 
 	if (m_ShellGlobal == nullptr)

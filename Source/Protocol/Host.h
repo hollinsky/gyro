@@ -16,6 +16,7 @@
 #include "Protocol/Context.h"
 #include "Protocol/Data.h"
 #include "Protocol/Dmabuf.h"
+#include "Protocol/ExplicitSync.h"
 #include "Protocol/Floor.h"
 #include "Protocol/Output.h"
 #include "Protocol/Presentation.h"
@@ -257,6 +258,13 @@ private:
 
 	DmabufGlobal m_Dmabuf{ m_Context };
 	wl_global* m_DmabufGlobal = nullptr;
+
+	// The DRM node clients' timelines are imported against, and the global that lets them name one.
+	// Both absent on a machine where no node opened, which is the whole of the availability rule — see
+	// [ExplicitSync.h](ExplicitSync.h).
+	ExplicitSync m_Sync;
+	SyncobjGlobal m_Syncobj{ m_Context };
+	wl_global* m_SyncobjGlobal = nullptr;
 
 	ShellGlobal m_Shell{ m_Context };
 	wl_global* m_ShellGlobal = nullptr;

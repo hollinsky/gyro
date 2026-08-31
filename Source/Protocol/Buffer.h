@@ -3,6 +3,7 @@
 #include "Core/Result.h"
 #include "Core/Texture.h"
 #include "Geometry/Space.h"
+#include "Protocol/Sync.h"
 #include "Scene/Textures.h"
 #include "Wayland/Server/Wayland.h"
 
@@ -31,7 +32,24 @@ public:
 	//
 	// Whatever the texture space refused, which the caller answers to the client rather than dropping —
 	// a window that silently never appears is the hardest bug there is to report.
-	[[nodiscard]] virtual Result<TextureId> Adopt(ITextures& textures) = 0;
+	// **`release` is the timeline point a `wp_linux_drm_syncobj_surface_v1` named for this adoption**,
+	// or nothing for the ordinary case. It is per adoption rather than per buffer for the same reason
+	// `wl_buffer.release` is counted rather than sent once: a buffer committed twice before the first
+	// frame left the screen has two ids and two points against it, and the buffer is the only party
+	// that sees both. Unset on every implementation but the dmabuf one, which is what
+	// `SupportsExplicitSync` below already refused the client for.
+	[[nodiscard]] virtual Result<TextureId> Adopt(ITextures& textures, SyncTimelinePoint release) = 0;
+
+	// Whether a client may name timeline points for content arriving in this buffer.
+	//
+	// **False is the copying answer and true is the borrowing one**, which is `ReleasesImmediately`
+	// asked from the other end and is not the same question. A `wl_shm` buffer's pixels are *read* by
+	// `Adopt` itself, so honouring an acquire point on one would mean deferring the copy — and the copy
+	// is what makes the buffer the client's again in the same step. The protocol has a name for
+	// declining that, `unsupported_buffer`, and says outright that a compositor need support explicit
+	// synchronization only for buffers the dmabuf protocol made. So a software client is told plainly
+	// rather than served a contract gyro would have to break the ordering of.
+	[[nodiscard]] virtual bool SupportsExplicitSync() const noexcept { return false; }
 
 	// Whether the client may draw into this buffer again the instant `Adopt` returns.
 	//

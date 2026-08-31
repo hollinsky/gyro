@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "Protocol/Buffer.h"
+#include "Protocol/ExplicitSync.h"
 #include "Protocol/Presentation.h"
 #include "Protocol/Region.h"
 #include "Protocol/Subcompositor.h"
@@ -228,6 +229,18 @@ ClientSurface::~ClientSurface()
 		m_Viewport = nullptr;
 
 		viewport->ForgetSurface();
+	}
+
+	// **And the synchronization object, for the viewport's reason exactly.** A client destroying a
+	// `wl_surface` and then its `wp_linux_drm_syncobj_surface_v1` is legal, and every request on the
+	// second after the first owes `no_surface` rather than reaching through a freed pointer. Whatever
+	// wait it had armed goes down with it, and any release point already handed to a buffer is the
+	// buffer's now and is still owed.
+	if (ClientSyncSurface* const sync = m_Sync; sync != nullptr)
+	{
+		m_Sync = nullptr;
+
+		sync->ForgetSurface();
 	}
 
 	// The client is gone and its window with it, so the pixels stop being drawn. Retiring is the id
@@ -618,6 +631,16 @@ Wayland::Server::WlCallbackHandler* ClientSurface::OnGetRelease()
 
 void ClientSurface::OnCommit()
 {
+	// **Explicit synchronization's four commit-time errors, asked before either path runs.** They are
+	// questions about the pair the client staged rather than about the world, so they are answered where
+	// the pair lives — and answered first, because a client that got them wrong is ended rather than
+	// cached. The two points come across into this surface's own state in the same step, since the
+	// object holding them may be destroyed the instant after this returns.
+	if (m_Sync != nullptr && !m_Sync->TakeCommit(m_Attached, m_CommitAcquire, m_CommitRelease))
+	{
+		return;
+	}
+
 	// **A synchronized subsurface's commit changes nothing a person can see, and that is the whole of
 	// the mode.** A toolkit moving a video and the controls over it commits each of them and then the
 	// window, and what it is buying is that the three arrive together — a compositor that applied each
@@ -677,10 +700,26 @@ void ClientSurface::ApplyCached()
 		return;
 	}
 
+	// **The cache waits on the same point a direct commit does, and the surface rather than the parent
+	// is what waits.** A synchronized subsurface's state is applied by whoever commits above it, so the
+	// exact reading of the protocol would hold the *parent's* whole commit until every child's acquire
+	// point had signalled — which is the atomicity the mode exists for. gyro holds only the child, and
+	// what that costs is a late subsurface landing a beat after the parent arrangement it belongs to.
+	// It is a real cost and it is stated in Open.md rather than hidden: the alternative is one late
+	// client freezing every surface in a tree, which is the failure this whole design refuses one level
+	// up.
+	if (HoldForAcquire())
+	{
+		return;
+	}
+
 	if (!CheckViewport(m_Cached))
 	{
 		return;
 	}
+
+	m_HeldForAcquire = false;
+	m_CommitAcquire = {};
 
 	const TextureId shown = m_Current.Content;
 
@@ -833,7 +872,10 @@ void ClientSurface::TakeContent(ITextures& textures)
 
 	if (buffer != nullptr)
 	{
-		if (const Result<TextureId> adopted = buffer->Adopt(textures); adopted)
+		// **The release point goes in with the adoption**, which is what pairs it with the one id it is
+		// about: a buffer committed twice before the first frame left the screen has two ids and two
+		// release points against it, and the buffer is what keeps them apart.
+		if (const Result<TextureId> adopted = buffer->Adopt(textures, std::move(m_CommitRelease)); adopted)
 		{
 			m_Pending.Content = *adopted;
 			m_Pending.ContentSize = buffer->Extent();
@@ -865,6 +907,10 @@ void ClientSurface::TakeContent(ITextures& textures)
 	// instead, and a client told it may reuse one would be drawing into the buffer a panel is scanning
 	// out; that buffer answers its own release when the watermark says nobody is reading it.
 	//
+	// Consumed whether or not there was a buffer to hand it to, because it described *this* commit and
+	// a point left staged would be signalled for the next one's buffer.
+	m_CommitRelease = {};
+
 	// The staged attach is dropped either way, because it has been consumed whichever it was.
 	if (buffer == nullptr || buffer->ReleasesImmediately())
 	{
@@ -874,6 +920,79 @@ void ClientSurface::TakeContent(ITextures& textures)
 	{
 		m_Attached.reset();
 	}
+}
+
+bool ClientSurface::AdoptSync(ClientSyncSurface& sync) noexcept
+{
+	if (m_Sync != nullptr)
+	{
+		return false;
+	}
+
+	m_Sync = &sync;
+
+	return true;
+}
+
+void ClientSurface::ForgetSync(const ClientSyncSurface& sync) noexcept
+{
+	if (m_Sync == &sync)
+	{
+		m_Sync = nullptr;
+	}
+}
+
+bool ClientSurface::HoldForAcquire()
+{
+	// **An unset point is not a client that is ready, it is a commit with nothing to synchronize** —
+	// every surface without one of these objects, and every commit that did not attach.
+	if (!m_CommitAcquire.IsSet())
+	{
+		return false;
+	}
+
+	// The query, which is the only question asked of the client's counter on this path. A point that has
+	// already signalled is the ordinary case for a client that finished its frame before it committed,
+	// and it costs one ioctl and no wait at all.
+	if (m_CommitAcquire.HasSignalled())
+	{
+		m_CommitAcquire = {};
+
+		return false;
+	}
+
+	if (m_Sync == nullptr || !m_Sync->Watch(m_CommitAcquire))
+	{
+		// Nothing could be armed, so waiting would be waiting forever. Publishing samples a buffer the
+		// client has not finished, which is a tear; a window that never updates again is worse, and the
+		// cause is gyro's kernel rather than the client. The warning is at the arming site, where the
+		// errno is.
+		m_CommitAcquire = {};
+
+		return false;
+	}
+
+	m_HeldForAcquire = true;
+
+	return true;
+}
+
+void ClientSurface::OnAcquireSignalled()
+{
+	m_HeldForAcquire = false;
+	m_CommitAcquire = {};
+
+	// **Which half resumes is which half held.** A synchronized subsurface's state is in the cache and a
+	// direct commit's is in pending, and the two are exclusive: a surface is synchronized or it is not,
+	// for as long as its role says so.
+	if (m_HasCached)
+	{
+		ApplyCached();
+
+		return;
+	}
+
+	Publish();
 }
 
 void ClientSurface::Apply()
@@ -901,6 +1020,24 @@ void ClientSurface::Apply()
 			ReleaseStaged();
 		}
 	}
+
+	// **Held here and nowhere earlier**, which is what makes explicit synchronization cost a late
+	// client a frame and cost gyro nothing. Everything above has already happened — the buffer is
+	// imported, the callbacks are owed, the release point is registered against the id — and what waits
+	// is only the moment the world starts naming it. The client's fence never reaches gyro's queue or a
+	// plane, so a client that is late holds up its own window and no other. See decision 174.
+	if (HoldForAcquire())
+	{
+		return;
+	}
+
+	Publish();
+}
+
+void ClientSurface::Publish()
+{
+	m_HeldForAcquire = false;
+	m_CommitAcquire = {};
 
 	// **After the attach and before the adoption**, which is the one point the buffer this state will
 	// be shown with is known: `out_of_buffer` is a question about the buffer that arrived in this very

@@ -167,12 +167,17 @@ public:
 	// The resource is already destroyed when this runs, and `OnGone` follows immediately.
 	void OnDestroy() override {}
 
-	[[nodiscard]] Result<TextureId> Adopt(ITextures& textures) override;
+	[[nodiscard]] Result<TextureId> Adopt(ITextures& textures, SyncTimelinePoint release) override;
 
 	[[nodiscard]] PixelSize<BufferSpace> Extent() const noexcept override { return m_Size; }
 
 	// False, and this is the field the whole file turns on. See the header comment.
 	[[nodiscard]] bool ReleasesImmediately() const noexcept override { return false; }
+
+	// True, and it is the same fact as the line above read forward: nothing is copied, so the client has
+	// to be told when gyro stopped reading — and a client that would rather be told on its own timeline
+	// than by an event is what `wp_linux_drm_syncobj_v1` is.
+	[[nodiscard]] bool SupportsExplicitSync() const noexcept override { return true; }
 
 	void OnTextureReleased() noexcept override;
 
@@ -192,6 +197,16 @@ private:
 	std::vector<Plane> m_Planes;
 
 	std::size_t m_Outstanding = 0;
+
+	// The release points owed on this buffer, one per adoption that named one.
+	//
+	// **Signalled together at zero rather than one per retirement**, which is exactly the rule the
+	// `wl_buffer.release` above already follows and is right for the same reason: a buffer with two ids
+	// against it is still being read by whichever of them has not retired, and a client told otherwise
+	// draws into memory a panel is scanning out. `OnTextureReleased` carries no id, so per-adoption
+	// ordering is not knowable here — and it does not need to be, because signalling a point signals
+	// every point below it and the only safe moment is the one where nothing is reading at all.
+	std::vector<SyncTimelinePoint> m_Releases;
 };
 
 // One `zwp_linux_buffer_params_v1`: descriptors accumulating until `create` turns them into a buffer.

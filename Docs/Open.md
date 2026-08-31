@@ -381,18 +381,23 @@ is to do the work.
   pass (much cheaper, but the renderer grows a YUV output path it otherwise would not have), or both
   can be offered. HDR sharpens it — P010 and transfer functions. This is the one part of decision 26
   with a real performance number attached and it should not be decided from the armchair.
-- **A nested session's keyboard, and whether its pointer should be relative.** *(The handoff itself
-  is answered by
-  [decision 173](Decisions.md#173-nested-gyro-takes-input-from-the-hosts-seat-and-a-host-window-is-an-absolute-device-bound-to-the-output-it-is):
-  a bounded oldest-wins ring behind an `IEventSource`, rung once per host drain, dropping at the tail
-  because the producer runs where allocating is an abort. What is left is what rides it.)* The
-  keyboard is not bound, so the daily driver has no `Ctrl+Alt+Esc` and no way to write a trace from
-  inside the window — and binding one raises a question the pointer did not: gyro compiles its own
-  layout from `XKB_DEFAULT_*` while the host sends a keymap of its own, and a session where the two
-  disagree types the wrong letters. Ignoring the host's is probably right and means nested tests
-  gyro's layout rather than the session's, which should be said out loud rather than discovered.
-  Separately, the host's motion has already been through the host's acceleration curve, so gyro's own
-  curve and warp path are unexercised under the backend everything is developed on;
+- **A nested session types gyro's layout rather than the surrounding session's.** *(What is left of
+  this entry after
+  [decision 173](Decisions.md#173-nested-gyro-takes-input-from-the-hosts-seat-and-a-host-window-is-an-absolute-device-bound-to-the-output-it-is)
+  built the pointer and
+  [175](Decisions.md#175-a-nested-keyboard-forwards-keycodes-and-nothing-else-and-focus-leaving-releases-what-was-held)
+  built the keyboard. The handoff is a bounded oldest-wins ring behind an `IEventSource`, rung once
+  per host drain, dropping at the tail because the producer runs where allocating is an abort; the
+  keyboard rides it as keycodes with the host's keymap dropped.)* 175 settled the mechanism and left
+  the consequence: gyro compiles its own layout from `XKB_DEFAULT_*`, so a person who selected Dvorak
+  in their desktop and nests gyro inside it types QWERTY unless they set the variable too. That is
+  correct for testing gyro's own keymap path and wrong for the person doing the testing, and the two
+  candidate answers are opposite — read the host's keymap and forward it, which needs a channel from
+  `Nested` to `Protocol` across the whole waist and puts a layout in the one path built to have none,
+  or read the host's `XKB_DEFAULT_*` environment, which gyro already inherits and which is what a
+  toolkit would use. The second is nearly free and may simply be what already happens; nobody has
+  checked. Separately, the host's motion has already been through the host's acceleration curve, so
+  gyro's own curve and warp path are unexercised under the backend everything is developed on;
   `zwp_relative_pointer_v1` with a lock is the fix and costs a pointer that cannot leave the window.
 
 - **Clock offset for injected input.** Decision 26 keeps the claim that `t₀` is the event timestamp,
@@ -1635,3 +1640,43 @@ Worth stating what is *not* open: the corner quadrature decision 132 is mostly a
 executed. Nothing in the tree sets `DrawItem::Radius` to anything but zero, so every quad gyro draws
 today has square corners and `ShadowDeficit` returns at its first line. The measurement above is the
 separable term alone, and the first rounded corner on screen adds to it rather than being included.
+
+## The clients still on implicit sync are the stall explicit sync was built to remove
+
+[Decision 174](Decisions.md#174-gyro-serves-wp_linux_drm_syncobj_v1-and-a-clients-fence-is-waited-on-before-the-commit-rather-than-inside-the-frame)
+holds a commit until the client's acquire point signals, so no fence a client owns reaches gyro's queue
+submission. That is true only of the clients that ask. Everything else — which is every dmabuf client
+that has not adopted `wp_linux_drm_syncobj_v1`, and will remain most of them for years — is on implicit
+synchronization, where the kernel attaches the client's fence to the buffer and gyro's own submission
+waits on it at composite time. A late client is therefore still capable of holding up the composite for
+every window on the machine, at a priority gyro asked for and cannot use, and the trace shows a long
+GPU span rather than a wait on somebody else.
+
+The shape of the fix is the same and it is not obviously worth what it costs. A dmabuf's implicit fence
+is pollable: `poll(POLLIN)` on the descriptor answers *the writer has finished*, so a commit could be
+held on that exactly as it is held on an acquire point, with no protocol involved and no client
+cooperation. What is unmeasured is the cost of the poll on every commit of every software-paced
+client — one syscall per commit is nothing, but the fences are per plane and a client with no fence at
+all pays it to learn that.
+
+Worse, the answer is not honest for a client that is *reusing* a buffer: the implicit fence says the
+last writer finished, not that this frame's writer has started, so a toolkit that attaches a buffer it
+has not begun drawing into yet would be published early. That is the case explicit sync exists to name
+and implicit sync genuinely cannot. So the poll may be a strict improvement only for the single-buffer
+case and a lie for the double-buffered one, which is the question to settle before building it.
+
+## A held subsurface lands a beat after the arrangement it belongs to
+
+Decision 174 holds a synchronized subsurface's *own* cached state on its acquire point rather than
+holding the parent commit that would apply it. The exact reading of the protocol is the other one: the
+cache is applied by whoever commits above it, so a parent whose child is not ready has not got a
+complete arrangement to apply. What gyro does instead is let the parent apply everything that is ready
+and let the late child arrive on its own, which is a video frame landing one beat away from the
+controls drawn over it — precisely the tear `wl_subsurface`'s synchronized mode exists to prevent.
+
+The reason it is this way round is that the exact reading has a worse failure: one late child freezes
+every surface in the tree, including the ones that were ready, which is the hostage-taking decision 174
+refuses at the top level. What is open is whether there is a third answer — hold the parent, but only
+for a bounded number of refreshes, after which the ready surfaces go out without the late one. That
+needs a deadline the dispatch thread does not currently have, and it needs somebody to say what the
+bound is in terms of what a person sees.

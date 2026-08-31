@@ -172,7 +172,7 @@ GYRO_TEST(Dmabuf, DescriptorsAreBorrowedRatherThanCopiedSoTheReleaseIsOwed)
 	// buffer a panel is scanning out.
 	GYRO_CHECK(!buffer.ReleasesImmediately());
 
-	const Result<TextureId> adopted = buffer.Adopt(textures);
+	const Result<TextureId> adopted = buffer.Adopt(textures, {});
 
 	GYRO_REQUIRE(adopted.has_value());
 	GYRO_CHECK(buffer.OutstandingCount() == 1);
@@ -195,8 +195,8 @@ GYRO_TEST(Dmabuf, ABufferCommittedTwiceIsNotReleasedUntilBothFramesAreDone)
 		                       TextureFormat{ .Code = 0x34325241, .Modifier = 0 },
 		                       OnePlane(std::move(fd), 64U * 4U) };
 
-	GYRO_REQUIRE(buffer.Adopt(textures).has_value());
-	GYRO_REQUIRE(buffer.Adopt(textures).has_value());
+	GYRO_REQUIRE(buffer.Adopt(textures, {}).has_value());
+	GYRO_REQUIRE(buffer.Adopt(textures, {}).has_value());
 	GYRO_CHECK(buffer.OutstandingCount() == 2);
 
 	// The first frame's id retires and the second is still on screen. A release here is the tearing
@@ -231,7 +231,7 @@ GYRO_TEST(Dmabuf, ABufferTheClientDestroyedStopsBeingCalledBackAndTheIdStaysLive
 			                                         TextureFormat{ .Code = 0x34325241, .Modifier = 0 },
 			                                         OnePlane(std::move(fd), 64U * 4U) };
 
-		GYRO_REQUIRE(buffer->Adopt(textures).has_value());
+		GYRO_REQUIRE(buffer->Adopt(textures, {}).has_value());
 
 		delete buffer;
 	}
@@ -251,7 +251,7 @@ GYRO_TEST(Dmabuf, AnInertBufferRefusesRatherThanAdoptingNothing)
 	ClientDmabufBuffer buffer{ context, {}, {}, std::vector<ClientDmabufBuffer::Plane>{} };
 
 	GYRO_CHECK(buffer.IsInert());
-	GYRO_CHECK(!buffer.Adopt(textures).has_value());
+	GYRO_CHECK(!buffer.Adopt(textures, {}).has_value());
 }
 
 // What a client maps, checked against what it will read out of it.

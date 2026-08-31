@@ -10,9 +10,11 @@
 #include "Geometry/Space.h"
 #include "Protocol/Context.h"
 #include "Protocol/Region.h"
+#include "Protocol/Sync.h"
 #include "Wayland/Server/Wayland.h"
 
 class ClientPresentationFeedback;
+class ClientSyncSurface;
 
 // One frame reaching the glass, as much of it as a client is owed.
 //
@@ -412,6 +414,29 @@ public:
 		m_Pending.Viewport.Destination = destination;
 	}
 
+	// Claim this surface's explicit synchronization. False where a `wp_linux_drm_syncobj_surface_v1`
+	// already has it, which is that protocol's `surface_exists` and is raised by the caller for the
+	// role's reason.
+	//
+	// **A third claim beside the role and the viewport, and independent of both**, because it is not
+	// what a surface *is* either: a window, a subsurface and a cursor can each be explicitly
+	// synchronized, and each may have exactly one of these.
+	[[nodiscard]] bool AdoptSync(ClientSyncSurface& sync) noexcept;
+
+	// The synchronization object is going away. The staged points go with it, which is what the protocol
+	// says a destroy may do to points set since the last commit; a commit already held keeps its wait,
+	// because the object holds that and takes it down itself.
+	void ForgetSync(const ClientSyncSurface& sync) noexcept;
+
+	// The acquire point this surface's commit was held on has signalled. Called from the event loop
+	// source the synchronization object armed, which runs inside `Server::Poll` and therefore inside an
+	// `Advance` — so the store and the texture space are on the stack exactly as they are for a request.
+	void OnAcquireSignalled();
+
+	// Whether a commit is waiting on a client's acquire point. A test's way of asserting that a late
+	// client was held rather than that nothing was drawn.
+	[[nodiscard]] bool IsHeldForAcquire() const noexcept { return m_HeldForAcquire; }
+
 	// Claim this surface. False where something already has it, which is every role object's own
 	// `role` error and is raised by the caller because only it knows which one to name.
 	[[nodiscard]] bool AdoptRole(SurfaceRole& role) noexcept;
@@ -506,6 +531,22 @@ private:
 	// ordinary machine, so the walk is not paid for by the case that does not have one.
 	void Restack();
 
+	// Whether this commit has to wait, and the arming of that wait.
+	//
+	// **The check is a query and never a wait**, which is the whole of decision 174: a client's fence
+	// must not reach gyro's queue or a plane, so what happens here is a `DRM_IOCTL_SYNCOBJ_QUERY` and,
+	// where it says *not yet*, an eventfd the kernel will increment. False for a point that has already
+	// signalled, for a surface with no synchronization object, and for a wait that could not be armed —
+	// the last of which publishes rather than holding the window forever, because a kernel that refused
+	// the ioctl is gyro's problem and a frozen window would be the client's punishment for it.
+	[[nodiscard]] bool HoldForAcquire();
+
+	// The state the client stated becomes the state the world has. The tail of `Apply`, split out
+	// because it is also what an acquire point signalling resumes — and the split is where the whole of
+	// this protocol lands: everything above it is bookkeeping a commit does immediately, and everything
+	// below it is what a person can see.
+	void Publish();
+
 	// Pending becomes current, and pending's per-commit accumulations reset.
 	//
 	// **Damage resets and the rest does not**, which is the asymmetry the protocol actually specifies
@@ -550,6 +591,23 @@ private:
 	// Whatever gave this surface a meaning, or null while it has none. Not owned: a role object is a
 	// protocol object of its own with its own lifetime, and it lets go through `ForgetRole`.
 	SurfaceRole* m_Role = nullptr;
+
+	// The `wp_linux_drm_syncobj_surface_v1` on this surface, or null for every surface that has never
+	// had one — which is most of them. Not owned, and it lets go through `ForgetSync`.
+	ClientSyncSurface* m_Sync = nullptr;
+
+	// The two points the commit being applied named, moved out of the synchronization object by
+	// `TakeCommit` and consumed by `TakeContent` and `HoldForAcquire` respectively.
+	//
+	// **They are on the surface rather than on the object because they belong to the state**, exactly
+	// as the crop and scale a `wp_viewport` stages do: the object is a handle that may be destroyed the
+	// instant after a commit, and what has to survive that is the commit.
+	SyncTimelinePoint m_CommitAcquire;
+	SyncTimelinePoint m_CommitRelease;
+
+	// True while a commit is waiting on `m_CommitAcquire`. The state stays in `m_Pending` or `m_Cached`
+	// meanwhile and the world goes on showing the last frame this client finished.
+	bool m_HeldForAcquire = false;
 
 	// True once the client has been ended for overrunning `MaxDamageRects`.
 	bool m_Overrun = false;

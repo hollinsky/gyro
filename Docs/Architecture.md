@@ -162,6 +162,14 @@ achievable nested by driving `zwp_linux_dmabuf_v1` directly rather than going th
 
 Sync is uniform: DRM syncobj timelines throughout, exported from Vulkan timeline semaphores.
 On KMS that becomes `IN_FENCE_FD` / `OUT_FENCE_PTR`; nested it becomes `wp_linux_drm_syncobj_v1`.
+
+**That uniformity is about the timelines gyro *produces*, and it deliberately stops at the ones a
+client owns.** gyro serves `wp_linux_drm_syncobj_v1` as well as speaking it, and on the serving side a
+client's acquire point never enters a submission or a plane — the commit is held on the dispatch thread
+until the point signals instead. A fence wait is the one thing GPU priority and preemption cannot
+help with, so a client's point inside gyro's own composite would be gyro's deadline spent on a client's
+schedule. See [decision 174](Decisions.md#174-gyro-serves-wp_linux_drm_syncobj_v1-and-a-clients-fence-is-waited-on-before-the-commit-rather-than-inside-the-frame),
+which also records that the clients still on implicit sync are doing exactly that today.
 Damage is in the interface from the start because both paths want it — `FB_DAMAGE_CLIPS` on KMS,
 `wl_surface.damage_buffer` nested.
 

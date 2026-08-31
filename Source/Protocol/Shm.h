@@ -156,7 +156,7 @@ public:
 	// The resource is already destroyed when this runs, and `OnGone` follows immediately.
 	void OnDestroy() override {}
 
-	[[nodiscard]] Result<TextureId> Adopt(ITextures& textures) override;
+	[[nodiscard]] Result<TextureId> Adopt(ITextures& textures, SyncTimelinePoint release) override;
 
 	[[nodiscard]] PixelSize<BufferSpace> Extent() const noexcept override { return m_Size; }
 

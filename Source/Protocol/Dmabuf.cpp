@@ -1,5 +1,6 @@
 #include "Protocol/Dmabuf.h"
 
+#include <spdlog/spdlog.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -155,7 +156,7 @@ ClientDmabufBuffer::~ClientDmabufBuffer()
 	}
 }
 
-Result<TextureId> ClientDmabufBuffer::Adopt(ITextures& textures)
+Result<TextureId> ClientDmabufBuffer::Adopt(ITextures& textures, SyncTimelinePoint release)
 {
 	if (IsInert())
 	{
@@ -176,6 +177,11 @@ Result<TextureId> ClientDmabufBuffer::Adopt(ITextures& textures)
 	if (adopted)
 	{
 		++m_Outstanding;
+
+		if (release.IsSet())
+		{
+			m_Releases.push_back(std::move(release));
+		}
 	}
 
 	return adopted;
@@ -193,7 +199,33 @@ void ClientDmabufBuffer::OnTextureReleased() noexcept
 	// **Only at zero.** A buffer committed twice before the first frame left the screen has two ids
 	// against it, and telling the client it may redraw after the first retires is the tearing this whole
 	// file is arranged to prevent.
-	if (m_Outstanding == 0 && Object().IsValid())
+	if (m_Outstanding != 0)
+	{
+		return;
+	}
+
+	// **The release points go out here and the event goes out beside them**, rather than instead of.
+	// The protocol says the delivery of `wl_buffer.release` becomes *undefined* for a surface with a
+	// synchronization object, which is permission to stop sending it rather than a requirement to —
+	// and a buffer's outstanding count is per buffer while a synchronization object is per surface, so
+	// the same `wl_buffer` can legitimately have been committed to one of each. Sending both is the
+	// only answer that is right for both, and a client that is not listening for the event is a client
+	// that ignores it.
+	for (const SyncTimelinePoint& point : m_Releases)
+	{
+		if (const Result<void> signalled = point.Timeline->Signal(point.Point); !signalled)
+		{
+			// The client waits forever for a buffer it will never get back, which is a hung window and
+			// not a hung compositor. There is nothing to answer it with: the protocol has no error for
+			// *gyro could not signal*, and ending the connection over gyro's own ioctl failing would
+			// take the window down rather than let it recover.
+			spdlog::warn("could not signal a client's buffer release point: {}", signalled.error());
+		}
+	}
+
+	m_Releases.clear();
+
+	if (Object().IsValid())
 	{
 		Object().Release();
 	}

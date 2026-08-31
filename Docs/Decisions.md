@@ -13806,3 +13806,150 @@ warning rather than refused, for `wp_linux_drm_syncobj_v1`'s reason and a strong
 that will not start because there is no mouse is useless on the machine you most want to look at a
 frame on. The source exists either way, so the composition root wires one descriptor whatever the host
 turned out to offer.
+
+---
+
+### 174. gyro serves `wp_linux_drm_syncobj_v1`, and a client's fence is waited on before the commit rather than inside the frame
+
+*(Decided 2026-08-30.)*
+
+**gyro advertises `wp_linux_drm_syncobj_manager_v1` at version 1, and a commit carrying an acquire
+point is *held on the dispatch thread* until that point signals.** The wait is a
+`DRM_IOCTL_SYNCOBJ_EVENTFD` on the display's own event loop; the surface state becomes current when it
+fires. No client timeline point ever reaches gyro's queue submission or a plane's `IN_FENCE_FD`.
+
+**The reason to serve it is not parity — it is that the status quo already stalls the composite.**
+Every dmabuf client today is on implicit synchronization, which means the kernel attaches the client's
+fence to the buffer and inserts a wait for it into gyro's *own* submission at composite time. gyro
+cannot see that wait, cannot schedule around it, and cannot preempt it: preemption preempts work that
+is running and does nothing to a dependency that has not resolved. So a client that is late finishing
+its frame holds up the composite for every window on the machine, on a `SCHED_FIFO` thread whose whole
+promise is hitting the next refresh — and nothing in the trace says so, because the wait is inside a
+submission gyro made. The protocol is what removes it: the spec lets a compositor ignore implicit
+synchronization for a surface carrying one of these objects, and gyro does.
+
+***Rejected: plumbing the acquire point through to the renderer and to KMS.*** This is what the
+protocol was designed for and what every other compositor with somewhere to put a fence does — the
+composite is submitted and the flip is programmed against a value the client's GPU has not reached
+yet, and the display engine does the waiting. `Frame/Assign.h` even left the slot for it, saying the
+client's own fence belongs in `PresentLayer::Acquire` when a protocol brings one. It was the intended
+design here for most of an afternoon. What kills it is the sentence above: gyro's plan is to take GPU
+priority and preemption wherever it can, and a fence wait is exactly the thing neither touches. A
+composite submitted behind a client's unsignalled point is gyro's frame held hostage to a client's
+schedule, with the driver's reset timeout as the only backstop; a plane's `IN_FENCE_FD` that never
+signals is worse still, because a CRTC has nothing to reset it. Explicit sync is worth having *because*
+it lets gyro decline that, not because it lets gyro submit earlier.
+
+**Which makes this the opposite trade to
+[decision 125](#125-nesteds-release-timelines-come-from-a-drm-node-it-opens-itself), and the asymmetry
+is the whole argument.** There gyro was the client, and refusing to name a point it had not reached
+would have cost gyro its own latency — a permanent frame of it, the nested window visibly trailing the
+cursor. Here gyro is the host, and waiting inside its own frame spends gyro's deadline on a client's.
+A late client should drop a frame. The compositor should not. What a person sees while a client is
+behind is the last frame that client finished, which is what they would have seen anyway; what they no
+longer see is every other window waiting behind it.
+
+***Rejected: substituting the previous texture at record time.*** The frame thread queries each
+acquire point as it builds the draw list and draws the older buffer where one has not signalled. It
+sounds like the same containment and is not: unsignalled at record time is the *normal* case, not the
+pathological one, so this is a per-item ioctl on the frame path to make a decision the dispatch thread
+already had the information for. Worse, it has the frame thread choosing content the published
+snapshot did not name, and then owing damage on a later frame with no commit to carry it —
+synthesizing damage on the frame side, which is a second authority over what a window looks like.
+
+**The hold is placed after the import and before the publication, which is what makes coalescing come
+out right.** Importing a dmabuf reads nothing — it is a descriptor becoming a `VkImage` — so `Adopt`
+runs at the commit as it always did, and only the moment the world starts naming the id waits. A second
+commit arriving while the first is held therefore retires the first's texture through the ordinary
+path, which is what signals the first's release point: the client gets its superseded buffer back and
+the two commits coalesce into the state a person sees, which is what a compositor is allowed to do with
+an update nothing ever showed.
+
+**Release points are answered at zero outstanding, alongside `wl_buffer.release` rather than instead of
+it.** The protocol makes the event's delivery *undefined* for a synchronized surface, which is
+permission to stop sending it rather than an obligation to — and a buffer's outstanding count is per
+buffer while a synchronization object is per surface, so one `wl_buffer` can legitimately have been
+committed to one of each. Sending both is the only answer right for both. Signalling only at zero is
+the same rule the event already followed and holds for the same reason: a buffer with two ids against
+it is still being read by whichever has not retired. Ordering is a non-question because signalling a
+point signals every point below it, which is also why a release at or below the acquire on the *same*
+timeline is `conflicting_points` and one on a different timeline is not comparable and so not refused.
+
+**`wl_shm` buffers are refused with `unsupported_buffer`.** gyro copies those pixels inside `Adopt`,
+which is a read — so honouring an acquire point on one would mean deferring the copy, and the copy is
+what hands the buffer straight back. The protocol names exactly this out, obliging support only for
+buffers the dmabuf protocol made. *Rejected: supporting them by moving the copy after the hold.* It
+costs the superseded-commit path its ordering for a case no toolkit produces.
+
+**The node is gyro's own and is opened for this alone.** A client's timeline arrives as a descriptor
+and a bare syncobj cannot be queried — the query needs a DRM file the handle was imported into — so
+*serve explicit sync* and *hold a DRM fd* are one decision here exactly as they were in decision 125.
+The node is the one the dmabuf feedback already tells clients to allocate against, falling back to any
+render node, because a `drm_syncobj` is DRM core and nothing on this path submits work or allocates
+memory. Where no node opens, or the kernel has no eventfd ioctl, **the global is not advertised at
+all** — a machine with no device has no dmabuf clients to synchronize anyway, and the alternatives to
+the eventfd are blocking the dispatch thread or sampling early, neither of which is a contract worth
+claiming.
+
+**What it does not do, stated rather than discovered.** A synchronized subsurface is held on its own
+rather than holding its parent's commit, so a late child lands a beat after the arrangement it belongs
+to; the exact reading would block the whole cached tree, and that is one late client freezing every
+surface in it — the failure this entry refuses one level up. And the clients still on implicit
+synchronization are still stalling the composite exactly as described above: the fix is the same shape
+— `poll()` the dmabuf at commit and hold identically — and it is its own commit and its own entry.
+
+### 175. A nested keyboard forwards keycodes and nothing else, and focus leaving releases what was held
+
+*(Decided 2026-08-30, finishing what [173](#173-nested-gyro-takes-input-from-the-hosts-seat-and-a-host-window-is-an-absolute-device-bound-to-the-output-it-is)
+deferred. That entry built the pointer and left the keyboard as the half nobody could run gyro's own
+escape chord without.)*
+
+**A keyboard is the connection's, not a window's, and that is the whole structural difference from
+the pointer.** A host window is a piece of glass and the pointer on it is absolute, so 173 mints one
+device per window and names it for the output it *is*. There is nothing of the kind for a keyboard:
+the host has one `wl_keyboard` with one focus for the whole client, and a keystroke means the same
+thing whichever window gyro opened is in front. So one device, minted from a slot one past the
+windows, not absolute and bound to no output — which is why `Compositor::OnDeviceAdded` ignores it
+entirely and the arrival is logged from the backend instead. A person nesting gyro needs to see that
+keys are getting through before they press one; the alternative is typing into a window and guessing.
+
+**A key crosses as the kernel numbered it, and the host's keymap is taken and dropped.**
+`Seam/Input.h` already forbids a layout in this path in as many words, and the reason is gyro's own
+escape hatch: `Ctrl+Alt+Esc` is matched on keycodes so that it cannot be moved by a keymap that failed
+to compile or by somebody selecting Dvorak. Forwarding the host's keymap would put a layout in the one
+path built to have none, and it would need a channel from `Nested` to `Protocol` across the whole
+waist to get there. So `wl_keyboard.keymap` is a descriptor gyro reads and closes, and what a keycode
+means is `Protocol/Keymap.h`'s at the far end, compiled from `XKB_DEFAULT_*` exactly as it is on a
+machine with real devices. `modifiers` goes the same way for the same reason — gyro derives its own
+from an `xkb_state` fed the keycodes below, and taking the host's numbers instead would be two
+layouts' idea of `Shift` reaching one client. `repeat_info` goes because repeat is the client's under
+Wayland and gyro is the compositor for the clients inside it.
+
+*The cost is stated rather than hidden:* a person who selected a layout in the surrounding session
+types gyro's layout inside a nested gyro unless `XKB_DEFAULT_LAYOUT` says otherwise. That is
+[Open.md](Open.md)'s, and it is the only thing this trade actually buys against.
+
+**Focus leaving releases everything still held, and that is what the down-set is for.** Somebody
+holding `Alt` to switch away from gyro's window releases it somewhere gyro cannot see. A compositor
+that kept `Alt` down would turn the next keystroke a person makes into a shortcut nobody asked for,
+and nothing downstream could discover it — the chord and the seat's `xkb_state` each hold key state
+for their own purpose and neither can be told *assume nothing*. What they can be told is a release per
+key, which they already know how to take. `wl_keyboard.leave` says in as many words that the logical
+state resets, so the sweep is what that sentence means at gyro's end; a seat that loses its keyboard
+capability gets the same sweep, because after that nothing more will ever arrive.
+
+**The keys already held on entry are not replayed as presses.** `wl_keyboard.enter` carries them and
+the protocol's own text says a client must not emulate presses from the list — which is exactly
+gyro's case, since the replay would reach a terminal inside the nested session as a character nobody
+typed. The price is that a modifier held across the moment focus arrives is invisible to gyro until it
+is let go, and the host does send that release, because it put the key in the list and owes it. So the
+state converges within one keypress and the wrong direction to fail in was the other one.
+
+**Not the host's `wl_keyboard.modifiers` as the source of truth, with keycodes ignored** — it would
+make gyro's clients see the surrounding session's layout while gyro's own chord saw nothing at all.
+
+**What this changes outside `Nested`:** the startup line advertising the chord is no longer suppressed
+on a nested run, because the chord now works there. The caveat is real and is in the log's neighbours
+rather than in the line: a nested gyro sits behind another compositor's bindings, so a host that claims
+`Ctrl+Alt+Esc` for itself — KDE does — swallows it, and the way out of that window stays the window's
+own close button.

@@ -11,6 +11,7 @@
 #include "Protocol/Floor.h"
 #include "Protocol/Popup.h"
 #include "Protocol/Server.h"
+#include "Protocol/Sync.h"
 #include "Scene/Store.h"
 #include "Scene/Textures.h"
 
@@ -53,6 +54,17 @@ public:
 	// The texture space this step was handed, or null outside one.
 	[[nodiscard]] ITextures* Textures() const noexcept { return m_Textures; }
 
+	// The DRM node clients' timelines are imported against, or null on a machine where explicit sync
+	// could not be served at all.
+	//
+	// **Unlike the two above it is live outside a dispatch**, and the difference is what it is for: the
+	// store and the texture space are the world an `Advance` was handed, while this is a descriptor the
+	// host opened once and holds for its whole life. A held commit is resumed from the event loop, which
+	// runs inside `Server::Poll` and therefore inside an `Advance` — but the *wait* is armed and taken
+	// down at moments that are not requests, and a pointer that went null between them would leak one
+	// eventfd per held commit.
+	[[nodiscard]] ExplicitSync* Sync() const noexcept { return m_Sync; }
+
 	// What a window of this client is parented into, per [Floor.h](Floor.h), or null where its session
 	// has none.
 	//
@@ -89,6 +101,10 @@ public:
 		m_Floors = &floors;
 		m_Server = &server;
 	}
+
+	// Wired once when the host opens, and only where a node opened. Left null otherwise, which is the
+	// same statement `Sync()` makes to its callers and the reason the global is never advertised there.
+	void SetSync(ExplicitSync& sync) noexcept { m_Sync = &sync; }
 
 	// The open menus, per [Popup.h](Popup.h). Beside the floor for the same reason: it is one per
 	// session rather than one per connection, it outlives every client that pushes onto it, and the
@@ -192,6 +208,9 @@ private:
 	ITextures* m_Textures = nullptr;
 	const SessionFloors* m_Floors = nullptr;
 	const Server* m_Server = nullptr;
+
+	// The explicit-sync device, or null where none opened. Not owned; the host holds it.
+	ExplicitSync* m_Sync = nullptr;
 	PopupStack m_Popups;
 	WindowDrag m_Drag;
 
