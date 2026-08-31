@@ -635,6 +635,15 @@ gyro_add_module(Wire PORTABLE
 # `presentation-time` is the host's vblank, which is the clock Frame/FrameClock.h predicts against
 # when the panel belongs to somebody else; `viewporter` is scaling without a re-render; and
 # `xdg-decoration` is how gyro says it draws its own, which it does.
+#
+# **`ext-foreign-toplevel-list-v1` is the exception and it is here for the tests.** A nested output
+# will never ask a host to enumerate its windows; what needs a typed client of it is
+# Integration/ProtocolRoundTrip.Test.cpp, which is the only place gyro's server is checked against a
+# demarshaller that is not its own. The alternative was a hand-written decoder in the test, and this
+# project has already made that argument once and answered it the other way: Tools/TraceDump.cpp links
+# `Trace` rather than parsing the format again, because a second parser agrees on the day it is written
+# and reports a phantom afterwards. A test reading a protocol through bindings generated from the same
+# XML the server was cannot drift from it.
 gyro_add_bindings(WaylandProtocols
 	PROTOCOLS
 		wayland
@@ -644,6 +653,7 @@ gyro_add_bindings(WaylandProtocols
 		staging/linux-drm-syncobj/linux-drm-syncobj-v1
 		stable/viewporter/viewporter
 		unstable/xdg-decoration/xdg-decoration-unstable-v1
+		staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1
 )
 
 # The typed server bindings, over libwayland — the other half of decision 2's split, and the wrapper
@@ -668,6 +678,7 @@ gyro_add_bindings(WaylandServerProtocols
 		staging/linux-drm-syncobj/linux-drm-syncobj-v1
 		stable/viewporter/viewporter
 		unstable/xdg-decoration/xdg-decoration-unstable-v1
+		staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1
 )
 
 # The CPU renderer, and PORTABLE is the load-bearing word here for a stronger reason than it is
@@ -984,6 +995,7 @@ gyro_add_module(Protocol DISPATCH
 		Drag.cpp
 		ExplicitSync.cpp
 		Floor.cpp
+		Foreign.cpp
 		Host.cpp
 		Keymap.cpp
 		Output.cpp
@@ -1006,6 +1018,7 @@ gyro_add_module(Protocol DISPATCH
 		Drag.Test.cpp
 		ExplicitSync.Test.cpp
 		Floor.Test.cpp
+		Foreign.Test.cpp
 		Host.Test.cpp
 		Positioner.Test.cpp
 		Presentation.Test.cpp

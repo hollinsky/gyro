@@ -5,6 +5,8 @@
 
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -31,6 +33,7 @@
 #include "Geometry/Scale.h"
 #include "Geometry/Space.h"
 #include "Protocol/Host.h"
+#include "Protocol/Tier.h"
 #include "Publication/Return.h"
 #include "Scene/Entity.h"
 #include "Scene/Output.h"
@@ -38,6 +41,7 @@
 #include "Scene/Store.h"
 #include "Scene/Textures.h"
 #include "Testing/Test.h"
+#include "Wayland/ExtForeignToplevelListV1.h"
 #include "Wayland/LinuxDmabufV1.h"
 #include "Wayland/PresentationTime.h"
 #include "Wayland/Viewporter.h"
@@ -258,6 +262,40 @@ public:
 	std::vector<std::uint32_t> Removed;
 };
 
+// A listening `AF_UNIX` socket at a path, standing where a session agent's would.
+//
+// Bound and listened on here rather than through `Server::Bind`, because the whole point of the
+// handover is that the socket is somebody else's: gyro is handed a descriptor it did not create, and a
+// test that made it any other way would be exercising the path it is trying to stand in for.
+[[nodiscard]] Fd MakeListener(const std::string& path)
+{
+	Fd socket{ ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0) };
+
+	if (!socket.IsValid())
+	{
+		return {};
+	}
+
+	sockaddr_un address{};
+	address.sun_family = AF_UNIX;
+
+	if (path.size() >= sizeof(address.sun_path))
+	{
+		return {};
+	}
+
+	std::memcpy(address.sun_path, path.c_str(), path.size());
+
+	::unlink(path.c_str());
+
+	if (::bind(socket.Get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0)
+	{
+		return {};
+	}
+
+	return ::listen(socket.Get(), 8) == 0 ? std::move(socket) : Fd{};
+}
+
 // The server, the client, and the one verb that moves bytes between them.
 //
 // **Both directions in one call, and both non-blocking.** The composition root's real loop parks on a
@@ -266,9 +304,14 @@ public:
 // the last thing before the thread would have slept.
 struct Pair
 {
-	explicit Pair(std::string_view socket)
+	// `trust` is what the client on the far end is granted. **`User` binds a socket the way this binary
+	// always has; `System` takes the handover path instead**, because trust belongs to the listener
+	// (Protocol/Tier.h) and there is no other way to produce a `System` connection — a socket gyro bound
+	// itself is an application's by construction. The listener is this test's own, standing where a
+	// session agent's would, which is the same shape Protocol/Server.Test.cpp uses for the same reason.
+	explicit Pair(std::string_view socket, Trust trust = Trust::User)
 	{
-		Host = MakeClientHost(HostListener::Own, socket);
+		Host = MakeClientHost(trust == Trust::System ? HostListener::Handover : HostListener::Own, socket);
 
 		if (!Host || *Host == nullptr)
 		{
@@ -280,7 +323,19 @@ struct Pair
 		// path a real client takes.
 		::setenv("WAYLAND_DISPLAY", std::string{ socket }.c_str(), 1);
 
-		Opened = (*Host)->Open(Store, Textures).has_value() && Client.Open().has_value();
+		Opened = (*Host)->Open(Store, Textures).has_value();
+
+		if (Opened && trust == Trust::System)
+		{
+			Fd listener = MakeListener(std::string{ g_RuntimeDir.Path } + "/" + std::string{ socket });
+
+			Opened = listener.IsValid() &&
+			         (*Host)
+			             ->Adopt(Store, std::move(listener), ::getuid(), static_cast<SessionId>(1), Trust::System)
+			             .has_value();
+		}
+
+		Opened = Opened && Client.Open().has_value();
 
 		// The return leg, wired the way the composition root wires it: before anything can have
 		// committed, because a first frame owed against an unobserved drain is a callback nothing would
@@ -4832,4 +4887,302 @@ GYRO_TEST(ProtocolRoundTrip, AReactiveMenuIsPlacedAgainWhenItsWindowMovesUnderIt
 
 	GYRO_CHECK_EQ(menu.Events.Configured, std::uint32_t{ 2 });
 	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+// The windows on this machine, described to a client that did not open them.
+//
+// **This is the first global an application never sees**, so half of what is asserted here is a
+// negative: an ordinary connection's registry does not carry it, which is Protocol/Tier.h's filter
+// doing the only thing it exists for. The other half is the enumeration itself, and the case worth
+// having a wire test for at all is the *ordering* — the protocol tells a client to bind and roundtrip,
+// and a compositor that announced its windows a moment later would leave every taskbar on the machine
+// empty until somebody opened a window.
+
+namespace
+{
+// One `ext_foreign_toplevel_handle_v1`, recording what the compositor said about a window. Everything
+// here is what a switcher would draw.
+class ForeignHandleEvents final : public Wayland::ExtForeignToplevelHandleV1Listener
+{
+public:
+	void OnIdentifier(std::string_view identifier) override { Identifier = std::string{ identifier }; }
+
+	void OnTitle(std::string_view title) override
+	{
+		Title = std::string{ title };
+		++Titles;
+	}
+
+	void OnAppId(std::string_view appId) override
+	{
+		AppId = std::string{ appId };
+		++AppIds;
+	}
+
+	void OnDone() override { ++Done; }
+
+	void OnClosed() override { ++Closed; }
+
+	std::string Identifier;
+	std::string Title;
+	std::string AppId;
+
+	// Counted rather than only recorded, because the failure that hides behind a correct title is a
+	// `done` per dispatch iteration: every switcher on the machine re-laying out its list on every
+	// wakeup, with nothing on screen to say so.
+	std::uint32_t Titles = 0;
+	std::uint32_t AppIds = 0;
+	std::uint32_t Done = 0;
+	std::uint32_t Closed = 0;
+};
+
+// One `ext_foreign_toplevel_list_v1`. Owns the handles it is given, since the protocol mints them and
+// the client's only say in the matter is when to destroy them.
+class ForeignListEvents final : public Wayland::ExtForeignToplevelListV1Listener
+{
+public:
+	Wayland::ExtForeignToplevelHandleV1Listener* OnToplevel(Wayland::ExtForeignToplevelHandleV1 toplevel) override
+	{
+		Handles.push_back(std::make_unique<ForeignHandleEvents>());
+		Objects.push_back(toplevel);
+
+		return Handles.back().get();
+	}
+
+	void OnFinished() override { ++Finished; }
+
+	std::vector<std::unique_ptr<ForeignHandleEvents>> Handles;
+	std::vector<Wayland::ExtForeignToplevelHandleV1> Objects;
+	std::uint32_t Finished = 0;
+};
+
+[[nodiscard]] Wayland::ExtForeignToplevelListV1 BindForeign(BoundCompositor& bound, ForeignListEvents& events)
+{
+	const Registry::Global* const global = bound.Listener.Find(Wayland::ExtForeignToplevelListV1::WireName);
+
+	return global != nullptr ?
+	           bound.Listener.Object().Bind<Wayland::ExtForeignToplevelListV1>(global->Name, global->Version, events) :
+	           Wayland::ExtForeignToplevelListV1{};
+}
+} // namespace
+
+GYRO_TEST(ProtocolRoundTrip, AnApplicationIsNotOfferedTheWindowList)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-foreign-user" };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	// The whole of Protocol/Tier.h from the far side of the socket: the interface is advertised in the
+	// display and simply is not in this client's registry. The shell's globals are the ones that must
+	// never arrive by accident, and this is the only place that can say they did not.
+	GYRO_CHECK(bound.Listener.Find(Wayland::ExtForeignToplevelListV1::WireName) == nullptr);
+
+	// The rest of the registry is untouched, which is the failure a filter is most likely to have: an
+	// application that lost its shell or its shared memory alongside the global it was never meant to
+	// have would be a compositor no window opens on.
+	GYRO_CHECK(bound.Listener.Find(Wayland::WlCompositor::WireName) != nullptr);
+	GYRO_CHECK(bound.Listener.Find(Wayland::XdgWmBase::WireName) != nullptr);
+	GYRO_CHECK(bound.Listener.Find(Wayland::WlSeat::WireName) != nullptr);
+}
+
+GYRO_TEST(ProtocolRoundTrip, AShellIsToldAboutTheWindowsThatAreAlreadyOpen)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-foreign-open", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel window;
+	GYRO_REQUIRE(Show(pair, bound, window, std::byte{ 0x40 }));
+
+	window.Window.SetTitle("Editing Decisions.md");
+	window.Window.SetAppId("com.example.editor");
+
+	pair.Turn();
+
+	// **Bound and answered in one turn, which is the ordering the protocol asks for.** A client binds
+	// this global and roundtrips, and the reply to that roundtrip is queued by libwayland while the bind
+	// is still being dispatched — so an announcement deferred to the end of gyro's iteration would
+	// arrive after the client had already concluded there were no windows.
+	ForeignListEvents events;
+	const Wayland::ExtForeignToplevelListV1 list = BindForeign(bound, events);
+
+	GYRO_REQUIRE(list.IsValid());
+
+	pair.Turn();
+
+	GYRO_REQUIRE(events.Handles.size() == 1);
+
+	const ForeignHandleEvents& handle = *events.Handles.front();
+
+	GYRO_CHECK(handle.Title == "Editing Decisions.md");
+	GYRO_CHECK(handle.AppId == "com.example.editor");
+	GYRO_CHECK(!handle.Identifier.empty());
+
+	// The `done` that applies them, and exactly one: the three properties of a window a client has just
+	// been introduced to are one atomic state rather than three.
+	GYRO_CHECK(handle.Done == 1);
+	GYRO_CHECK(handle.Closed == 0);
+}
+
+GYRO_TEST(ProtocolRoundTrip, AWindowThatOpensIsAnnouncedAndOneThatGoesIsClosed)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-foreign-life", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	ForeignListEvents events;
+	const Wayland::ExtForeignToplevelListV1 list = BindForeign(bound, events);
+
+	GYRO_REQUIRE(list.IsValid());
+
+	pair.Turn();
+
+	// Nothing yet, which is worth asserting rather than assuming: a list that announced a window before
+	// one existed would pass every check below.
+	GYRO_CHECK(events.Handles.empty());
+
+	{
+		Toplevel window;
+		GYRO_REQUIRE(Show(pair, bound, window, std::byte{ 0x40 }));
+
+		pair.Turn();
+
+		GYRO_REQUIRE(events.Handles.size() == 1);
+		GYRO_CHECK(events.Handles.front()->Closed == 0);
+
+		// A window a person closes: the role object goes, which unmaps it whatever the surface still has
+		// attached.
+		window.Window.Destroy();
+	}
+
+	pair.Turn();
+
+	GYRO_REQUIRE(events.Handles.size() == 1);
+	GYRO_CHECK(events.Handles.front()->Closed == 1);
+
+	// And nothing after it, ever. The protocol says the compositor sends no further events on a handle
+	// it has closed, and the walk that decides is a comparison rather than a hook — so the case that
+	// would break it is exactly this one, an iteration later.
+	pair.Turn();
+
+	GYRO_CHECK(events.Handles.front()->Closed == 1);
+	GYRO_CHECK(events.Handles.size() == 1);
+}
+
+GYRO_TEST(ProtocolRoundTrip, ATitleIsSentWhenItChangesAndNotOtherwise)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-foreign-title", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel window;
+	GYRO_REQUIRE(Show(pair, bound, window, std::byte{ 0x40 }));
+
+	window.Window.SetTitle("one");
+
+	pair.Turn();
+
+	ForeignListEvents events;
+	GYRO_REQUIRE(BindForeign(bound, events).IsValid());
+
+	pair.Turn();
+	GYRO_REQUIRE(events.Handles.size() == 1);
+
+	ForeignHandleEvents& handle = *events.Handles.front();
+
+	GYRO_CHECK(handle.Title == "one");
+	GYRO_CHECK(handle.Titles == 1);
+	GYRO_CHECK(handle.Done == 1);
+
+	// **A window redrawing is not a window being renamed**, which is what the comparison is for: a
+	// client that commits every frame produces no traffic here at all, and a switcher that re-laid out
+	// its list on every wakeup would be the cost of getting this wrong.
+	window.Drawn.Surface.Commit();
+
+	pair.Turn();
+	pair.Turn();
+
+	GYRO_CHECK(handle.Titles == 1);
+	GYRO_CHECK(handle.Done == 1);
+
+	window.Window.SetTitle("two");
+
+	pair.Turn();
+
+	GYRO_CHECK(handle.Title == "two");
+	GYRO_CHECK(handle.Titles == 2);
+
+	// One `done` for the change, and the app id untouched — the event applies whatever moved rather
+	// than restating the window.
+	GYRO_CHECK(handle.Done == 2);
+	GYRO_CHECK(handle.AppIds == 1);
+}
+
+GYRO_TEST(ProtocolRoundTrip, StoppingIsAnsweredAtOnceAndLeavesTheHandlesCurrent)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-foreign-stop", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel window;
+	GYRO_REQUIRE(Show(pair, bound, window, std::byte{ 0x40 }));
+
+	window.Window.SetTitle("before");
+
+	pair.Turn();
+
+	ForeignListEvents events;
+	const Wayland::ExtForeignToplevelListV1 list = BindForeign(bound, events);
+
+	GYRO_REQUIRE(list.IsValid());
+
+	pair.Turn();
+	GYRO_REQUIRE(events.Handles.size() == 1);
+
+	list.Stop();
+
+	pair.Turn();
+
+	// **`finished` comes back in the turn the request went out in**, because the protocol's own sequence
+	// has the client wait for it before destroying anything — a compositor that answered later is one
+	// every client of it stalls behind.
+	GYRO_CHECK(events.Finished == 1);
+
+	// A second window is not announced, which is the whole of what `stop` asks for.
+	Toplevel second;
+	GYRO_REQUIRE(Show(pair, bound, second, std::byte{ 0x80 }));
+
+	pair.Turn();
+
+	GYRO_CHECK(events.Handles.size() == 1);
+
+	// And the handle the client is still holding goes on being kept current, because `stop` is about the
+	// `toplevel` event and says nothing about the rest: a switcher that stopped wanting new entries and
+	// then watched its existing labels freeze would be the other reading, and it is not what the request
+	// says.
+	window.Window.SetTitle("after");
+
+	pair.Turn();
+
+	GYRO_CHECK(events.Handles.front()->Title == "after");
 }

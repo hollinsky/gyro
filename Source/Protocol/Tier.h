@@ -78,3 +78,16 @@ enum class GlobalTier : std::uint8_t
 // advertises before any of this ships — so there is no log line here, because the state it would
 // report is one a passing test says cannot exist.
 [[nodiscard]] GlobalTier TierOf(std::string_view interface) noexcept;
+
+// Whether the table names this interface at all.
+//
+// **A separate question from `TierOf`, and the first System-tier global is what made it one.** While
+// every global gyro served was an application's, *is it visible to a `User`* was a complete test for a
+// forgotten row — an omission and a refusal are the same answer, so failing to be visible caught both.
+// A global that is deliberately `System` gives that answer legitimately, and a walk asserting
+// visibility would have to skip it, which is a test that stops checking the thing it is for.
+//
+// So the omission is asked about directly. Nothing in the dispatch path calls this and nothing should:
+// at runtime the two cases are identical on purpose, and it is `Tier.Test.cpp` that has to tell them
+// apart — before a global ships hidden from the clients it was written for.
+[[nodiscard]] bool Listed(std::string_view interface) noexcept;

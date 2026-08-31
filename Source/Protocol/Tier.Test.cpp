@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "Testing/Test.h"
+#include "Wayland/Server/ExtForeignToplevelListV1.h"
 #include "Wayland/Server/LinuxDmabufV1.h"
 #include "Wayland/Server/LinuxDrmSyncobjV1.h"
 #include "Wayland/Server/PresentationTime.h"
@@ -18,6 +19,13 @@
 // list would simply stop appearing in every client's registry. The list below is that catch, and it is
 // deliberately a second copy of the interfaces `Protocol/Host.cpp` and `Protocol/Output.cpp`
 // advertise — a copy that has to be updated in the same commit as the global, and says so by failing.
+//
+// **The question it asks is `Listed` rather than `Visible`, and the first System-tier global is what
+// changed that.** While every global was an application's, asking whether an interface reaches a
+// `User` client caught a forgotten row for free: an omission answers `System` and so did nothing else.
+// `ext_foreign_toplevel_list_v1` answers `System` on purpose, so the visibility form would have to
+// carry an exception for it — and a walk with an exception list is one that stops catching the case it
+// exists for the moment somebody adds the second entry to it.
 
 namespace
 {
@@ -36,18 +44,18 @@ constexpr std::array Advertised{
 	Wayland::Server::WlOutput::WireName,
 	Wayland::Server::WlDataDeviceManager::WireName,
 	Wayland::Server::WlSeat::WireName,
+	Wayland::Server::ExtForeignToplevelListV1::WireName,
 };
 } // namespace
 
-GYRO_TEST(Tier, EveryGlobalGyroAdvertisesIsReachableByAnApplication)
+GYRO_TEST(Tier, EveryGlobalGyroAdvertisesSitsInATierSomebodyChose)
 {
 	for (const std::string_view interface : Advertised)
 	{
-		// Not `!= System`, because the failure this catches is a missing row and a missing row *is* the
-		// System answer. Reported through `GYRO_FAIL` rather than `GYRO_CHECK` so the interface is
-		// *named*: whoever added the global needs to be told which one it was, and the loop variable is
-		// what a stringified expression would print instead.
-		if (!Visible(TierOf(interface), Trust::User))
+		// Reported through `GYRO_FAIL` rather than `GYRO_CHECK` so the interface is *named*: whoever added
+		// the global needs to be told which one it was, and the loop variable is what a stringified
+		// expression would print instead.
+		if (!Listed(interface))
 		{
 			GYRO_FAIL(interface);
 		}
@@ -59,9 +67,22 @@ GYRO_TEST(Tier, AnInterfaceWithNoRowIsRefusedToAnApplication)
 	// The spelling is deliberately one of the System tier's eventual occupants
 	// (Docs/Architecture.md#filtered-globals) rather than nonsense, because that is the case the default
 	// exists for: a protocol gyro has not written yet must not become visible by being forgotten.
+	GYRO_CHECK(!Listed("zwlr_layer_shell_v1"));
 	GYRO_CHECK(TierOf("zwlr_layer_shell_v1") == GlobalTier::System);
 	GYRO_CHECK(!Visible(TierOf("zwlr_layer_shell_v1"), Trust::User));
 	GYRO_CHECK(Visible(TierOf("zwlr_layer_shell_v1"), Trust::System));
+}
+
+GYRO_TEST(Tier, TheWindowListIsTheShellsAndNotAnApplications)
+{
+	// The first occupant of the tier, and the row that makes `Listed` a different question from
+	// `TierOf`: it is `System` because somebody wrote it down, and an application asking for the titles
+	// of every window in the session is refused for that reason rather than by omission.
+	GYRO_CHECK(Listed(Wayland::Server::ExtForeignToplevelListV1::WireName));
+	GYRO_CHECK(TierOf(Wayland::Server::ExtForeignToplevelListV1::WireName) == GlobalTier::System);
+
+	GYRO_CHECK(!Visible(TierOf(Wayland::Server::ExtForeignToplevelListV1::WireName), Trust::User));
+	GYRO_CHECK(Visible(TierOf(Wayland::Server::ExtForeignToplevelListV1::WireName), Trust::System));
 }
 
 GYRO_TEST(Tier, TheSeatAndTheDataDeviceAreSessionScopedAndStillAdvertised)

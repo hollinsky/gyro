@@ -198,6 +198,18 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		return Failure(ENOMEM, "advertising wl_seat");
 	}
 
+	m_ForeignGlobal = Wayland::Server::ExtForeignToplevelListV1::Advertise(*display, ForeignToplevelVersion, m_Foreign);
+
+	if (m_ForeignGlobal == nullptr)
+	{
+		// Fatal like the rest, and it is the first global no application will ever see: [Tier.h](Tier.h)
+		// puts it in the System tier, so the registry it appears in is a shell's. Failing the run anyway
+		// rather than carrying on without it — a compositor that came up unable to describe its own
+		// windows is one whose shell will start, find nothing to list, and show an empty taskbar with no
+		// error anywhere.
+		return Failure(ENOMEM, "advertising ext_foreign_toplevel_list_v1");
+	}
+
 	return {};
 }
 
@@ -341,6 +353,13 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// type into and cannot tell they are typing into. [Shell.h](Shell.h) has why a menu leaves its own
 	// window activated.
 	SyncWindows(m_Context, scene, focused);
+
+	// **Last, because it reports on everything above it.** A window that mapped in this wakeup, one that
+	// retired in it and a title a client changed in it are all settled by the time this runs, so a shell
+	// hears one account of the iteration rather than a running commentary on it. It costs nothing on a
+	// machine with no shell, which is every machine today: there are no lists bound, and the walk is over
+	// an empty vector.
+	m_Foreign.Sync();
 
 	return Wake::Never();
 }

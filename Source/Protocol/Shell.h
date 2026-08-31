@@ -490,6 +490,13 @@ public:
 	// before the popup can hang off it.
 	[[nodiscard]] bool IsMapped() const noexcept { return !m_Window.IsNull(); }
 
+	// The `xdg_toplevel` this surface's role is, or null for a popup or for a surface whose client has
+	// not said yet. **Public because a menu is in the window registry and is not a window**:
+	// `HostContext::Windows()` holds every mapped `xdg_surface`, and
+	// [Foreign.h](Foreign.h) enumerates toplevels alone — so the party asking needs the role rather than
+	// the mapping, and this is the one question that separates them.
+	[[nodiscard]] ClientXdgToplevel* Toplevel() const noexcept { return m_Toplevel; }
+
 	// The role object let go, which unmaps the window: a toplevel that is destroyed is a window that is
 	// gone, whatever the surface still has attached.
 	void Orphan() noexcept;

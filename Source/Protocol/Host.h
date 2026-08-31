@@ -18,6 +18,7 @@
 #include "Protocol/Dmabuf.h"
 #include "Protocol/ExplicitSync.h"
 #include "Protocol/Floor.h"
+#include "Protocol/Foreign.h"
 #include "Protocol/Output.h"
 #include "Protocol/Presentation.h"
 #include "Protocol/Seat.h"
@@ -122,14 +123,20 @@ public:
 	// the container it hangs under — and a session that could not be given a floor is not served at all,
 	// which is a failure the agent is told about rather than one a person meets as an application that
 	// starts and never appears.
-	[[nodiscard]] Result<void> Adopt(SceneStore& scene, Fd listener, std::uint32_t uid, SessionId session)
+	//
+	// `trust` is what the offered socket grants the clients that arrive on it, forwarded verbatim to
+	// [Server.h](Server.h) — the host does not read it and has no business doing so, since a global's
+	// tier is [Tier.h](Tier.h)'s and the filter is the display's. Defaulted to `User`, which is every
+	// caller: the listener that carries `System` is Docs/Open.md's and does not exist yet.
+	[[nodiscard]] Result<void>
+	Adopt(SceneStore& scene, Fd listener, std::uint32_t uid, SessionId session, Trust trust = Trust::User)
 	{
 		if (const Result<void> floor = m_Floors.Open(scene, session); !floor)
 		{
 			return floor;
 		}
 
-		Result<void> adopted = m_Server.Adopt(std::move(listener), uid, session);
+		Result<void> adopted = m_Server.Adopt(std::move(listener), uid, session, trust);
 
 		if (!adopted)
 		{
@@ -274,6 +281,9 @@ private:
 
 	SeatGlobal m_Seat{ m_Context };
 	wl_global* m_SeatGlobal = nullptr;
+
+	ForeignToplevelGlobal m_Foreign{ m_Context };
+	wl_global* m_ForeignGlobal = nullptr;
 
 	// One per session, each authored before its session's listener is taken and outliving every client
 	// on it. A development run has exactly one, whose session is `None`.

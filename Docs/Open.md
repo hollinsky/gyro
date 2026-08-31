@@ -699,6 +699,16 @@ is to do the work.
   where it lives, and how a client is judged worthy of it are all unspecified. Decision 51 promotes
   this from speculative to load-bearing: the shell is its motivating occupant, and "which process
   gets to be the shell" is exactly the judgement this listener has to encode.
+
+  **The tier now has a global in it, and nothing can reach it.** *(Annotated 2026-08-30.)*
+  `ext_foreign_toplevel_list_v1` is served, filtered and tested — a client admitted with
+  `Trust::System` is told about the windows in its session, and an ordinary one is not offered the
+  interface at all. What produces `Trust::System` is a test. So the entry has stopped being about a
+  mechanism nothing needs and is now about a global that works and is unreachable in a real run, which
+  is the state where the answer is cheapest to change and most obviously owed. The narrower question
+  underneath it is the development case: a run under `--gym` or a bound socket has no agent, so
+  whatever a session's System listener turns out to be, gyro also needs a way to be its own — and that
+  half touches no ABI.
 - **When gyro reads an X11 client's frame extents, relative to the buffer they describe.**
   [Decision 106](Decisions.md#106-an-x11-client-has-no-window-geometry-gyros-window-manager-computes-the-frame-rect)
   found that no window geometry crosses from Xwayland at all, so gyro's own window manager reads
