@@ -999,6 +999,7 @@ gyro_add_module(Protocol DISPATCH
 		Subcompositor.cpp
 		Surface.cpp
 		Sync.cpp
+		Tier.cpp
 		Viewporter.cpp
 	TESTS
 		Dmabuf.Test.cpp
@@ -1013,6 +1014,7 @@ gyro_add_module(Protocol DISPATCH
 		Shm.Test.cpp
 		Subcompositor.Test.cpp
 		Surface.Test.cpp
+		Tier.Test.cpp
 		Viewporter.Test.cpp
 )
 

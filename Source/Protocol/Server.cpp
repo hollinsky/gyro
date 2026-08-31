@@ -33,7 +33,7 @@ struct ClientWatch
 {
 	wl_listener Destroyed{};
 
-	std::unordered_map<wl_client*, SessionId>* Watched = nullptr;
+	std::unordered_map<wl_client*, Server::Admitted>* Watched = nullptr;
 
 	wl_client* Client = nullptr;
 };
@@ -97,6 +97,13 @@ Result<void> Server::Open()
 	m_Display = display;
 	m_EventLoop = wl_display_get_event_loop(display);
 
+	// **One hook rather than a check in every global's bind path**, which is what makes filtered globals
+	// a day's work rather than the rewrite Docs/Architecture.md#filtered-globals priced it as before the
+	// server half existed. libwayland calls this while advertising a registry *and* while binding off
+	// one, so a global a client never saw is also a global it cannot name, and no `Advertise` call site
+	// changes.
+	wl_display_set_global_filter(display, &Server::OnGlobalFilter, this);
+
 	return {};
 }
 
@@ -144,7 +151,7 @@ Result<void> Server::Bind(std::string_view name)
 	return {};
 }
 
-Result<void> Server::Adopt(Fd listener, std::uint32_t uid, SessionId session)
+Result<void> Server::Adopt(Fd listener, std::uint32_t uid, SessionId session, Trust trust)
 {
 	if (m_EventLoop == nullptr)
 	{
@@ -165,6 +172,7 @@ Result<void> Server::Adopt(Fd listener, std::uint32_t uid, SessionId session)
 	held->Owner = this;
 	held->Uid = uid;
 	held->Session = session;
+	held->Level = trust;
 	held->Socket = std::move(listener);
 
 	// The address is the user data, which is why the record is behind a pointer: the vector below is
@@ -212,7 +220,7 @@ void Server::Release(SessionId session) noexcept
 
 	for (const auto& [client, held] : m_Watched)
 	{
-		if (held == session)
+		if (held.Session == session)
 		{
 			ending.push_back(client);
 		}
@@ -251,6 +259,21 @@ int Server::OnConnection(int descriptor, std::uint32_t mask, void* data) noexcep
 	listener->Owner->Admit(connection, *listener);
 
 	return 1;
+}
+
+bool Server::OnGlobalFilter(const wl_client* client, const wl_global* global, void* data) noexcept
+{
+	const auto* const server = static_cast<const Server*>(data);
+	const wl_interface* const interface = wl_global_get_interface(global);
+
+	// A global with no interface is not a thing libwayland makes; answering `false` rather than
+	// asserting keeps a state nobody can reach from being the one that takes the compositor down.
+	if (interface == nullptr || interface->name == nullptr)
+	{
+		return false;
+	}
+
+	return Visible(TierOf(interface->name), server->TrustOf(client));
 }
 
 void Server::Admit(int connection, const Listener& listener) noexcept
@@ -306,7 +329,7 @@ void Server::Admit(int connection, const Listener& listener) noexcept
 
 	wl_client_add_destroy_listener(client, &watch->Destroyed);
 
-	m_Watched.emplace(client, listener.Session);
+	m_Watched.emplace(client, Admitted{ .Session = listener.Session, .Level = listener.Level });
 }
 
 int Server::PollFd() const noexcept

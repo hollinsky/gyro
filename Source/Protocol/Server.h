@@ -10,9 +10,11 @@
 #include "Core/Fd.h"
 #include "Core/Result.h"
 #include "Core/Session.h"
+#include "Protocol/Tier.h"
 
 struct wl_client;
 struct wl_display;
+struct wl_global;
 struct wl_event_loop;
 struct wl_event_source;
 struct wl_listener;
@@ -113,7 +115,11 @@ public:
 	// `uid` is what the kernel said about the offering process rather than anything it claimed, and it
 	// is the whole of what a connection is admitted against. The descriptor is taken: it is closed by
 	// `Release`, by the destructor, or here if the event source cannot be made.
-	[[nodiscard]] Result<void> Adopt(Fd listener, std::uint32_t uid, SessionId session);
+	// `trust` is what a connection arriving here is granted, and it belongs to the listener rather than
+	// to the client for the reason [Tier.h](Tier.h) gives: a socket is something a process is pointed
+	// at, and a claim made over one is a claim. Every caller passes `User` today, because nothing yet
+	// creates the System listener Docs/Open.md still owes.
+	[[nodiscard]] Result<void> Adopt(Fd listener, std::uint32_t uid, SessionId session, Trust trust = Trust::User);
 
 	// Stop serving a session: close its listener, and end every client that arrived on it.
 	//
@@ -162,6 +168,20 @@ public:
 
 	[[nodiscard]] bool IsOpen() const noexcept { return m_Display != nullptr; }
 
+	// What was true of the connection when it was admitted: the session it belongs to and what it is
+	// trusted with. `SessionOf` and `TrustOf` below are its two halves, and neither is a question the
+	// socket can still answer once a request is being dispatched — so both are recorded here at admission.
+	//
+	// **Public because the record is named outside this class.** libwayland's destroy listener is
+	// intrusive, so the thing that keeps the map current lives in Server.cpp beside a `wl_listener` this
+	// header will not say, and it has to spell the map's value type to hold a pointer to it.
+	struct Admitted
+	{
+		SessionId Session = SessionId::None;
+
+		Trust Level = Trust::User;
+	};
+
 	// Which session a client arrived under, or `None` for one that came in on a socket gyro bound
 	// itself — which under `HostListener::Own` is every client there is.
 	//
@@ -173,7 +193,23 @@ public:
 	{
 		const auto found = m_Watched.find(client);
 
-		return found == m_Watched.end() ? SessionId::None : found->second;
+		return found == m_Watched.end() ? SessionId::None : found->second.Session;
+	}
+
+	// What this client's connection is trusted with, which is what decides whether a System-tier global
+	// is in its registry at all. See [Tier.h](Tier.h).
+	//
+	// **A client this server never admitted is `User`, and that is the answer rather than a fallback.**
+	// Clients on a socket `Bind` created are libwayland's own — it accepts on them and gyro never sees
+	// the connection — so there is no record to consult and nothing about that socket says otherwise.
+	// The direction the unknown case falls is the whole point: an unrecognised client is an application.
+	[[nodiscard]] Trust TrustOf(const wl_client* client) const noexcept
+	{
+		// The map is keyed on the pointer libwayland handed out and the filter is given a `const` one of
+		// the same client. Casting the qualifier away to look it up reads nothing through the pointer.
+		const auto found = m_Watched.find(const_cast<wl_client*>(client));
+
+		return found == m_Watched.end() ? Trust::User : found->second.Level;
 	}
 
 	// How many clients are live across every session. For a test; nothing in the loop asks.
@@ -193,10 +229,17 @@ private:
 		std::uint32_t Uid = 0;
 
 		SessionId Session = SessionId::None;
+
+		Trust Level = Trust::User;
 	};
 
 	// libwayland's `wl_event_loop_fd_func_t`: a connection is pending on an adopted listener.
 	static int OnConnection(int descriptor, std::uint32_t mask, void* data) noexcept;
+
+	// libwayland's `wl_display_global_filter_func_t`, installed on the display by `Open` and consulted
+	// both when a registry is advertised and when a client binds off one — so a name a client guessed
+	// rather than received is refused by the same answer that hid it.
+	static bool OnGlobalFilter(const wl_client* client, const wl_global* global, void* data) noexcept;
 
 	// Admit an accepted connection, or close it. Answers nothing because there is no caller that could
 	// act on the difference: a stranger is a log line and a client that failed to construct is one too.
@@ -208,9 +251,9 @@ private:
 
 	std::vector<std::unique_ptr<Listener>> m_Listeners;
 
-	// Which session each live client arrived under, which is the whole of what `Release` needs of one.
+	// Every live client this server admitted, and what `Release` and the global filter need of one.
 	// **The destroy listener that keeps this current is not here**: libwayland's is intrusive, so the
 	// record holding it has to contain a `wl_listener` by value, and that is a type this header goes out
 	// of its way not to name. Server.cpp owns it and frees it from its own notify.
-	std::unordered_map<wl_client*, SessionId> m_Watched;
+	std::unordered_map<wl_client*, Admitted> m_Watched;
 };

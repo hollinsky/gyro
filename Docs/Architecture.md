@@ -2460,9 +2460,14 @@ hope:
 
 ### Filtered globals
 
-`wl_registry` advertisement is a function of the connection, not a static table. This is the
-structural commitment — a small amount of code before the server half exists, and a rewrite of every
-global's bind path afterwards. The tiers it enforces are policy and can move:
+`wl_registry` advertisement is a function of the connection, not a static table. This was priced as
+the structural commitment — a small amount of code before the server half exists, and a rewrite of
+every global's bind path afterwards — and **the second half of that is wrong**, which is worth
+recording because the fear of it is what deferred the mechanism past fourteen globals.
+`wl_display_set_global_filter` is one hook on the display, consulted both while a registry is
+advertised and while a client binds off one, so a global a client never saw is also one it cannot
+name by guessing, and no `Advertise` call site changes. The tiers it enforces are policy and can
+move — [Protocol/Tier.h](../Source/Protocol/Tier.h) is this list transcribed, and the only copy:
 
 - **Shared** — `wl_compositor`, `wl_shm`, dmabuf, `xdg_wm_base`, viewporter, fractional-scale,
   presentation-time, `wp_fifo_v1`, `wp_commit_timing_v1`.
@@ -2488,7 +2493,11 @@ its membership is not.
 Trust is a property of the *listener*, since that is where connection identity comes from — so a
 `System` connection cannot arrive on the ordinary per-user socket, and the shell needs a second
 listener with different permissions. Who creates it and how a process is judged worthy of it is
-[open](Open.md), and the shell is what makes it urgent rather than theoretical.
+[open](Open.md), and the shell is what makes it urgent rather than theoretical. The mechanism is
+built and nothing produces `Trust::System` yet: `Server::Adopt` takes the level a listener grants,
+every caller passes `User`, and an interface the tier table does not name is refused to an
+application rather than shown to one — so a System-tier global becomes reachable by a listener
+arriving, not by a check being added.
 
 ### Locking
 

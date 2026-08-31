@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <wayland-server-core.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -225,6 +226,28 @@ struct OfferedListener
 
 	return socket;
 }
+
+// The one client the display is holding, or null where it has none or more than one. libwayland's own
+// list walk, because `Server` deliberately hands out a count rather than the clients themselves — and
+// what these tests need is the pointer `TrustOf` is asked about, which no gyro API mints.
+[[nodiscard]] wl_client* TheOnlyClient(wl_display* display)
+{
+	wl_list* const clients = wl_display_get_client_list(display);
+	wl_client* found = nullptr;
+	wl_client* client = nullptr;
+
+	wl_client_for_each(client, clients)
+	{
+		if (found != nullptr)
+		{
+			return nullptr;
+		}
+
+		found = client;
+	}
+
+	return found;
+}
 } // namespace
 
 GYRO_TEST(Server, AnAdoptedListenerServesClients)
@@ -292,4 +315,63 @@ GYRO_TEST(Server, ReleasingAnUnknownSessionDoesNothing)
 	server.Release(static_cast<SessionId>(3));
 
 	GYRO_CHECK(server.SocketName() == "gyro-adopted-2");
+}
+
+GYRO_TEST(Server, AnAdoptedListenersTrustIsWhatItsClientsGet)
+{
+	OfferedListener offered{ "gyro-adopted-3" };
+
+	GYRO_REQUIRE(offered.Socket.IsValid());
+
+	Server server;
+
+	GYRO_REQUIRE(server.Open().has_value());
+
+	// **Nothing in the compositor passes this today**, and the test does rather than waiting for the
+	// System listener Docs/Open.md still owes: what is being checked is that trust travels from the
+	// socket to the client, which is the whole of Tier.h's rule, and a parameter no caller exercises is
+	// one that is wrong the day the first one does.
+	GYRO_REQUIRE(
+		server.Adopt(std::move(offered.Socket), ::getuid(), static_cast<SessionId>(4), Trust::System).has_value()
+	);
+
+	const Fd client = ConnectTo(offered.Path);
+
+	GYRO_REQUIRE(client.IsValid());
+	GYRO_REQUIRE(server.Poll().has_value());
+	GYRO_REQUIRE(server.Clients() == 1);
+
+	wl_client* const admitted = TheOnlyClient(server.Display());
+
+	GYRO_REQUIRE(admitted != nullptr);
+	GYRO_CHECK(server.TrustOf(admitted) == Trust::System);
+	GYRO_CHECK(server.SessionOf(admitted) == static_cast<SessionId>(4));
+}
+
+GYRO_TEST(Server, AClientOnASocketGyroBoundItselfIsAnApplication)
+{
+	Server server;
+
+	GYRO_REQUIRE(server.Open().has_value());
+	GYRO_REQUIRE(server.Bind("gyro-adopted-4").has_value());
+
+	const char* const directory = ::getenv("XDG_RUNTIME_DIR");
+
+	GYRO_REQUIRE(directory != nullptr);
+
+	const Fd client = ConnectTo(std::string{ directory } + "/gyro-adopted-4");
+
+	GYRO_REQUIRE(client.IsValid());
+	GYRO_REQUIRE(server.Poll().has_value());
+
+	// libwayland accepted this one, so gyro never saw the connection and has no record of it — which is
+	// why the count is zero while the display is holding a client. The answer has to come from the
+	// direction the unknown case falls rather than from a lookup that succeeds.
+	GYRO_CHECK(server.Clients() == 0);
+
+	wl_client* const unrecorded = TheOnlyClient(server.Display());
+
+	GYRO_REQUIRE(unrecorded != nullptr);
+	GYRO_CHECK(server.TrustOf(unrecorded) == Trust::User);
+	GYRO_CHECK(server.SessionOf(unrecorded) == SessionId::None);
 }
