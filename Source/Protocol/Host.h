@@ -54,14 +54,15 @@
 // acting on the callback it never received. `Flush` is therefore public and the root calls it
 // immediately before the wait, which is the one place that knows the thread is about to sleep.
 //
-// **Three globals are a window on screen, and the fourth is what a toolkit demands before it will
-// look for them.** `wl_compositor` is where a `wl_surface` and a `wl_region` come from, `wl_shm` is
-// where its pixels do, and `xdg_wm_base` is what says the surface is a window — so a toolkit can now
-// start, negotiate a size, draw a frame and be placed. `wl_data_device_manager` is beside them
-// because GTK gives up on a display that does not advertise one, and it transfers nothing:
-// [Data.h](Data.h) says why an inert clipboard is the honest shape of it while there is no seat. The
-// floor a window is placed on is authored here, once, because with no session agent there is one
-// session and this object is the whole of it.
+// **Three globals are a window on screen, and the fourth is what a person does with two of them.**
+// `wl_compositor` is where a `wl_surface` and a `wl_region` come from, `wl_shm` is where its pixels
+// do, and `xdg_wm_base` is what says the surface is a window — so a toolkit can start, negotiate a
+// size, draw a frame and be placed. `wl_data_device_manager` is beside them because copying out of
+// one window and pasting into another is the plainest thing two applications ever do together, and
+// because GTK gives up on a display that does not advertise one; [Data.h](Data.h) and
+// [Clipboard.h](Clipboard.h) carry what gyro keeps of a selection and why it outlives the application
+// that made it. The floor a window is placed on is authored here, once, because with no session agent
+// there is one session and this object is the whole of it.
 //
 // **A window redraws now, and what it redraws against is the return leg.** `Observe` connects this
 // host to the fact `Scene/Return.h` derives — *the pixels this entity committed reached the glass, at
@@ -103,6 +104,12 @@ class ClientHost final : public ISceneAuthor
 {
 public:
 	ClientHost() = default;
+
+	// **The clipboard is torn down here rather than by a member going out of scope**, because its
+	// background fetches and pastes are event sources on the display's own loop — and the display is a
+	// member too. A source outliving its loop is a use-after-free at shutdown rather than a leak, and a
+	// destructor body runs while every member is still alive.
+	~ClientHost() override { m_Data.Close(); }
 
 	// The socket clients reach this compositor through, for the log line that tells a person where to
 	// point one.
@@ -157,6 +164,13 @@ public:
 	void Release(SceneStore& scene, SessionId session) noexcept
 	{
 		m_Server.Release(session);
+
+		// **After the clients and for their reason**: ending them destroys their sources and offers,
+		// which deregister from the clipboard on the way out, so what this drops is a clipboard nothing
+		// still points at. What a person logging out gets from it is that what they copied does not stay
+		// on a machine somebody else is still using.
+		m_Data.Close(session);
+
 		m_Floors.Close(scene, session);
 	}
 
@@ -276,7 +290,7 @@ private:
 	ShellGlobal m_Shell{ m_Context };
 	wl_global* m_ShellGlobal = nullptr;
 
-	DataDeviceManagerGlobal m_Data;
+	DataDeviceManagerGlobal m_Data{ m_Context };
 	wl_global* m_DataGlobal = nullptr;
 
 	SeatGlobal m_Seat{ m_Context };

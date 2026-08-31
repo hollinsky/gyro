@@ -2563,8 +2563,9 @@ private:
 				"wp_presentation, wl_data_device_manager and wl_seat are the globals; a window will open with every "
 				"part its toolkit drew separately at the size its client says it is, be placed, redraw against the "
 				"frames that reach the glass and be told when each one was seen, take the keyboard and the pointer, "
-				"come to the front on a click, open and dismiss its menus, and be moved and resized by a drag it "
-				"asks for, but there is nothing behind the clipboard, so nothing can be copied, pasted or dragged, "
+				"come to the front on a click, open and dismiss its menus, be moved and resized by a drag it "
+				"asks for, and copy and paste with the others — with what was copied outliving the application "
+				"that copied it — but nothing can be dragged between windows, there is no middle-click paste, "
 				"and no client is told a scale that is not a whole number"
 			);
 

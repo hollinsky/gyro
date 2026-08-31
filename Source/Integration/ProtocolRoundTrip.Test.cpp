@@ -545,9 +545,7 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 // find it answers, and — for a client that owns something copyable — make a source nobody will ever
 // ask for. Both have to work for an application to start; neither transfers anything.
 //
-// `get_data_device` is not exercised here: it resolves now that there is a seat, and what is behind
-// it is inert — a device with no selection to read and no drag to start, because both need a pointer.
-// The test that belongs here is the one that transfers something, and it lands with the selection.
+// The transfer itself is the two tests below this one, which is where the selection landed.
 GYRO_TEST(ProtocolRoundTrip, ADataSourceIsCreatedAndOffersMimeTypesNobodyWillAskFor)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
@@ -2238,6 +2236,291 @@ GYRO_TEST(ProtocolRoundTrip, TheKeymapDescriptorIsATextKeymapAndCannotBeWritten)
 
 	// Sealed, so the descriptor that left this process cannot grow, shrink or be written through.
 	GYRO_CHECK(::ftruncate(keyboard.Listener.KeymapFd.Borrow().Value, 0) != 0);
+}
+
+// The clipboard, end to end, over a real socket.
+//
+// **This is the one part of the protocol whose whole content is a file descriptor crossing twice**, so
+// nothing either side asserts on its own can say it works: the source's pipe, the receiver's pipe and
+// gyro's own are three descriptors that have to line up, and a compositor that got the direction wrong
+// would look correct in every handler test and paste nothing.
+
+namespace
+{
+// A client offering something, which is asked for the bytes twice — once by gyro, keeping its own
+// copy, and once by whoever pastes.
+class CopyingSource final : public Wayland::WlDataSourceIgnoring
+{
+public:
+	explicit CopyingSource(std::string text) noexcept : m_Text{ std::move(text) } {}
+
+	void OnSend(std::string_view mimeType, Fd fd) override
+	{
+		Asked.emplace_back(mimeType);
+
+		// What every toolkit does with this event, and the descriptor is the client's to close.
+		const ssize_t written = ::write(fd.Get(), m_Text.data(), m_Text.size());
+
+		static_cast<void>(written);
+	}
+
+	void OnCancelled() override { ++Cancelled; }
+
+	std::vector<std::string> Asked;
+	std::uint32_t Cancelled = 0;
+
+private:
+	std::string m_Text;
+};
+
+// What a client is told is on the clipboard.
+class Clipboard final : public Wayland::WlDataDeviceListener
+{
+public:
+	Wayland::WlDataOfferListener* OnDataOffer(Wayland::WlDataOffer id) override
+	{
+		Offers.push_back(std::make_unique<OfferEvents>());
+		Made = id;
+
+		return Offers.back().get();
+	}
+
+	void OnEnter(std::uint32_t, Wayland::WlSurface, Wire::Fixed, Wire::Fixed, Wayland::WlDataOffer) override {}
+
+	void OnLeave() override {}
+
+	void OnMotion(std::uint32_t, Wire::Fixed, Wire::Fixed) override {}
+
+	void OnDrop() override {}
+
+	void OnSelection(Wayland::WlDataOffer id) override
+	{
+		++Selections;
+		Selected = id;
+	}
+
+	// The types the last offer carried.
+	class OfferEvents final : public Wayland::WlDataOfferIgnoring
+	{
+	public:
+		void OnOffer(std::string_view mimeType) override { Mimes.emplace_back(mimeType); }
+
+		std::vector<std::string> Mimes;
+	};
+
+	[[nodiscard]] bool Lists(std::string_view mime) const
+	{
+		return !Offers.empty() &&
+		       std::find(Offers.back()->Mimes.begin(), Offers.back()->Mimes.end(), mime) != Offers.back()->Mimes.end();
+	}
+
+	std::vector<std::unique_ptr<OfferEvents>> Offers;
+	Wayland::WlDataOffer Made;
+	Wayland::WlDataOffer Selected;
+	std::uint32_t Selections = 0;
+};
+
+// Ask an offer for its bytes and read what comes back, turning the loop as many times as it takes for
+// the descriptor to have been written into.
+[[nodiscard]] std::string Paste(Pair& pair, const Wayland::WlDataOffer& offer, std::string_view mime)
+{
+	std::array<int, 2> ends{ -1, -1 };
+
+	if (::pipe(ends.data()) < 0)
+	{
+		return {};
+	}
+
+	const Fd read{ ends[0] };
+
+	offer.Receive(mime, Fd{ ends[1] });
+
+	// Two turns rather than one: the request has to reach gyro, and where the selection is still a live
+	// client's the `send` then has to reach *it* before anything is written.
+	pair.Turn();
+	pair.Turn();
+
+	std::string pasted;
+	std::array<char, 256> chunk{};
+
+	for (;;)
+	{
+		const ssize_t got = ::read(read.Get(), chunk.data(), chunk.size());
+
+		if (got <= 0)
+		{
+			break;
+		}
+
+		pasted.append(chunk.data(), static_cast<std::size_t>(got));
+	}
+
+	return pasted;
+}
+
+// A client with a window, the keyboard, and a data device: everything a person needs to copy.
+struct Copier
+{
+	Toplevel Window;
+	Clipboard Listener;
+	Wayland::WlDataDeviceManager Manager;
+	Wayland::WlDataDevice Device;
+};
+
+[[nodiscard]] bool Open(Pair& pair, BoundCompositor& bound, const Keyboard& keyboard, Copier& copier)
+{
+	const Registry::Global* const data = bound.Listener.Find(Wayland::WlDataDeviceManager::WireName);
+
+	if (data == nullptr)
+	{
+		return false;
+	}
+
+	copier.Manager = bound.Listener.Object().Bind<Wayland::WlDataDeviceManager>(data->Name, data->Version);
+
+	if (!copier.Manager.IsValid())
+	{
+		return false;
+	}
+
+	copier.Device = copier.Manager.GetDataDevice(keyboard.Seat, copier.Listener);
+
+	if (!copier.Device.IsValid() || !Role(bound, copier.Window, std::byte{ 0x40 }))
+	{
+		return false;
+	}
+
+	copier.Window.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	copier.Window.XdgSurface.AckConfigure(copier.Window.SurfaceEvents.Serial);
+	copier.Window.Drawn.Surface.Attach(copier.Window.Drawn.Buffer, 0, 0);
+	copier.Window.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	return true;
+}
+} // namespace
+
+GYRO_TEST(ProtocolRoundTrip, ACopyReachesTheWindowThatHasTheKeyboard)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-copy" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Copier copier;
+	GYRO_REQUIRE(Open(pair, bound, keyboard, copier));
+
+	// A window with no selection anywhere is told so, which is what greys out Paste rather than leaving
+	// a menu entry that does nothing.
+	GYRO_CHECK_EQ(copier.Listener.Selections, std::uint32_t{ 1 });
+	GYRO_CHECK(!copier.Listener.Selected.IsValid());
+
+	CopyingSource source{ "the line a person copied" };
+	Wayland::WlDataSource offering = copier.Manager.CreateDataSource(source);
+	GYRO_REQUIRE(offering.IsValid());
+
+	offering.Offer("text/plain;charset=utf-8");
+	offering.Offer("text/html");
+
+	copier.Device.SetSelection(offering, keyboard.Listener.EnterSerial);
+
+	pair.Turn();
+
+	// **The copy arrives in the wakeup it was made in**, rather than waiting for focus to move: a
+	// person who copies and pastes inside one window is the ordinary case, and the alternative is a
+	// paste that offers what was on the clipboard before.
+	GYRO_CHECK_EQ(copier.Listener.Selections, std::uint32_t{ 2 });
+	GYRO_REQUIRE(copier.Listener.Selected.IsValid());
+
+	// The source's own list, verbatim, because the application offering it is still running.
+	GYRO_CHECK(copier.Listener.Lists("text/plain;charset=utf-8"));
+	GYRO_CHECK(copier.Listener.Lists("text/html"));
+
+	// **The paste goes through the application rather than through gyro**, which is what `send`
+	// arriving proves: the descriptor the receiver made is the one the source writes into.
+	GYRO_CHECK(Paste(pair, copier.Listener.Selected, "text/plain;charset=utf-8") == "the line a person copied");
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+GYRO_TEST(ProtocolRoundTrip, TheClipboardOutlivesTheApplicationThatFilledIt)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-clipboard" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Copier copier;
+	GYRO_REQUIRE(Open(pair, bound, keyboard, copier));
+
+	CopyingSource source{ "the line a person copied" };
+	Wayland::WlDataSource offering = copier.Manager.CreateDataSource(source);
+	GYRO_REQUIRE(offering.IsValid());
+
+	offering.Offer("text/plain;charset=utf-8");
+	offering.Offer("image/png");
+
+	copier.Device.SetSelection(offering, keyboard.Listener.EnterSerial);
+
+	// **gyro asks for the text itself, once, at the moment of the copy** — which is the whole
+	// departure, and it is visible from the client's side as a `send` nobody asked for.
+	pair.Turn();
+	pair.Turn();
+
+	GYRO_REQUIRE(source.Asked.size() == 1);
+	GYRO_CHECK(source.Asked[0] == "text/plain;charset=utf-8");
+
+	// And only the text: an image is left where it is, because generating one at every Ctrl+C is work
+	// the application does for a paste that mostly never comes.
+	GYRO_CHECK(std::find(source.Asked.begin(), source.Asked.end(), "image/png") == source.Asked.end());
+
+	const Wayland::WlDataOffer live = copier.Listener.Selected;
+	GYRO_REQUIRE(live.IsValid());
+
+	// The application closes, which on every other compositor is the moment the clipboard empties.
+	offering.Destroy();
+
+	pair.Turn();
+
+	// **It still pastes.** Nobody was asked this time — there is nobody left to ask — and the bytes are
+	// the ones gyro kept.
+	const std::size_t asked = source.Asked.size();
+
+	GYRO_CHECK(Paste(pair, live, "text/plain;charset=utf-8") == "the line a person copied");
+	GYRO_CHECK_EQ(source.Asked.size(), asked);
+
+	// Under a name the application never offered, because what was kept is UTF-8 and every other text
+	// name is that same byte sequence under a different label.
+	GYRO_CHECK(Paste(pair, live, "text/plain") == "the line a person copied");
+
+	// And the image is honestly gone rather than offered and empty.
+	GYRO_CHECK(Paste(pair, live, "image/png").empty());
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
 }
 
 GYRO_TEST(ProtocolRoundTrip, AWindowThatOpensTakesFocusAndTheKeysFollowIt)

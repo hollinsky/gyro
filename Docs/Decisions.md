@@ -13962,3 +13962,86 @@ on a nested run, because the chord now works there. The caveat is real and is in
 rather than in the line: a nested gyro sits behind another compositor's bindings, so a host that claims
 `Ctrl+Alt+Esc` for itself — KDE does — swallows it, and the way out of that window stays the window's
 own close button.
+
+### 176. The clipboard is the compositor's, and one text type survives the application that filled it
+
+*(Decided 2026-08-30. Answers the half [Protocol/Data.h](../Source/Protocol/Data.h) had deferred since
+the global went up inert, and departs from every other Wayland compositor on purpose.)*
+
+**The complaint is real and it is the protocol's own shape.** `wl_data_device` makes the selection an
+object the *source client* owns: the bytes never leave that process, and a paste is a pipe the
+compositor hands over so the two applications can talk. So closing the application a person copied from
+empties the clipboard. A person copies a line out of a terminal, closes it, pastes into a browser and
+gets nothing — and all three programs behaved correctly. The usual answer is a clipboard manager: a
+daemon that takes the selection *away* from the application in order to hold it, which makes a third
+party the owner of everything anybody copies, breaks the protocol's account of who is offering what,
+and has to be installed and running before the copy that needs it.
+
+**gyro keeps the text itself, at the moment of the copy.** `set_selection` is followed by the compositor
+asking the source for one text type and holding the answer; when the source goes away the offer stays
+and the paste still works. The offer's mime list *shrinks* to what is genuinely still available, so a
+client asking for a type nobody has is told so rather than handed a pipe that closes empty. There is
+nothing to install, and no third party owns anything: gyro is already the party every selection passes
+through.
+
+**One text type, and the bound is the argument rather than a budget.** Reading every type a source
+offers is the tempting version and it is wrong for a reason a person feels: generating a format is work
+the application does on demand, so a compositor that asks for all of them turns every Ctrl+C in a
+spreadsheet into the app rendering ODF, HTML, RTF and a bitmap that nobody will ever paste — seconds of
+invisible work, on the keystroke a person expects to be free. Text is cheap in every toolkit and it is
+also what a person notices losing. An image, a file list or a rich document behaves exactly as it does
+everywhere else. A megabyte is the ceiling and a copy past it is not held *at all* rather than held
+truncated, because half a paste that arrives silently is a document with a sentence missing and nothing
+anywhere saying so.
+
+**A UTF-8 type is preferred because that is what makes the re-offer honest.** What gyro kept is
+re-advertised under every text name — `text/plain`, `UTF8_STRING`, both spellings of the charset
+parameter — and it may only do that because the ranking preferred a name that says what the encoding
+is. `text/plain` alone says nothing, so it is taken only where nothing better was offered.
+
+**A live source is still handed the receiver's own descriptor.** The cache is a fallback rather than a
+path: while the application that copied is running, `wl_data_source.send` gives it the receiving
+client's pipe and the bytes never enter this process. That keeps a hundred-megabyte image paste at zero
+cost here, and it means what a person pastes is what the application would say now rather than what it
+said at copy time.
+
+**Nothing waits on a client, which on this compositor is not a nicety.** gyro runs `SCHED_FIFO` with
+`mlockall`; a blocking read on a pipe whose other end belongs to a stopped application is the whole
+machine, every session, gone. So the fetch and the cached paste are both armed on the display's own
+event loop, exactly as a held commit's acquire point is (174), each with a deadline — two seconds for a
+source that will not answer, half a minute for a receiver that is not reading.
+
+**A source that asks not to be remembered is not.** `x-kde-passwordManagerHint` is the one convention
+there is and every vault already sets it; a compositor that holds the clipboard forever is precisely
+the program that must honour it, and what a person copies out of a password manager must not outlive
+the window it came from.
+
+**Anybody may set the selection, and the alternative was considered and rejected.** The protocol has a
+serial on `set_selection` and gyro sends the serials it would be checked against, so refusing a client
+that does not have the keyboard is available. What that stops is an application overwriting the
+clipboard in the background; what it breaks is a person copying in a window that has just lost focus,
+which is a paste that comes back empty for no reason anybody can see. The background case is worth
+*telling somebody about* instead, so gyro records the first read of each selection by each application
+— the fact a phone renders as *Notes pasted from Safari*. There is nowhere to render it yet and it is a
+log line; the surfacing is [Open.md](Open.md)'s.
+
+**Past selections are kept and nothing shows them.** A history is the other half of what a clipboard
+manager is for, and the only moment its bytes are reachable is the one the cache above already passes
+through — so sixteen entries and four megabytes are held per session, deduplicated against the top.
+Nothing reads them: surfacing needs a shell and a protocol to carry it, and that is
+[Open.md](Open.md)'s too. This is recorded as built-with-no-caller deliberately rather than left out,
+because the alternative is discovering later that the one instant the data existed has passed.
+
+**Per session, which only a compositor shaped like this one has to decide.** Decision 21 serves every
+user on the machine from one process, so one person's copy reaching another person's windows is exactly
+the disclosure the per-uid split exists to prevent. The clipboard is keyed on the session a connection
+was admitted under and is dropped when the session's listener is released — so logging out does not
+leave what a person copied on a machine somebody else is still using. A per-session compositor gets
+this right by having nowhere else to put it.
+
+**Not drag-and-drop, which is the same interface and not the same feature.** A drag needs an icon
+surface with a role of its own, a grab that supersedes the seat's implicit one, and an action
+negotiation between two clients — [Drag.h](../Source/Protocol/Drag.h)-shaped work that shares nothing
+with the selection but a factory. `start_drag` answers `wl_data_source.cancelled` rather than silence,
+because a toolkit told nothing waits for an `enter` that never arrives and leaves a person holding a
+button on a drag that began nowhere.

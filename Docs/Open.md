@@ -1690,3 +1690,53 @@ refuses at the top level. What is open is whether there is a third answer — ho
 for a bounded number of refreshes, after which the ready surfaces go out without the late one. That
 needs a deadline the dispatch thread does not currently have, and it needs somebody to say what the
 bound is in terms of what a person sees.
+
+## Nothing shows a person the clipboard, and nothing tells them it was read
+
+Decision 176 has gyro holding the text of every selection and the sixteen before it, per session, and
+recording the first read of each one by each application. Both halves are built and neither reaches a
+person. The history has no reader at all; the read notice is an `info` line in a log, which is exactly
+where a person who wanted to know that a background application had just taken what they copied will
+not be looking.
+
+What is missing in both cases is the same thing: a shell, and a protocol for it to hear about this on.
+That is [decision 51](Decisions.md#51-the-shell-is-a-per-session-client-gyro-owns-mechanism)'s seam
+and it does not exist yet, so what is open is not *whether* to surface these but whose vocabulary they
+land in — a System-tier global a shell binds, with the history as an enumeration and the read as an
+event, is the obvious shape and it prejudges nothing else. What has to be decided with it is whether
+selecting an entry from the history is the compositor setting the selection on the shell's behalf, or
+the shell holding a source of its own like every clipboard manager does today. The first is the reason
+this is gyro's at all; the second is the one every toolkit is already written against.
+
+A read notice also needs a policy the log line does not have: which reads are worth showing. A toolkit
+reads the selection whenever a window gains focus, so *every first read per application per copy* — the
+rule gyro records under — is still one line per application per Ctrl+C, which is a notification per
+window a person alt-tabs through. Whether the honest unit is the read, the paste, or nothing at all
+until a person asks is a question about what people do with the answer rather than about the mechanism.
+
+## Drag-and-drop is not built, and a person can copy but not drag
+
+Decision 176 is the selection half of `wl_data_device_manager`; `start_drag` is answered with
+`wl_data_source.cancelled` and nothing happens. What that costs is dragging a file out of a file
+manager, a tab out of a browser window, or a colour onto a swatch — none of which have any other path
+in Wayland.
+
+The work is not more clipboard. A drag needs an icon surface, which is a `wl_surface` role gyro does
+not have and which is drawn under the pointer at input rate; a grab that supersedes the seat's implicit
+one for the duration, which is the machinery
+[Protocol/Drag.h](../Source/Protocol/Drag.h) already holds for moving a window and would have to admit
+a second kind of gesture; and the action negotiation, which is the one part of this protocol where the
+compositor is expected to have a *policy* — the modifier a person holds decides copy against move, and
+there is no configuration and no shell to declare one. That last is the open question rather than the
+first two: the mechanism is clear and the default behaviour is a choice nobody has made.
+
+## Middle-click paste has no protocol behind it
+
+`zwp_primary_selection_device_manager_v1` is a separate interface with the same shape as the selection
+half of 176, and gyro advertises none — so selecting text in one window and middle-clicking in another
+does nothing, which on X11 and on every other Wayland compositor it does. It is deliberately not folded
+into 176: the primary selection is set by *selecting* rather than by a keystroke, so it changes
+constantly and the eager fetch that makes the clipboard survive an application would mean asking a
+source for its text on every drag of a mouse across a paragraph. Whether the primary selection is
+cached at all, or is the one selection that lives and dies with its client, is the question to settle
+before the global goes up.

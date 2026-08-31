@@ -989,6 +989,7 @@ gyro_add_module(Protocol DISPATCH
 		Geometry
 		Scene
 	SOURCES
+		Clipboard.cpp
 		Compositor.cpp
 		Data.cpp
 		Dmabuf.cpp
@@ -1014,6 +1015,7 @@ gyro_add_module(Protocol DISPATCH
 		Tier.cpp
 		Viewporter.cpp
 	TESTS
+		Clipboard.Test.cpp
 		Dmabuf.Test.cpp
 		Drag.Test.cpp
 		ExplicitSync.Test.cpp

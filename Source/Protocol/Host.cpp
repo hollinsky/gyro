@@ -168,13 +168,18 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		return Failure(ENOMEM, "advertising xdg_wm_base");
 	}
 
+	// **The loop before the global**, because the first `set_selection` may arrive on the first dispatch
+	// after this returns and the clipboard has nowhere to arm its background read without one.
+	m_Data.Open(*m_Server.EventLoop());
+
 	m_DataGlobal = Wayland::Server::WlDataDeviceManager::Advertise(*display, DataDeviceManagerVersion, m_Data);
 
 	if (m_DataGlobal == nullptr)
 	{
-		// Fatal, and it is the one global here that transfers nothing: GTK refuses to open a display
-		// without it, so a compositor that came up missing this would start, log nothing, and be a
-		// socket every GTK application walks away from. [Data.h](Data.h) carries the rest.
+		// Fatal for two reasons and the second is the older one: a person cannot copy or paste anything
+		// without it, and GTK refuses to open a display at all when it is missing — so a compositor that
+		// came up without this would start, log nothing, and be a socket every GTK application walks away
+		// from. [Data.h](Data.h) carries the rest.
 		return Failure(ENOMEM, "advertising wl_data_device_manager");
 	}
 
@@ -346,6 +351,12 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	const EntityId focused = scene.Focus().Focused();
 
 	m_Seat.SyncFocus(focused);
+
+	// **Beside the seat's comparison and against the same answer**, for the reason the shell's walk is
+	// there too: the selection is offered to whoever has the keyboard, so a window that got the keys in
+	// this wakeup has to be told what is on the clipboard in it as well. A person's first Ctrl+V in a
+	// window they have just clicked into is otherwise the one paste that does nothing.
+	m_Data.Sync(focused);
 
 	// **Beside the seat's comparison and against the same answer**, because the two are one fact told to
 	// two different objects: a `wl_keyboard.enter` says where the keys are going and an `activated`
