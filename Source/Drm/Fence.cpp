@@ -7,15 +7,16 @@
 #include <xf86drm.h>
 
 #include <cerrno>
+#include <cstddef>
 #include <utility>
 
 namespace Drm
 {
 FenceExporter::FenceExporter(FenceExporter&& other) noexcept
-	: m_Device{ std::exchange(other.m_Device, RawFd{}) }, m_Timelines{ std::move(other.m_Timelines) },
+	: m_Device{ std::exchange(other.m_Device, RawFd{}) }, m_Timelines{ other.m_Timelines },
+	  m_Held{ std::exchange(other.m_Held, 0) }, m_Next{ std::exchange(other.m_Next, 0) },
 	  m_Scratch{ std::exchange(other.m_Scratch, 0) }
 {
-	other.m_Timelines.clear();
 }
 
 FenceExporter& FenceExporter::operator=(FenceExporter&& other) noexcept
@@ -24,9 +25,10 @@ FenceExporter& FenceExporter::operator=(FenceExporter&& other) noexcept
 	{
 		Reset();
 		m_Device = std::exchange(other.m_Device, RawFd{});
-		m_Timelines = std::move(other.m_Timelines);
+		m_Timelines = other.m_Timelines;
+		m_Held = std::exchange(other.m_Held, 0);
+		m_Next = std::exchange(other.m_Next, 0);
 		m_Scratch = std::exchange(other.m_Scratch, 0);
-		other.m_Timelines.clear();
 	}
 
 	return *this;
@@ -39,12 +41,13 @@ void FenceExporter::Reset() noexcept
 		return;
 	}
 
-	for (const Imported& timeline : m_Timelines)
+	for (std::size_t index = 0; index < m_Held; ++index)
 	{
-		::drmSyncobjDestroy(m_Device.Value, timeline.Handle);
+		::drmSyncobjDestroy(m_Device.Value, m_Timelines[index].Handle);
 	}
 
-	m_Timelines.clear();
+	m_Held = 0;
+	m_Next = 0;
 
 	if (m_Scratch != 0)
 	{
@@ -54,11 +57,11 @@ void FenceExporter::Reset() noexcept
 
 Result<std::uint32_t> FenceExporter::HandleFor(RawFd timeline)
 {
-	for (const Imported& imported : m_Timelines)
+	for (std::size_t index = 0; index < m_Held; ++index)
 	{
-		if (imported.Descriptor == timeline.Value)
+		if (m_Timelines[index].Descriptor == timeline.Value)
 		{
-			return imported.Handle;
+			return m_Timelines[index].Handle;
 		}
 	}
 
@@ -69,10 +72,21 @@ Result<std::uint32_t> FenceExporter::HandleFor(RawFd timeline)
 		return Failure(errno, "importing the renderer's timeline onto the display device");
 	}
 
-	// Allocating, and deliberately outside the frame section: this runs the first time a given
-	// timeline is seen, which is at the first frame after a target set is bound. Every frame after it
-	// finds the handle already here.
-	m_Timelines.push_back(Imported{ .Descriptor = timeline.Value, .Handle = handle });
+	// Allocation-free, because this runs inside the frame section: the first frame after a target set
+	// is bound is a frame like any other and the debug allocator does not grant it an exception. Past
+	// the bound the oldest entry goes, and its handle with it — the descriptor it named belongs to a
+	// device that has been replaced, so nothing on the machine can still ask for it.
+	if (m_Held == m_Timelines.size())
+	{
+		::drmSyncobjDestroy(m_Device.Value, m_Timelines[m_Next].Handle);
+	}
+	else
+	{
+		++m_Held;
+	}
+
+	m_Timelines[m_Next] = Imported{ .Descriptor = timeline.Value, .Handle = handle };
+	m_Next = (m_Next + 1) % m_Timelines.size();
 
 	return handle;
 }
