@@ -314,6 +314,21 @@ struct Options
 	// else it owns.
 	std::string ControlPath{};
 
+	// A PAM to show behind everything, or empty for a machine with none.
+	//
+	// **A path on a command line is the stand-in and the descriptor is the destination.** A background
+	// belongs to a shell — it is the one piece of what a person sees that is a *setting* rather than a
+	// mechanism — and what a shell will do is hand a descriptor over the session handover, for
+	// `Session/Handover.h`'s reason: the party that opened the file is the party entitled to it. Until
+	// there is a shell, gyro opens the path itself and hands the descriptor to the same verb, so the
+	// arrival of one changes what calls `PamImage::Read` and nothing below it.
+	//
+	// **One image and not a list**, because gyro holds one background: an image is shown on the outputs
+	// whose device extent it matches exactly and on no others (`Scene/Background.h`), and a machine
+	// whose panels differ is one where the shell hands over a new image as the person's attention moves
+	// rather than one where gyro picks from a set it was given at startup.
+	std::string BackgroundPath{};
+
 	// The outputs actually requested, which is the default single 1080p60 when the command line named
 	// none. Returning a span keeps the "none means one" rule in one place rather than at each reader.
 	[[nodiscard]] std::span<const OutputRequest> Requested() const noexcept { return { Outputs.data(), OutputCount }; }
@@ -729,6 +744,18 @@ inline constexpr double MaximumArcminutes = 10.0;
 		{
 			options.Clients = true;
 			options.ControlPath = value.empty() ? std::string{ Session::DefaultControlPath } : std::string{ value };
+
+			continue;
+		}
+
+		if (Detail::Matches(argument, "--background", value))
+		{
+			if (value.empty())
+			{
+				return Failure(EINVAL, "--background wants a path to a PAM image");
+			}
+
+			options.BackgroundPath = value;
 
 			continue;
 		}

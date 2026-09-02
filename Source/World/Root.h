@@ -42,6 +42,13 @@ struct SceneRoot
 	// belonging to one of them. The boot splash and the recovery console are `None` for the same
 	// reason and stay honest without a third state, because gyro authors and *retires* them around
 	// the moment they are on screen rather than keeping them and hiding them.
+	//
+	// **It holds both ends of the stack rather than one, which is what the second member of it makes
+	// clear.** Scene/Background.h is `None` and is the *first* root — authored before any author opens,
+	// because a list makes the last root the frontmost and a wallpaper handed over an hour into a
+	// session would otherwise land in front of every window on the machine (179). So `None` is not a
+	// layer: it is *whose*, and where a root of gyro's own sits is decided by when it was authored,
+	// exactly as it is for a session's.
 	SessionId Session = SessionId::None;
 };
 

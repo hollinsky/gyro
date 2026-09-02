@@ -5,6 +5,7 @@
 
 #include "Compositor/Compositor.h"
 
+#include <fcntl.h>
 #include <signal.h>
 #include <spdlog/spdlog.h>
 #include <stdlib.h>
@@ -36,7 +37,9 @@
 #include "Compositor/Wait.h"
 #include "Core/Clock.h"
 #include "Core/ColorState.h"
+#include "Core/Fd.h"
 #include "Core/Handle.h"
+#include "Core/Pam.h"
 #include "Core/Signal.h"
 #include "Core/SlotAllocator.h"
 #include "Core/Time.h"
@@ -2715,7 +2718,56 @@ private:
 			return opened;
 		}
 
+		OpenBackground();
+
 		return {};
+	}
+
+	// The `--background` image, if there is one.
+	//
+	// **A warning rather than a failure, which is the whole of the policy.** A machine whose wallpaper
+	// will not open is a machine that boots to black behind its windows; a machine that refuses to start
+	// is one somebody has to fix from another computer. This process is also the recovery console, so
+	// the only defensible answer to a bad path is to say so and carry on.
+	//
+	// gyro opens the path itself because a command line is a path. What a shell will hand over is the
+	// descriptor, for `Session/Handover.h`'s reason, and it reaches the same verb one line down.
+	void OpenBackground()
+	{
+		if (m_Options.BackgroundPath.empty())
+		{
+			return;
+		}
+
+		const Fd file{ ::open(m_Options.BackgroundPath.c_str(), O_RDONLY | O_CLOEXEC) };
+
+		if (!file.IsValid())
+		{
+			spdlog::warn("Background {}: {}", m_Options.BackgroundPath, Error::FromErrno("opening a background"));
+
+			return;
+		}
+
+		const Result<PamImage> image = PamImage::Read(file.Borrow());
+
+		if (!image)
+		{
+			spdlog::warn("Background {}: {}", m_Options.BackgroundPath, image.error());
+
+			return;
+		}
+
+		if (const Result<void> shown = m_Dispatch->SetBackground(*image); !shown)
+		{
+			spdlog::warn("Background {}: {}", m_Options.BackgroundPath, shown.error());
+
+			return;
+		}
+
+		// Said out loud because the fit rule is exact and silence on a mismatch is indistinguishable
+		// from a wallpaper that did not load: an image that is not the panel's device extent is shown on
+		// nothing, and the number is what tells somebody which one to produce.
+		spdlog::info("Background {}x{} from {}", image->Width(), image->Height(), m_Options.BackgroundPath);
 	}
 
 	// Where the outputs sit in the space the world is laid out in, and what scale each of them takes.

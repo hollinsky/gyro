@@ -245,6 +245,7 @@ gyro_add_module(Core PORTABLE OBJECT
 		Clock.cpp
 		DebugAllocator.cpp
 		Fd.cpp
+		Pam.cpp
 		Signal.cpp
 	TESTS
 		Clock.Test.cpp
@@ -252,6 +253,7 @@ gyro_add_module(Core PORTABLE OBJECT
 		Fd.Test.cpp
 		FrameSection.Test.cpp
 		Handle.Test.cpp
+		Pam.Test.cpp
 		Quiet.Test.cpp
 		Result.Test.cpp
 		Signal.Test.cpp
@@ -432,6 +434,7 @@ gyro_add_module(Scene PORTABLE DISPATCH
 	SOURCES
 		Cursor.cpp
 	TESTS
+		Background.Test.cpp
 		Commit.Test.cpp
 		Cursor.Test.cpp
 		Density.Test.cpp

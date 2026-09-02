@@ -17,6 +17,7 @@
 #include "Publication/Return.h"
 #include "Publication/Ring.h"
 #include "Scene/Author.h"
+#include "Scene/Background.h"
 #include "Scene/Cursor.h"
 #include "Scene/Output.h"
 #include "Scene/Return.h"
@@ -140,6 +141,17 @@ public:
 
 		m_Store.SetOutputs(outputs);
 
+		// **Before the author and not after, which is the whole of what makes it a background.** The
+		// top level is a list and decision 55 makes the last root the frontmost, so the container has
+		// to exist before anything else claims a position — a shell handing over a wallpaper an hour
+		// into a session would otherwise put it in front of every window on the machine.
+		// `Scene/Background.h` is the exact inverse of the cursor, which is the last root and re-raises
+		// itself to stay there.
+		if (!m_Background.Open(m_Store))
+		{
+			return Failure(ENOSPC, "the scene would not take the background container");
+		}
+
 		// The drain reads a positional run, so it has to be told how long this world's is — the same
 		// number and the same order the store just took, which is what makes index `i` here the frame
 		// loop's output `i` on the way back as well as on the way out.
@@ -206,6 +218,12 @@ public:
 		// **Before the seal and not after**, for the same reason the seal is where it is: a pointer
 		// that just went away retires its image in here, and the scene about to be published is the
 		// first that does not name it.
+		// **Beside the cursor and for its reason**: a background is gyro's own on every output, and an
+		// author that had to remember to draw one is an author that forgets — with the boot splash and
+		// the recovery console being the two that would forget most visibly. It is stepped before the
+		// pointer only because that is the order they are stacked in; neither reads the other.
+		m_Background.Step(m_Store, m_Textures);
+
 		m_Cursor.Step(m_Store, m_Textures);
 
 		// **Before the publish and not after**, because the number has to be the sequence this step's
@@ -366,6 +384,23 @@ public:
 	// nodes. Nothing in the design reads it.
 	[[nodiscard]] const SceneCursor& Cursor() const noexcept { return m_Cursor; }
 
+	// Show this image behind everything: the `--background` flag at startup, and a session's shell over
+	// the handover when there is one.
+	//
+	// **A verb here rather than a reference to the background itself**, because setting one needs the
+	// store and the texture space and both are this loop's — a caller handed the background would have
+	// to be handed those too, which is the composition root reaching across the publication boundary
+	// for a wallpaper.
+	[[nodiscard]] Result<void> SetBackground(const PamImage& image)
+	{
+		return m_Background.Set(m_Store, m_Textures, image);
+	}
+
+	// Take it away, fading to black. A session whose shell has gone.
+	void ClearBackground() { m_Background.Clear(m_Store); }
+
+	[[nodiscard]] const SceneBackground& Background() const noexcept { return m_Background; }
+
 	[[nodiscard]] SceneReturn& Return() noexcept { return m_Return; }
 
 	[[nodiscard]] const SceneReturn& Return() const noexcept { return m_Return; }
@@ -429,6 +464,8 @@ private:
 	// than in the store beside the position it follows, because drawing it needs the texture space and
 	// the store has none — and because an author handed the world would then be handed a cursor it
 	// could retire.
+	SceneBackground m_Background{};
+
 	SceneCursor m_Cursor{};
 
 	// The devices' link to where the pointer is. Held rather than fired and forgotten, because a device

@@ -40,6 +40,8 @@ static void PrintUsage()
 			  << "                      kernel's name for the panel, as eDP-1 or DP-7; requests that\n"
 			  << "                      name none bind in the order the card enumerates them.\n"
 			  << "                      Repeat for several; the default is one 1920x1080@60\n"
+			  << "  --background=PATH   Show this PAM behind everything, on the outputs whose\n"
+			  << "                      device extent it matches exactly and on no others\n"
 			  << "  --gym[=NAME]        Author one of gyro's own scenes instead of hosting clients;\n"
 			  << "                      bare is lanes\n"
 			  << "  --socket[=NAME]     Host clients on this Wayland socket; bare picks the first\n"

@@ -1756,3 +1756,25 @@ what a person actually reads. And either one is a piece of shell UI drawn by the
 the thing 141, 162 and 177 are each careful to say they are only doing because nothing else can yet —
 so the question is whether the switcher is the fourth stand-in or the point at which gyro stops adding
 them and grows the surface a shell draws its own on.
+
+## Nothing tells a shell which backgrounds to produce, and a panel with none draws black
+
+Decision 179 makes the fit exact: a background is shown on an output whose device extent it matches
+and nowhere else. That is right — the party that knows what a picture is *of* is the party that should
+crop it — but it names an obligation and no channel for it. A shell has to know every panel's device
+extent to produce an image per panel, and today a client learns a `wl_output`'s mode in the mode
+event's own units, which is not the same number as the one this is compared against on a scaled or
+rotated panel. So the first shell to try will produce an image that is refused, and what a person sees
+is black behind their windows with nothing in the log about the size that was wanted.
+
+The nearest existing answer is `wp_fractional_scale_v1` plus the output's mode, which reconstructs the
+number the hard way and once per panel. The honest one is probably a protocol of gyro's own carrying
+the extent this actually compares against — the same protocol that would let a shell hand a descriptor
+over rather than a path — and the question is whether that is a background protocol or the first verb
+of the shell interface decisions 141, 162 and 177 keep deferring.
+
+Two smaller things wait behind it. **A background is one image, not one per output**, which is the
+right shape while a shell is handing them over as attention moves and the wrong one if the answer above
+turns out to be *here is the set, keep them all*. And **a background handed over as a dmabuf is not
+built**: `PamImage` is the whole intake, so a shell that has already composited its wallpaper on the
+GPU has to read it back and hand over bytes.

@@ -14139,3 +14139,70 @@ prints. **Rejected: hanging it off `Dispatch/Textures.h`, which is where the pix
 live.** They do not, on a real machine: `Promote` writes an authored image into a scannable allocation
 and lets the mapping go, so a client's shm buffer is a descriptor by the time the registry is holding
 it. The commit is the one place the rows and the damage are both in hand.
+
+### 179. The background is gyro's, shown only where it fits exactly, and replaced by a cross-fade
+
+A wallpaper drawn by a shell is absent for every moment a shell is not running, and those are the
+moments a machine looks worst: before anybody has logged in, between one session and the next, on the
+lock screen, and on the recovery console. gyro already draws on every one of them — decision 21 keeps
+every session alive at once and `SessionId::None` is the root kind that means *gyro's own, on every
+output*, which until now held only the pointer glyph. **So the background is gyro's, and a shell is
+the party that supplies the picture rather than the party that draws it.**
+
+**The container is authored before any author opens, which is what makes it a background.** The top
+level is a list and decision 55 makes the last root the frontmost, so a root created when a shell
+hands a wallpaper over an hour into a session would land in front of every window on the machine.
+`Scene/Background.h` is therefore the exact inverse of `Scene/Cursor.h`: created once, empty, ahead of
+`ISceneAuthor::Open`, with images as children of it, where the cursor is the last root and re-raises
+itself every iteration to stay there. Neither is an author's job for the same reason — the splash, the
+console, a gym and the client host all want both, and one each of them had to remember to draw is one
+the console is without.
+
+**An image is shown on an output whose device extent it matches exactly, and on no other.** There is
+no fit policy: no cover-crop, no stretch, no letterbox, and no resampler anywhere in the compositor.
+The shell knows the panels, because gyro tells it, and it hands over an image per size; an output with
+nothing that fits draws black, which is what it drew before there was a background at all. The extent
+compared against is the output's own logical rectangle in device pixels rather than its mode, which
+are the same number on an ordinary panel and transposed on one stood on end — a wallpaper is authored
+in the space the world is laid out in.
+
+**Replacement is a cross-fade and it is one commit.** The outgoing nodes fade to nothing and are
+retired in the same scope; decision 114 keeps a retired subtree published while anything on it is
+still moving, so the fade *is* the exit and nothing has to remember to sweep it. The incoming nodes
+are created transparent and fade up, which makes the first background on a machine — the one the boot
+animation hands over to — a fade in from black by the same path rather than a second one. The write
+order inside that commit is load-bearing: a fade written *after* a retire is a write to a node that
+has stopped listening, and the picture that produces is a wallpaper vanishing on the frame it was
+asked to fade.
+
+**The replaced image is given up when the last node drawing it has left the world.** `Adopt` promises
+an id to the frames already published and a node still fading is a frame not yet published, so
+retiring the texture at the moment its replacement arrived is a panel sampling memory the registry has
+taken back. That is what makes an adopted image a record with its nodes rather than a
+current-and-previous pair: two backgrounds can be replaced faster than one fade finishes.
+
+**PAM, and the trade is `Virtual/Pam.h`'s read backwards.** Decoding a PNG means zlib inside the one
+process on the machine that holds DRM master and runs `SCHED_FIFO`, to save disk on a file read once;
+a 4K background is 33 MB as a PAM, paid by a filesystem rather than by somebody waiting for a frame.
+The grammar moved to `Core/Pam.h` so both directions read one statement of it — the dump writer's
+inline header was one, and a reader beside it would have been the second, which is decision 139's
+argument for `Trace/Schema.h` one format over. `Core` rather than `Virtual` because the reader's caller
+is `Scene`, which may name neither `Virtual` nor `Seam`: decision 87's rule that a type both sides need
+lives below both waists.
+
+**The intake verb takes a descriptor.** A command line is a path and gyro opens it, but what a shell
+will hand over is an open file, for `Session/Handover.h`'s reason — the party that opened it is the
+party entitled to it — so both arrive at `PamImage::Read`.
+
+**Rejected: cover-crop, or any fit policy in the compositor.** It buys never showing black on a
+monitor plugged in ten seconds ago, and costs a resampler in the frame path and a wallpaper that is
+subtly soft on the panel a person spends the day in front of. The party that knows what the picture is
+*of* is the party that should be choosing what to keep of it. **Rejected: a list of images at
+startup.** A repeatable flag was the obvious way to reach a multi-head machine, and it makes gyro the
+party that picks — which is the shell's job the moment there is one, and a second policy to retire.
+gyro holds one background and is handed a new one. **Rejected: retiring the old texture at the
+replacement.** Above. **Rejected: leaving a faded-out node in the world.** Nothing in the frame walk
+culls a transparent quad, so it is a full-screen composite for the life of the session — the same
+finding `SceneCursor` records for a hidden pointer. **Rejected: a solid colour instead of an image
+until a shell exists.** `SolidContent` already says a fill is what stands in for a wallpaper; what
+this decides is what happens when there is one.

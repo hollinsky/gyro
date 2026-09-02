@@ -101,31 +101,13 @@ Result<void> WritePam(const ImageView& image, std::string_view path, std::string
 		return Failure(errno, "creating a PAM frame");
 	}
 
-	// The comments go first, because `P7` has to be the first token of the file and everything between
-	// it and `ENDHDR` is the header the note is part of.
-	std::string header = std::format(
-		"P7\nWIDTH {}\nHEIGHT {}\nDEPTH 4\nMAXVAL {}\nTUPLTYPE RGB_ALPHA\n",
-		image.Size().Width,
-		image.Size().Height,
-		wide ? 65535 : 255
+	// The grammar is Core/Pam.h's, in both directions. It used to be spelled inline here, which was
+	// one of two statements of a format nothing else on this machine checks — and the reader that
+	// arrived beside it would have been the second.
+	const std::string header = FormatPamHeader(
+		{ .Width = image.Size().Width, .Height = image.Size().Height, .Depth = 4, .MaxValue = wide ? 65535U : 255U },
+		note
 	);
-
-	// Each line of the note is commented separately: a `#` runs to the end of a line, so a note that
-	// carried an embedded newline and was written whole would put its own second line into the grammar
-	// as a header field nobody defined.
-	while (!note.empty())
-	{
-		const std::size_t end = note.find('\n');
-		const std::string_view line = note.substr(0, end);
-
-		header += "# ";
-		header += line;
-		header += '\n';
-
-		note = end == std::string_view::npos ? std::string_view{} : note.substr(end + 1);
-	}
-
-	header += "ENDHDR\n";
 
 	if (const Result<void> written = WriteAll(file.Borrow(), header); !written)
 	{
