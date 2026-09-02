@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include "Core/Clock.h"
 #include "Core/Time.h"
@@ -213,8 +214,11 @@ GYRO_TEST(SceneCursor, TheHotspotIsInsideTheImageAndTheOutlineHangsOutsideIt)
 
 	// And the glyph is about as tall as it was asked to be, which is what catches an offset grown by the
 	// wrong unit — the mistake that drew a black rectangle around the first staircase.
-	GYRO_CHECK(image->Size().Height > 48);
-	GYRO_CHECK(image->Size().Height < 48 * 3 / 2);
+	//
+	// The silhouette rather than the image, because the image is padded out to a size a display engine
+	// will scan out and its height is that padding's rather than the drawing's.
+	GYRO_CHECK(image->GlyphSize().Height > 48);
+	GYRO_CHECK(image->GlyphSize().Height < 48 * 3 / 2);
 
 	const Result<EntityId> node = AuthorCursor(fixture.Store, {}, TextureId{ 1, 1 }, *image);
 
@@ -378,10 +382,22 @@ struct MixedFixture
 {
 	return store.Find(id)->Translation.Model();
 }
+
+// The frontmost root, decision 55 making the sibling chain the paint order.
+[[nodiscard]] EntityId LastRoot(const SceneStore& store) noexcept
+{
+	EntityId root = store.FirstRoot();
+
+	while (!root.IsNull() && !store.Find(root)->NextSibling.IsNull())
+	{
+		root = store.Find(root)->NextSibling;
+	}
+
+	return root;
+}
 } // namespace
 
-// Nothing is drawn until a device moves the pointer, which is what makes the cursor the last root and
-// therefore the frontmost node: every author that creates a root does so before the first event.
+// Nothing is drawn until a device moves the pointer.
 GYRO_TEST(SceneCursor, DrawsNothingUntilThePointerIsVisible)
 {
 	Fixture fixture;
@@ -418,6 +434,29 @@ GYRO_TEST(SceneCursor, AuthorsTheGlyphAtThePointer)
 	// The glyph hangs under the container rather than being it, so what moves at input rate is one
 	// translation and the hotspot offset is stated once.
 	GYRO_CHECK(!fixture.Store.Find(cursor.Container())->FirstChild.IsNull());
+}
+
+// A root created after the glyph was authored — a session's floor, which arrives when somebody logs
+// in — would otherwise sit in front of the pointer for the rest of that session.
+GYRO_TEST(SceneCursor, StaysInFrontOfARootAuthoredAfterIt)
+{
+	Fixture fixture;
+	CountingTextures textures;
+	SceneCursor cursor;
+
+	static_cast<void>(fixture.Store.Pointer().Move({ 400.0, 300.0 }, fixture.Store.Outputs()));
+
+	cursor.Step(fixture.Store, textures);
+
+	const std::optional<EntityId> floor = fixture.Store.CreateContainer(EntityId{}, {});
+
+	GYRO_REQUIRE(floor.has_value());
+	GYRO_REQUIRE(LastRoot(fixture.Store) == *floor);
+
+	cursor.Step(fixture.Store, textures);
+
+	GYRO_CHECK(LastRoot(fixture.Store) == cursor.Container());
+	GYRO_CHECK(textures.Adopted == 1);
 }
 
 // The position is written every iteration and the image is not, which is the difference between a
@@ -509,13 +548,84 @@ GYRO_TEST(SceneCursor, RebakesTheGlyphOnAPanelOfAnotherDensity)
 	GYRO_CHECK(textures.Adopted == 2);
 	GYRO_CHECK(textures.Retired == 1);
 
-	// The glyph is the same size in the output's own units on both panels — twice the texels on the
-	// scaled one, and a pointer that does not change size as a person drags it across the gap. The
-	// tolerance is one unit because the polygon is bounded outward onto two different grids, which is a
-	// texel of the coarser panel and is the whole of the difference a rebake can make.
 	const float second = fixture.Store.Find(fixture.Store.Find(cursor.Container())->FirstChild)->Extent.Width;
 
-	GYRO_CHECK(std::abs(static_cast<double>(second - width)) < 1.0);
+	// **Asked of the drawing rather than of the node, which the padding is what separates.** The glyph is
+	// the same size in the output's own units on both panels — twice the texels on the scaled one, and a
+	// pointer that does not change size as a person drags it across the gap. The node's extent is not,
+	// and must not be read for this: both images are padded to the same square of *device* pixels, so
+	// the scaled panel's node is half the width of the other in output units while the arrow inside it
+	// is identical. The tolerance is one unit because the polygon is bounded outward onto two different
+	// grids, which is a texel of the coarser panel and is the whole of the difference a rebake can make.
+	const Result<CursorImage> coarse = CursorImage::Draw(CursorHeight, Scale::FromInteger(1));
+	const Result<CursorImage> fine = CursorImage::Draw(CursorHeight, Scale::FromInteger(2));
+
+	GYRO_REQUIRE(coarse.has_value());
+	GYRO_REQUIRE(fine.has_value());
+
+	const double drawn = static_cast<double>(coarse->GlyphSize().Width);
+	const double rebaked = static_cast<double>(fine->GlyphSize().Width) / 2.0;
+
+	GYRO_CHECK(std::abs(rebaked - drawn) < 1.0);
+
+	// And the two nodes are the padded squares, which is what says the check above was reading the right
+	// one of the two sizes: had they agreed, there would have been nothing here to get wrong.
+	GYRO_CHECK(std::abs(static_cast<double>(width) - static_cast<double>(second) * 2.0) < 1e-6);
+}
+
+// The glyph is baked into a square a display engine will take, and the padding costs it nothing on
+// screen.
+//
+// **This is the whole of why plane promotion works on this machine at all.** The pointer is the
+// frontmost node, decision 152's promoted set is a suffix of the draw list, so the pointer is in every
+// partition gyro proposes — and a 21-pixel-wide glyph is under both the minimum extent this card's
+// overlays accept and every width its cursor plane does, so one refused layer lost the window
+// underneath it on every frame. Checked at three densities because the padding is chosen from the
+// silhouette's device pixels, so it is the scale rather than the design height that decides which
+// square is reached for.
+GYRO_TEST(SceneCursor, TheImageIsPaddedToASizeADisplayEngineWillScanOut)
+{
+	for (const int scale : { 1, 2, 3 })
+	{
+		const Result<CursorImage> image = CursorImage::Draw(CursorHeight, Scale::FromInteger(scale));
+
+		GYRO_REQUIRE(image.has_value());
+
+		// Square, and one of the sizes the hardware enumerates.
+		GYRO_CHECK(image->Size().Width == image->Size().Height);
+		GYRO_CHECK(
+			std::find(CursorPlaneSizes.begin(), CursorPlaneSizes.end(), image->Size().Width) != CursorPlaneSizes.end()
+		);
+
+		// The drawing is inside it and is not what was grown: padding that had scaled the arrow up would
+		// satisfy the check above and be a pointer the size of a window.
+		GYRO_CHECK(image->GlyphSize().Width <= image->Size().Width);
+		GYRO_CHECK(image->GlyphSize().Height <= image->Size().Height);
+		GYRO_CHECK(image->GlyphSize().Width < image->Size().Width || image->GlyphSize().Height < image->Size().Height);
+
+		// The hotspot is where the sweep put it, because the padding is right and bottom only. A glyph
+		// centred in its square would be a pointer whose tip is not where a person is pointing.
+		GYRO_CHECK(image->HotspotX() < image->GlyphSize().Width);
+		GYRO_CHECK(image->HotspotY() < image->GlyphSize().Height);
+
+		// And the padding is transparent, sampled at the corner furthest from the drawing.
+		GYRO_CHECK(image->At(image->Size().Width - 1, image->Size().Height - 1) == 0U);
+	}
+}
+
+// A glyph too large for the set is left at its own size rather than grown to the next power of two that
+// does not exist. The set is a floor to clear and not a grid to land on — an arrow this size clears
+// every overlay minimum by a mile, so it is promotable without any padding at all, and rounding it up
+// would be a quarter of a megabyte of transparent texels bought against nothing.
+GYRO_TEST(SceneCursor, AGlyphLargerThanEveryPlaneSizeIsNotPadded)
+{
+	const Result<CursorImage> image = CursorImage::Draw(300.0, Scale::FromInteger(1));
+
+	GYRO_REQUIRE(image.has_value());
+
+	GYRO_CHECK(image->Size().Width == image->GlyphSize().Width);
+	GYRO_CHECK(image->Size().Height == image->GlyphSize().Height);
+	GYRO_CHECK(image->Size().Height > CursorPlaneSizes.back());
 }
 
 // A texture space with no renderer behind it is a compositor that keeps running without a pointer drawn

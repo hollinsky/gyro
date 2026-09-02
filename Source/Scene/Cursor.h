@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -121,6 +122,52 @@ inline constexpr double ArrowOutline = 0.055;
 // glyph rather than as a megabyte allocated on the dispatch thread.
 inline constexpr std::size_t MaxCursorTexels = 512U * 512U;
 
+// SPEC: the square sizes a display engine will take a cursor at, smallest first.
+//
+// **This is the one place in gyro where hardware dictates the shape of something gyro draws, and it is
+// here because the pointer is the one texture gyro authors.** A client's buffer is the client's and is
+// never padded to suit a plane — there is no number to pad it to, since the DRM cursor caps are a
+// *maximum* and the constraint an amdgpu cursor plane actually applies is this enumerated set. But the
+// glyph is gyro's own pixels, so the width is gyro's to choose, and choosing one the hardware takes
+// costs nothing but transparent texels.
+//
+// **What it buys is every other layer on the screen.** Decision 152's promoted set is a suffix of the
+// draw list and the pointer is the frontmost node, so the pointer is in every partition gyro proposes
+// — and a display engine that refuses it refuses the whole proposal, including the window underneath.
+// A glyph baked at 21 device pixels wide was below the 24-pixel minimum of this machine's overlays and
+// below every width its cursor plane accepts, so *nothing on this machine ever promoted*, for the life
+// of the project, at about 200 µs of `SCHED_FIFO` frame-thread time per frame spent being told so.
+// Three pixels of a drawing were the whole of it.
+//
+// **Square, and these three numbers, because that is the intersection rather than one card's answer.**
+// The set was measured on amdgpu, where the width is enumerated and the height is free; i915 wants a
+// square on most generations and 64 square alone on the oldest; 64 square is what the legacy cursor
+// ioctl meant and what every driver has taken since. Padding to a square from this set satisfies all of
+// them, and it clears the overlays' minimum extent as well — so the glyph is promotable whichever plane
+// the backend offers it, which is what keeps `IPresenter::TestLayers` the only arbiter of *fits*
+// without it being the only thing that ever says no.
+inline constexpr std::array<std::int32_t, 3> CursorPlaneSizes{ 64, 128, 256 };
+
+// The image size a glyph of this extent is baked into: the smallest square in `CursorPlaneSizes` that
+// holds it, or the extent itself where none does.
+//
+// **A glyph too large for the set is left at its own size rather than grown to it.** Padding a 300-pixel
+// arrow up to 512 would be a quarter of a megabyte of transparent texels bought against a plane size no
+// hardware has ever advertised — and at that extent the overlays' minimum is met by a mile, so the
+// layer is promotable on an overlay regardless. The set is a floor to clear, not a grid to land on.
+[[nodiscard]] constexpr PixelSize<BufferSpace> CursorImageSize(PixelSize<BufferSpace> glyph) noexcept
+{
+	for (const std::int32_t side : CursorPlaneSizes)
+	{
+		if (glyph.Width <= side && glyph.Height <= side)
+		{
+			return { side, side };
+		}
+	}
+
+	return glyph;
+}
+
 // The arrow as an image, in the layout Scene/Textures.h adopts: eight bits a channel in a 32-bit
 // little-endian word, blue lowest, alpha in the top byte and already multiplied into the other three.
 //
@@ -137,7 +184,18 @@ public:
 	// sweep carries; `E2BIG` where the two together ask for more texels than `MaxCursorTexels`.
 	[[nodiscard]] static Result<CursorImage> Draw(double height, Scale density);
 
+	// The whole image, padding included, which is what was adopted and what a plane is handed.
 	[[nodiscard]] PixelSize<BufferSpace> Size() const noexcept { return m_Size; }
+
+	// The device pixels the silhouette actually reaches, in the image's top-left corner.
+	//
+	// **The two differ by the padding and nothing else, and the distinction is worth a verb because
+	// every question about how the pointer *looks* is about this one.** A test that asks whether the
+	// arrow came out the height it was asked for is asking about the drawing; a test that asks what the
+	// node's extent is, or what the display engine was shown, is asking about the image. Reading the
+	// padded size for the first is how a change to `CursorPlaneSizes` would silently start passing for
+	// the wrong reason.
+	[[nodiscard]] PixelSize<BufferSpace> GlyphSize() const noexcept { return m_Glyph; }
 
 	[[nodiscard]] std::uint32_t Stride() const noexcept { return static_cast<std::uint32_t>(m_Size.Width) * 4U; }
 
@@ -161,17 +219,19 @@ public:
 private:
 	CursorImage(
 		PixelSize<BufferSpace> size,
+		PixelSize<BufferSpace> glyph,
 		std::vector<std::uint32_t> words,
 		std::int32_t hotspotX,
 		std::int32_t hotspotY,
 		Scale density
 	)
-		: m_Words{ std::move(words) }, m_Size{ size }, m_HotspotX{ hotspotX }, m_HotspotY{ hotspotY },
+		: m_Words{ std::move(words) }, m_Size{ size }, m_Glyph{ glyph }, m_HotspotX{ hotspotX }, m_HotspotY{ hotspotY },
 		  m_Density{ density }
 	{}
 
 	std::vector<std::uint32_t> m_Words;
 	PixelSize<BufferSpace> m_Size;
+	PixelSize<BufferSpace> m_Glyph;
 	std::int32_t m_HotspotX = 0;
 	std::int32_t m_HotspotY = 0;
 	Scale m_Density;
@@ -203,11 +263,14 @@ inline constexpr double CursorHeight = 24.0;
 // So the loop steps this after the author has run and before the scene is serialised, and no author
 // names it.
 //
-// **The glyph is authored on first use rather than at startup**, which is what makes it the last root
-// and therefore the frontmost node (55): the authors that create roots do so in `Open`, and the
-// pointer becomes visible when a device first moves it. Nothing today creates a root after that — a
-// client's window is parented into `Protocol/Floor.h`'s container, which is itself a root authored at
-// startup — and the day something does, the cursor needs raising rather than a different home.
+// **The glyph is authored on first use, and raised to the front of the roots every iteration.** A
+// client's window is parented into `Protocol/Floor.h`'s container and never becomes a root itself, so
+// authoring on first motion looked like enough to make the pointer the last root and therefore the
+// frontmost node (55). It was not: a floor is created when a session's agent hands its listener over,
+// which is when somebody logs in rather than at startup — so a person who moved the mouse before the
+// first window arrived had the cursor drawn *behind* every window for the rest of the session.
+// `SceneStore::Raise` is a comparison where the node is already last, which is every iteration but the
+// one after a floor opened, so the answer is to re-raise rather than to author later.
 //
 // **A hidden pointer has no node at all rather than a transparent one.** Nothing in the frame walk
 // culls a fully faded node, so a cursor faded out is a quad composited over the whole screen's worth

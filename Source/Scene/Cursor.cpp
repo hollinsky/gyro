@@ -304,7 +304,17 @@ Result<CursorImage> CursorImage::Draw(double height, Scale density)
 		return Failure(EINVAL, "the glyph's silhouette covers no device pixels at this density");
 	}
 
-	if (static_cast<std::size_t>(width) * static_cast<std::size_t>(rows) > MaxCursorTexels)
+	// **Padded out to a size a display engine will scan out, with the glyph in the top-left corner.**
+	// See `CursorPlaneSizes`: the pointer is the frontmost node, decision 152's promoted set is a suffix,
+	// so a glyph a plane refuses costs every layer beneath it too. The padding is right and bottom only,
+	// which is what leaves the hotspot where the sweep put it — it is measured from the image's origin
+	// and the origin has not moved.
+	const PixelSize<BufferSpace> image = CursorImageSize({ width, rows });
+
+	// Against the padded extent rather than the silhouette's, because the padded extent is what is
+	// allocated. The two are the same wherever the bound refuses: a glyph large enough to reach it is
+	// far past the largest size in the set, so it is not padded at all.
+	if (static_cast<std::size_t>(image.Width) * static_cast<std::size_t>(image.Height) > MaxCursorTexels)
 	{
 		return Failure(
 			E2BIG, "the glyph covers more texels than a cursor image will hold, so it is authored too large"
@@ -324,7 +334,11 @@ Result<CursorImage> CursorImage::Draw(double height, Scale density)
 		inner.Push(point);
 	}
 
-	std::vector<std::uint32_t> words(static_cast<std::size_t>(width) * static_cast<std::size_t>(rows), 0U);
+	// Zero is transparent black in this layout, so the padding is written by the allocation and the
+	// sweep below never visits it.
+	std::vector<std::uint32_t> words(
+		static_cast<std::size_t>(image.Width) * static_cast<std::size_t>(image.Height), 0U
+	);
 
 	for (std::int32_t row = 0; row < rows; ++row)
 	{
@@ -359,12 +373,13 @@ Result<CursorImage> CursorImage::Draw(double height, Scale density)
 			const double covered = std::clamp(Area(outerPixel), 0.0, 1.0);
 			const double filled = std::clamp(Area(innerPixel), 0.0, covered);
 
-			words[static_cast<std::size_t>(row) * static_cast<std::size_t>(width) + static_cast<std::size_t>(column)] =
-				Texel(covered, filled);
+			words
+				[static_cast<std::size_t>(row) * static_cast<std::size_t>(image.Width) +
+			     static_cast<std::size_t>(column)] = Texel(covered, filled);
 		}
 	}
 
-	return CursorImage{ { width, rows }, std::move(words), -originX, -originY, density };
+	return CursorImage{ image, { width, rows }, std::move(words), -originX, -originY, density };
 }
 
 std::uint32_t CursorImage::At(std::int32_t x, std::int32_t y) const noexcept
@@ -390,6 +405,14 @@ Result<EntityId> AuthorCursor(SceneStore& scene, EntityId parent, TextureId text
 	// texels are then one to one with device pixels, which is what makes `Blit`'s bilinear filter land
 	// exactly on texel centres and return the copy — its own comment says so — so the glyph reaches the
 	// panel as the bytes that were baked rather than as a resample of them.
+	//
+	// **The padded extent rather than the glyph's, which is the node being honest about what it draws.**
+	// `CursorImageSize` grows the image to a square a display engine will take, so the node is a quad
+	// larger than the arrow with transparent texels around it. Sizing it to the silhouette instead would
+	// crop the source and hand a plane a rectangle that is not the buffer, which is the one thing that
+	// would put the promotion back where it started. What it costs is a few thousand transparent texels
+	// blended on the frames the pointer is composited rather than promoted, against the whole screen's
+	// composite it exists to avoid.
 	const auto units = [&](std::int32_t pixels) { return static_cast<double>(pixels) / scale; };
 
 	// `Node::Snap` for decision 156's reason and one that is particular to a baked glyph: the coverage
@@ -486,6 +509,15 @@ void SceneCursor::Step(SceneStore& scene, ITextures& textures)
 	{
 		return;
 	}
+
+	// **Frontmost every iteration rather than once at the author.** The glyph becomes a root when a
+	// device first moves the pointer, and decision 55 makes the last root the frontmost — but a root
+	// created *after* that lands in front of it, and a session's floor is created when its agent hands
+	// over a listener, which is whenever a person logs in. Moving the mouse before the first window
+	// arrives put the cursor behind every window on the machine for the life of the session. `Raise`
+	// answers true and touches nothing where the node is already last, which is every iteration but the
+	// one after a floor opened, so this is a comparison per pointer motion.
+	static_cast<void>(scene.Raise(m_Container));
 
 	const Point<GlobalSpace> at = pointer.Position();
 
