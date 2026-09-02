@@ -267,10 +267,34 @@ void Configure(libinput_device* device)
 	}
 
 	// Zero is *this device cannot tap*, which is every mouse and every trackpoint, rather than a pad
-	// that happens to have tapping switched off.
+	// that happens to have tapping switched off — and it is also the whole of how a pad is told from a
+	// wheel here, since the two want opposite answers below.
 	if (::libinput_device_config_tap_get_finger_count(device) == 0)
 	{
 		return;
+	}
+
+	// **Fingers move the page, a wheel moves the view.** On a touchpad a person is pushing the thing on
+	// screen: two fingers down carries the content down with them, which is what every phone and every
+	// laptop has done for a decade and is what a hand arrives already expecting. A wheel has no contact
+	// to push with — a notch away from the hand is a step *down* a document — so it keeps libinput's
+	// default, which is what makes this per device rather than an option: a machine with a pad and a
+	// mouse plugged in at once needs both answers at the same time.
+	if (::libinput_device_config_scroll_has_natural_scroll(device) != 0 &&
+	    ::libinput_device_config_scroll_set_natural_scroll_enabled(device, 1) != LIBINPUT_CONFIG_STATUS_SUCCESS)
+	{
+		spdlog::warn("input: {} would not take natural scrolling", Named(device));
+	}
+
+	// Two fingers rather than the edge strip, for the reason above: the gesture is the hand pushing the
+	// page, and an edge strip is a scrollbar drawn on the frame of the pad. libinput's default is
+	// already this on most pads and is not on all of them, and a default depended on silently is one
+	// that moves under the dependency.
+	if ((::libinput_device_config_scroll_get_methods(device) & LIBINPUT_CONFIG_SCROLL_2FG) != 0 &&
+	    ::libinput_device_config_scroll_set_method(device, LIBINPUT_CONFIG_SCROLL_2FG) !=
+	        LIBINPUT_CONFIG_STATUS_SUCCESS)
+	{
+		spdlog::warn("input: {} would not take two-finger scrolling", Named(device));
 	}
 
 	if (::libinput_device_config_tap_set_enabled(device, LIBINPUT_CONFIG_TAP_ENABLED) != LIBINPUT_CONFIG_STATUS_SUCCESS)

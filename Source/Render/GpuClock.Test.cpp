@@ -12,9 +12,10 @@
 // **What is testable here is the two halves that run without hardware**: the per-driver mapping from a
 // driver name and a DRM minor to a pair of sysfs paths, and the read path itself — parse, divisor, the
 // two halves against each other, and what a bad read does — driven against plain files the test wrote.
-// The parts that genuinely need a machine — reading the bound driver off the DRM node's symlink, and
-// scanning msm's devfreq — are the composition `Open` does over these, and are covered by decision
-// 142's hardware bring-up rather than here, where there is no `i915` to bind.
+// The parts that genuinely need a machine — reading the bound driver off the DRM node's symlink,
+// scanning msm's devfreq, and scanning amdgpu's hwmon for the channel labelled `sclk` — are the
+// composition `Open` does over these, and are covered by decision 142's hardware bring-up rather than
+// here, where there is no `i915` to bind.
 
 namespace
 {
@@ -93,12 +94,24 @@ GYRO_TEST(GpuClock, TheSplitDisplayDriversAreStillMsm)
 	GYRO_CHECK(!GpuClock::IsMsmDriver(""));
 }
 
-// A driver the reader does not cover resolves to nothing, which is what makes `Open` warn and file a
-// zero clock rather than guess a path.
-GYRO_TEST(GpuClock, AnUnknownDriverResolvesToNothing)
+// amdgpu is msm's shape for msm's reason: the `hwmonN` in the path is handed out by the class in
+// probe order, so the mapping carries the Hz divisor here and the node is scanned for at `Open`.
+GYRO_TEST(GpuClock, AmdgpuCarriesTheHzDivisorAndNoFixedNode)
 {
 	GYRO_CHECK(GpuClock::Resolve("amdgpu", 0).Count == 0);
+	GYRO_CHECK(GpuClock::Resolve("amdgpu", 0).Divisor == 1'000'000);
+}
+
+// A driver the reader does not cover resolves to nothing, which is what makes `Open` warn and file a
+// zero clock rather than guess a path. `Count` of zero alone does not say that any more — msm and
+// amdgpu both answer it and both resolve their node elsewhere — so the divisor is what tells an
+// unrecognised driver from a deferred one.
+GYRO_TEST(GpuClock, AnUnknownDriverResolvesToNothing)
+{
+	GYRO_CHECK(GpuClock::Resolve("nouveau", 0).Count == 0);
+	GYRO_CHECK(GpuClock::Resolve("nouveau", 0).Divisor == 1);
 	GYRO_CHECK(GpuClock::Resolve("", 0).Count == 0);
+	GYRO_CHECK(GpuClock::Resolve("", 0).Divisor == 1);
 }
 
 // An invalid clock — every device gyro cannot read one off — answers zeros forever.

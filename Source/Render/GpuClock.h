@@ -49,8 +49,17 @@
 //
 // **Which attributes are a per-driver fact, discovered rather than configured.** The kernel driver
 // bound to the DRM node names the paths — i915 and xe carry it in MHz under different nodes, msm reports Hz
-// through devfreq — and a driver gyro does not recognise reads back zero after a warning, which is the
-// same honest nothing `Blit` and a device with no timestamp support already report for `Cost` itself.
+// through devfreq, amdgpu reports Hz through the hwmon its SMU registers — and a driver gyro does not
+// recognise reads back zero after a warning, which is the same honest nothing `Blit` and a device with
+// no timestamp support already report for `Cost` itself.
+//
+// **amdgpu has an actual half and no requested one**, which is the first driver to fill only one side
+// of the pair. Nothing it exposes means what i915's `gt_cur_freq_mhz` means — the point the governor
+// has commanded — and `pp_dpm_sclk`'s starred rung is a coarser reading of the clock `freq1_input`
+// already measures rather than a target, so filing it opposite the actual half would put one quantity
+// on two rows and invite a reader to compare them. The loss is real and smaller than it looks: the
+// second half exists to tell a slow part from a parked one, and amdgpu's actual attribute reports a
+// live average rather than i915's flat zero while gated.
 class GpuClock
 {
 public:
@@ -133,6 +142,15 @@ public:
 	// GPU driver (`adreno` on the kernels gyro targets). Public because Render/GpuFloor.h resolves its
 	// pair of nodes off the same directory.
 	[[nodiscard]] static std::string MsmDevfreqDirectory();
+
+	// The full path to amdgpu's core-clock attribute — `<drm node>/device/hwmon/hwmonN/freq1_input`,
+	// in Hz — or empty where the device registers no hwmon channel labelled `sclk`. Public for the
+	// same reason `Resolve` is: it is the whole of the amdgpu mapping, and `Open` is the composition
+	// over it. The `hwmonN` is scanned for rather than composed because the class numbers its
+	// instances in probe order across the machine, and the channel is matched on its *label* rather
+	// than on the number, so a part that also reports `mclk` cannot have the wrong clock filed
+	// against its composites.
+	[[nodiscard]] static std::string AmdgpuFrequencyNode(std::int64_t primaryMinor);
 
 private:
 	// One half of the pair read through, keeping `last` where the read or the parse failed.

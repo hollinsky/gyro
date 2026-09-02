@@ -36,6 +36,36 @@ constexpr int DrmMajor = 226;
 
 	return std::string{ slash == std::string_view::npos ? resolved : resolved.substr(slash + 1) };
 }
+
+// A short sysfs attribute's contents with the trailing newline off, or empty where it will not open.
+// For the one attribute here that is a word rather than a number — hwmon's channel label — so the
+// scan below can tell the core clock from the memory clock by what the kernel calls it.
+[[nodiscard]] std::string ReadWord(const std::string& path)
+{
+	const Fd file{ open(path.c_str(), O_RDONLY | O_CLOEXEC) };
+
+	if (file.Get() < 0)
+	{
+		return {};
+	}
+
+	std::array<char, 64> buffer{};
+	const ssize_t length = read(file.Get(), buffer.data(), buffer.size() - 1);
+
+	if (length <= 0)
+	{
+		return {};
+	}
+
+	std::string_view word{ buffer.data(), static_cast<std::size_t>(length) };
+
+	while (!word.empty() && (word.back() == '\n' || word.back() == ' '))
+	{
+		word.remove_suffix(1);
+	}
+
+	return std::string{ word };
+}
 } // namespace
 
 std::string GpuClock::NodeBase(std::int64_t primaryMinor)
@@ -99,6 +129,51 @@ std::string GpuClock::MsmDevfreqDirectory()
 	return found;
 }
 
+std::string GpuClock::AmdgpuFrequencyNode(std::int64_t primaryMinor)
+{
+	// Inside the DRM device's own subtree, unlike msm's: the GPU and the display engine are one PCI
+	// function on amdgpu, so the hwmon the SMU registers hangs off the node gyro already has. What is
+	// not fixed is the `hwmonN` — the class numbers instances in probe order across the whole machine,
+	// and on the part this was written against the CPU package took the low numbers and the GPU landed
+	// at seven. So the directory is scanned rather than composed.
+	constexpr std::string_view CoreClock = "sclk";
+	const std::string directory = NodeBase(primaryMinor) + "/device/hwmon";
+	DIR* const handle = opendir(directory.c_str());
+
+	if (handle == nullptr)
+	{
+		return {};
+	}
+
+	std::string found;
+
+	while (const dirent* const entry = readdir(handle))
+	{
+		const std::string_view name{ entry->d_name };
+
+		if (name == "." || name == "..")
+		{
+			continue;
+		}
+
+		const std::string base = directory + "/" + std::string{ name };
+
+		// **Matched on the label rather than on `freq1_input` existing**, because the channel numbering
+		// is not a promise: a part that reports its memory clock as well answers `freq2_label` `mclk`,
+		// and a kernel free to order them the other way would have the cost window filing composites
+		// against the wrong clock with nothing in the trace to say so.
+		if (ReadWord(base + "/freq1_label") == CoreClock)
+		{
+			found = base + "/freq1_input";
+			break;
+		}
+	}
+
+	closedir(handle);
+
+	return found;
+}
+
 GpuClock::Source GpuClock::Resolve(std::string_view driver, std::int64_t primaryMinor)
 {
 	const std::string base = NodeBase(primaryMinor);
@@ -129,6 +204,13 @@ GpuClock::Source GpuClock::Resolve(std::string_view driver, std::int64_t primary
 	{
 		// devfreq reports Hz, and the node name is dynamic — resolved at `Open`, not here, so this
 		// leaves the candidates empty and only carries the unit.
+		source.Count = 0;
+		source.Divisor = 1'000'000;
+	}
+	else if (driver == "amdgpu")
+	{
+		// hwmon reports Hz, and the `hwmonN` in the path is whatever number the class handed out at
+		// probe — so this is msm's shape for msm's reason: the unit here, the node at `Open`.
 		source.Count = 0;
 		source.Divisor = 1'000'000;
 	}
@@ -184,6 +266,32 @@ GpuClock GpuClock::Open(std::int64_t primaryMinor)
 		spdlog::warn(
 			"no GPU clock: msm has no readable devfreq node (driver '{}' behind DRM {})", driver, primaryMinor
 		);
+
+		return {};
+	}
+
+	if (driver == "amdgpu")
+	{
+		// The actual half alone, and `Requested` deliberately left unopened. amdgpu has no attribute
+		// that means what i915's `gt_cur_freq_mhz` means — the point the governor has *commanded* —
+		// and the nearest thing, `pp_dpm_sclk`'s starred rung, is a coarser reading of the same clock
+		// `freq1_input` already measures rather than a target. Filing it as the requested half would
+		// put two samples of one quantity on two rows and invite a reader to compare them.
+		//
+		// What that costs is stated rather than hidden: the pair exists so a cost window can tell a
+		// slow part from a parked one, and on amdgpu it cannot. It is a smaller loss here than it
+		// would be on i915, where the actual attribute reads a flat zero while the part is gated —
+		// this one reports a real average and was measured moving between 400 and 700 MHz across a
+		// gym's frames — but a `Requested` of zero is the honest answer and not a claim of 0 MHz.
+		if (const std::string node = AmdgpuFrequencyNode(primaryMinor); !node.empty())
+		{
+			if (GpuClock clock = OpenPath(node.c_str(), nullptr, 1'000'000); clock.IsValid())
+			{
+				return clock;
+			}
+		}
+
+		spdlog::warn("no GPU clock: amdgpu behind DRM {} has no hwmon channel labelled 'sclk'", primaryMinor);
 
 		return {};
 	}
