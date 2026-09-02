@@ -1259,6 +1259,101 @@ GYRO_TEST(ProtocolRoundTrip, AToplevelIsConfiguredBeforeItIsAskedToDrawAnything)
 	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 1 });
 }
 
+// **A refusal is still an answer, and this is the test that says so.** gyro declines fullscreen and
+// maximise because they are window management a shell owns (51) — but xdg-shell's own wording is that
+// *the compositor will respond by emitting a configure event*, and only then that *whether the client
+// is actually put into a fullscreen state is subject to compositor policies*. The policy is optional;
+// the configure is not.
+//
+// What the silence cost was a browser whose fullscreen button did nothing: Firefox asks, waits for the
+// configure that tells it what it got, and never completes the transition — so the page's own
+// `fullscreenchange` never fires and a person clicking the control on a video sees nothing move.
+GYRO_TEST(ProtocolRoundTrip, ADeclinedFullscreenIsStillAnsweredWithAConfigure)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-fullscreen" };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x33 }));
+
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_REQUIRE_EQ(toplevel.WindowEvents.Configured, std::uint32_t{ 1 });
+
+	const std::uint32_t opening = toplevel.SurfaceEvents.Serial;
+
+	GYRO_REQUIRE(opening != 0);
+
+	toplevel.Window.SetFullscreen(Wayland::WlOutput{});
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// The answer arrived, under its own serial: a client acknowledges what it was told rather than what
+	// it asked, so a second question sharing the first one's serial is a client that cannot tell them
+	// apart.
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Configured, std::uint32_t{ 2 });
+	GYRO_CHECK_EQ(toplevel.SurfaceEvents.Configured, std::uint32_t{ 2 });
+	GYRO_CHECK(toplevel.SurfaceEvents.Serial != opening);
+
+	// And it says no. The state list is what the client reads to find out, and `fullscreen` is not in
+	// it — which is the compositor declining out loud rather than by silence.
+	GYRO_CHECK(!toplevel.WindowEvents.Has(Wayland::XdgToplevelState::Fullscreen));
+
+	// Unsetting is answered too, which the protocol asks for in the same words and which a toolkit
+	// leaving fullscreen waits on exactly as hard.
+	toplevel.Window.UnsetFullscreen();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Configured, std::uint32_t{ 3 });
+}
+
+// The same contract on the other pair of requests, which the protocol words identically.
+GYRO_TEST(ProtocolRoundTrip, ADeclinedMaximiseIsStillAnsweredWithAConfigure)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-maximise" };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x34 }));
+
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_REQUIRE_EQ(toplevel.WindowEvents.Configured, std::uint32_t{ 1 });
+
+	toplevel.Window.SetMaximized();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Configured, std::uint32_t{ 2 });
+	GYRO_CHECK(!toplevel.WindowEvents.Has(Wayland::XdgToplevelState::Maximized));
+
+	toplevel.Window.UnsetMaximized();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Configured, std::uint32_t{ 3 });
+}
+
 GYRO_TEST(ProtocolRoundTrip, AnAcknowledgedFrameBecomesAWindowCentredOnTheOutput)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());

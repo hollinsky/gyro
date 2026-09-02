@@ -115,13 +115,33 @@ public:
 
 	void OnSetMinSize(std::int32_t width, std::int32_t height) override;
 
-	void OnSetMaximized() override {}
+	// **The four state requests gyro declines, and declining them is still an answer.** Maximise and
+	// fullscreen are window management a shell owns (51), so gyro's policy is that the state does not
+	// change — which the protocol permits in as many words: *whether the client is actually put into a
+	// fullscreen state is subject to compositor policies*. What it does not permit is silence. The same
+	// paragraph opens *the compositor will respond by emitting a configure event*, and a client that
+	// asked and heard nothing is not a client that learned it was refused: it is one still waiting.
+	//
+	// **What that cost was a browser whose fullscreen button did nothing at all.** Firefox asks, holds
+	// its transition open for the configure that says what it got, and never completes it — so the
+	// page's own `fullscreenchange` never fires and a person clicking the control on a video sees the
+	// frame they were already looking at. The window not growing is the policy; the button being dead
+	// is the bug, and only the second one is visible to them.
+	//
+	// So each of these answers with the window exactly as it is. `ClientXdgSurface::Configure` sends the
+	// current size and states under a fresh serial, which is precisely *you asked, and here is what you
+	// have* — and a toolkit reads the absent state and puts its own UI back.
+	//
+	// **`set_minimized` is the one that stays silent, and the protocol is why**: it is the request with
+	// no state to carry back and no way to observe the result, so there is nothing a configure could
+	// say. A client is told in the interface description that it cannot know.
+	void OnSetMaximized() override;
 
-	void OnUnsetMaximized() override {}
+	void OnUnsetMaximized() override;
 
-	void OnSetFullscreen(Wayland::Server::WlOutput output) override { (void)output; }
+	void OnSetFullscreen(Wayland::Server::WlOutput output) override;
 
-	void OnUnsetFullscreen() override {}
+	void OnUnsetFullscreen() override;
 
 	void OnSetMinimized() override {}
 
@@ -218,6 +238,12 @@ public:
 	void ApplyBounds();
 
 private:
+	// The answer the four declined state requests share: configure with what this window already is.
+	//
+	// Gated on the surface still being there for `OnMove`'s reason — an `xdg_surface` destroyed out of
+	// order leaves this object alive with nothing behind it.
+	void AnswerUnchanged();
+
 	ClientXdgSurface* m_Surface = nullptr;
 
 	std::string m_Title;

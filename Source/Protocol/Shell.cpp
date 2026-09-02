@@ -336,6 +336,43 @@ void ClientXdgToplevel::OnSetMinSize(std::int32_t width, std::int32_t height)
 	m_BoundsStaged = true;
 }
 
+void ClientXdgToplevel::AnswerUnchanged()
+{
+	// **A fresh serial rather than a repeat of the last one**, which is what `ClientXdgSurface::Configure`
+	// does anyway and is the half a client acknowledges. Two requests in a row each get their own, so a
+	// toolkit that fullscreens and immediately unfullscreens is not left matching one answer to two
+	// questions.
+	if (m_Surface != nullptr)
+	{
+		m_Surface->Configure();
+	}
+}
+
+void ClientXdgToplevel::OnSetMaximized()
+{
+	AnswerUnchanged();
+}
+
+void ClientXdgToplevel::OnUnsetMaximized()
+{
+	AnswerUnchanged();
+}
+
+void ClientXdgToplevel::OnSetFullscreen(Wayland::Server::WlOutput output)
+{
+	// The output is the client's *preference* for which screen to use, and gyro is not going to use one
+	// — so it is read and dropped rather than recorded. Decision 51 has the choice of screen belonging
+	// to a shell along with the rest of the placement.
+	(void)output;
+
+	AnswerUnchanged();
+}
+
+void ClientXdgToplevel::OnUnsetFullscreen()
+{
+	AnswerUnchanged();
+}
+
 void ClientXdgPositioner::OnSetSize(std::int32_t width, std::int32_t height)
 {
 	// Zero is refused as well as negative, which the protocol spells out and is worth honouring rather
