@@ -162,6 +162,16 @@ public:
 	// **Asked once per drawn item, so it must be cheap and must tolerate being asked twice.** A texture
 	// two items name — a window and its own thumbnail — is offered twice on one frame, and the second
 	// ask has to come back empty rather than reading the same image into the same slab again.
+	//
+	// **Two things the frame loop owes before it may ask at all, and both are decision 181's.** The
+	// read acquires a client's dmabuf from `VK_QUEUE_FAMILY_FOREIGN_EXT`, which asserts the foreign
+	// user is done with it — so no commit still on its way to the glass may have that buffer on a
+	// plane, or the acquire is taken against a display engine mid-scanout and the panel does not come
+	// back. And the copy is ordered by the composite's own fence and by nothing else, so the target
+	// read that waits on that fence has to have *succeeded* first: two of its refusals come back before
+	// it waits, and a texture read after one of those is racing the GPU. A loop that cannot promise
+	// both reads nothing and writes no buffers, which is the same empty answer a run with no clients
+	// gives and is why `Buffers()` is counted apart from `Written()`.
 	[[nodiscard]] virtual bool WantsTexture([[maybe_unused]] TextureId texture) const noexcept { return false; }
 
 	[[nodiscard]] virtual TextureSlab ReserveTexture([[maybe_unused]] TextureId texture) noexcept { return {}; }

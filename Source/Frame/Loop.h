@@ -197,6 +197,26 @@ public:
 	// vanished allows none, which is the same answer as being full.
 	[[nodiscard]] std::uint32_t InFlight() const noexcept { return m_InFlight; }
 
+	// **Whether any commit still on its way to the glass put a client's own buffer on a plane.**
+	//
+	// It is the question Seam/Capture.h's texture half has to ask before it touches one. A readback
+	// acquires a client's dmabuf from `VK_QUEUE_FAMILY_FOREIGN_EXT`, which is a claim that the foreign
+	// user has finished with it — and a display engine scanning that buffer out has not. Forcing the
+	// promotion ceiling to zero on a capturing frame is not enough on its own, because it changes what
+	// *this* frame commits and says nothing about the planes the last one left on the screen.
+	[[nodiscard]] bool ArePlanesInFlight() const noexcept
+	{
+		for (std::uint32_t index = 0; index < m_InFlight; ++index)
+		{
+			if (m_InFlightPromoted[index])
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	[[nodiscard]] bool IsCommitFull() const noexcept
 	{
 		return m_Presenter == nullptr || m_InFlight >= std::min(m_Presenter->CommitDepth(), MaxCommitsInFlight);
@@ -383,11 +403,13 @@ private:
 			m_InFlightSnapshots[index] = m_InFlightSnapshots[index + 1];
 			m_InFlightFrames[index] = m_InFlightFrames[index + 1];
 			m_InFlightRows[index] = m_InFlightRows[index + 1];
+			m_InFlightPromoted[index] = m_InFlightPromoted[index + 1];
 		}
 
 		m_InFlightSnapshots[m_InFlight] = 0;
 		m_InFlightFrames[m_InFlight] = FrameClock::NoSequence;
 		m_InFlightRows[m_InFlight] = TraceThread;
+		m_InFlightPromoted[m_InFlight] = false;
 
 		// **Retired here, because a frame that has flipped is not one this output is still speaking
 		// for.** `m_Committed` was only ever cleared by `Discard`, on the reading that the anchor would
@@ -519,6 +541,7 @@ private:
 		m_InFlightSnapshots = {};
 		m_InFlightFrames = {};
 		m_InFlightRows = {};
+		m_InFlightPromoted = {};
 
 		// The ruler restarts rather than bridging the discontinuity. See `m_Tiled`.
 		m_Tiled = {};
@@ -590,6 +613,12 @@ private:
 	// The flight lane each of those commits was drawn on, shifted with them. Kept beside the queue
 	// rather than derived from a position in it for the reason `m_TraceFlight` gives.
 	std::array<std::uint16_t, MaxCommitsInFlight> m_InFlightRows{};
+
+	// Whether each of those commits carried a client's buffer on a plane, shifted with them. One bit
+	// rather than which ids, because the only question ever asked of it is `ArePlanesInFlight` — a
+	// capture waits for *every* plane to retire rather than for the one window it wants, since the
+	// buffer it wants is exactly the one most likely to have been promoted.
+	std::array<bool, MaxCommitsInFlight> m_InFlightPromoted{};
 
 	// The most recent flip this output has not yet reported, staged in the drain and cleared by the post
 	// that carries it.
@@ -1482,15 +1511,38 @@ private:
 			// captures very likely misses its deadline. That is accepted rather than worked around: a
 			// capture perturbs the frame it takes either way, and one late frame at an instant a person
 			// chose is cheaper than a slab held across iterations and a target the presenter cannot reuse.
-			if (capturing)
+			// **The press waits for the planes to retire before it reads anything.** The ceiling above is
+			// zero while a capture is owed, so this frame promotes nothing and every frame after it
+			// promotes nothing — but the commits already on their way to the glass still carry the
+			// planes the last ordinary frame put there, and a client's buffer under one of those is
+			// being scanned out right now. `CaptureTextures` acquires exactly such a buffer away from
+			// the display engine, which on this machine's amdgpu wedges the display controller: DMCUB
+			// faults, the flip never completes, and the panel is gone for the life of the process.
+			//
+			// So the capture is deferred rather than narrowed. The slot stays `Armed` because nothing
+			// publishes it, `capturing` is therefore still true next iteration, the whole-output damage
+			// above keeps the loop drawing, and within `CommitDepth` frames every promoting commit has
+			// flipped and this is a screen with one path to the glass. It converges because the only
+			// thing that could keep promoting is the ceiling, and the ceiling is zero.
+			//
+			// **Both halves wait, not just the texture half.** Reading only the target on such a frame
+			// would put a picture on disk with no buffers beside it, which reads as *no clients were
+			// up* rather than as *the capture came a frame early* — and the two are the same directory
+			// listing.
+			if (capturing && output.ArePlanesInFlight())
 			{
-				CaptureTarget(output, index, *composite, submission->Point, decision.Sequence);
-
-				// After the target and not before, so a slow disk holds up the picture rather than the
-				// windows in it — and after the stall above, which is the wait these reads inherit
-				// rather than repeat: the composite that sampled every one of these images is the work
-				// `CaptureTarget` has just seen land.
-				CaptureTextures(output, list.Items);
+				TraceMark("capture waiting on planes", output.m_Trace, TraceTag(output.InFlight()));
+			}
+			else if (capturing)
+			{
+				// The target first, so a slow disk holds up the picture rather than the windows in it.
+				// The textures inherit its stall rather than repeating it: the composite that sampled
+				// every one of these images is the work `CaptureTarget` has just seen land — which is
+				// why they run only where it says it actually waited.
+				if (CaptureTarget(output, index, *composite, submission->Point, decision.Sequence))
+				{
+					CaptureTextures(output, list.Items);
+				}
 			}
 		}
 
@@ -1556,6 +1608,11 @@ private:
 
 		++output.m_FlightLane;
 		output.m_InFlightRows[output.m_InFlight] = lane;
+
+		// Whether this commit hands a client's own buffer to the display engine, which is what a later
+		// capture has to wait out before it may read one back. `partition.Count` rather than the layer
+		// count, because the composite is a layer too and it is gyro's own image.
+		output.m_InFlightPromoted[output.m_InFlight] = partition.Count != 0;
 
 		TraceOpen("frame", lane, TraceTag(decision.Sequence));
 
@@ -1831,7 +1888,12 @@ private:
 	// exactly the moment the schedule woke up to draw it.
 	// Read the composite back and hand it over. Everything that could allocate or open a file is the
 	// sink's and happens on the sink's own thread; what runs here is a reserve, a copy and a publish.
-	void CaptureTarget(
+	// **Answers whether the composite's own work was waited on**, which is the precondition every
+	// texture read after it inherits rather than repeats. Both of the early returns below leave that
+	// work outstanding, so a caller that read textures anyway would be copying images the GPU may
+	// still be sampling — and the two paths that get there are a mode set since `Remember` and a
+	// format the slab was not sized for, neither of which is rare enough to leave unsaid.
+	[[nodiscard]] bool CaptureTarget(
 		FrameOutput& output,
 		std::size_t index,
 		std::uint32_t target,
@@ -1845,7 +1907,7 @@ private:
 
 		if (bytesPerPixel == 0)
 		{
-			return;
+			return false;
 		}
 
 		// Tight, which is the stride Virtual/Pam.h writes and the one a reader of the slab can derive
@@ -1858,7 +1920,7 @@ private:
 		{
 			// An ordinary answer rather than a fault, per Seam/Capture.h: the frame has already been
 			// forced to composite and the honest thing left is to draw it.
-			return;
+			return false;
 		}
 
 		const Result<void> read =
@@ -1875,6 +1937,13 @@ private:
 		}
 
 		m_Capture->Publish(at, sequence, read.has_value());
+
+		// **The success of the read is the signal, because only success implies the stall.** Two of
+		// `ReadTarget`'s refusals — a device built without readback, a target that is not bound — come
+		// back *before* it waits on `point`, so a caller that read textures on any refusal would be
+		// copying images the composite may still be sampling. The reads that follow this are ordered by
+		// that wait and by nothing else, so anything short of a clean return has to stop them.
+		return read.has_value();
 	}
 
 	// Read back every client image this frame drew, for Seam/Capture.h's texture half.

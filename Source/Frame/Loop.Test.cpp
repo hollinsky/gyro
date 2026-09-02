@@ -229,8 +229,16 @@ public:
 		return {};
 	}
 
+	[[nodiscard]] Result<void> ReadTexture(TextureId, std::span<std::byte>, std::uint32_t) override
+	{
+		++TextureReads;
+
+		return {};
+	}
+
 	int Records = 0;
 	int Reads = 0;
+	int TextureReads = 0;
 	bool RefuseRead = false;
 	std::uint32_t ReadFrom = 0;
 	std::uint32_t ReadStride = 0;
@@ -2484,11 +2492,35 @@ public:
 		Armed = false;
 	}
 
+	// Seam/Capture.h's texture half. Off unless a case asks for it, so every test written before the
+	// client buffers existed keeps reading as *the picture and nothing else*.
+	[[nodiscard]] bool WantsTexture(TextureId texture) const noexcept override
+	{
+		return WantTextures && !texture.IsNull();
+	}
+
+	TextureSlab ReserveTexture(TextureId) noexcept override
+	{
+		++TextureReserves;
+
+		return { .Into = { Slab.data(), std::size_t{ 640 } * 4 * 480 }, .Stride = 640 * 4 };
+	}
+
+	void PublishTexture(TextureId, bool complete) noexcept override
+	{
+		++TexturePublishes;
+		TexturePublishedComplete = complete;
+	}
+
 	bool Armed = false;
 	bool Starve = false;
+	bool WantTextures = false;
 
 	int Reserves = 0;
 	int Publishes = 0;
+	int TextureReserves = 0;
+	int TexturePublishes = 0;
+	bool TexturePublishedComplete = false;
 
 	PixelSize<DeviceSpace> ReservedSize{};
 	std::uint32_t ReservedStride = 0;
@@ -2530,6 +2562,125 @@ GYRO_TEST(FrameLoop, ACaptureForcesTheWholeScreenThroughTheComposite)
 
 	// And nothing was proposed to the hardware, because there was nothing to promote.
 	GYRO_CHECK_EQ(harness.Presenter.Tests, 0);
+}
+
+// **The capture waits for the planes already on their way to the glass to retire.** Forcing the
+// ceiling to zero stops *this* frame promoting; it does nothing about the commit in front of it, whose
+// client buffers the display engine is scanning out. Reading one of those back acquires it away from
+// the display engine, which is what wedged an amdgpu display controller hard enough to cost the
+// session — so the press is deferred a frame rather than narrowed.
+//
+// Two deep on purpose: at a commit depth of one the queue-full check already refuses the frame and the
+// deferral would never be reached, which is the shape that let this ship.
+// The ordinary path for Seam/Capture.h's texture half: the picture, and beside it the client buffer
+// the composite sampled to draw it.
+GYRO_TEST(FrameLoop, ACaptureReadsTheClientBuffersBesideThePicture)
+{
+	Harness harness;
+	RecordingCapture capture;
+	const std::array<DrawItem, 2> items{ Composited(), Promotable({ { 100, 100 }, { 640, 480 } }) };
+
+	harness.Evaluator.Items = items;
+	capture.Armed = true;
+	capture.WantTextures = true;
+	harness.Loop.Capture(&capture);
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Renderer.Reads, 1);
+	GYRO_CHECK_EQ(harness.Renderer.TextureReads, 1);
+	GYRO_CHECK_EQ(capture.TextureReserves, 1);
+	GYRO_CHECK_EQ(capture.TexturePublishes, 1);
+	GYRO_CHECK(capture.TexturePublishedComplete);
+}
+
+// **A target read that never happened takes the buffers with it.** Every texture read is ordered by
+// the composite's own fence, and the only thing that waits on that fence is `ReadTarget` — so a press
+// that could not reserve a slab for the picture has not waited for anything, and reading a client's
+// image there would be copying pixels the GPU may still be writing. Two of `ReadTarget`'s refusals
+// come back before it waits at all, which is why the signal is *did it succeed* rather than *was it
+// called*.
+GYRO_TEST(FrameLoop, AStarvedCaptureReadsNoClientBuffersEither)
+{
+	Harness harness;
+	RecordingCapture capture;
+	const std::array<DrawItem, 2> items{ Composited(), Promotable({ { 100, 100 }, { 640, 480 } }) };
+
+	harness.Evaluator.Items = items;
+	capture.Armed = true;
+	capture.WantTextures = true;
+	capture.Starve = true;
+	harness.Loop.Capture(&capture);
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	// The frame is still drawn and still presented — the capture is the thing that did not happen.
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
+	GYRO_CHECK_EQ(harness.Renderer.Reads, 0);
+	GYRO_CHECK_EQ(harness.Renderer.TextureReads, 0);
+	GYRO_CHECK_EQ(capture.TextureReserves, 0);
+}
+
+GYRO_TEST(FrameLoop, ACaptureWaitsForAPromotedCommitToRetire)
+{
+	Harness harness;
+	RecordingCapture capture;
+	const std::array<DrawItem, 2> items{ Composited(), Promotable({ { 100, 100 }, { 640, 480 } }) };
+
+	harness.Presenter.Planes = 2;
+	harness.Presenter.Depth = 2;
+	harness.Evaluator.Items = items;
+	harness.Loop.Capture(&capture);
+
+	// An ordinary frame first, which puts the top item on a plane and leaves it in flight.
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 2 });
+	GYRO_REQUIRE_EQ(harness.Output().InFlight(), std::uint32_t{ 1 });
+
+	// Now the press. The frame is drawn — and drawn wholly through the composite, since the ceiling is
+	// already zero — but nothing is read back, because the commit in front is still holding a client's
+	// buffer on a plane.
+	capture.Armed = true;
+	harness.Clock.Set(At(1012));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 2);
+	GYRO_CHECK_EQ(harness.Renderer.Reads, 0);
+	GYRO_CHECK_EQ(capture.Reserves, 0);
+
+	// Still armed, which is the whole mechanism: nothing published the slot, so the next iteration is
+	// still a capturing one and the ceiling stays down.
+	GYRO_CHECK(capture.Armed);
+
+	// The promoting commit retires. Nothing else is in flight that carries a plane — the frame above
+	// promoted nothing — so the next one may read.
+	harness.Presenter.Flip(At(1010), 8);
+
+	harness.Clock.Set(At(1022));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	// A frame was drawn on this iteration too, so what changed between the two is the readback rather
+	// than whether the loop ran at all.
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 3);
+	GYRO_CHECK_EQ(harness.Renderer.Reads, 1);
+	GYRO_CHECK_EQ(capture.Reserves, 1);
+	GYRO_CHECK_EQ(capture.Publishes, 1);
+	GYRO_CHECK(capture.PublishedComplete);
+	GYRO_CHECK(!capture.Armed);
 }
 
 GYRO_TEST(FrameLoop, ACaptureReadsTheTargetItJustRecordedInto)

@@ -14289,3 +14289,54 @@ It does not — an armed texture the composite never sampled would hold its tabl
 the run and no later press could arm anything. So a reserve claims its entry out of `Armed` with a
 compare-exchange, which lets the *next* press take back what was never touched while never racing a
 read in progress, and doubles as the deduplication for a texture two draw items name.
+
+
+### 181. A capture waits for the planes to retire before it reads a client's buffer back
+
+Decision 180 has the frame thread read every dmabuf client back on the frame the press forces, and it
+rested on a claim about that frame that is true and insufficient: the promotion ceiling is zero while a
+capture is owed, so the captured frame promotes nothing and the composite is the whole screen.
+
+What that says nothing about is the commit *in front of it*. A page flip is in flight for as long as a
+refresh, and the frame before the press was an ordinary one — it put client buffers on overlay planes,
+and the display engine is scanning them out at the instant the readback runs. `CaptureTextures` sits
+between the record and the present, which is where it has to be for the target's sake, so the buffers
+it walks are exactly the ones the panel is reading.
+
+The readback acquires each one from `VK_QUEUE_FAMILY_FOREIGN_EXT`. That is a claim that the foreign
+user has finished with the image, and a display controller mid-scanout has not. On the amdgpu part this
+was found on, the acquire is where the driver resolves DCC and tiling metadata — it is entitled to
+*write* to the surface — and doing that under a live scanout wedges DMCUB: the display microcontroller
+faults, `drm_atomic_helper_wait_for_flip_done` gives up ten seconds later, and the ioctl returns
+**zero**. No page flip event is ever delivered, so the output's commit queue never drains and the panel
+is gone for the life of the process. Two presses, two reboots.
+
+So the press is deferred rather than narrowed. A capturing frame with any promoting commit still in
+flight draws and presents as usual and reads nothing; the slot stays armed, the ceiling stays down, and
+within `CommitDepth` frames every plane has retired and the screen has one path to the glass. It
+converges because the only thing that could promote again is the ceiling, and the ceiling is zero.
+
+**Rejected: skipping the textures a plane is showing.** Smaller, needs no extra frame, and drops
+exactly the windows the hatch is for — a promoted window is a full-screen unobstructed one, which is
+the case somebody presses the chord to look at. A capture that silently omits the interesting window is
+an instrument that costs an afternoon.
+
+**Rejected: reading the textures after the flip instead.** Correct about scanout and wrong about
+lifetime: `Dispatch/Textures` seals a retirement with the sequence about to be published, so a deferred
+read can name an id already reclaimed. The deferral above moves the *whole* capture rather than half of
+it, which keeps the picture and the buffers one moment.
+
+**What the same reading found beside it.** Every texture read is ordered by the composite's fence, and
+the only party that waits on that fence is `ReadTarget` — but two of its refusals, a device built
+without readback and a target that is not bound, come back *before* it waits. `CaptureTarget` returned
+`void`, so a press that could not reserve a slab for the picture read client images with nothing waited
+on at all. It answers whether it actually stalled now, and the texture walk is gated on that.
+
+**What this does not fix is the wedge.** `DrmOutput::Reap` treats a commit the kernel accepted as a
+promise that a flip event follows, and DRM makes no such promise — a driver that times out internally
+returns success and delivers nothing. One lost event still bricks an output for the life of the
+process, and that is its own entry when the watchdog is built.
+
+**`--no-planes` is what settled it**, and it is the second time a question was answered by taking
+promotion away for a whole run rather than for a frame. There was no way to ask before, which is why it
+is a flag now rather than a patch somebody applied twice.
