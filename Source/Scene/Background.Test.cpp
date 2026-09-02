@@ -97,12 +97,25 @@ struct Fixture
 	}
 
 	// One dispatch iteration as `Dispatch/Loop.h` runs it: step, then serialise, which is the pass that
-	// sweeps whatever finished leaving.
-	void Iterate()
+	// sweeps whatever finished leaving. The wake is the step's, which is what the loop folds.
+	Wake Iterate()
 	{
-		Background.Step(Store, Textures);
+		const Wake wake = Background.Step(Store, Textures);
 
 		static_cast<void>(Serializer.Serialize(Store));
+
+		return wake;
+	}
+
+	// The same, past the wait the first background holds off for. Every test that is not *about* the
+	// wait starts here, because a background nobody waited for is not on screen yet.
+	void Show()
+	{
+		static_cast<void>(Iterate());
+
+		Clock.Advance(BackgroundDelay);
+
+		static_cast<void>(Iterate());
 	}
 
 	// Long enough that every spring in the world has settled, which is what retires a faded node. Eight
@@ -115,7 +128,7 @@ struct Fixture
 		{
 			Clock.Advance(Duration{ 200'000'000 });
 
-			Iterate();
+			static_cast<void>(Iterate());
 		}
 	}
 
@@ -157,7 +170,7 @@ GYRO_TEST(SceneBackground, IsBehindEveryRootAuthoredAfterIt)
 
 	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(1920, 1080, 200)).has_value());
 
-	fixture.Iterate();
+	fixture.Show();
 
 	GYRO_CHECK(fixture.Store.FirstRoot() == fixture.Background.Container());
 }
@@ -172,7 +185,7 @@ GYRO_TEST(SceneBackground, DrawsOnlyOnAnOutputItFitsExactly)
 
 	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(1920, 1080, 200)).has_value());
 
-	fixture.Iterate();
+	fixture.Show();
 
 	GYRO_REQUIRE(fixture.Background.Sheets().size() == 1);
 	GYRO_REQUIRE(fixture.Background.Sheets().front().Panels.size() == 1);
@@ -196,13 +209,13 @@ GYRO_TEST(SceneBackground, FitsAgainstDevicePixelsRatherThanLogicalOnes)
 
 	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(1920, 1080, 200)).has_value());
 
-	fixture.Iterate();
+	fixture.Show();
 
 	GYRO_CHECK(fixture.Panels() == 0);
 
 	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(3840, 2160, 200)).has_value());
 
-	fixture.Iterate();
+	fixture.Show();
 
 	GYRO_CHECK(fixture.Panels() == 1);
 }
@@ -217,11 +230,12 @@ GYRO_TEST(SceneBackground, KeepsBothImagesInTheWorldWhileOneReplacesTheOther)
 
 	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(1920, 1080, 40)).has_value());
 
-	fixture.Iterate();
+	fixture.Show();
 
 	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(1920, 1080, 200)).has_value());
 
-	fixture.Iterate();
+	// One iteration and no wait, because there is a picture to fade from.
+	static_cast<void>(fixture.Iterate());
 
 	GYRO_CHECK(fixture.Background.Sheets().size() == 2);
 	GYRO_CHECK(fixture.Panels() == 2);
@@ -240,11 +254,11 @@ GYRO_TEST(SceneBackground, GivesUpTheOldImageOnlyOnceNothingIsDrawingIt)
 
 	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(1920, 1080, 40)).has_value());
 
-	fixture.Iterate();
+	fixture.Show();
 
 	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(1920, 1080, 200)).has_value());
 
-	fixture.Iterate();
+	static_cast<void>(fixture.Iterate());
 
 	GYRO_CHECK(fixture.Textures.Retired == 0);
 
@@ -265,7 +279,7 @@ GYRO_TEST(SceneBackground, TakesTheImageOffAnOutputThatStoppedFitting)
 
 	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(1920, 1080, 200)).has_value());
 
-	fixture.Iterate();
+	fixture.Show();
 
 	GYRO_REQUIRE(fixture.Panels() == 2);
 
@@ -289,7 +303,7 @@ GYRO_TEST(SceneBackground, ClearsToBlackAndHoldsNothing)
 
 	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(1920, 1080, 200)).has_value());
 
-	fixture.Iterate();
+	fixture.Show();
 
 	fixture.Background.Clear(fixture.Store);
 
@@ -314,4 +328,59 @@ GYRO_TEST(SceneBackground, TellsTheTextureSpaceWhatTheTopByteMeans)
 	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(4, 4, 200)).has_value());
 
 	GYRO_CHECK(fixture.Textures.LastAlpha == TextureAlpha::None);
+}
+
+// The wait, which is what keeps a wallpaper from racing the boot it is meant to arrive after: nothing
+// is in the world at all until it is due — not a transparent quad, which nothing culls — and the step
+// answers when to come back, because a settled world would otherwise sleep through the moment.
+GYRO_TEST(SceneBackground, TheFirstBackgroundWaitsBeforeItFadesIn)
+{
+	const SceneOutput outputs[] = { Panel(1920, 1080) };
+
+	Fixture fixture{ outputs };
+
+	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(1920, 1080, 200)).has_value());
+
+	const Wake waiting = fixture.Iterate();
+
+	GYRO_CHECK(fixture.Panels() == 0);
+	GYRO_CHECK(waiting.Which == Wake::Kind::Timed);
+	GYRO_CHECK(waiting.When == Advanced(fixture.Clock.Now(), BackgroundDelay));
+
+	// Still nothing a moment before it is due, which is the half a wait written as a slower fade would
+	// get wrong.
+	fixture.Clock.Advance(BackgroundDelay - Duration{ 1 });
+
+	static_cast<void>(fixture.Iterate());
+
+	GYRO_CHECK(fixture.Panels() == 0);
+
+	fixture.Clock.Advance(Duration{ 1 });
+
+	const Wake shown = fixture.Iterate();
+
+	GYRO_CHECK(fixture.Panels() == 1);
+	GYRO_CHECK(shown.Which == Wake::Kind::Settled);
+}
+
+// And a replacement does not wait, because the picture it is fading from is already on screen — a
+// person changing their wallpaper and getting two seconds of black is the failure the asymmetry
+// exists to avoid.
+GYRO_TEST(SceneBackground, AReplacementFadesInImmediately)
+{
+	const SceneOutput outputs[] = { Panel(1920, 1080) };
+
+	Fixture fixture{ outputs };
+
+	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(1920, 1080, 40)).has_value());
+
+	fixture.Show();
+
+	GYRO_REQUIRE(fixture.Panels() == 1);
+
+	GYRO_REQUIRE(fixture.Background.Set(fixture.Store, fixture.Textures, Wallpaper(1920, 1080, 200)).has_value());
+
+	static_cast<void>(fixture.Iterate());
+
+	GYRO_CHECK(fixture.Panels() == 2);
 }

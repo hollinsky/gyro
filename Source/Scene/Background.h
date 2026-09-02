@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -9,6 +10,8 @@
 #include "Core/Pam.h"
 #include "Core/Result.h"
 #include "Core/Texture.h"
+#include "Core/Time.h"
+#include "Core/Wake.h"
 #include "Geometry/Space.h"
 #include "Scene/Commit.h"
 #include "Scene/Output.h"
@@ -43,6 +46,14 @@
 // soft on the one panel a person spends the day in front of, in exchange for never showing black on a
 // monitor that was plugged in ten seconds ago.
 //
+// **The first background waits before it fades in, and a replacement does not.** A machine coming up
+// has the firmware's logo on the glass and then gyro's own splash over it, and a wallpaper that
+// appeared the instant the compositor got far enough to read a file would be a picture racing the boot
+// it is meant to arrive after. So the first image gyro is handed holds off for `BackgroundDelay` and
+// then fades up from black. A *replacement* starts immediately, because the picture it is fading from
+// is already on screen: delaying that would be a black gap between two wallpapers, on the one
+// interaction — a person changing their background — where the answer is supposed to be instant.
+//
 // **What replaces a background is a cross-fade, and it is one commit.** The outgoing nodes fade to
 // nothing and are retired in the same scope; decision 114 keeps a retired subtree published for as
 // long as anything on it is still moving, so the fade *is* the exit and nothing here has to remember
@@ -60,6 +71,14 @@
 // manipulation and an overshoot on one is a flicker of the previous picture.
 inline constexpr Motion BackgroundMotion = Motion::Gentle;
 
+// SPEC: how long the first background waits before it begins to fade up.
+//
+// Two seconds is a boot's worth of everything else — the splash gyro draws over the firmware's logo,
+// and the session coming up behind it — and it is a number about the *machine* rather than about the
+// picture, which is why it is stated here rather than passed in. It applies only where there is
+// nothing to fade from; see above.
+inline constexpr Duration BackgroundDelay = std::chrono::milliseconds{ 500 };
+
 // One adopted image and the nodes drawing it.
 //
 // **A record per image rather than a current-and-previous pair**, because two backgrounds can be
@@ -74,6 +93,12 @@ struct BackgroundSheet
 
 	// Whether this is the background gyro is holding. Exactly one sheet has it.
 	bool Current = false;
+
+	// The instant this image may start being drawn. Now for a replacement, and `BackgroundDelay` out
+	// for the first one on a machine — which is what makes the wait *before* the fade rather than a
+	// slower fade, the two being different pictures: a background that is faintly there for two seconds
+	// is a smear over the splash, and one that is not there at all is a boot.
+	Instant Due{};
 
 	// One node per output showing this image, and the ones on their way out.
 	struct Panel
@@ -145,9 +170,20 @@ public:
 			return std::unexpected{ texture.error() };
 		}
 
+		// Read before the dismissal, because the dismissal is what takes them off screen: what decides
+		// the wait is whether there is a picture to fade *from*, and after `Dismiss` every sheet is on
+		// its way out whether or not it had ever been drawn.
+		const bool showing = Showing();
+
 		Dismiss(scene);
 
-		m_Sheets.push_back(BackgroundSheet{ .Texture = *texture, .Size = size, .Current = true, .Panels = {} });
+		m_Sheets.push_back(
+			BackgroundSheet{ .Texture = *texture,
+		                     .Size = size,
+		                     .Current = true,
+		                     .Due = showing ? scene.Now() : Advanced(scene.Now(), BackgroundDelay),
+		                     .Panels = {} }
+		);
 
 		return {};
 	}
@@ -165,22 +201,32 @@ public:
 	// Silent about failure for `SceneCursor::Step`'s reason — a background that would not author is a
 	// compositor that keeps running with black behind the windows, and there is nobody on this call to
 	// tell.
-	void Step(SceneStore& scene, ITextures& textures)
+	//
+	// **It answers a wake, which the cursor does not have to.** A pointer is moved by a person and the
+	// input that moves it is what wakes the loop; the first background is waiting on nothing but the
+	// clock, so a world that has settled would sleep straight through the instant it was meant to
+	// appear. `Wake::Never()` at every other moment, because the fade itself is a spring the serialiser
+	// already folds.
+	[[nodiscard]] Wake Step(SceneStore& scene, ITextures& textures)
 	{
 		if (m_Container.IsNull())
 		{
-			return;
+			return Wake::Never();
 		}
 
 		Reclaim(scene, textures);
+
+		Wake wake = Wake::Never();
 
 		for (BackgroundSheet& sheet : m_Sheets)
 		{
 			if (sheet.Current)
 			{
-				Reconcile(scene, sheet);
+				wake = Sooner(wake, Reconcile(scene, sheet));
 			}
 		}
+
+		return wake;
 	}
 
 	// The container the images hang under, or null before `Open`. For a test, and for the day the hit
@@ -284,7 +330,9 @@ private:
 	}
 
 	// The current sheet against the output set: one node per output it fits, and none anywhere else.
-	void Reconcile(SceneStore& scene, BackgroundSheet& sheet)
+	//
+	// Answers when to come back where it is holding an image that is not due yet.
+	[[nodiscard]] Wake Reconcile(SceneStore& scene, BackgroundSheet& sheet)
 	{
 		const std::span<const SceneOutput> outputs = scene.Outputs();
 
@@ -313,6 +361,15 @@ private:
 			Leave(commit, panel.Node);
 		}
 
+		// **Nothing is authored before it is due, rather than authored transparent and left there.**
+		// Nothing in the frame walk culls a fully faded node, so a wallpaper waiting at zero opacity is
+		// a full-screen composite for every frame of the wait — which is `SceneCursor`'s finding about a
+		// hidden pointer, on a quad the size of the screen.
+		if (scene.Now() < sheet.Due)
+		{
+			return Wake::At(sheet.Due);
+		}
+
 		for (const SceneOutput& output : outputs)
 		{
 			if (FittingSize(output) != sheet.Size || Holds(sheet, output.Id))
@@ -333,6 +390,22 @@ private:
 
 			sheet.Panels.push_back(BackgroundSheet::Panel{ .Output = output.Id, .Node = *node });
 		}
+
+		return Wake::Never();
+	}
+
+	// Whether anything is on screen: a sheet with a node on it, current or leaving.
+	[[nodiscard]] bool Showing() const noexcept
+	{
+		for (const BackgroundSheet& sheet : m_Sheets)
+		{
+			if (!sheet.Panels.empty())
+			{
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	// One image node covering an output, transparent until the commit that authored it fades it up.

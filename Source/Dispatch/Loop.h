@@ -222,7 +222,7 @@ public:
 		// author that had to remember to draw one is an author that forgets — with the boot splash and
 		// the recovery console being the two that would forget most visibly. It is stepped before the
 		// pointer only because that is the order they are stacked in; neither reads the other.
-		m_Background.Step(m_Store, m_Textures);
+		const Wake background = m_Background.Step(m_Store, m_Textures);
 
 		m_Cursor.Step(m_Store, m_Textures);
 
@@ -296,7 +296,10 @@ public:
 		// to write; `Republish` says when a channel it already wrote comes to rest, which is when this
 		// scene can be re-serialised smaller. Both must be armed or one of the two halves of
 		// Docs/Architecture.md#doing-nothing-must-cost-nothing goes unserved.
-		const Wake wake = Sooner(authored, m_Serializer.Republish());
+		// Three folds now. The background's is the odd one: an image gyro was handed but is not drawing
+		// yet is waiting on the clock and on nothing else, so a world that has settled would sleep
+		// through the instant it was meant to fade up. See `Scene/Background.h`.
+		const Wake wake = Sooner(Sooner(authored, background), m_Serializer.Republish());
 
 		return published ? wake : Sooner(wake, Wake::At(Advanced(now, PublishRetryInterval)));
 	}

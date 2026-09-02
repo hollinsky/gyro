@@ -14166,6 +14166,17 @@ compared against is the output's own logical rectangle in device pixels rather t
 are the same number on an ordinary panel and transposed on one stood on end — a wallpaper is authored
 in the space the world is laid out in.
 
+**The first background waits two seconds and a replacement does not.** A machine coming up has the
+firmware's logo on the glass and gyro's own splash over it, and a wallpaper appearing the instant the
+compositor got far enough to read a file is a picture racing the boot it is meant to arrive after. A
+replacement starts immediately, because what it is fading from is already on screen — delaying that
+would be a black gap between two wallpapers, on the one interaction where a person expects an instant
+answer. The wait is *before* the fade rather than a slower fade: a background faintly present for two
+seconds is a smear over the splash. Nothing is authored during it, because nothing in the frame walk
+culls a transparent quad, and `Step` answers a `Wake` for the same reason the pointer does not need
+one — a wallpaper waits on the clock and on nothing else, so a settled world would sleep through the
+instant it was meant to appear.
+
 **Replacement is a cross-fade and it is one commit.** The outgoing nodes fade to nothing and are
 retired in the same scope; decision 114 keeps a retired subtree published while anything on it is
 still moving, so the fade *is* the exit and nothing has to remember to sweep it. The incoming nodes
