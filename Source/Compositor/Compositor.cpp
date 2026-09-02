@@ -1491,6 +1491,17 @@ public:
 		                          .Lead = m_Options.Lead.value_or(ArmingLead),
 		                          .Composite = m_Options.Composite } }
 		);
+
+		if (m_Options.NoPlanes)
+		{
+			m_Loop->Planes(false);
+
+			// Said out loud for the reason the lead below is: a run that composites everything looks
+			// like a run that could not promote anything, and the trace rows are identical. The one
+			// difference is that this one was asked for.
+			spdlog::info("--no-planes: every item composites, nothing is promoted to an overlay");
+		}
+
 		// **Said out loud where it is not the default, because a sweep is four runs that differ by one
 		// number and a capture does not carry it.** Four traces taken at four leads are indistinguishable
 		// from each other on the day after they were taken, and the one that matters is always the one

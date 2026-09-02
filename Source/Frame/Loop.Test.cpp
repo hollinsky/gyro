@@ -2361,6 +2361,33 @@ GYRO_TEST(FrameLoop, AllPromotableLeavesTheGpuAsleep)
 	GYRO_CHECK_EQ(harness.Presenter.Held(), std::uint32_t{ 0 });
 }
 
+// `--no-planes`, which is the same frame as above with the flag on: an item the assigner would have
+// promoted whole is composited instead, and the presenter is handed one layer that is gyro's own
+// composite rather than the client's buffer. Asserted on the record count as well as the layer count,
+// because a partition that promoted nothing and a frame that drew nothing read alike on the second.
+GYRO_TEST(FrameLoop, RefusingPlanesCompositesWhatWouldHaveBeenPromoted)
+{
+	Harness harness;
+	const std::array<DrawItem, 1> items{ Promotable({ {}, { 2560, 1440 } }) };
+
+	harness.Presenter.Planes = 2;
+	harness.Evaluator.Items = items;
+	harness.Loop.Planes(false);
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Renderer.Records, 1);
+	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 1 });
+
+	// The one the GPU drew into, which `AllPromotableLeavesTheGpuAsleep` asserts is zero without the
+	// flag. It is what says the layer above is the composite rather than the client.
+	GYRO_CHECK_EQ(harness.Presenter.Held(), std::uint32_t{ 1 });
+}
+
 // **The same with something under it, which is where the layer indices are load-bearing.** Two
 // promotable items — a window with the pointer over it — promote whole, and the promoted set is a
 // suffix addressed from where the composite ends, so reading it as `list.Items[slot]` hands the plane

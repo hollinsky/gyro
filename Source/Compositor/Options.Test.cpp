@@ -419,6 +419,20 @@ GYRO_TEST(Options, ACompositeThatNamesNoTierIsRefused)
 	GYRO_CHECK(!Parse({ "--composite" }).has_value());
 }
 
+GYRO_TEST(Options, PlanesArePromotedUntilRefusedAndTheRefusalTakesNoValue)
+{
+	const Result<Options> ordinary = Parse({});
+	const Result<Options> refused = Parse({ "--no-planes" });
+
+	GYRO_REQUIRE(ordinary.has_value() && refused.has_value());
+	GYRO_CHECK(!ordinary->NoPlanes);
+	GYRO_CHECK(refused->NoPlanes);
+
+	// A ceiling is not what this flag is: it says no client reaches the glass on a plane, and a value
+	// here is somebody reading it as a number of planes to allow.
+	GYRO_CHECK(!Parse({ "--no-planes=2" }).has_value());
+}
+
 GYRO_TEST(Options, TheMissTriggerIsOffUntilAskedForAndTakesNoValue)
 {
 	const Result<Options> silent = Parse({});

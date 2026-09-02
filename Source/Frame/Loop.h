@@ -709,6 +709,15 @@ public:
 	// which is the last moment the pixels are provably the ones about to be latched.
 	void Capture(ICaptureSink* sink) noexcept { m_Capture = sink; }
 
+	// **`--no-planes`: refuse decision 152's partition for the whole run.** The promotion is recomputed
+	// per frame with nothing carried over, so switching it off is a ceiling of zero rather than a mode
+	// — the same lever a captured frame already pulls for itself, held for every frame instead of one.
+	//
+	// It is here rather than in `Timing` because it is not a policy about when to draw; it is a claim
+	// about which hardware draws, and the only party that can state it is the one that asks the
+	// presenter for its ceiling.
+	void Planes(bool promote) noexcept { m_Planes = promote; }
+
 	// One iteration. Returns the wake the next one is owed at; `Wake::Never()` arms nothing.
 	[[nodiscard]] Wake Step()
 	{
@@ -1183,7 +1192,7 @@ private:
 		// This is the perturbation Seam/Capture.h declares and the reason the verb is a debug hatch: the
 		// captured frame is drawn by a different path from its neighbours, and if the two ever disagree
 		// the disagreement is visible on the glass at the instant of capture.
-		const std::uint32_t ceiling = capturing ? 0 : output.m_Presenter->LayerCeiling();
+		const std::uint32_t ceiling = capturing || !m_Planes ? 0 : output.m_Presenter->LayerCeiling();
 
 		Partition partition = Assign(list.Items, ceiling, output.m_Configuration.Color);
 
@@ -2055,6 +2064,9 @@ private:
 	// Null on every run that was not asked for captures, which is almost all of them — the check is one
 	// predictable branch per output per frame and buys a loop that carries no capture state at all.
 	ICaptureSink* m_Capture = nullptr;
+
+	// Whether a client may reach the glass on a plane at all. True unless `--no-planes` said otherwise.
+	bool m_Planes = true;
 
 	Wake m_Armed = Wake::Never();
 };

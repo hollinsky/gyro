@@ -257,6 +257,19 @@ struct Options
 	std::string CaptureDirectory;
 	bool Capture = false;
 
+	// **Never put a client on an overlay plane, and composite every item on the GPU instead.**
+	// Decision 152's partition is a per-frame answer with no state behind it, so turning it off is a
+	// ceiling of zero rather than a mode — which is the same lever `--capture` already pulls for the
+	// one frame it reads back, made to hold for the run.
+	//
+	// It is a debugging flag and it costs what promotion was buying: every window the display engine
+	// would have scanned out directly is drawn by the GPU, so a full-screen video plays through a
+	// composite it did not need and a still desktop wakes the GPU to redraw what a plane was holding
+	// for free. What it buys back is a session with exactly one path to the glass, which is the
+	// fastest way to tell a fault in the partition apart from a fault in what gyro drew — and the
+	// second time that question came up there was no way to ask it.
+	bool NoPlanes = false;
+
 	// Snapshot on the first frame that lands a refresh after the one it was aimed at. The miss being
 	// hunted recurs about as often as the ring is long, so waiting for it with a finger on `SIGUSR1`
 	// means catching the right half-minute by hand; this is the loop making the request the moment it
@@ -847,6 +860,21 @@ inline constexpr double MaximumArcminutes = 10.0;
 			}
 
 			options.TraceOnMiss = true;
+
+			continue;
+		}
+
+		if (Detail::Matches(argument, "--no-planes", value))
+		{
+			// No value, for `--trace-on-miss`'s reason: how many planes to allow is not a dial anybody
+			// has an opinion about, and a flag that took one would read `--no-planes=2` as a ceiling
+			// rather than as the refusal it says it is.
+			if (!value.empty())
+			{
+				return Failure(EINVAL, "--no-planes takes no value");
+			}
+
+			options.NoPlanes = true;
 
 			continue;
 		}
