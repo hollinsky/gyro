@@ -87,7 +87,7 @@ public:
 		++Tests;
 		TestedLayers = layers.size();
 
-		if (RefuseTest || layers.size() > Planes)
+		if (RefuseTest || layers.size() > Planes || Tests <= RefuseFirstTests)
 		{
 			return Failure(EINVAL, "fake presenter refuses that partition");
 		}
@@ -145,6 +145,13 @@ public:
 	// for more.
 	std::uint32_t Planes = 1;
 	bool RefuseTest = false;
+
+	// Refuse the first this many proposals and take the next. A driver that says no to one partition
+	// and yes to a narrower one is the ordinary case — a plane's format, its bandwidth, a scaler it
+	// shares — and it is the only way to see the loop *narrow* rather than collapse, which `RefuseTest`
+	// cannot show because it refuses everything the whole way down to zero.
+	int RefuseFirstTests = 0;
+
 	int Tests = 0;
 	std::size_t TestedLayers = 0;
 	// `MaxLayers` up front, because `Present` runs inside the frame section: the assign below reuses
@@ -2255,6 +2262,76 @@ GYRO_TEST(FrameLoop, ARefusedPartitionCompositesTheWholeFrame)
 	GYRO_CHECK_EQ(harness.Presenter.Tests, 1);
 	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 2 });
 	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 1 });
+}
+
+// **A refusal gives back one layer rather than every layer**, which is the difference between a window
+// being composited because a menu in front of it could not be promoted and the window scanning out with
+// the menu drawn into the composite under it. The atomic test is all-or-nothing, so the loop has to
+// narrow by hand; three items on three planes with a driver that takes two is the smallest case that
+// tells the two behaviours apart, because collapsing and narrowing agree on every partition of one.
+GYRO_TEST(FrameLoop, ARefusedPartitionGivesBackOneLayerRatherThanAllOfThem)
+{
+	Harness harness;
+	const std::array<DrawItem, 3> items{ Composited(),
+		                                 Promotable({ { 100, 100 }, { 640, 480 } }),
+		                                 Promotable({ { 200, 200 }, { 320, 240 } }) };
+
+	harness.Presenter.Planes = 3;
+	harness.Presenter.RefuseFirstTests = 1;
+	harness.Evaluator.Items = items;
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	// Three layers proposed and refused, then two proposed and taken.
+	GYRO_CHECK_EQ(harness.Presenter.Tests, 2);
+	GYRO_CHECK_EQ(harness.Presenter.TestedLayers, std::size_t{ 2 });
+
+	// **The layer given back is the one nearest the composite, and that is forced rather than chosen.**
+	// The promoted set is a suffix, so the only end of it that can move is the bottom — giving back the
+	// frontmost layer would leave a promoted item under a composited one, which is the hole in the
+	// composite that decision 152's suffix rule exists to avoid. So the GPU draws the solid and the
+	// middle item, and what stays on a plane is the item that was in front.
+	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 2 });
+
+	GYRO_REQUIRE(harness.Presenter.PresentedLayers.size() == 2);
+	GYRO_CHECK(!harness.Presenter.PresentedLayers[0].Target.IsTexture());
+	GYRO_CHECK(harness.Presenter.PresentedLayers[1].Target.IsTexture());
+	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers[1].Destination.Origin.X, 200);
+}
+
+// **The narrowing runs from a partition that had no composite at all**, which is the path that has to
+// discover it wants the GPU after deciding it did not: two promotable items on two planes acquire no
+// target, and giving one back means acquiring one and rebuilding the layer array around it.
+GYRO_TEST(FrameLoop, NarrowingAFullyPromotedPartitionTakesATargetForTheRemainder)
+{
+	Harness harness;
+	const std::array<DrawItem, 2> items{ Promotable({ {}, { 2560, 1440 } }),
+		                                 Promotable({ { 200, 200 }, { 320, 240 } }) };
+
+	harness.Presenter.Planes = 2;
+	harness.Presenter.RefuseFirstTests = 1;
+	harness.Evaluator.Items = items;
+
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Presenter.Tests, 2);
+
+	// The bottom item is composited and the top one stays on its plane, so the frame commits a composite
+	// under one layer — and the GPU, which had nothing to do a moment ago, drew exactly the one item.
+	GYRO_CHECK_EQ(harness.Renderer.RecordedItems, std::size_t{ 1 });
+
+	GYRO_REQUIRE(harness.Presenter.PresentedLayers.size() == 2);
+	GYRO_CHECK(!harness.Presenter.PresentedLayers[0].Target.IsTexture());
+	GYRO_CHECK(harness.Presenter.PresentedLayers[1].Target.IsTexture());
+	GYRO_CHECK_EQ(harness.Presenter.PresentedLayers[1].Destination.Origin.X, 200);
 }
 
 // **The arrangement the whole mechanism exists for: every item on a plane and the GPU asleep.** The

@@ -106,6 +106,16 @@ public:
 	// and the frame thread only ever reads ones the snapshot it is composing from does.
 	[[nodiscard]] std::uint32_t Find(TextureId id) const noexcept;
 
+	// How that id's pixels are laid out, as the fourcc and modifier the framebuffer was created under.
+	// An invalid format for an id this card has no framebuffer for, which is the same miss `Find`
+	// reports as zero.
+	//
+	// **Kept rather than asked of the kernel, because `drmModeGetFB2` is an ioctl and the caller is
+	// `DrmOutput::Expressible` on the `SCHED_FIFO` frame thread.** What wants it is the pre-filter that
+	// decides whether a plane advertises this layout at all — which is the cheap, deterministic half of
+	// not proposing a partition the atomic test would refuse, and the expensive half is the test.
+	[[nodiscard]] PixelFormat Layout(TextureId id) const noexcept;
+
 	// Remove every framebuffer no output is reading any more. Called at the top of both dispatch-side
 	// verbs, so a card on which nothing is ever promoted walks an empty list.
 	void Sweep() noexcept;
@@ -126,6 +136,10 @@ private:
 		std::uint32_t Framebuffer = 0;
 		std::array<std::uint32_t, MaxImagePlanes> Handles{};
 		std::uint32_t PlaneCount = 0;
+
+		// What `AddFB2` was told these pixels are. Kept because the only other way to ask is an ioctl,
+		// and the party that asks is inside a frame section — see `Layout`.
+		PixelFormat Format{};
 	};
 
 	// One GEM handle and how many framebuffers name it. See the class comment: this is the count that

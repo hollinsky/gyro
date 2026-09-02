@@ -175,3 +175,37 @@ GYRO_TEST(DrmCatalog, RefusesABlobThatDoesNotFit)
 	GYRO_REQUIRE(catalog.size() == 1);
 	GYRO_CHECK(catalog[0].Modifiers.empty());
 }
+
+// **The pre-filter in front of the atomic test, and the two silences it must not read as refusals.**
+// A plane that reports no `IN_FORMATS` at all is a driver that did not answer, and a framebuffer with
+// no modifier is one the driver laid out itself — refusing either would disable promotion on hardware
+// that works, which is a whole-screen composite every frame in exchange for a question this file was
+// never able to answer.
+GYRO_TEST(DrmCatalog, AdvertisedFiltersALayoutAPlaneNeverNamed)
+{
+	const std::vector<std::uint32_t> formats{ FormatXrgb8888, FormatArgb8888 };
+	const std::vector<drm_format_modifier> modifiers{
+		drm_format_modifier{ .formats = 0b011, .offset = 0, .pad = 0, .modifier = ModifierLinear },
+		drm_format_modifier{ .formats = 0b001, .offset = 0, .pad = 0, .modifier = 0x100000000000002ULL },
+	};
+
+	const std::vector<Drm::PlaneFormat> catalog = Drm::DecodeFormats(BuildBlob(formats, modifiers));
+
+	GYRO_CHECK(Drm::Advertised(catalog, PixelFormat{ .Code = FormatXrgb8888, .Modifier = ModifierLinear }));
+	GYRO_CHECK(Drm::Advertised(catalog, PixelFormat{ .Code = FormatXrgb8888, .Modifier = 0x100000000000002ULL }));
+
+	// The format is in the table and that modifier is not, which is the tiled buffer a cursor plane
+	// will not read — refused here rather than by an ioctl on the frame thread.
+	GYRO_CHECK(!Drm::Advertised(catalog, PixelFormat{ .Code = FormatArgb8888, .Modifier = 0x100000000000002ULL }));
+
+	// The format is not in the table at all, which is the whole of what a cursor plane's one-entry
+	// catalog says about every window buffer on the machine.
+	GYRO_CHECK(!Drm::Advertised(catalog, PixelFormat{ .Code = FormatNv12, .Modifier = ModifierLinear }));
+
+	// Neither silence is a refusal: an empty catalog, and a layout the framebuffer never stated.
+	GYRO_CHECK(Drm::Advertised({}, PixelFormat{ .Code = FormatNv12, .Modifier = ModifierLinear }));
+	GYRO_CHECK(Drm::Advertised(catalog, PixelFormat{ .Code = FormatArgb8888, .Modifier = ModifierInvalid }));
+
+	// And a layer with no format at all is `Framebuffer`'s refusal to make, not this one's.
+	GYRO_CHECK(Drm::Advertised(catalog, PixelFormat{}));
+}

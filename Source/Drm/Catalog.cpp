@@ -198,4 +198,27 @@ std::span<const std::uint64_t> ModifiersFor(std::span<const PlaneFormat> catalog
 
 	return {};
 }
+bool Advertised(std::span<const PlaneFormat> catalog, PixelFormat format) noexcept
+{
+	// See the header: neither silence is a refusal.
+	if (catalog.empty() || !format.IsValid())
+	{
+		return true;
+	}
+
+	const std::span<const std::uint64_t> modifiers = ModifiersFor(catalog, format.Code);
+
+	if (modifiers.empty())
+	{
+		return false;
+	}
+
+	if (format.Modifier == ModifierInvalid)
+	{
+		return true;
+	}
+
+	return std::ranges::find(modifiers, format.Modifier) != modifiers.end();
+}
+
 } // namespace Drm

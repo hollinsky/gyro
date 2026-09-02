@@ -209,6 +209,14 @@ private:
 		std::uint32_t Offset = 0;
 		std::uint32_t Count = 0;
 		bool Fenced = false;
+
+		// What this plane says it will scan out, borrowed from the pipeline's own inventory.
+		//
+		// **A borrow rather than a copy, and it is safe because `Pipe()` is already borrowed the same
+		// way.** The pipeline outlives every output built from it — `m_Pipeline` beside this is the
+		// same lifetime — and the catalog is a few dozen fourccs with a modifier list each, which is
+		// not a thing to duplicate per plane per output.
+		std::span<const PlaneFormat> Formats;
 	};
 
 	[[nodiscard]] Result<void> BuildTargets();
@@ -250,10 +258,23 @@ private:
 	// the blocks with it — and it is a bare ioctl for the reason the header gives.
 	[[nodiscard]] Result<void> Commit(std::uint32_t flags) noexcept;
 
+	// Copy the proposal the kernel just refused out of the commit blocks, on the frame thread. Allocates
+	// nothing and asks nothing: it is `std::memcpy` in a loop, which is what makes it legal where it is
+	// called from.
+	void KeepRefusal(std::span<const PresentLayer> layers, int code) noexcept;
+
+	// Say it out loud. Called from `Settle`, which the device's drain runs outside the frame section.
+	void ReportRefusal();
+
 	// What a layer's pixels are on this card: one of this output's own targets, or a framebuffer the
 	// device's scanout table holds for a promoted client buffer. Zero for neither, which `Expressible`
 	// turns into a refusal of the whole partition.
 	[[nodiscard]] std::uint32_t Framebuffer(const PresentLayer& layer) const noexcept;
+
+	// How those pixels are laid out — the same two sources `Framebuffer` reads, asked the other
+	// question. An invalid format where the layer names neither, which `Advertised` reads as *nothing
+	// to compare* rather than as a refusal, because `Framebuffer` has already refused that layer.
+	[[nodiscard]] PixelFormat Layout(const PresentLayer& layer) const noexcept;
 
 	// The image's own extent, which a layer with an empty source rectangle means the whole of.
 	[[nodiscard]] PixelSize<DeviceSpace> Extent(const PresentLayer& layer) const noexcept;
@@ -309,6 +330,52 @@ private:
 
 	// How many planes this output may put a layer on: the primary and everything above it, capped.
 	std::uint32_t m_PlaneCount = 0;
+
+	// **The proposal the kernel last refused, kept so that somebody outside the frame section can say
+	// what was in it.** `TestLayers` runs on the `SCHED_FIFO` frame thread inside Core/FrameSection.h's
+	// guard, where a log call is the blocking operation that thread exists to avoid — so the numbers are
+	// copied into plain storage here and `Settle` prints them, which is `FrameLoop::m_FirstRefusal`'s
+	// route unchanged.
+	//
+	// **What it is for is that an errno alone cannot be acted on.** A capture of a machine that never
+	// promotes reads `committing a page flip 22` on every frame and stops there: `EINVAL` is the driver
+	// saying *not this*, and which of a dozen properties it meant is the only thing worth knowing. The
+	// format and the modifier are not in here because they are the kernel's — `drmModeGetFB2` answers
+	// them from the framebuffer id at report time, off the frame path, where an ioctl is free.
+	struct RefusedLayer
+	{
+		std::uint32_t Plane = 0;
+		std::uint32_t Framebuffer = 0;
+
+		// 16.16 fixed point, exactly as they went to the kernel: reporting the numbers that were sent
+		// rather than the floats they came from is the point, since a conversion is one of the things
+		// that can be wrong.
+		std::uint64_t SrcX = 0;
+		std::uint64_t SrcY = 0;
+		std::uint64_t SrcW = 0;
+		std::uint64_t SrcH = 0;
+
+		std::int64_t CrtcX = 0;
+		std::int64_t CrtcY = 0;
+		std::uint64_t CrtcW = 0;
+		std::uint64_t CrtcH = 0;
+	};
+
+	// **Compared rather than counted, which is what *once per distinct refusal* means.** A standing
+	// refusal is one line for the session; a refusal that changes when a window resizes is a new line,
+	// and the pair of them together is the diagnosis.
+	struct RefusedProposal
+	{
+		std::array<RefusedLayer, MaxLayers> Layers{};
+		std::uint32_t Count = 0;
+		int Code = 0;
+
+		[[nodiscard]] bool SameAs(const RefusedProposal& other) const noexcept;
+	};
+
+	RefusedProposal m_Refused{};
+	RefusedProposal m_Reported{};
+	bool m_RefusalPending = false;
 
 	Pending m_Pending{};
 

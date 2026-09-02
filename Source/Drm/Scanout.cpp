@@ -129,7 +129,7 @@ Result<void> DrmScanout::Adopt(TextureId id, const TextureSource& source)
 	// one does.
 	Forget(id);
 
-	Image built{ .Id = id, .Framebuffer = 0, .Handles = {}, .PlaneCount = 0 };
+	Image built{ .Id = id, .Framebuffer = 0, .Handles = {}, .PlaneCount = 0, .Format = source.Format };
 
 	std::array<std::uint32_t, MaxImagePlanes> strides{};
 	std::array<std::uint32_t, MaxImagePlanes> offsets{};
@@ -279,6 +279,19 @@ std::uint32_t DrmScanout::Find(TextureId id) const noexcept
 	}
 
 	return 0;
+}
+
+PixelFormat DrmScanout::Layout(TextureId id) const noexcept
+{
+	for (std::uint32_t index = 0; index < m_Count; ++index)
+	{
+		if (m_Images[index].Id == id)
+		{
+			return m_Images[index].Format;
+		}
+	}
+
+	return {};
 }
 
 } // namespace Drm

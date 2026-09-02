@@ -4,6 +4,7 @@
 
 #include <drm/drm.h>
 #include <drm/drm_mode.h>
+#include <spdlog/spdlog.h>
 #include <sys/ioctl.h>
 #include <xf86drm.h>
 
@@ -184,16 +185,26 @@ Result<void> DrmOutput::Open(const OutputConfiguration& wanted)
 			break;
 		}
 
-		// A cursor plane is skipped, and it is the one kind that is refused by name rather than by the
-		// atomic test. Decision 152 makes the pointer an ordinary promotable node, but the hardware's
-		// cursor plane is not an ordinary plane: several drivers accept exactly one size on it, ignore
-		// the source rectangle, and take a format nothing else takes. Putting an arbitrary layer there
-		// would be a promotion that works on one machine and is refused on the next, for a plane that
-		// buys nothing an overlay does not.
-		if (plane.Kind == PlaneKind::Cursor)
-		{
-			continue;
-		}
+		// **A cursor plane is taken like any other, and the pointer reaches it without anything here
+		// knowing what a pointer is.** This kind used to be skipped by name, on the reading that several
+		// drivers accept one size on it, ignore the source rectangle and take a format nothing else
+		// takes — so an arbitrary layer put there would be a promotion that works on one machine and is
+		// refused on the next. Every clause of that is true and the conclusion did not follow. A cursor
+		// plane sits at the top of `zpos`, and the inventory is sorted by `zpos`, so it is the last slot
+		// this loop fills; the promoted set is a suffix and the layers go onto planes bottom-first, so
+		// the only layer that can ever reach it is the frontmost one, and only on a frame that has
+		// already used every plane beneath it. A large window cannot land here while a lower plane is
+		// free. What does land here is whatever is in front of everything else, which on a screen with a
+		// pointer is the pointer — arrived at by the ordering rather than by naming the node, which is
+		// what keeps decision 152's partition free of per-surface state.
+		//
+		// The rejected alternative is packing the promoted layers against the *top* planes instead, so
+		// that a frame with slack reaches this one. That hands a full-screen window to a plane that
+		// takes `AR24` alone, and an atomic test is all-or-nothing — one refused layer costs the whole
+		// partition — so it would lose the offload on exactly the frames that have it today.
+		//
+		// What this kind is still worth naming for is the *format* pre-filter in `Expressible`, which is
+		// the cheap half of not proposing a layer this plane will refuse.
 
 		const PlaneProperties& properties = plane.Props;
 
@@ -201,6 +212,7 @@ Result<void> DrmOutput::Open(const OutputConfiguration& wanted)
 		block.Object = plane.Id;
 		block.Offset = offset;
 		block.Fenced = properties.InFenceFd != 0;
+		block.Formats = plane.Formats;
 
 		const auto add = [&](std::uint32_t property, std::uint64_t value) {
 			m_Properties[offset] = property;
@@ -603,8 +615,10 @@ Result<void> DrmOutput::Expressible(std::span<const PresentLayer> layers) const 
 		return Failure(EINVAL, "this output has no plane for every layer of that partition");
 	}
 
-	for (const PresentLayer& layer : layers)
+	for (std::uint32_t index = 0; index < layers.size(); ++index)
 	{
+		const PresentLayer& layer = layers[index];
+
 		// A promoted layer that has no framebuffer on this card is refused here with the rest of the
 		// partition, which is decision 153's rule: the frame thread names an id, and an id that did not
 		// import costs decision 35's one composited frame rather than a hole on the screen.
@@ -612,9 +626,40 @@ Result<void> DrmOutput::Expressible(std::span<const PresentLayer> layers) const 
 		{
 			return Failure(EINVAL, "presenting an image this output cannot scan out");
 		}
+
+		// **Does the plane this layer would land on say it takes these pixels at all.** `IN_FORMATS` is
+		// already decoded per plane and the layout is already kept per image, so this is a walk over a
+		// short list against two integers — no ioctl, nothing allocated, and an answer that does not
+		// change while the plane and the buffer both live.
+		//
+		// **It is here because an atomic test is all-or-nothing.** One layer the driver will not take
+		// costs the whole partition and the frame composites, so the layers most likely to be refused
+		// are worth refusing *before* the ioctl rather than after it — which is both the 200 µs the test
+		// costs on the `SCHED_FIFO` frame thread and, with the narrowing retry above this, the
+		// difference between giving up one layer and giving up all of them.
+		//
+		// A plane that reports no format table at all is left alone rather than refused: an empty
+		// catalog is a driver that did not answer, and inventing a refusal from silence would disable
+		// promotion on hardware that works.
+		if (!Advertised(m_Planes[index].Formats, Layout(layer)))
+		{
+			return Failure(EINVAL, "a plane in that partition does not scan out that layer's layout");
+		}
 	}
 
 	return {};
+}
+
+PixelFormat DrmOutput::Layout(const PresentLayer& layer) const noexcept
+{
+	if (layer.Target.IsTexture())
+	{
+		const DrmScanout* const scanout = m_Device != nullptr ? &m_Device->Scanout() : nullptr;
+
+		return scanout != nullptr ? scanout->Layout(layer.Target.Texture) : PixelFormat{};
+	}
+
+	return layer.Target.Index < m_TargetCount ? m_Descriptions[layer.Target.Index].Format : PixelFormat{};
 }
 
 Result<void> DrmOutput::TestLayers(std::span<const PresentLayer> layers)
@@ -649,10 +694,169 @@ Result<void> DrmOutput::TestLayers(std::span<const PresentLayer> layers)
 
 	const Result<void> answer = Commit(DRM_MODE_ATOMIC_TEST_ONLY);
 
+	// **Kept rather than logged, and kept here rather than in the caller.** Frame/Loop.h already marks
+	// the refusal on this output's trace row with the sentence and the errno, which is what tells a
+	// reader that promotion is being refused at all; what it cannot say is *what was proposed*, because
+	// a `PresentLayer` names a texture id and the numbers that went to the kernel are this file's. See
+	// `m_Refused`.
+	if (!answer)
+	{
+		KeepRefusal(layers, answer.error().Code());
+	}
+
 	// The blocks are left holding a partition that was never committed, so the next `Present` must
 	// rewrite them — which it does unconditionally. Saying so here is for the reader; nothing depends
 	// on the state surviving.
 	return answer;
+}
+
+bool DrmOutput::RefusedProposal::SameAs(const RefusedProposal& other) const noexcept
+{
+	if (Count != other.Count || Code != other.Code)
+	{
+		return false;
+	}
+
+	for (std::uint32_t index = 0; index < Count; ++index)
+	{
+		const RefusedLayer& left = Layers[index];
+		const RefusedLayer& right = other.Layers[index];
+
+		if (left.Plane != right.Plane || left.Framebuffer != right.Framebuffer || left.SrcX != right.SrcX ||
+		    left.SrcY != right.SrcY || left.SrcW != right.SrcW || left.SrcH != right.SrcH ||
+		    left.CrtcX != right.CrtcX || left.CrtcY != right.CrtcY || left.CrtcW != right.CrtcW ||
+		    left.CrtcH != right.CrtcH)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+void DrmOutput::KeepRefusal(std::span<const PresentLayer> layers, int code) noexcept
+{
+	// **Read out of `m_Values` rather than recomputed from the layers**, which is the whole point: the
+	// question is what the ioctl carried, and a second derivation from the same inputs would agree with
+	// the first even where both are wrong.
+	RefusedProposal kept{};
+
+	kept.Code = code;
+	kept.Count = static_cast<std::uint32_t>(layers.size());
+
+	if (kept.Count > MaxLayers)
+	{
+		kept.Count = MaxLayers;
+	}
+
+	for (std::uint32_t index = 0; index < kept.Count; ++index)
+	{
+		const PlaneCommit& block = m_Planes[index];
+		const std::size_t at = block.Offset;
+
+		kept.Layers[index] = RefusedLayer{
+			.Plane = block.Object,
+			.Framebuffer = static_cast<std::uint32_t>(m_Values[at + 0]),
+			.SrcX = m_Values[at + 2],
+			.SrcY = m_Values[at + 3],
+			.SrcW = m_Values[at + 4],
+			.SrcH = m_Values[at + 5],
+			.CrtcX = static_cast<std::int64_t>(m_Values[at + 6]),
+			.CrtcY = static_cast<std::int64_t>(m_Values[at + 7]),
+			.CrtcW = m_Values[at + 8],
+			.CrtcH = m_Values[at + 9],
+		};
+	}
+
+	m_Refused = kept;
+	m_RefusalPending = true;
+}
+
+void DrmOutput::ReportRefusal()
+{
+	if (!m_RefusalPending)
+	{
+		return;
+	}
+
+	m_RefusalPending = false;
+
+	// The standing case: a driver that refuses the same partition every frame says so once. A window
+	// that resizes changes the rectangles and earns a second line, which is the pair that separates
+	// *this arrangement is refused* from *everything is refused*.
+	if (m_Refused.SameAs(m_Reported))
+	{
+		return;
+	}
+
+	m_Reported = m_Refused;
+
+	spdlog::warn(
+		"the display engine refused a partition of {} layer(s) on crtc {}: {}",
+		m_Refused.Count,
+		m_Crtc,
+		std::strerror(m_Refused.Code)
+	);
+
+	for (std::uint32_t index = 0; index < m_Refused.Count; ++index)
+	{
+		const RefusedLayer& layer = m_Refused.Layers[index];
+
+		// **The format and the modifier from the kernel rather than from gyro's own record**, which is
+		// the half that cannot be got wrong twice in the same direction: what the display engine is
+		// judging is the framebuffer it holds, and asking it what that framebuffer is describes the
+		// object under test rather than the intent behind it. An ioctl is free here — the drain is
+		// outside Core/FrameSection.h's guard — and a driver too old for `GETFB2` answers nothing, which
+		// prints as zeroes rather than as a second failure to explain.
+		std::uint32_t format = 0;
+		std::uint64_t modifier = 0;
+		std::uint32_t width = 0;
+		std::uint32_t height = 0;
+
+		if (drmModeFB2Ptr framebuffer = ::drmModeGetFB2(m_Device->Descriptor().Value, layer.Framebuffer))
+		{
+			format = framebuffer->pixel_format;
+			modifier = framebuffer->modifier;
+			width = framebuffer->width;
+			height = framebuffer->height;
+
+			::drmModeFreeFB2(framebuffer);
+		}
+
+		// **The framebuffer's own extent beside the source rectangle, which is the comparison that
+		// answers this.** A source that runs off the end of the image it names is the refusal a plane
+		// makes and a shader does not — a sampler clamps and the display engine will not — so printing
+		// the two apart and leaving a reader to hold them in their head is printing the harder half of
+		// the question. The source is given in whole texels beside the raw fixed point for the same
+		// reason: a fractional edge is refused too, and reading one out of a 16.16 integer by eye is how
+		// it gets missed.
+		spdlog::warn(
+			"  layer {} on plane {}: fb {} {:c}{:c}{:c}{:c} {}x{} modifier 0x{:016x} src {}x{}+{}+{} (0x{:x} "
+			"0x{:x} 0x{:x} 0x{:x}) dst {}x{}+{}+{}",
+			index,
+			layer.Plane,
+			layer.Framebuffer,
+			static_cast<char>(format & 0xFFU),
+			static_cast<char>((format >> 8U) & 0xFFU),
+			static_cast<char>((format >> 16U) & 0xFFU),
+			static_cast<char>((format >> 24U) & 0xFFU),
+			width,
+			height,
+			modifier,
+			layer.SrcW >> 16U,
+			layer.SrcH >> 16U,
+			layer.SrcX >> 16U,
+			layer.SrcY >> 16U,
+			layer.SrcX,
+			layer.SrcY,
+			layer.SrcW,
+			layer.SrcH,
+			layer.CrtcW,
+			layer.CrtcH,
+			layer.CrtcX,
+			layer.CrtcY
+		);
+	}
 }
 
 void DrmOutput::Program(std::span<const PresentLayer> layers, std::span<const Fd> fences) noexcept
@@ -924,6 +1128,12 @@ void DrmOutput::Reap()
 
 void DrmOutput::Settle()
 {
+	// **The frame thread's refusal, said out loud on the thread that may say things.** This is the first
+	// thing in the drain rather than the last because it is not part of settling anything — it is a
+	// message the previous frame left behind, and burying it under the commit bookkeeping would put it
+	// after a `Reap` that can end this output.
+	ReportRefusal();
+
 	// First, so that a commit which finished since the last drain has freed its slot before anything
 	// below asks whether this output is busy.
 	Reap();

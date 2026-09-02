@@ -109,4 +109,22 @@ struct PlaneFormat
 // reversal, and the reason this returns a list rather than picking one.
 [[nodiscard]] std::span<const std::uint64_t>
 ModifiersFor(std::span<const PlaneFormat> catalog, std::uint32_t code) noexcept;
+
+// Whether a plane advertises that layout at all: `ModifiersFor` asked as the yes-or-no a partition
+// wants.
+//
+// **The cheap half of not proposing a layer the display engine will refuse.** An atomic test is
+// all-or-nothing and costs a couple of hundred microseconds on the frame thread, so a layer whose
+// fourcc a plane has never heard of is worth dropping before the ioctl rather than after it. It is
+// not the authority and cannot be — a plane that takes `AR24` may still refuse a particular extent,
+// which only `DRM_MODE_ATOMIC_TEST_ONLY` can say — so this is a filter in front of that call and
+// never a substitute for it.
+//
+// **Two silences are read as yes rather than as no.** An empty catalog is a driver that did not
+// answer `IN_FORMATS`, and inventing a refusal from that would disable promotion on hardware that
+// works; an invalid modifier is a framebuffer created without `DRM_MODE_FB_MODIFIERS`, where the
+// driver chose the layout and is the only party that knows it, so there is nothing to compare and the
+// fourcc alone is the answer. Both leave the decision with the atomic test, which is where a question
+// this file cannot answer belongs.
+[[nodiscard]] bool Advertised(std::span<const PlaneFormat> catalog, PixelFormat format) noexcept;
 } // namespace Drm

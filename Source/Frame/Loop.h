@@ -1235,35 +1235,99 @@ private:
 		std::array<PresentLayer, MaxLayers> layers{};
 		std::uint32_t count = 0;
 
-		if (composite)
-		{
-			const PixelSize<DeviceSpace> size = output.m_Presenter->Targets()[*composite].Size;
+		// Fill `layers` from whatever `partition` currently says, taking the composite's target if the
+		// partition has come to need one. False means this frame has to be abandoned, which is the one
+		// thing the caller cannot do anything about.
+		//
+		// **A closure because the narrowing below runs it more than once**, and the two runs have to
+		// build the array the same way — a second spelling of *the composite first, then the promoted
+		// suffix* is a second place for the layer order to be wrong, and the order is what the plane
+		// assignment rides on.
+		const auto build = [&]() -> bool {
+			// **The target the narrowed partition needs, which the frame may not be holding.** A partition
+			// that promoted everything acquired nothing above, so giving a layer back here is the one path
+			// that discovers it wants the GPU after deciding it did not. Asked for now rather than kept in
+			// hand against the possibility: holding an image on every fully-promoted frame is the cost the
+			// order above was changed to stop paying, and a free set with nothing in it means this output
+			// waits a frame rather than that it draws wrong.
+			if ((partition.NeedsComposite() || partition.Count == 0) && !composite)
+			{
+				composite = Target(output);
 
-			layers[count++] = PresentLayer{
-				.Target = LayerSource{ *composite },
-				.Blend = BlendMode::Opaque,
-				.Acquire = SyncPoint::Immediate(),
-				.Source = { {}, { static_cast<float>(size.Width), static_cast<float>(size.Height) } },
-				.Destination = { {}, size },
-				.Damage = {},
-				.Color = output.m_Configuration.Color,
-			};
-		}
+				if (!composite)
+				{
+					return false;
+				}
+			}
 
-		for (std::uint32_t promoted = 0; promoted < partition.Count; ++promoted)
+			count = 0;
+
+			if (composite)
+			{
+				const PixelSize<DeviceSpace> size = output.m_Presenter->Targets()[*composite].Size;
+
+				layers[count++] = PresentLayer{
+					.Target = LayerSource{ *composite },
+					.Blend = BlendMode::Opaque,
+					.Acquire = SyncPoint::Immediate(),
+					.Source = { {}, { static_cast<float>(size.Width), static_cast<float>(size.Height) } },
+					.Destination = { {}, size },
+					.Damage = {},
+					.Color = output.m_Configuration.Color,
+				};
+			}
+
+			for (std::uint32_t promoted = 0; promoted < partition.Count; ++promoted)
+			{
+				layers[count++] = Promoted(list.Items[partition.ItemIndexForPromoted(promoted)]);
+			}
+
+			return true;
+		};
+
+		if (!build())
 		{
-			layers[count++] = Promoted(list.Items[partition.ItemIndexForPromoted(promoted)]);
+			return;
 		}
 
 		// **Asked only where something would be promoted**, so a machine that promotes nothing pays no
 		// ioctl. A refusal is ordinary rather than a fault: a plane's format, its bandwidth, or a scaler
 		// it shares with another pipe are all things only the driver knows, and the answer is that this
 		// frame composites — which is decision 35's one frame and is why the fallback is silent.
-		const Result<void> testable =
-			partition.Count != 0 ? output.m_Presenter->TestLayers({ layers.data(), count }) : Result<void>{};
-
-		if (!testable)
+		//
+		// **A refused partition gives one layer back and asks again, rather than collapsing to a full
+		// composite.** An atomic test is all-or-nothing — one layer the display engine will not take
+		// refuses the whole set — so a partition that is one layer too wide, or that names one buffer a
+		// plane cannot read, costs every other promotion in it. Narrowing turns that cliff into a step,
+		// and it costs one test per layer given up on a frame that was going to be refused anyway. It
+		// stops at zero rather than testing it: a lone composite on the primary plane is the commit this
+		// output makes on every frame that promotes nothing, so there is nothing left to ask.
+		//
+		// **The layer given back is the one nearest the composite, which is forced rather than chosen.**
+		// The promoted set is a suffix and the only end of it that can move is the bottom; giving back
+		// the frontmost layer would leave a promoted item under a composited one, which is the hole in
+		// the composite decision 152's suffix rule exists to avoid.
+		//
+		// **So this does nothing for a refusal caused by the frontmost item, and that is worth saying
+		// out loud.** A pointer glyph the display engine will not take is the last layer to be given up
+		// rather than the first, so the walk pays a test per step and ends where it started. What that
+		// case wants is not a different narrowing order — there is no legal one — but for the item never
+		// to have been proposed: a plane it fits, which is why the cursor plane is now in the inventory,
+		// and the format pre-filter each backend applies before the ioctl.
+		//
+		// **Generic on purpose.** Nothing here knows which layer it is dropping or why the driver said
+		// no — the refusal is the driver's whole answer, and proposing less of the same partition is the
+		// only response that is right for a format, a bandwidth ceiling, a shared scaler and a plane with
+		// a minimum width alike.
+		while (partition.Count != 0)
 		{
+			const Result<void> testable = output.m_Presenter->TestLayers({ layers.data(), count });
+
+			if (testable)
+			{
+				break;
+			}
+
 			// **Silent until now, and that was the gap worth closing.** A driver refusing every proposal —
 			// a format the plane will not take, bandwidth it does not have, a scaler shared with another
 			// pipe — reads exactly like a compositor that never tried, because both leave the count at
@@ -1276,45 +1340,28 @@ private:
 			// capture full of that mark reads as *the driver will not take these planes* when what
 			// happened is that gyro never issued the ioctl. The first is a machine to give up promoting
 			// on and the second is a bug upstream of here, and only the sentence separates them.
+			//
+			// One mark per attempt rather than one per frame, which is what makes the narrowing legible:
+			// a row with three of these and a `planes` count of two says the driver refused twice and
+			// took the third proposal, and that is the shape somebody tuning a machine wants to see.
 			TraceMark(
 				testable.error().Sentence(),
 				output.m_Trace,
 				TraceTag(static_cast<std::uint64_t>(testable.error().Code()))
 			);
 
-			// **And the target the fallback needs, which the frame may not be holding.** A partition that
-			// promoted everything acquired nothing above, so a refusal here is the one path that discovers
-			// it wants the GPU after deciding it did not. Asked for now rather than kept in hand against
-			// the possibility: holding an image on every fully-promoted frame is the cost this order was
-			// changed to stop paying, and a free set with nothing in it means this output waits a frame
-			// rather than that it draws wrong.
-			if (!composite)
-			{
-				composite = Target(output);
+			--partition.Count;
+			++partition.Composited;
 
-				if (!composite)
-				{
-					return;
-				}
-			}
-
-			partition = Partition{ .Composited = static_cast<std::uint32_t>(list.Items.size()) };
-
-			const PixelSize<DeviceSpace> size = output.m_Presenter->Targets()[*composite].Size;
-
-			layers[0] = PresentLayer{
-				.Target = LayerSource{ *composite },
-				.Blend = BlendMode::Opaque,
-				.Acquire = SyncPoint::Immediate(),
-				.Source = { {}, { static_cast<float>(size.Width), static_cast<float>(size.Height) } },
-				.Destination = { {}, size },
-				.Damage = {},
-				.Color = output.m_Configuration.Color,
-			};
-
-			count = 1;
-
+			// The comparison against last frame's partition happened before the driver was asked, so the
+			// damage it decided on was for a partition this frame is no longer committing. The composite
+			// is now responsible for a layer it was not, and nothing in the scene says so.
 			output.m_Damage.Add(PixelRect<DeviceSpace>{ {}, output.m_Configuration.Resolution });
+
+			if (!build())
+			{
+				return;
+			}
 		}
 
 		// **The scene this output has now drawn from**, recorded once the frame has everything it needs to
