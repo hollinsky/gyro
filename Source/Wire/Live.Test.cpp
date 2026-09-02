@@ -139,9 +139,11 @@ GYRO_TEST(Live, RegistryAndSyncRoundTrip)
 
 	// Five seconds is generous for a local socket and is a bound rather than an expectation: what it
 	// buys is that a host which never answers fails the test instead of hanging the suite.
+	bool spoke = false;
+
 	for (int round = 0; round < 50 && !callback.Done; ++round)
 	{
-		(void)Wait(connection, 100);
+		spoke = Wait(connection, 100) || spoke;
 
 		const Result<void> drained = connection.Drain();
 
@@ -156,6 +158,27 @@ GYRO_TEST(Live, RegistryAndSyncRoundTrip)
 
 			return;
 		}
+	}
+
+	// **A connection that was accepted by nobody, which is not the same as a host that answered
+	// wrong.** *(Revised 2026-09-01.)* Open() succeeding stopped being evidence of a host the day
+	// gyro grew Session/Handover.h: the session agent creates the listener and holds it for gyro to
+	// adopt, so on a machine where gyro is not running, connect() lands in the backlog of a socket
+	// with no server behind it and completes. The skip above never fires and this used to fail as
+	// though the codec were wrong — which is the one thing this file must never say by accident.
+	//
+	// The discriminator is the poll rather than what was decoded: a host sends its globals before it
+	// answers the sync, so five seconds with the socket never once readable is nobody there. Bytes
+	// that arrived and did not add up to a `done` stay a failure, because that is the codec.
+	if (!spoke)
+	{
+		std::println(
+			"  skipped Live.RegistryAndSyncRoundTrip: the wayland socket accepted the connection and "
+			"nothing ever answered — a listener with no compositor behind it, which is what "
+			"gyro-session leaves when gyro is not running"
+		);
+
+		return;
 	}
 
 	GYRO_REQUIRE(callback.Done);
