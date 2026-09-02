@@ -62,6 +62,24 @@
 // root, and it is empty on a machine with no GPU — where this global falls back to version 3, offers
 // an empty list, and a client draws into shared memory and still gets a window.
 
+// The four DRM fourccs whose top bits are padding rather than coverage, and the only reason this file
+// spells any of them out.
+//
+// **A fourcc is an opaque token everywhere else in gyro and here it is read**, which is the licence
+// this module's header already claims: the client chose the word, and *is the top byte alpha* is a
+// question about the client's own choice rather than about a layout gyro is passing through. It stops
+// at four constants and a predicate on purpose — anything more is the format vocabulary decision 87
+// keeps in `Seam`, which this module may not name.
+inline constexpr std::uint32_t FourccXrgb8888 = 0x34325258;    // XR24
+inline constexpr std::uint32_t FourccXbgr8888 = 0x34324258;    // XB24
+inline constexpr std::uint32_t FourccXrgb2101010 = 0x30335258; // XR30
+inline constexpr std::uint32_t FourccXbgr2101010 = 0x30334258; // XB30
+
+[[nodiscard]] constexpr bool IsOpaqueFourcc(std::uint32_t code) noexcept
+{
+	return code == FourccXrgb8888 || code == FourccXbgr8888 || code == FourccXrgb2101010 || code == FourccXbgr2101010;
+}
+
 // What this global is advertised at where gyro can name a device to allocate against.
 inline constexpr std::uint32_t DmabufVersion = 5;
 
@@ -170,6 +188,19 @@ public:
 	[[nodiscard]] Result<TextureId> Adopt(ITextures& textures, SyncTimelinePoint release) override;
 
 	[[nodiscard]] PixelSize<BufferSpace> Extent() const noexcept override { return m_Size; }
+
+	// Scene/Capture.h's alpha, and the one of its three a descriptor can answer at all.
+	//
+	// **`MappedRows` stays empty and `MappedStride` stays zero, which is the offer saying *ask the
+	// device*.** Nothing on this thread can turn these bytes into a picture — they are tiled under a
+	// modifier only the driver knows — so a capture of a dmabuf is the frame thread's readback and the
+	// stride it lands at is gyro's own, tight, rather than anything the client chose. What this side
+	// still owns is what the top byte *means*, because the client named the format and this is the one
+	// module permitted to read the word it used.
+	[[nodiscard]] TextureAlpha MappedAlpha() const noexcept override
+	{
+		return IsOpaqueFourcc(m_Format.Code) ? TextureAlpha::None : TextureAlpha::Premultiplied;
+	}
 
 	// False, and this is the field the whole file turns on. See the header comment.
 	[[nodiscard]] bool ReleasesImmediately() const noexcept override { return false; }

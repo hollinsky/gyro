@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <span>
 
+#include "Core/Texture.h"
 #include "Geometry/Space.h"
 #include "Scene/Textures.h"
 
@@ -26,11 +27,17 @@
 // *is this client repainting too little* from an inference into a read: the rectangles either cover
 // the row that went stale or they do not.
 //
-// **`wl_shm` only, and the boundary is honest rather than temporary.** Those pixels are copied at
-// commit and are gyro's the moment `Adopt` returns, so offering them costs a walk over memory the
-// process already owns. A `zwp_linux_dmabuf_v1` buffer is borrowed, under a modifier that makes its
-// bytes something other than a picture, and reading one back means a map or a blit on the dispatch
-// thread — a path that half works would be worse than a gap somebody can see in the log.
+// **Both factories are captured and the two are captured differently, which is a lifetime rather
+// than a preference.** `wl_shm` pixels are copied at commit and are gyro's the moment `Adopt` returns
+// — so the *only* instant they can be read is this one, and the rows come with the offer. A
+// `zwp_linux_dmabuf_v1` buffer is borrowed and stays borrowed until the watermark says nobody is
+// reading, so its pixels are still there when somebody presses the chord; its bytes are also tiled
+// under a modifier and are not a picture until the driver detiles them. So a dmabuf offer carries no
+// rows at all: what it carries is `Texture`, and Seam/Capture.h's other half reads that image back on
+// the frame thread, in the frame that has already stalled to photograph the glass.
+//
+// What that means for a reader of this struct is that `Pixels` empty is an ordinary offer rather than
+// a refusal, and the sink is expected to record the shape and wait.
 //
 // **Here rather than at the waist for Scene/Textures.h's reason**, which is decision 87: `Protocol`
 // mints the thing being captured and may not name `Seam`, and the party that implements this is the
@@ -52,8 +59,18 @@ struct SurfaceCapture
 	std::uint32_t Stride = 0;
 	TextureAlpha Alpha = TextureAlpha::Premultiplied;
 
-	// The rows, at `Stride` apart.
+	// The rows, at `Stride` apart. Empty for a descriptor, per the header — the pixels arrive later,
+	// through `Texture`, from the thread that can ask a driver to detile them.
 	std::span<const std::byte> Pixels;
+
+	// The id this commit's content was adopted under, or null where the adoption failed.
+	//
+	// **The join between the two halves, and it is an id rather than a surface because the frame side
+	// has no other name for anything.** Frame/Evaluator.h walks a published scene whose items name
+	// textures; nothing down there has ever heard of a `wl_surface`. A new id is minted per committed
+	// frame — Protocol/Surface.cpp does that so the frame thread may still be recording from a snapshot
+	// naming the last one — which is what makes this identify *this* commit rather than this window.
+	TextureId Texture{};
 
 	// What the client said it changed, in buffer coordinates, in the order it said it.
 	//

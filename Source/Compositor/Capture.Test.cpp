@@ -231,6 +231,20 @@ Committed(std::uint32_t surface, std::span<const std::byte> pixels, std::span<co
 		                   .Pixels = pixels,
 		                   .Damage = damage };
 }
+
+// One committed *descriptor*: an extent, a damage list and an id, and no rows at all. What a
+// `zwp_linux_dmabuf_v1` client's commit looks like arriving at Scene/Capture.h.
+[[nodiscard]] SurfaceCapture
+Borrowed(std::uint32_t surface, TextureId texture, std::span<const PixelRect<BufferSpace>> damage)
+{
+	return SurfaceCapture{ .Surface = surface,
+		                   .Size = Tiny,
+		                   .Stride = 0,
+		                   .Alpha = TextureAlpha::Premultiplied,
+		                   .Pixels = {},
+		                   .Texture = texture,
+		                   .Damage = damage };
+}
 } // namespace
 
 // **The buffers are held before any press and written by it**, which is the whole reason this half is
@@ -314,4 +328,158 @@ GYRO_TEST(Capture, DeclinesABufferShorterThanItSaysItIs)
 	GYRO_CHECK_EQ(capture.Buffers(), std::uint64_t{ 0 });
 	GYRO_CHECK_EQ(capture.Failed(), std::uint64_t{ 0 });
 	GYRO_CHECK(scratch.Header(1, 2).empty());
+}
+
+// **A descriptor is recorded with no pixels and read back at the press**, which is Seam/Capture.h's
+// whole split: nothing is copied at the commit because the buffer is still gyro's to read when
+// somebody reaches for the key.
+GYRO_TEST(Capture, ReadsADescriptorBackAtThePressRatherThanAtTheCommit)
+{
+	Scratch scratch;
+	PamCapture capture{ scratch.Path(), 1 };
+
+	GYRO_REQUIRE(capture.Open().has_value());
+
+	const TextureId texture{ 7, 1 };
+	const std::array<PixelRect<BufferSpace>, 1> damage{ PixelRect<BufferSpace>{ { 5, 6 }, { 7, 8 } } };
+
+	capture.Offer(Borrowed(11, texture, damage));
+
+	// Nothing is owed before the press: the pixels are the client's and stay the client's.
+	GYRO_CHECK(!capture.WantsTexture(texture));
+
+	static_cast<void>(capture.Request());
+
+	// The frame thread's half, played by hand exactly as Frame/Loop.h plays it.
+	GYRO_REQUIRE(capture.WantsTexture(texture));
+
+	const TextureSlab slab = capture.ReserveTexture(texture);
+
+	GYRO_REQUIRE(slab.IsValid());
+
+	// Tight, four bytes a sample: the rows a readback produces were laid out by the copy rather than
+	// by the client, which is why `Stride` arrived as zero and comes back as eight.
+	GYRO_CHECK_EQ(slab.Stride, std::uint32_t{ 8 });
+	GYRO_CHECK_EQ(slab.Into.size(), std::size_t{ 16 });
+
+	capture.PublishTexture(texture, true);
+	capture.Close();
+
+	GYRO_CHECK_EQ(capture.Buffers(), std::uint64_t{ 1 });
+	GYRO_CHECK_EQ(capture.Failed(), std::uint64_t{ 0 });
+
+	// The damage the client claimed, carried from the commit that dropped it to a file written a
+	// keystroke later — which is the half of this a screenshot could never hold.
+	const std::string header = scratch.Header(1, 11);
+
+	GYRO_REQUIRE(!header.empty());
+	GYRO_CHECK(header.contains("# damage 1\n"));
+	GYRO_CHECK(header.contains("# damage 5 6 7 8\n"));
+	GYRO_CHECK(header.contains("# gyro surface 11 commit 1 2x2 stride 8 argb8888\n"));
+}
+
+// A texture two draw items name — a window and a thumbnail of it — is offered twice on one frame and
+// must be read once. The claim is `ReserveTexture`'s compare-exchange out of `Armed`.
+GYRO_TEST(Capture, ReadsATextureOnceHoweverManyItemsNameIt)
+{
+	Scratch scratch;
+	PamCapture capture{ scratch.Path(), 1 };
+
+	GYRO_REQUIRE(capture.Open().has_value());
+
+	const TextureId texture{ 3, 2 };
+
+	capture.Offer(Borrowed(12, texture, {}));
+
+	static_cast<void>(capture.Request());
+
+	GYRO_REQUIRE(capture.ReserveTexture(texture).IsValid());
+
+	// The second item's ask, which finds the entry already claimed.
+	GYRO_CHECK(!capture.ReserveTexture(texture).IsValid());
+	GYRO_CHECK(!capture.WantsTexture(texture));
+
+	capture.PublishTexture(texture, true);
+	capture.Close();
+
+	GYRO_CHECK_EQ(capture.Buffers(), std::uint64_t{ 1 });
+}
+
+// A readback the renderer refused — no transfer usage, a copy that timed out — hands the slab back
+// unwritten. A file of zeroes beside a picture of a window that is plainly drawn reads as a client
+// that committed nothing, which is the very bug somebody would be here to diagnose.
+GYRO_TEST(Capture, WritesNothingForARefusedTextureReadback)
+{
+	Scratch scratch;
+	PamCapture capture{ scratch.Path(), 1 };
+
+	GYRO_REQUIRE(capture.Open().has_value());
+
+	const TextureId texture{ 4, 1 };
+
+	capture.Offer(Borrowed(13, texture, {}));
+
+	static_cast<void>(capture.Request());
+
+	GYRO_REQUIRE(capture.ReserveTexture(texture).IsValid());
+
+	capture.PublishTexture(texture, false);
+	capture.Close();
+
+	GYRO_CHECK_EQ(capture.Buffers(), std::uint64_t{ 0 });
+	GYRO_CHECK_EQ(capture.Failed(), std::uint64_t{ 0 });
+	GYRO_CHECK(scratch.Header(1, 13).empty());
+}
+
+// **An armed texture the frame never drew is taken back at the next press**, which is the whole
+// reason `Slot::Reserved` exists: a window occluded or on another panel is never offered to
+// `ReserveTexture`, and without this its entry would hold the table shut for the rest of the run.
+GYRO_TEST(Capture, AbandonsATextureThePreviousPressNeverDrew)
+{
+	Scratch scratch;
+	PamCapture capture{ scratch.Path(), 1 };
+
+	GYRO_REQUIRE(capture.Open().has_value());
+
+	const TextureId texture{ 5, 1 };
+
+	capture.Offer(Borrowed(14, texture, {}));
+
+	// The first press arms it and no frame ever asks for it.
+	static_cast<void>(capture.Request());
+
+	GYRO_REQUIRE(capture.WantsTexture(texture));
+
+	// The second press takes the entry back and arms it again, so the window is still capturable.
+	static_cast<void>(capture.Request());
+
+	GYRO_REQUIRE(capture.WantsTexture(texture));
+	GYRO_REQUIRE(capture.ReserveTexture(texture).IsValid());
+
+	capture.PublishTexture(texture, true);
+	capture.Close();
+
+	// One file, under the second press, because the first press wrote nothing at all.
+	GYRO_CHECK_EQ(capture.Buffers(), std::uint64_t{ 1 });
+	GYRO_CHECK(scratch.Header(1, 14).empty());
+	GYRO_CHECK(!scratch.Header(2, 14).empty());
+}
+
+// Neither rows nor an id is a commit that adopted nothing — a full texture space, or a layout the
+// renderer refused. There is no picture behind it to go and fetch, and the client has already been
+// told with `PostNoMemory`.
+GYRO_TEST(Capture, DeclinesACommitThatAdoptedNothing)
+{
+	Scratch scratch;
+	PamCapture capture{ scratch.Path(), 1 };
+
+	GYRO_REQUIRE(capture.Open().has_value());
+
+	capture.Offer(Borrowed(15, TextureId{}, {}));
+
+	static_cast<void>(capture.Request());
+	capture.Close();
+
+	GYRO_CHECK_EQ(capture.Buffers(), std::uint64_t{ 0 });
+	GYRO_CHECK(scratch.Header(1, 15).empty());
 }

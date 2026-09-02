@@ -896,7 +896,7 @@ void ClientSurface::TakeContent(ITextures& textures)
 	// changed still exists to be written down beside what it actually handed over.
 	if (buffer != nullptr)
 	{
-		Capture(*buffer);
+		Capture(*buffer, m_Pending.Content);
 	}
 
 	// Retired after the new id exists rather than before, so a device that fails the import leaves the
@@ -932,7 +932,7 @@ void ClientSurface::TakeContent(ITextures& textures)
 	}
 }
 
-void ClientSurface::Capture(ClientBuffer& buffer)
+void ClientSurface::Capture(ClientBuffer& buffer, TextureId content)
 {
 	ISurfaceCapture* const sink = m_Context->Capture();
 
@@ -946,10 +946,16 @@ void ClientSurface::Capture(ClientBuffer& buffer)
 
 	const std::span<const std::byte> pixels = buffer.MappedRows();
 
-	// A descriptor, or a pool that no longer holds the rows it named. Both are ordinary and neither is
-	// worth a log line here: the first is the boundary Scene/Capture.h states, and the second has
-	// already cost the client its frame.
-	if (pixels.empty())
+	// **Empty rows are a descriptor and are offered anyway**, which is the whole of what dmabuf capture
+	// changes on this side. The frame thread reads those pixels off the device later, and what it has
+	// no other way to learn is on this stack right now: the extent the client declared, what its top
+	// byte means, and above all the damage `Apply` is about to drop on the floor. So the offer goes out
+	// with the id in place of the rows.
+	//
+	// What is refused instead is a commit that adopted nothing — a texture space that was full, or a
+	// renderer that would not take the layout. There is no image behind that id and the client has
+	// already been told so with `PostNoMemory`.
+	if (pixels.empty() && content.IsNull())
 	{
 		return;
 	}
@@ -964,6 +970,7 @@ void ClientSurface::Capture(ClientBuffer& buffer)
 	                    .Stride = buffer.MappedStride(),
 	                    .Alpha = buffer.MappedAlpha(),
 	                    .Pixels = pixels,
+	                    .Texture = content,
 	                    .Damage = m_Pending.BufferDamage }
 	);
 }

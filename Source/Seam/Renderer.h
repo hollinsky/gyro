@@ -620,6 +620,35 @@ public:
 	{
 		return Failure(ENOTSUP, "reading a target back on a renderer that cannot");
 	}
+
+	// Read an adopted texture back as linear rows, for Seam/Capture.h's other half.
+	//
+	// **The same verb as `ReadTarget` pointed at a client's pixels instead of gyro's**, and it is a
+	// second entry point rather than a `TextureSource` on the first because the two name their subject
+	// differently: a target is an index into the set last bound, and a texture is an id from the space
+	// Scene/Textures.h mints. Everything downstream of that — the copy, the queue-family acquire, the
+	// stall — is shared, which is why `VulkanRenderer` answers both out of one reservation.
+	//
+	// **It waits for nothing**, which is the one way it differs from the target read above. The caller
+	// has already waited on the composite that sampled this image, and the composite sampled it — so
+	// the work that could still be reading the pixels is work this thread has just seen land. A second
+	// wait here would be a fence with nothing behind it.
+	//
+	// **Defaulted to a refusal for `ReadTarget`'s reason**, and answered by exactly one renderer: the
+	// CPU renderer refuses descriptors at adoption, so a machine drawing on `Blit` has no dmabuf
+	// clients and nothing here to read.
+	//
+	// `ENOTSUP` from a renderer with nothing to read or a device that was not built for readback,
+	// `EINVAL` for an id that names no image or a slab too small for the rows the device is holding,
+	// and `ENODEV` where the device is gone.
+	[[nodiscard]] virtual Result<void> ReadTexture(
+		[[maybe_unused]] TextureId texture,
+		[[maybe_unused]] std::span<std::byte> into,
+		[[maybe_unused]] std::uint32_t stride
+	)
+	{
+		return Failure(ENOTSUP, "reading a texture back on a renderer that cannot");
+	}
 };
 
 [[nodiscard]] constexpr std::string_view Name(RenderMode mode) noexcept

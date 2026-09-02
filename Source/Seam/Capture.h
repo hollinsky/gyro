@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <span>
 
+#include "Core/Texture.h"
 #include "Geometry/Space.h"
 #include "Seam/Pixel.h"
 #include "Seam/SyncPoint.h"
@@ -68,6 +69,52 @@ struct TargetReadback
 	std::uint32_t Stride = 0;
 };
 
+// One client's image read back beside the frame, which is the other half of Scene/Capture.h.
+//
+// **A `wl_shm` buffer is captured on the dispatch thread and a `zwp_linux_dmabuf_v1` one is captured
+// here, and the split is a lifetime rather than a preference.** Protocol/Shm.cpp copies at commit and
+// hands the buffer straight back, so those pixels stop being the client's frame the instant `Adopt`
+// returns — the only moment they can be read is the commit itself, which is why that half is held
+// continuously and costs a copy of every software window. A descriptor is the inverse: gyro borrows
+// it and keeps borrowing it until the watermark says nobody is reading, so the pixels a client
+// committed are *still there* when somebody presses the chord. Nothing has to be kept, and the whole
+// mechanism costs nothing until the key is pressed.
+//
+// **The read is here, on the frame thread, in the frame that is already stalling.** A dmabuf's bytes
+// are tiled under a modifier and are not a picture; the one party obliged to know the layout is the
+// driver, which is Render/Readback.h's argument for a scanout target applied to the other end of the
+// same pipe. So the copy is the driver's, off the image Render/Textures.h already imported, on the
+// thread that has just waited on the composite's fence for `TargetReadback` anyway.
+//
+// The alternative was a `VK_EXT_host_image_copy` on the dispatch thread, which would have cost the
+// frame nothing at all, and it is dead for a reason the layout comment in Render/Textures.cpp states:
+// an imported image lives in `VK_IMAGE_LAYOUT_GENERAL` and moves between `VK_QUEUE_FAMILY_FOREIGN_EXT`
+// and gyro's queue on every frame that samples it. A host copy issued from the other thread races an
+// ownership it does not hold, and what that produces is a file of plausible garbage rather than an
+// error — the worst possible output for an instrument whose whole job is to be believed.
+//
+// **Only the textures this frame actually drew.** The walk is over the draw list, so a window that is
+// occluded, off-screen or on another output is not read back. That is a real gap and it is the honest
+// one: the frame side can only photograph what the frame sampled, and a texture no item names is one
+// the composite never touched.
+
+// A slab to read one client image into, or nothing.
+//
+// **The sink sizes it rather than the frame loop, because the sink is the party that knows the
+// shape.** Scene/Capture.h's offer already told it the extent, the stride and what the top byte means,
+// at the commit that produced the texture — so the loop asks for an id and is handed somewhere to put
+// it. What the renderer then checks is that the image it actually holds fits, which is the one place
+// the client's claim and the device's record are compared.
+struct TextureSlab
+{
+	std::span<std::byte> Into;
+
+	// Bytes per row of `Into`. The sink's own, for `TargetReadback::Stride`'s reason.
+	std::uint32_t Stride = 0;
+
+	[[nodiscard]] bool IsValid() const noexcept { return !Into.empty() && Stride != 0; }
+};
+
 // Where a captured frame goes, and the reason the frame loop can hand one over at all.
 //
 // **Three verbs rather than one, because the frame thread may neither allocate nor open a file.** The
@@ -106,4 +153,21 @@ public:
 	// which hands the slab back without writing a file — a truncated PAM in a directory somebody is
 	// watching reads as a compositor that drew half a frame.
 	virtual void Publish(std::uint32_t output, std::uint64_t sequence, bool complete) noexcept = 0;
+
+	// The three above again for a client's image rather than a panel's, and defaulted to *no* for the
+	// reason `IRenderer::ReadTarget` is defaulted to a refusal: the frame loop asks these of every
+	// drawn item on a captured frame, and a sink that captures only the glass should answer without
+	// having to say so three times.
+	//
+	// **Asked once per drawn item, so it must be cheap and must tolerate being asked twice.** A texture
+	// two items name — a window and its own thumbnail — is offered twice on one frame, and the second
+	// ask has to come back empty rather than reading the same image into the same slab again.
+	[[nodiscard]] virtual bool WantsTexture([[maybe_unused]] TextureId texture) const noexcept { return false; }
+
+	[[nodiscard]] virtual TextureSlab ReserveTexture([[maybe_unused]] TextureId texture) noexcept { return {}; }
+
+	// `complete` is false where the read was refused after the reserve — a device with no readback
+	// usage, a copy that timed out, an image whose extent does not match what the commit claimed. The
+	// slab goes back unwritten, for the reason a half-read target does.
+	virtual void PublishTexture([[maybe_unused]] TextureId texture, [[maybe_unused]] bool complete) noexcept {}
 };

@@ -386,3 +386,37 @@ GYRO_TEST(DmabufFeedback, ADeviceAndLayoutsTogetherAreWhatRaisesTheVersion)
 	GYRO_CHECK(feedback.Version() == DmabufVersion);
 	GYRO_CHECK(feedback.Version() >= FeedbackFromVersion);
 }
+
+// Scene/Capture.h's three verbs on the factory that answers only one of them.
+//
+// **No rows and no stride is the offer saying *ask the device*, and it is not a refusal.** Those bytes
+// are tiled under a modifier and nothing on the dispatch thread can turn them into a picture; what
+// reads them is Seam/Capture.h's texture half, on the frame thread, off the image the renderer
+// already imported. What this side still owns is what the top byte means, because the client named
+// the format — and a window that said `xrgb8888` has to keep saying it here, or its capture comes out
+// transparent where its client meant it opaque.
+GYRO_TEST(Dmabuf, ADescriptorOffersItsFormatToACaptureAndNoRows)
+{
+	HostContext context;
+
+	Fd opaque = MakeBuffer(64U * 32U * 4U);
+	Fd covered = MakeBuffer(64U * 32U * 4U);
+
+	GYRO_REQUIRE(opaque.IsValid() && covered.IsValid());
+
+	ClientDmabufBuffer xrgb{ context,
+		                     PixelSize<BufferSpace>{ 64, 32 },
+		                     TextureFormat{ .Code = FourccXrgb8888, .Modifier = 0 },
+		                     OnePlane(std::move(opaque), 64U * 4U) };
+
+	GYRO_CHECK(xrgb.MappedRows().empty());
+	GYRO_CHECK_EQ(xrgb.MappedStride(), std::uint32_t{ 0 });
+	GYRO_CHECK(xrgb.MappedAlpha() == TextureAlpha::None);
+
+	ClientDmabufBuffer argb{ context,
+		                     PixelSize<BufferSpace>{ 64, 32 },
+		                     TextureFormat{ .Code = 0x34325241, .Modifier = 0 },
+		                     OnePlane(std::move(covered), 64U * 4U) };
+
+	GYRO_CHECK(argb.MappedAlpha() == TextureAlpha::Premultiplied);
+}

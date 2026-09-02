@@ -14131,6 +14131,13 @@ would write a file that looks like a compositor bug and is not one, which is wor
 names. The one thing lost with it is the toolkits that have moved off shm entirely, and those are the
 clients whose own damage tracking is least likely to be what is wrong.
 
+*Revised 2026-09-01, and the last sentence is what did it: the toolkits that have moved off shm
+entirely are nearly all of them, so the boundary as drawn left the instrument pointed at the clients
+least likely to need it. What was wrong in the paragraph is "on the dispatch thread" — that was taken
+as a property of the buffer when it is a property of where the reading was assumed to happen. Decision
+180 moves it to the frame thread, where the detile is the driver's and costs a frame gyro was already
+spending.*
+
 **Rejected: a second chord key.** Two presses are two instants, which destroys the only property that
 makes the pair a diff. **Rejected: a sidecar file for the damage.** Two files get separated, and a
 list of rectangles that has drifted away from its pixels is a list of numbers about nothing — so it
@@ -14217,3 +14224,68 @@ culls a transparent quad, so it is a full-screen composite for the life of the s
 finding `SceneCursor` records for a hidden pointer. **Rejected: a solid colour instead of an image
 until a shell exists.** `SolidContent` already says a fill is what stands in for a wallpaper; what
 this decides is what happens when there is one.
+
+
+### 180. A dmabuf client is captured at the press rather than at the commit, and the read is the frame thread's
+
+Decision 178 drew its boundary at `wl_shm` and the argument it gave was about tiling. That half still
+stands and the conclusion drawn from it did not: nearly every toolkit on a machine with a GPU is on
+`zwp_linux_dmabuf_v1`, so an instrument that captures only software clients is one pointed away from
+almost every window a person has open. The sentence in 178 that gave it away was the consolation —
+*the clients whose own damage tracking is least likely to be what is wrong* — which is a reason to
+expect the gap to matter rather than a reason it does not.
+
+**The two factories are captured differently because their lifetimes are opposite, and that is the
+whole design.** `Protocol/Shm.cpp` copies at commit and hands the buffer straight back, so those
+pixels stop being the client's frame the instant `Adopt` returns: the only moment they can be read is
+the commit itself, which is why 178 holds them continuously and pays a copy of every software window
+on every commit. A descriptor is the inverse. gyro borrows it and keeps borrowing it until the
+watermark says nobody is reading — so the pixels a client committed are *still there* when somebody
+presses the chord. Nothing has to be kept, and the mechanism costs nothing at all until the key is
+pressed. The eager half of 178 was never a preference for eagerness; it was the only moment available.
+
+**The read happens on the frame thread, in the frame that is already stalling.** 178 is right that a
+dmabuf's bytes are tiled under a modifier and are not a picture, and that the only party obliged to
+know the layout is the driver — which is `Render/Readback.h`'s argument for a scanout target, and a
+client's buffer is the same argument at the other end of the same pipe. So the copy is a
+`vkCmdCopyImageToBuffer` off the `VkImage` `Render/Textures.h` has already imported, issued on the
+thread that has just waited on the composite's fence to photograph the glass. It inherits that stall
+rather than adding one: the composite that sampled these images is work this thread has seen land, so
+there is nothing left to wait for.
+
+**Rejected: a host image copy on the dispatch thread**, which is what the file would have looked like
+if 178's "on the dispatch thread" had simply been made true — `VK_EXT_host_image_copy` detiles on the
+calling thread with no queue, which is exactly how `Render/Textures.h` writes a `wl_shm` client's
+pixels *in*. It would have cost the frame nothing. It is dead because an adopted image lives in
+`VK_IMAGE_LAYOUT_GENERAL` and moves between `VK_QUEUE_FAMILY_FOREIGN_EXT` and gyro's queue on every
+frame that samples it: a host copy issued from the other thread races an ownership it does not hold,
+and what that produces is a file of plausible garbage rather than an error. For an instrument whose
+entire value is being believed, that is the worst available output.
+
+**Rejected: mapping the descriptor and reading it directly**, which needs no GPU and would have been
+a tenth of the code. It works only under `DRM_FORMAT_MOD_LINEAR`, which is not what a client on real
+hardware allocates — so it would fire on exactly the machines where the gap does not matter and refuse
+on the ones where it does.
+
+**What it costs, stated rather than buried.** An imported image needs `VK_IMAGE_USAGE_TRANSFER_SRC_BIT`
+to be a copy source, and a usage bit narrows what a driver will agree to: a client layout this device
+can sample but cannot copy out of is one `ImportImage` refuses once the bit is on, and that window
+falls back to `wl_shm` for the whole session. So it goes behind `VulkanDevicePolicy::Readable` and
+`--capture` turns it on, which is the identical shape and the identical switch decision 178's own
+frame half already uses for a scanout target.
+
+**The gap that remains is the draw list.** The walk is over what the frame actually drew, so a window
+occluded, off-screen, or on another panel is not read back. That is the honest limit rather than an
+oversight: the frame side can only photograph what the frame sampled, and a texture no item names is
+one the composite never touched. It also keeps the cost proportional to the picture rather than to how
+many windows the machine is holding open.
+
+**Rejected: reading every held texture rather than every drawn one**, which would close that gap by
+forcing a copy of every window on the machine through one staging buffer, on the `SCHED_FIFO` thread,
+inside the frame a person is trying to photograph. The capture would then be measuring its own weight.
+
+**Rejected: a second slot state would not be needed if the frame always drew what the press armed.**
+It does not — an armed texture the composite never sampled would hold its table entry for the rest of
+the run and no later press could arm anything. So a reserve claims its entry out of `Armed` with a
+compare-exchange, which lets the *next* press take back what was never touched while never racing a
+read in progress, and doubles as the deduplication for a texture two draw items name.

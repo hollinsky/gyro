@@ -2321,7 +2321,46 @@ Result<void> VulkanRenderer::ReadTarget(const TargetReadback& request)
 	// `GENERAL`, which is what this renderer keeps a composite in for its whole life — see `Transfer`
 	// at the top of this file for why there is no optimal layout for an image somebody else may be
 	// scanning out.
-	return m_Readback.Read(m_Slots[request.Target].Image, VK_IMAGE_LAYOUT_GENERAL, request.Into, request.Stride);
+	return m_Readback.Read(
+		m_Slots[request.Target].Image, VK_IMAGE_LAYOUT_GENERAL, m_Readback.Size(), request.Into, request.Stride
+	);
+}
+
+Result<void> VulkanRenderer::ReadTexture(TextureId texture, std::span<std::byte> into, std::uint32_t stride)
+{
+	if (m_Textures == nullptr)
+	{
+		return Failure(ENOTSUP, "reading a texture back on a renderer with no texture table");
+	}
+
+	if (!m_Readback.IsOpen())
+	{
+		// The same refusal `ReadTarget` gives one function up and for the same reason: the reservation
+		// exists only where `VulkanDevicePolicy::Readable` asked for it, and the words matter because
+		// *the capture failed* cannot tell a missing flag from a wedged GPU.
+		return Failure(ENOTSUP, "this device was not built for readback; pass --capture");
+	}
+
+	const ReadableTexture image = m_Textures->Readable(texture);
+
+	if (!image.IsValid())
+	{
+		return Failure(EINVAL, "that id names no imported image on this device");
+	}
+
+	// **No wait, and Seam/Renderer.h says why**: the composite that sampled this image is the one the
+	// caller has already stalled on, so the only work that could still be reading it has landed.
+	//
+	// `GENERAL` on both halves of the queue-family acquire, which is the layout Render/Textures.cpp
+	// keeps every adopted image in from `Adopt` until it is destroyed — and the frame that just drew
+	// this one released it back to `VK_QUEUE_FAMILY_FOREIGN_EXT` naming the same one.
+	return m_Readback.Read(
+		image.Handle,
+		VK_IMAGE_LAYOUT_GENERAL,
+		PixelSize<DeviceSpace>{ image.Size.Width, image.Size.Height },
+		into,
+		stride
+	);
 }
 
 bool VulkanRenderer::IsComplete(SyncPoint point) const

@@ -52,6 +52,10 @@ public:
 
 	[[nodiscard]] bool IsOpen() const noexcept { return m_Buffer != VK_NULL_HANDLE; }
 
+	// What the staging buffer was sized for, which is the whole extent a target read asks for and the
+	// ceiling a texture read is bounded by.
+	[[nodiscard]] PixelSize<DeviceSpace> Size() const noexcept { return m_Size; }
+
 	// Copy `image` out and write its rows into `into` at `stride` bytes per row.
 	//
 	// **`image` must already be idle.** The wait for the composite's own work is the caller's, because
@@ -61,8 +65,17 @@ public:
 	// `layout` is what the target is in when the copy is submitted, which for a composite that has
 	// been recorded and presented is whatever `Record` left it in; naming it here rather than assuming
 	// keeps this honest against a renderer that changes its mind about the final transition.
-	[[nodiscard]] Result<void>
-	Read(VkImage image, VkImageLayout layout, std::span<std::byte> into, std::uint32_t stride) noexcept;
+	// `extent` is what to copy, which is the reservation's own size for a target and a client's window
+	// for Seam/Capture.h's texture half — the staging buffer is sized for a panel and a window is
+	// smaller than the panel it is on, so one reservation serves both. An extent that does not fit is
+	// refused rather than clipped: half a window is a picture somebody would read as a compositor bug.
+	[[nodiscard]] Result<void> Read(
+		VkImage image,
+		VkImageLayout layout,
+		PixelSize<DeviceSpace> extent,
+		std::span<std::byte> into,
+		std::uint32_t stride
+	) noexcept;
 
 private:
 	VulkanDevice* m_Device = nullptr;

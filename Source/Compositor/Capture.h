@@ -36,6 +36,16 @@
 //     `SCHED_FIFO`: the write punts to io-wq and comes back as a frame gyro missed. Virtual/Dump.h
 //     makes the same split for the same reason and is the shape this follows.
 //
+// **A dmabuf client is captured the other way round, and Seam/Capture.h carries why.** What this file
+// adds is the bookkeeping: the dispatch side records a descriptor commit without its pixels — the
+// extent, what the top byte means, the damage rectangles, and the texture id — and the press turns
+// those records into slabs the frame thread fills on the frame it is already stalling on. So a run
+// whose clients are all on `zwp_linux_dmabuf_v1` costs nothing at all until the key is pressed, where
+// the same run on `wl_shm` costs a copy of every window on every commit.
+//
+// The two halves land in one directory and read the same, which is the point: a `wl_shm` capture and
+// a dmabuf capture differ in when the bytes were taken, not in what the file says.
+//
 // **The client buffers are held continuously and the press only writes them out**, which is the one
 // design decision in this file that is not the frame side's. Seam/Capture.h photographs the glass;
 // Scene/Capture.h supplies the other half of the diff, the buffer a client actually handed over. If
@@ -47,8 +57,9 @@
 // wanted.
 //
 // The cost is a copy of every `wl_shm` commit on the dispatch thread and a resident megabyte or so
-// per window, which is why it is behind `--capture` rather than on: Options.h already says a run
-// declares up front that it is being debugged, and this is the second thing that declaration buys.
+// per software window — a dmabuf window costs nothing until the press — which is why it is behind `--capture` rather
+// than on: Options.h already says a run declares up front that it is being debugged, and this is the second thing that
+// declaration buys.
 //
 // **One capture in flight per output, and a second press while one is outstanding is dropped.** A
 // queue would be Virtual/Dump.h's, and it is the right structure for a *cadence* — a stream of frames
@@ -97,9 +108,21 @@ public:
 
 	void Offer(const SurfaceCapture& buffer) noexcept override;
 
+	// Seam/Capture.h's texture half, all three on the frame thread.
+	//
+	// The table they read is filled by `Request` on the dispatch thread and is not touched by it
+	// again until every entry is back to `Idle`, which is the same handover the output slabs above
+	// run on and for the same reason.
+	[[nodiscard]] bool WantsTexture(TextureId texture) const noexcept override;
+
+	[[nodiscard]] TextureSlab ReserveTexture(TextureId texture) noexcept override;
+
+	void PublishTexture(TextureId texture, bool complete) noexcept override;
+
 	// Buffers written, which is counted apart from frames because zero of them is a meaningful answer:
-	// a run whose clients are all on `zwp_linux_dmabuf_v1` writes pictures and no buffers, and a person
-	// reading the log needs to be told that rather than left looking for files.
+	// a run with no clients at all, or one where every window a press caught was refused a readback,
+	// writes pictures and no buffers — and a person reading the log needs to be told that rather than
+	// left looking for files that were never going to be there.
 	[[nodiscard]] std::uint64_t Buffers() const noexcept { return m_Buffers.load(std::memory_order_relaxed); }
 
 	// Captures that reached a file, and captures the filesystem refused. Read after `Close` has joined
@@ -123,6 +146,18 @@ private:
 		Idle,
 		Armed,
 		Filled,
+
+		// **A fourth state that only the dmabuf table uses, and it is what makes abandoning one safe.**
+		// An armed texture the frame never draws — a window occluded, or on a panel that did not
+		// capture — would otherwise hold its entry forever and no later press could arm the table
+		// again. So a stale entry is abandoned by the *dispatch* thread at the next press, which needs
+		// a way to tell *nobody has touched this* from *the frame thread is filling it right now*.
+		// `Reserve` claims the entry with a compare-exchange out of `Armed`, so an entry in `Reserved`
+		// belongs to the frame thread until it publishes and is never a candidate for abandonment.
+		//
+		// It is also the deduplication: a texture two draw items name is offered twice on one frame,
+		// and the second claim fails because the first moved the entry out of `Armed`.
+		Reserved,
 	};
 
 	struct Output
@@ -146,10 +181,21 @@ private:
 	struct Buffer
 	{
 		std::uint32_t Surface = 0;
+
+		// Filled at the commit for a `wl_shm` buffer and by the frame thread for a descriptor. Empty on
+		// a dmabuf record until a press has it read back, which is what `Texture` below is for.
 		std::vector<std::byte> Pixels;
 		PixelSize<BufferSpace> Size{};
+
+		// The client's own pitch for `wl_shm`, and gyro's own — tight — for a descriptor, because the
+		// rows a readback produces were laid out by the copy rather than by the client.
 		std::uint32_t Stride = 0;
 		TextureAlpha Alpha = TextureAlpha::Premultiplied;
+
+		// The id this commit's content was adopted under, or null for a `wl_shm` commit whose pixels
+		// are already here. Non-null is the whole of what marks a record as owing a readback.
+		TextureId Texture{};
+
 		std::vector<PixelRect<BufferSpace>> Damage;
 
 		// Which commit of this surface it was, counted by this object. It is what says whether a buffer
@@ -196,6 +242,31 @@ private:
 	std::vector<std::shared_ptr<const Buffer>> m_Held;
 
 	std::uint64_t m_Commits = 0;
+
+	// One dmabuf record a press is waiting on the frame thread to fill.
+	//
+	// **The same three-state cell the output slabs use, for the same three parties**, minus one: the
+	// dispatch thread arms it inside `Request`, the frame thread fills it or hands it back, and the
+	// writer empties it. What differs is that the slab is allocated at the press rather than at a
+	// `Remember` — there is no earlier moment that knows a window's size, and the press is on the
+	// thread that may allocate.
+	struct Pending
+	{
+		std::shared_ptr<Buffer> Held;
+		std::uint64_t Press = 0;
+		std::uint32_t Stride = 0;
+		std::atomic<Slot> State{ Slot::Idle };
+	};
+
+	// Fixed for `m_Outputs`' reason — `Pending` holds an atomic and is neither copyable nor movable —
+	// and at `MaxBuffers`, since a press can owe at most one readback per surface it is holding.
+	std::array<Pending, MaxBuffers> m_Pending{};
+
+	// How many of `m_Pending` a press armed. Written by the dispatch thread before any of the states
+	// leave `Idle` and read by the other two, so it needs no ordering of its own: a frame thread that
+	// saw a stale zero simply captures nothing, and the press it missed is the one the person is
+	// about to take again.
+	std::atomic<std::size_t> m_PendingCount{ 0 };
 
 	// Which press a written buffer belongs to, so a directory holds one set per keystroke.
 	std::uint64_t m_Press = 0;

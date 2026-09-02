@@ -196,20 +196,32 @@ void TargetReadbackBuffer::Reset() noexcept
 Result<void> TargetReadbackBuffer::Read(
 	VkImage image,
 	VkImageLayout layout,
+	PixelSize<DeviceSpace> extent,
 	std::span<std::byte> into,
 	std::uint32_t stride
 ) noexcept
 {
 	if (!IsOpen())
 	{
-		return Failure(EINVAL, "reading a target back through a reservation that was never opened");
+		return Failure(EINVAL, "reading an image back through a reservation that was never opened");
 	}
 
-	const std::size_t rows = static_cast<std::size_t>(m_Size.Height);
-
-	if (stride < m_Stride || into.size() < rows * stride)
+	if (!extent.IsValid() || extent.IsEmpty() || extent.Width > m_Size.Width || extent.Height > m_Size.Height)
 	{
-		return Failure(EINVAL, "reading a target back into a slab too small to hold it");
+		return Failure(EINVAL, "reading back an image larger than the reservation was sized for");
+	}
+
+	// The staging buffer is packed at the copy's own width rather than the reservation's, because
+	// `bufferRowLength` zero means *tight for this region*. So the row a `memcpy` below moves is this
+	// image's, not the panel's, and a window narrower than the screen is not read out with the
+	// neighbouring garbage after it.
+	const std::size_t rows = static_cast<std::size_t>(extent.Height);
+	const std::uint32_t packed =
+		m_Stride / static_cast<std::uint32_t>(m_Size.Width) * static_cast<std::uint32_t>(extent.Width);
+
+	if (stride < packed || into.size() < rows * stride)
+	{
+		return Failure(EINVAL, "reading an image back into a slab too small to hold it");
 	}
 
 	const VkDevice device = m_Device->Handle();
@@ -272,7 +284,7 @@ Result<void> TargetReadbackBuffer::Read(
 		.bufferImageHeight = 0,
 		.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
 		.imageOffset = { 0, 0, 0 },
-		.imageExtent = { static_cast<std::uint32_t>(m_Size.Width), static_cast<std::uint32_t>(m_Size.Height), 1 },
+		.imageExtent = { static_cast<std::uint32_t>(extent.Width), static_cast<std::uint32_t>(extent.Height), 1 },
 	};
 
 	vkCmdCopyImageToBuffer(m_Command, image, layout, m_Buffer, 1, &region);
@@ -336,7 +348,7 @@ Result<void> TargetReadbackBuffer::Read(
 
 	for (std::size_t y = 0; y < rows; ++y)
 	{
-		std::memcpy(into.data() + y * stride, m_Mapped + y * m_Stride, m_Stride);
+		std::memcpy(into.data() + y * stride, m_Mapped + y * packed, packed);
 	}
 
 	return {};

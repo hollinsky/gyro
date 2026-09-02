@@ -89,7 +89,20 @@ void PamCapture::Offer(const SurfaceCapture& buffer) noexcept
 {
 	const auto rows = static_cast<std::size_t>(buffer.Stride) * static_cast<std::size_t>(buffer.Size.Height);
 
-	if (rows == 0 || buffer.Pixels.size() < rows)
+	// **A descriptor, which arrives with no rows and is recorded anyway.** Scene/Capture.h says why the
+	// offer is made at all: the damage rectangles and the extent exist on this stack and nowhere else,
+	// and the pixels come later off the device. What is refused is an offer with neither — no rows and
+	// no id is a commit that adopted nothing, and there is no picture behind it to go and fetch.
+	const bool borrowed = buffer.Pixels.empty();
+
+	if (borrowed)
+	{
+		if (buffer.Texture.IsNull() || !buffer.Size.IsValid() || buffer.Size.IsEmpty())
+		{
+			return;
+		}
+	}
+	else if (rows == 0 || buffer.Pixels.size() < rows)
 	{
 		return;
 	}
@@ -112,10 +125,20 @@ void PamCapture::Offer(const SurfaceCapture& buffer) noexcept
 	auto held = std::make_shared<Buffer>();
 
 	held->Surface = buffer.Surface;
-	held->Pixels.assign(buffer.Pixels.begin(), buffer.Pixels.begin() + static_cast<std::ptrdiff_t>(rows));
+
+	if (!borrowed)
+	{
+		held->Pixels.assign(buffer.Pixels.begin(), buffer.Pixels.begin() + static_cast<std::ptrdiff_t>(rows));
+	}
+
 	held->Size = buffer.Size;
-	held->Stride = buffer.Stride;
+
+	// Tight for a descriptor, because the rows a readback produces were laid out by the copy rather
+	// than by the client — and four bytes a sample, which is every format `Render/Readback.cpp` can
+	// come back with and every one Virtual/Pam.h can write.
+	held->Stride = borrowed ? static_cast<std::uint32_t>(buffer.Size.Width) * 4 : buffer.Stride;
 	held->Alpha = buffer.Alpha;
+	held->Texture = borrowed ? buffer.Texture : TextureId{};
 	held->Damage.assign(buffer.Damage.begin(), buffer.Damage.end());
 	held->Commit = ++m_Commits;
 
@@ -140,12 +163,85 @@ std::size_t PamCapture::Request() noexcept
 	{
 		const std::uint64_t press = ++m_Press;
 
+		// **Only the ones whose pixels are already here.** A `wl_shm` record was copied at its commit
+		// and can go to the writer now; a descriptor record has an extent and a damage list and no
+		// bytes, and what fills it is the frame thread on the frame this press is about to force.
 		{
 			const std::lock_guard<std::mutex> guard{ m_Lock };
 
 			for (const std::shared_ptr<const Buffer>& held : m_Held)
 			{
-				m_Queued.emplace_back(press, held);
+				if (held->Texture.IsNull())
+				{
+					m_Queued.emplace_back(press, held);
+				}
+			}
+		}
+
+		// **Armed here and not before, and the slab is allocated here too.** This is the dispatch
+		// thread, which owes no deadline; the frame thread that fills these may not allocate at all.
+		//
+		// Skipped entirely while any entry from the last press is still outstanding, which is the
+		// output slabs' rule read across the whole table: a press whose readbacks have not landed is
+		// one whose slabs the writer may still be reading out of.
+		{
+			// **Everything a previous press left armed is abandoned first.** Those are the textures the
+			// frame never drew — a window occluded, minimised, or on a panel this capture did not
+			// reach — and they are safe to take back precisely because they are still in `Armed`: an
+			// entry the frame thread is working on has already moved to `Reserved`.
+			for (Pending& slot : m_Pending)
+			{
+				Slot stale = Slot::Armed;
+
+				(void)slot.State.compare_exchange_strong(stale, Slot::Idle, std::memory_order_acq_rel);
+			}
+
+			std::size_t armed = 0;
+
+			for (const std::shared_ptr<const Buffer>& held : m_Held)
+			{
+				if (held->Texture.IsNull())
+				{
+					continue;
+				}
+
+				// Past the entries a `Reserved` or `Filled` from this press or the last is still using.
+				// Running out is the ordinary answer and is the same one `MaxBuffers` gives: the picture
+				// is on disk and the buffers are a supplement to it.
+				while (armed < m_Pending.size() && m_Pending[armed].State.load(std::memory_order_acquire) != Slot::Idle)
+				{
+					++armed;
+				}
+
+				if (armed >= m_Pending.size())
+				{
+					break;
+				}
+
+				// A copy of the record rather than the record itself, because the frame thread is about
+				// to write into `Pixels` and the dispatch thread may replace `m_Held`'s entry with the
+				// client's next commit while it does.
+				auto owed = std::make_shared<Buffer>(*held);
+
+				owed->Pixels.assign(
+					static_cast<std::size_t>(owed->Stride) * static_cast<std::size_t>(owed->Size.Height), std::byte{}
+				);
+
+				Pending& slot = m_Pending[armed];
+
+				slot.Held = std::move(owed);
+				slot.Press = press;
+				slot.Stride = slot.Held->Stride;
+				slot.State.store(Slot::Armed, std::memory_order_release);
+
+				++armed;
+			}
+
+			// The high-water mark of entries the other two threads must scan, which only grows within a
+			// run and is reset by the writer when the table empties. Released after every store above.
+			if (armed > m_PendingCount.load(std::memory_order_relaxed))
+			{
+				m_PendingCount.store(armed, std::memory_order_release);
 			}
 		}
 
@@ -176,6 +272,93 @@ std::size_t PamCapture::Request() noexcept
 	}
 
 	return armed;
+}
+
+bool PamCapture::WantsTexture(TextureId texture) const noexcept
+{
+	if (texture.IsNull())
+	{
+		return false;
+	}
+
+	const std::size_t count = m_PendingCount.load(std::memory_order_acquire);
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		const Pending& slot = m_Pending[index];
+
+		if (slot.State.load(std::memory_order_acquire) == Slot::Armed && slot.Held != nullptr &&
+		    slot.Held->Texture == texture)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+TextureSlab PamCapture::ReserveTexture(TextureId texture) noexcept
+{
+	const std::size_t count = m_PendingCount.load(std::memory_order_acquire);
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		Pending& slot = m_Pending[index];
+
+		if (slot.Held == nullptr || slot.Held->Texture != texture)
+		{
+			continue;
+		}
+
+		// **The claim, and the header on `Slot::Reserved` is the whole argument for it.** Failing the
+		// exchange is the ordinary case rather than a fault: a texture two draw items name is offered
+		// twice on one frame, and the second offer finds the entry already taken and reads nothing.
+		Slot expected = Slot::Armed;
+
+		if (!slot.State.compare_exchange_strong(expected, Slot::Reserved, std::memory_order_acq_rel))
+		{
+			return {};
+		}
+
+		return { .Into = { slot.Held->Pixels.data(), slot.Held->Pixels.size() }, .Stride = slot.Stride };
+	}
+
+	return {};
+}
+
+void PamCapture::PublishTexture(TextureId texture, bool complete) noexcept
+{
+	const std::size_t count = m_PendingCount.load(std::memory_order_acquire);
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		Pending& slot = m_Pending[index];
+
+		if (slot.Held == nullptr || slot.Held->Texture != texture ||
+		    slot.State.load(std::memory_order_acquire) != Slot::Reserved)
+		{
+			continue;
+		}
+
+		if (!complete)
+		{
+			// Handed back unwritten, per Seam/Capture.h. A file of zeroes beside a picture of a window
+			// that is plainly drawn is the worst answer available: it reads as a client that committed
+			// nothing, which is precisely the bug somebody would be here to diagnose.
+			slot.Held.reset();
+			slot.State.store(Slot::Idle, std::memory_order_release);
+		}
+		else
+		{
+			// The release that hands the rows to the writer, matching the output slabs' above.
+			slot.State.store(Slot::Filled, std::memory_order_release);
+
+			m_Signal.fetch_add(1, std::memory_order_release);
+			m_Signal.notify_one();
+		}
+
+		return;
+	}
 }
 
 bool PamCapture::Wanted(std::uint32_t output) const noexcept
@@ -255,6 +438,60 @@ std::string PamCapture::Destination(std::size_t index)
 
 void PamCapture::WriteBuffers()
 {
+	// **The readbacks the frame thread finished, folded into the same queue as the copied ones**, so
+	// everything below this line writes one kind of record. A dmabuf capture and a `wl_shm` capture
+	// differ in when their bytes were taken and in nothing a reader of the directory can see.
+	//
+	// The entry is cleared as it is taken and only then handed back to `Idle`, which is what lets the
+	// next press arm this table again — the same *last, so the slab is not reused under a write that
+	// has not happened* rule the output slabs follow.
+	{
+		const std::size_t count = m_PendingCount.load(std::memory_order_acquire);
+		std::size_t outstanding = 0;
+
+		for (std::size_t index = 0; index < count; ++index)
+		{
+			Pending& slot = m_Pending[index];
+
+			switch (slot.State.load(std::memory_order_acquire))
+			{
+				case Slot::Filled:
+				{
+					{
+						const std::lock_guard<std::mutex> guard{ m_Lock };
+
+						m_Queued.emplace_back(slot.Press, std::shared_ptr<const Buffer>{ std::move(slot.Held) });
+					}
+
+					slot.Held.reset();
+					slot.State.store(Slot::Idle, std::memory_order_release);
+
+					break;
+				}
+				case Slot::Armed:
+				case Slot::Reserved:
+				{
+					// Still owed a frame, or being read right now. An entry stuck in `Armed` is a window
+					// the composite never sampled, and the next press takes it back rather than anything
+					// here waiting on it.
+					++outstanding;
+
+					break;
+				}
+				case Slot::Idle:
+					break;
+			}
+		}
+
+		if (outstanding == 0)
+		{
+			// Every entry is back, so the next press may arm the table. Released after the stores above
+			// rather than before, so a dispatch thread that reads zero here is reading a table nothing
+			// is left in.
+			m_PendingCount.store(0, std::memory_order_release);
+		}
+	}
+
 	std::vector<std::pair<std::uint64_t, std::shared_ptr<const Buffer>>> queued;
 
 	{

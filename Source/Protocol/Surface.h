@@ -579,7 +579,8 @@ private:
 
 	// Offer this commit's buffer to Scene/Capture.h's sink, where the chord has armed one. Called from
 	// `TakeContent` while the attach is still alive and the damage has not been cleared.
-	void Capture(ClientBuffer& buffer);
+	// `content` is the id this commit adopted, which is what a descriptor offers in place of rows.
+	void Capture(ClientBuffer& buffer, TextureId content);
 
 	// Hand a buffer back and forget it was staged. Safe on an invalid resource, which is what a detach
 	// stages.

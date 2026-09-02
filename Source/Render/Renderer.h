@@ -151,6 +151,8 @@ public:
 
 	[[nodiscard]] Result<void> ReadTarget(const TargetReadback& request) override;
 
+	[[nodiscard]] Result<void> ReadTexture(TextureId texture, std::span<std::byte> into, std::uint32_t stride) override;
+
 	// Decision 29's `C`, GPU half: every submission whose timestamps have resolved since the last
 	// call, oldest first.
 	//

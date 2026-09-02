@@ -70,12 +70,13 @@ public:
 
 	// The rows as the processor can read them, for Scene/Capture.h and nothing else.
 	//
-	// **Empty is the honest answer for a descriptor and the default says so.** A `wl_shm` buffer is
-	// already being read on this thread — the commit copies it — so handing the same span to a capture
-	// costs a walk over memory gyro is about to walk anyway. A dmabuf's bytes are tiled under a
-	// modifier and are not a picture until somebody detiles them, which is a map or a blit on the
-	// dispatch thread; a capture that guessed at it would write a file that looks like a compositor
-	// bug and is not one.
+	// **Empty is the honest answer for a descriptor and the default says so, and it no longer means
+	// *no capture*.** A `wl_shm` buffer is already being read on this thread — the commit copies it —
+	// so handing the same span to a capture costs a walk over memory gyro is about to walk anyway. A
+	// dmabuf's bytes are tiled under a modifier and are not a picture until somebody detiles them,
+	// which nothing on the dispatch thread can do; so an empty span is the offer saying *ask the
+	// device*, and Seam/Capture.h reads that image back on the frame thread instead. `MappedAlpha`
+	// stays answerable either way, because the client named the format.
 	//
 	// Borrowed and live only for the call: a pool mapping is the client's memory, and a pool that could
 	// not be mapped is a scratch buffer the next read overwrites.

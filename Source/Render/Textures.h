@@ -132,6 +132,24 @@ struct BoundTexture
 	[[nodiscard]] bool IsValid() const noexcept { return Set != VK_NULL_HANDLE; }
 };
 
+// What Seam/Capture.h's texture read needs of an adopted image, which is everything the copy has to
+// state and nothing the frame path does.
+//
+// Separate from `BoundTexture` rather than three more fields on it: that one is returned per drawn
+// item on every frame of every session, and this one is asked for on the frames a person presses a
+// key on.
+struct ReadableTexture
+{
+	VkImage Handle = VK_NULL_HANDLE;
+	PixelSize<BufferSpace> Size{};
+
+	// The client's own fourcc and modifier, as adopted. It is what says whether the top byte of the
+	// rows that come back is coverage or padding, and gyro never chose it.
+	PixelFormat Format{};
+
+	[[nodiscard]] bool IsValid() const noexcept { return Handle != VK_NULL_HANDLE; }
+};
+
 class VulkanTextures final : public ITextureImporter
 {
 public:
@@ -189,6 +207,13 @@ public:
 	// that: draw nothing and say nothing.
 	[[nodiscard]] BoundTexture Find(TextureId id) const noexcept;
 
+	// What an id names for a readback, on the frame thread and only on a captured frame.
+	//
+	// Invalid for an id nothing names and for an image this device wrote itself: a `wl_shm` client's
+	// pixels are captured at the commit that copied them, where the damage rectangles still exist, and
+	// reading the device's copy back would put the same window on disk twice under two names.
+	[[nodiscard]] ReadableTexture Readable(TextureId id) const noexcept;
+
 	// How many ids currently name an image, and how many images are waiting on a renderer to finish
 	// with them. Both for a test, which is the only party that can meaningfully assert on either.
 	[[nodiscard]] std::uint32_t Held() const noexcept { return m_Count; }
@@ -208,6 +233,10 @@ private:
 		VkImageView View = VK_NULL_HANDLE;
 		VkDescriptorSet Set = VK_NULL_HANDLE;
 		PixelSize<BufferSpace> Size{};
+
+		// As adopted, kept for `Readable` above — the view has already consumed the fourcc and neither
+		// it nor the descriptor set can be asked what it was built from.
+		PixelFormat Format{};
 
 		// Whether the pixels are a client's, reached through a descriptor this device did not
 		// allocate — which is the whole of what the frame thread has to do differently.

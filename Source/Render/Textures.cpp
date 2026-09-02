@@ -18,6 +18,19 @@ namespace
 // to lay out memory it did not lay out.
 constexpr VkImageUsageFlags SampledUsage = VK_IMAGE_USAGE_SAMPLED_BIT;
 
+// What a capture adds, and it is asked for only where the composition root asked for captures.
+//
+// **A usage bit narrows what a driver will agree to, which is why this is a policy and not a
+// constant.** For an imported dmabuf it is the modifier set: a client's layout that this device can
+// sample but cannot copy out of is one `ImportImage` refuses once the bit is on, and the client's
+// window then falls back to `wl_shm` on every run of every session — a real regression to pay for a
+// verb that fires when somebody is looking for a bug. Render/Readback.h makes the identical argument
+// for a scanout target and `--capture` is the identical switch.
+[[nodiscard]] VkImageUsageFlags CaptureUsage(const VulkanDevice& device) noexcept
+{
+	return device.TargetsAreReadable() ? VkImageUsageFlags{ VK_IMAGE_USAGE_TRANSFER_SRC_BIT } : VkImageUsageFlags{ 0 };
+}
+
 // The layout every adopted texture lives in, from the end of `Adopt` until it is destroyed.
 //
 // **`GENERAL` rather than `SHADER_READ_ONLY_OPTIMAL`, and the imported arm is why.** A client's
@@ -266,6 +279,32 @@ BoundTexture VulkanTextures::Find(TextureId id) const noexcept
 	return {};
 }
 
+ReadableTexture VulkanTextures::Readable(TextureId id) const noexcept
+{
+	if (id.IsNull())
+	{
+		return {};
+	}
+
+	const std::uint32_t count = m_Count;
+
+	for (std::uint32_t index = 0; index < count; ++index)
+	{
+		const Image& image = m_Images[index];
+
+		// Imported only, per the header: an image this device wrote is a `wl_shm` client's, and that
+		// client's pixels reach a capture at the commit that copied them.
+		if (image.Id != id || !image.Imported)
+		{
+			continue;
+		}
+
+		return { .Handle = image.Handle, .Size = image.Size, .Format = image.Format };
+	}
+
+	return {};
+}
+
 Result<void> VulkanTextures::Adopt(TextureId id, const TextureSource& source)
 {
 	Sweep();
@@ -299,6 +338,7 @@ Result<void> VulkanTextures::Adopt(TextureId id, const TextureSource& source)
 		         .View = VK_NULL_HANDLE,
 		         .Set = VK_NULL_HANDLE,
 		         .Size = source.Size,
+		         .Format = source.Format,
 		         .Imported = !source.IsMapped() };
 
 	Image* const existing = Lookup(id);
@@ -392,7 +432,8 @@ Result<void> VulkanTextures::AdoptMapped(Image& into, const TextureSource& sourc
 		                               .arrayLayers = 1,
 		                               .samples = VK_SAMPLE_COUNT_1_BIT,
 		                               .tiling = VK_IMAGE_TILING_OPTIMAL,
-		                               .usage = SampledUsage | VK_IMAGE_USAGE_HOST_TRANSFER_BIT,
+		                               .usage =
+		                                   SampledUsage | VK_IMAGE_USAGE_HOST_TRANSFER_BIT | CaptureUsage(*m_Device),
 		                               .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 		                               .queueFamilyIndexCount = 0,
 		                               .pQueueFamilyIndices = nullptr,
@@ -500,7 +541,7 @@ Result<void> VulkanTextures::AdoptDmabuf(Image& into, const TextureSource& sourc
 		{ static_cast<std::uint32_t>(source.Size.Width), static_cast<std::uint32_t>(source.Size.Height) },
 		source.Format,
 		plane,
-		SampledUsage
+		SampledUsage | CaptureUsage(*m_Device)
 	);
 
 	if (!imported)

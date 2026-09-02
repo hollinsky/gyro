@@ -1476,6 +1476,12 @@ private:
 			if (capturing)
 			{
 				CaptureTarget(output, index, *composite, submission->Point, decision.Sequence);
+
+				// After the target and not before, so a slow disk holds up the picture rather than the
+				// windows in it — and after the stall above, which is the wait these reads inherit
+				// rather than repeat: the composite that sampled every one of these images is the work
+				// `CaptureTarget` has just seen land.
+				CaptureTextures(output, list.Items);
 			}
 		}
 
@@ -1860,6 +1866,53 @@ private:
 		}
 
 		m_Capture->Publish(at, sequence, read.has_value());
+	}
+
+	// Read back every client image this frame drew, for Seam/Capture.h's texture half.
+	//
+	// **The draw list is the walk rather than the texture space**, which bounds this to what the
+	// composite actually sampled and is the honest limit: a window on another output, occluded, or
+	// off-screen is one the frame never touched and cannot vouch for. It also makes the cost
+	// proportional to the picture rather than to how many windows the machine is holding open.
+	//
+	// The sink deduplicates rather than this walk: two items naming one texture — a window and a
+	// thumbnail of it — reach `ReserveTexture` twice, and the second ask comes back empty because the
+	// first already took the slot. Doing it here would need a set on the frame thread, which is either
+	// an allocation Core/FrameSection.h aborts on or a fixed array duplicating the one the sink has.
+	void CaptureTextures(FrameOutput& output, std::span<const DrawItem> items) noexcept
+	{
+		for (const DrawItem& item : items)
+		{
+			const DrawTexture* const content = std::get_if<DrawTexture>(&item.Content);
+
+			if (content == nullptr || content->Texture.IsNull() || !m_Capture->WantsTexture(content->Texture))
+			{
+				continue;
+			}
+
+			const TextureSlab slab = m_Capture->ReserveTexture(content->Texture);
+
+			if (!slab.IsValid())
+			{
+				// Ordinary, per Seam/Capture.h: a texture already read on this press, or a sink whose
+				// writer is still busy. Nothing has been perturbed, so there is nothing to say.
+				continue;
+			}
+
+			const Result<void> read = output.m_Renderer->ReadTexture(content->Texture, slab.Into, slab.Stride);
+
+			if (!read)
+			{
+				// The refusal's own words, for `CaptureTarget`'s reason — and this one has a second
+				// failure worth telling apart by hand: a renderer with no readback usage and a client
+				// whose modifier the device would not copy out of read very differently.
+				TraceMark(
+					read.error().Sentence(), output.m_Trace, TraceTag(static_cast<std::uint64_t>(read.error().Code()))
+				);
+			}
+
+			m_Capture->PublishTexture(content->Texture, read.has_value());
+		}
 	}
 
 	[[nodiscard]] bool Wants(const FrameOutput& output, std::size_t index, const FrameDecision& decision) const noexcept
