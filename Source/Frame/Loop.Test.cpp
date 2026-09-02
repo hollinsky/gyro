@@ -147,7 +147,10 @@ public:
 	bool RefuseTest = false;
 	int Tests = 0;
 	std::size_t TestedLayers = 0;
-	std::vector<PresentLayer> PresentedLayers;
+	// `MaxLayers` up front, because `Present` runs inside the frame section: the assign below reuses
+	// this capacity and never asks the allocator for more, and a partition wider than the seam allows
+	// cannot reach here at all.
+	std::vector<PresentLayer> PresentedLayers = std::vector<PresentLayer>(MaxLayers);
 
 	// One by default, which is KMS's rule. A case about pipelining asks for two, which is what a nested
 	// output answers because its completion arrives from the host a whole refresh after the frame it is
@@ -2356,9 +2359,17 @@ public:
 			return {};
 		}
 
-		Slab.assign(static_cast<std::size_t>(stride) * static_cast<std::size_t>(size.Height), std::byte{});
+		const std::size_t wanted = static_cast<std::size_t>(stride) * static_cast<std::size_t>(size.Height);
 
-		return Slab;
+		// Empty rather than grown, which is Compositor/Capture.h's own answer to a shape its slab was not
+		// sized for: `Reserve` is called from inside the frame section, so a fake that resized here would
+		// be allocating on the frame path — and the debug allocator aborted this test for exactly that.
+		if (wanted > Slab.size())
+		{
+			return {};
+		}
+
+		return { Slab.data(), wanted };
 	}
 
 	void Publish(std::uint32_t, std::uint64_t sequence, bool complete) noexcept override
@@ -2380,7 +2391,9 @@ public:
 	std::uint64_t PublishedSequence = 0;
 	bool PublishedComplete = false;
 
-	std::vector<std::byte> Slab;
+	// Sized once, off the frame path, for the whole of the harness's panel. Bigger than any capture the
+	// tests below ask for, so the shape refusal above never fires by accident.
+	std::vector<std::byte> Slab = std::vector<std::byte>{ std::size_t{ 2560 } * 4 * 1440 };
 };
 } // namespace
 
