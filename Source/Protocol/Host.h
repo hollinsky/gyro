@@ -192,6 +192,11 @@ public:
 	// Push everything owed back out to the clients. The root's to call, immediately before it sleeps.
 	void Flush() noexcept { m_Server.Flush(); }
 
+	// Where a committed `wl_shm` buffer goes, per [Scene/Capture.h](../Scene/Capture.h). Wired by the
+	// composition root when a run asked for captures, and never afterwards — a host with none offers
+	// nothing, which is every run without `--capture`.
+	void Capture(ISurfaceCapture& sink) noexcept { m_Context.SetCapture(sink); }
+
 	// One key, already past the compositor's own chord, on its way to whatever has focus. The root's to
 	// call, because it is what holds both the devices and this host — and it calls it for a consumed key
 	// too, because the modifier state is a fact about a person's hands rather than about who is

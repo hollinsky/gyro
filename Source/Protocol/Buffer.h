@@ -1,5 +1,9 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <span>
+
 #include "Core/Result.h"
 #include "Core/Texture.h"
 #include "Geometry/Space.h"
@@ -63,6 +67,25 @@ public:
 
 	// The extent of the pixels, in the buffer's own space.
 	[[nodiscard]] virtual PixelSize<BufferSpace> Extent() const noexcept = 0;
+
+	// The rows as the processor can read them, for Scene/Capture.h and nothing else.
+	//
+	// **Empty is the honest answer for a descriptor and the default says so.** A `wl_shm` buffer is
+	// already being read on this thread — the commit copies it — so handing the same span to a capture
+	// costs a walk over memory gyro is about to walk anyway. A dmabuf's bytes are tiled under a
+	// modifier and are not a picture until somebody detiles them, which is a map or a blit on the
+	// dispatch thread; a capture that guessed at it would write a file that looks like a compositor
+	// bug and is not one.
+	//
+	// Borrowed and live only for the call: a pool mapping is the client's memory, and a pool that could
+	// not be mapped is a scratch buffer the next read overwrites.
+	[[nodiscard]] virtual std::span<const std::byte> MappedRows() { return {}; }
+
+	// Bytes between rows of `MappedRows`, which is the client's own pitch and not `Width * 4`.
+	[[nodiscard]] virtual std::uint32_t MappedStride() const noexcept { return 0; }
+
+	// What the top byte of a sample means, stated as an adoption states it.
+	[[nodiscard]] virtual TextureAlpha MappedAlpha() const noexcept { return TextureAlpha::Premultiplied; }
 
 	// The implementation behind an id a client named, or null where the id was not a `wl_buffer` gyro
 	// made.

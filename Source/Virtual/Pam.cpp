@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "Core/Fd.h"
+#include "Core/Pam.h"
 
 namespace
 {
@@ -79,7 +80,7 @@ namespace
 }
 } // namespace
 
-Result<void> WritePam(const ImageView& image, std::string_view path)
+Result<void> WritePam(const ImageView& image, std::string_view path, std::string_view note)
 {
 	if (!image.IsValid())
 	{
@@ -100,12 +101,31 @@ Result<void> WritePam(const ImageView& image, std::string_view path)
 		return Failure(errno, "creating a PAM frame");
 	}
 
-	const std::string header = std::format(
-		"P7\nWIDTH {}\nHEIGHT {}\nDEPTH 4\nMAXVAL {}\nTUPLTYPE RGB_ALPHA\nENDHDR\n",
+	// The comments go first, because `P7` has to be the first token of the file and everything between
+	// it and `ENDHDR` is the header the note is part of.
+	std::string header = std::format(
+		"P7\nWIDTH {}\nHEIGHT {}\nDEPTH 4\nMAXVAL {}\nTUPLTYPE RGB_ALPHA\n",
 		image.Size().Width,
 		image.Size().Height,
 		wide ? 65535 : 255
 	);
+
+	// Each line of the note is commented separately: a `#` runs to the end of a line, so a note that
+	// carried an embedded newline and was written whole would put its own second line into the grammar
+	// as a header field nobody defined.
+	while (!note.empty())
+	{
+		const std::size_t end = note.find('\n');
+		const std::string_view line = note.substr(0, end);
+
+		header += "# ";
+		header += line;
+		header += '\n';
+
+		note = end == std::string_view::npos ? std::string_view{} : note.substr(end + 1);
+	}
+
+	header += "ENDHDR\n";
 
 	if (const Result<void> written = WriteAll(file.Borrow(), header); !written)
 	{

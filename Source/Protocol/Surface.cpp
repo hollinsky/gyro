@@ -889,6 +889,16 @@ void ClientSurface::TakeContent(ITextures& textures)
 		}
 	}
 
+	// **The capture is taken here and not one line later**, because `ReleaseStaged` below hands a
+	// `wl_shm` buffer straight back to the client — the pixels are still the ones this commit was made
+	// of only while the attach is alive. `m_Pending.BufferDamage` is live for the same reason: `Apply`
+	// clears it after this returns, so this is the last point at which what the client *said* it
+	// changed still exists to be written down beside what it actually handed over.
+	if (buffer != nullptr)
+	{
+		Capture(*buffer);
+	}
+
 	// Retired after the new id exists rather than before, so a device that fails the import leaves the
 	// surface holding nothing rather than holding a name it has already given up.
 	//
@@ -920,6 +930,42 @@ void ClientSurface::TakeContent(ITextures& textures)
 	{
 		m_Attached.reset();
 	}
+}
+
+void ClientSurface::Capture(ClientBuffer& buffer)
+{
+	ISurfaceCapture* const sink = m_Context->Capture();
+
+	// **Asked before the rows are fetched**, which is the reason Scene/Capture.h has two verbs rather
+	// than one: a pool gyro could not map is read with `pread` into a scratch buffer, and doing that on
+	// every commit for a key nobody pressed would be a copy of every window on the dispatch thread.
+	if (sink == nullptr || !sink->Wanted())
+	{
+		return;
+	}
+
+	const std::span<const std::byte> pixels = buffer.MappedRows();
+
+	// A descriptor, or a pool that no longer holds the rows it named. Both are ordinary and neither is
+	// worth a log line here: the first is the boundary Scene/Capture.h states, and the second has
+	// already cost the client its frame.
+	if (pixels.empty())
+	{
+		return;
+	}
+
+	// The wire id rather than a name of gyro's own, so a capture reads beside a `WAYLAND_DEBUG` log
+	// with no table in between.
+	const std::uint32_t id = ::wl_resource_get_id(Object().WireResource());
+
+	sink->Offer(
+		SurfaceCapture{ .Surface = id,
+	                    .Size = buffer.Extent(),
+	                    .Stride = buffer.MappedStride(),
+	                    .Alpha = buffer.MappedAlpha(),
+	                    .Pixels = pixels,
+	                    .Damage = m_Pending.BufferDamage }
+	);
 }
 
 bool ClientSurface::AdoptSync(ClientSyncSurface& sync) noexcept

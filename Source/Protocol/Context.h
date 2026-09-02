@@ -12,6 +12,7 @@
 #include "Protocol/Popup.h"
 #include "Protocol/Server.h"
 #include "Protocol/Sync.h"
+#include "Scene/Capture.h"
 #include "Scene/Store.h"
 #include "Scene/Textures.h"
 
@@ -101,6 +102,18 @@ public:
 		m_Floors = &floors;
 		m_Server = &server;
 	}
+
+	// Where a committed `wl_shm` buffer goes when the screenshot chord has armed one, per
+	// [Scene/Capture.h](../Scene/Capture.h), or null on every run without `--capture`.
+	//
+	// **Beside `Sync()` rather than beside the store, because it outlives an `Advance`.** The store and
+	// the texture space are the world one step was handed and are deliberately unreachable between
+	// steps; this is the composition root's own object, wired once and live for the host's whole life,
+	// and a commit is the only thing that ever reaches it.
+	[[nodiscard]] ISurfaceCapture* Capture() const noexcept { return m_Capture; }
+
+	// Wired once when the host opens, and only where the run asked for captures.
+	void SetCapture(ISurfaceCapture& capture) noexcept { m_Capture = &capture; }
 
 	// Wired once when the host opens, and only where a node opened. Left null otherwise, which is the
 	// same statement `Sync()` makes to its callers and the reason the global is never advertised there.
@@ -211,6 +224,9 @@ private:
 
 	// The explicit-sync device, or null where none opened. Not owned; the host holds it.
 	ExplicitSync* m_Sync = nullptr;
+
+	// The capture sink, or null where captures are off. Not owned; the composition root holds it.
+	ISurfaceCapture* m_Capture = nullptr;
 	PopupStack m_Popups;
 	WindowDrag m_Drag;
 

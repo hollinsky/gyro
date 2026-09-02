@@ -1530,7 +1530,9 @@ public:
 
 			m_Loop->Capture(&*m_Capture);
 
-			spdlog::info("ctrl+alt+esc s writes a frame to {}", m_Options.CaptureDirectory);
+			spdlog::info(
+				"ctrl+alt+esc s writes a frame and every client's wl_shm buffer to {}", m_Options.CaptureDirectory
+			);
 		}
 
 		// Last, because it lays the world out against the modes the backend *achieved* rather than the
@@ -2546,6 +2548,14 @@ private:
 			}
 
 			m_Clients = made->get();
+
+			// **After the capture object exists, which `Open` guarantees by calling this last.** A host
+			// wired to nothing is the ordinary run: `Wanted` is never asked and no client's pixels are
+			// ever copied.
+			if (m_Capture)
+			{
+				m_Clients->Capture(*m_Capture);
+			}
 
 			if (handover)
 			{

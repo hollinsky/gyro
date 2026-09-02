@@ -2,8 +2,10 @@
 
 #include <unistd.h>
 
+#include <array>
 #include <cstdio>
 #include <format>
+#include <span>
 #include <string>
 
 #include "Seam/RenderTarget.h"
@@ -36,6 +38,14 @@ public:
 			::unlink(std::format("{}/frame-{:08}.pam", m_Path, sequence).c_str());
 		}
 
+		for (std::uint64_t press = 0; press < 4; ++press)
+		{
+			for (std::uint32_t surface = 0; surface < 8; ++surface)
+			{
+				::unlink(std::format("{}/surface-{:08}-{:08}.pam", m_Path, press, surface).c_str());
+			}
+		}
+
 		::rmdir(m_Path.c_str());
 	}
 
@@ -43,6 +53,39 @@ public:
 	Scratch& operator=(const Scratch&) = delete;
 
 	[[nodiscard]] const std::string& Path() const noexcept { return m_Path; }
+
+	// What one buffer's file says, or empty where there is none. The header is where a capture puts the
+	// facts a picture cannot carry, so reading it back is how the damage list is checked at all.
+	[[nodiscard]] std::string Header(std::uint64_t press, std::uint32_t surface) const
+	{
+		const std::string file = std::format("{}/surface-{:08}-{:08}.pam", m_Path, press, surface);
+
+		std::FILE* const open = std::fopen(file.c_str(), "rb");
+
+		if (open == nullptr)
+		{
+			return {};
+		}
+
+		std::string header;
+		char byte = 0;
+
+		// To `ENDHDR`, which is the last token before the rows and the only place a text read may stop:
+		// past it the file is binary and a `getc` loop would be reading pixels as characters.
+		while (std::fread(&byte, 1, 1, open) == 1)
+		{
+			header += byte;
+
+			if (header.ends_with("ENDHDR\n"))
+			{
+				break;
+			}
+		}
+
+		static_cast<void>(std::fclose(open));
+
+		return header;
+	}
 
 	[[nodiscard]] bool Holds(std::uint64_t sequence) const
 	{
@@ -168,4 +211,107 @@ GYRO_TEST(Capture, DropsASecondPressWhileOneIsOutstanding)
 	GYRO_REQUIRE(capture.Request() == 1);
 
 	GYRO_CHECK_EQ(capture.Request(), std::size_t{ 0 });
+}
+
+// Scene/Capture.h's half. The dispatch thread's two verbs, played here exactly as
+// Protocol/Surface.cpp plays them.
+
+namespace
+{
+constexpr PixelSize<BufferSpace> Tiny{ 2, 2 };
+
+// One committed buffer of a colour, with the damage a client claimed for it.
+[[nodiscard]] SurfaceCapture
+Committed(std::uint32_t surface, std::span<const std::byte> pixels, std::span<const PixelRect<BufferSpace>> damage)
+{
+	return SurfaceCapture{ .Surface = surface,
+		                   .Size = Tiny,
+		                   .Stride = 8,
+		                   .Alpha = TextureAlpha::Premultiplied,
+		                   .Pixels = pixels,
+		                   .Damage = damage };
+}
+} // namespace
+
+// **The buffers are held before any press and written by it**, which is the whole reason this half is
+// not armed the way the frame half is: a window that repaints wrong and then goes quiet has nothing
+// left to offer by the time somebody reaches for the key.
+GYRO_TEST(Capture, WritesTheBufferACommitHandedOverBeforeThePress)
+{
+	Scratch scratch;
+	PamCapture capture{ scratch.Path(), 1 };
+
+	GYRO_REQUIRE(capture.Open().has_value());
+
+	const std::array<std::byte, 16> pixels{};
+	const std::array<PixelRect<BufferSpace>, 1> damage{ PixelRect<BufferSpace>{ { 1, 2 }, { 3, 4 } } };
+
+	capture.Offer(Committed(9, pixels, damage));
+
+	// No output has a slab, so the frame half arms nothing — and the buffer is written anyway, because
+	// the two halves answer different questions and a run with no panel still has clients.
+	GYRO_CHECK_EQ(capture.Request(), std::size_t{ 0 });
+
+	capture.Close();
+
+	GYRO_CHECK_EQ(capture.Buffers(), std::uint64_t{ 1 });
+	GYRO_CHECK_EQ(capture.Failed(), std::uint64_t{ 0 });
+
+	const std::string header = scratch.Header(1, 9);
+
+	GYRO_REQUIRE(!header.empty());
+
+	// The client's own rectangle, in the client's own numbers. This is the fact the whole capture
+	// exists for: whether what the client said it repainted covers the row that went stale.
+	GYRO_CHECK(header.contains("# damage 1\n"));
+	GYRO_CHECK(header.contains("# damage 1 2 3 4\n"));
+	GYRO_CHECK(header.contains("# gyro surface 9 commit 1 2x2 stride 8 argb8888\n"));
+}
+
+// **Newest wins per surface**, so a window redrawing at sixty hertz costs one entry and the press
+// finds the buffer it would have been showing rather than the first one it ever sent.
+GYRO_TEST(Capture, KeepsOnlyTheNewestBufferOfASurface)
+{
+	Scratch scratch;
+	PamCapture capture{ scratch.Path(), 1 };
+
+	GYRO_REQUIRE(capture.Open().has_value());
+
+	const std::array<std::byte, 16> pixels{};
+
+	capture.Offer(Committed(3, pixels, {}));
+	capture.Offer(Committed(3, pixels, {}));
+	capture.Offer(Committed(4, pixels, {}));
+
+	static_cast<void>(capture.Request());
+	capture.Close();
+
+	// Two surfaces and three commits, so two files — and the surviving one of surface 3 is the second
+	// commit, which is what the ordinal in the header is there to prove.
+	GYRO_CHECK_EQ(capture.Buffers(), std::uint64_t{ 2 });
+	GYRO_CHECK(scratch.Header(1, 3).contains("commit 2 "));
+	GYRO_CHECK(scratch.Header(1, 4).contains("commit 3 "));
+}
+
+// A buffer whose rows the pool could not produce — a client that truncated its own file — must not
+// become a file. Protocol/Surface.cpp declines to offer one at all; this is the second refusal, in the
+// party that would otherwise read past the end of a span.
+GYRO_TEST(Capture, DeclinesABufferShorterThanItSaysItIs)
+{
+	Scratch scratch;
+	PamCapture capture{ scratch.Path(), 1 };
+
+	GYRO_REQUIRE(capture.Open().has_value());
+
+	const std::array<std::byte, 4> stub{};
+
+	capture.Offer(Committed(2, stub, {}));
+
+	GYRO_CHECK_EQ(capture.Request(), std::size_t{ 0 });
+
+	capture.Close();
+
+	GYRO_CHECK_EQ(capture.Buffers(), std::uint64_t{ 0 });
+	GYRO_CHECK_EQ(capture.Failed(), std::uint64_t{ 0 });
+	GYRO_CHECK(scratch.Header(1, 2).empty());
 }

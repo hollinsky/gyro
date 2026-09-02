@@ -42,7 +42,13 @@
 // big-endian per the netpbm specification, for a ten-bit one. Widening everything to sixteen bits
 // would double a dump for no information, and narrowing everything to eight would throw away exactly
 // the precision a ten-bit target was chosen for.
-[[nodiscard]] Result<void> WritePam(const ImageView& image, std::string_view path);
+// `note` is written into the header as `#` comment lines, which the PAM grammar allows and every
+// reader skips. It is where a capture puts the facts a picture cannot carry — which surface, what the
+// client said it damaged — so that one file is self-describing and `head` is the whole tool needed to
+// read it. A sidecar would be the alternative and is worse for exactly one reason: two files get
+// separated, and a damage list that has drifted away from its pixels is a list of numbers about
+// nothing.
+[[nodiscard]] Result<void> WritePam(const ImageView& image, std::string_view path, std::string_view note = {});
 
 // The same, into a directory, named by the frame's sequence.
 //

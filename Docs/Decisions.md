@@ -14090,3 +14090,52 @@ raise is the whole of the feedback. That wants the scene vocabulary and a text l
 which exist, and it is [Open.md](Open.md)'s rather than this entry's. The caveat that is not fixable
 here is the leader's own one level worse: a nested gyro is behind another compositor's bindings, and
 `Alt+Tab` is the first thing a host claims — so this works on a panel and not inside a window.
+
+### 178. The screenshot chord also writes every client's `wl_shm` buffer, and it holds them continuously rather than arming them
+
+A stale row of an old window title survived a repaint and stayed on the glass until a focus change
+forced a full redraw. The capture that showed it could not say whose fault it was, and that is a
+property of the instrument rather than of the bug: decision 64's readback proves its pixels are the
+pixels the display engine scanned out, which is exactly why it cannot say what went into them.
+
+Both of gyro's chances to lose a row are chances it does not take. `Frame/Evaluator.h`'s `Changed`
+damages the whole output or none of it, so there is no per-node region to be off by one in;
+`Protocol/Shm.cpp` copies the full `stride × height` at commit, and the client damage
+`Protocol/Surface.cpp` accumulates never limits anything before being cleared. So the row that went
+stale was already in the buffer the client handed over — or it was not, and the loss is downstream of
+the copy. Nothing gyro writes to disk today distinguishes those.
+
+**So the chord writes the buffer beside the picture, and the damage rectangles beside the buffer.**
+The pixels alone only move the question one step: a client's repaint is its own damage applied to
+whatever the buffer already held, so what settles it is whether the rectangles cover the row. Those
+rectangles exist for the length of one commit and are then dropped, which is what makes recording them
+a change to the commit path rather than a reader somewhere else.
+
+**Held continuously, not armed by the press, and this is the part worth arguing.** The frame half is
+armed: a press asks the frame thread for the next frame, which is the frame a person is looking at.
+Doing the same for buffers records the commits *after* the interesting one — and a window that
+repainted wrong and then went quiet has nothing left to offer, which is precisely the shape of the bug
+that prompted this. So the newest `wl_shm` buffer of every surface is kept at all times under
+`--capture` and the press writes the table out. That is `Core/Trace.h`'s argument at decision 139
+applied to pixels: an instrument you switch on records the run after the one you wanted.
+
+The cost is honest and bounded — one copy per commit on the dispatch thread, which owes no deadline
+and was already copying those bytes, and a resident buffer per window under a ceiling of 32. It is
+behind `--capture` for the reason `Options.h` already gives: a run says up front that it is being
+debugged.
+
+**`wl_shm` only, and the boundary is a design rather than a stage.** Those pixels are gyro's the
+moment `Adopt` returns. A `zwp_linux_dmabuf_v1` buffer is borrowed, tiled under a modifier, and is not
+a picture until somebody detiles it — a map or a blit on the dispatch thread. A capture that guessed
+would write a file that looks like a compositor bug and is not one, which is worse than a gap the log
+names. The one thing lost with it is the toolkits that have moved off shm entirely, and those are the
+clients whose own damage tracking is least likely to be what is wrong.
+
+**Rejected: a second chord key.** Two presses are two instants, which destroys the only property that
+makes the pair a diff. **Rejected: a sidecar file for the damage.** Two files get separated, and a
+list of rectangles that has drifted away from its pixels is a list of numbers about nothing — so it
+goes in the PAM header as `#` comments, which the grammar allows, every reader skips, and `head`
+prints. **Rejected: hanging it off `Dispatch/Textures.h`, which is where the pixels look like they
+live.** They do not, on a real machine: `Promote` writes an authored image into a scannable allocation
+and lets the mapping go, so a client's shm buffer is a descriptor by the time the registry is holding
+it. The commit is the one place the rows and the damage are both in hand.

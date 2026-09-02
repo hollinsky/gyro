@@ -413,3 +413,29 @@ GYRO_TEST(Shm, AnOpaqueBufferSaysSoRatherThanCostingAPassOverItsPixels)
 
 	GYRO_CHECK(textures.Alpha == TextureAlpha::Premultiplied);
 }
+
+// Scene/Capture.h's three verbs, which `wl_shm` is the one factory that answers. The commit is about
+// to walk these same rows into a texture, so a capture that reads them costs nothing a client's frame
+// was not already paying — and a buffer that says `xrgb8888` has to keep saying it here, or a dumped
+// window is transparent where its client meant it opaque.
+GYRO_TEST(Shm, ABufferOffersItsOwnRowsToACapture)
+{
+	constexpr std::size_t Size = 4096;
+
+	Fd fd = MakeUnsealedPool(Size);
+	GYRO_REQUIRE(fd.IsValid());
+
+	Fill(fd, Size, std::byte{ 0x5A });
+
+	PoolMapping::Refusal refusal = PoolMapping::Refusal::None;
+	ClientShmPool pool{ PoolMapping::Map(std::move(fd), Size, refusal) };
+
+	const std::unique_ptr<ClientShmBuffer> buffer = Cut(pool, 0, 4, 4, 16, Wayland::Server::WlShmFormat::Xrgb8888);
+
+	const std::span<const std::byte> rows = buffer->MappedRows();
+
+	GYRO_REQUIRE(rows.size() >= 64U);
+	GYRO_CHECK(rows[0] == std::byte{ 0x5A });
+	GYRO_CHECK_EQ(buffer->MappedStride(), std::uint32_t{ 16 });
+	GYRO_CHECK(buffer->MappedAlpha() == TextureAlpha::None);
+}

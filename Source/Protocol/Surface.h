@@ -14,6 +14,7 @@
 #include "Wayland/Server/Wayland.h"
 
 class ClientPresentationFeedback;
+class ClientBuffer;
 class ClientSyncSurface;
 
 // One frame reaching the glass, as much of it as a client is owed.
@@ -575,6 +576,10 @@ private:
 	// client. Called by `Apply` and only when an attach is actually pending, because a commit that did
 	// not attach keeps the content it had.
 	void TakeContent(ITextures& textures);
+
+	// Offer this commit's buffer to Scene/Capture.h's sink, where the chord has armed one. Called from
+	// `TakeContent` while the attach is still alive and the damage has not been cleared.
+	void Capture(ClientBuffer& buffer);
 
 	// Hand a buffer back and forget it was staged. Safe on an invalid resource, which is what a detach
 	// stages.

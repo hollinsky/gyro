@@ -171,6 +171,17 @@ public:
 	// Not `noexcept`: the unmapped path allocates, once per pool and per size.
 	[[nodiscard]] std::span<const std::byte> Pixels() const;
 
+	// Scene/Capture.h's three, which `wl_shm` is the one factory that can answer: these pixels are the
+	// same ones the commit is about to copy, so a capture reads them rather than reconstructing them.
+	[[nodiscard]] std::span<const std::byte> MappedRows() override { return Pixels(); }
+
+	[[nodiscard]] std::uint32_t MappedStride() const noexcept override { return m_Stride; }
+
+	[[nodiscard]] TextureAlpha MappedAlpha() const noexcept override
+	{
+		return m_Format == Wayland::Server::WlShmFormat::Argb8888 ? TextureAlpha::Premultiplied : TextureAlpha::None;
+	}
+
 private:
 	std::shared_ptr<PoolMapping> m_Pool;
 
