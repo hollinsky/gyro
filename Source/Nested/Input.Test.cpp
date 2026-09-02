@@ -288,7 +288,7 @@ GYRO_TEST(NestedInput, AScrollTakesItsSourceFromTheGroupAndItsDetentFromValue120
 	GYRO_CHECK(session.Observed.Scrolls.front().Source == ScrollSource::Finger);
 	GYRO_CHECK(session.Observed.Scrolls.front().Axis == ScrollAxis::Vertical);
 	GYRO_CHECK_EQ(session.Observed.Scrolls.front().Distance, 15.0);
-	GYRO_CHECK_EQ(session.Observed.Scrolls.front().Clicks120, 1.0);
+	GYRO_CHECK_EQ(session.Observed.Scrolls.front().Clicks120, 120.0);
 	GYRO_CHECK(!session.Observed.Scrolls.front().Stop);
 }
 

@@ -14,10 +14,6 @@ namespace Nested
 {
 namespace
 {
-// What one detent is worth where the host does not say. `wl_pointer.axis` carries a distance in
-// surface units already, so this is only ever the fallback for the `value120` bookkeeping below.
-constexpr double DetentsPer120 = 120.0;
-
 // The keyboard's name in the log, fixed because there is nothing to vary: one seat, one keyboard,
 // and the host does not say what is plugged into it.
 constexpr std::string_view KeyboardName = "the host's keyboard";
@@ -453,8 +449,10 @@ void NestedInput::Pointer::OnAxisSource(Wayland::WlPointerAxisSource axisSource)
 void NestedInput::Pointer::OnAxisValue120(Wayland::WlPointerAxis, std::int32_t value120)
 {
 	// Held for the `axis` it belongs to, because the wire sends the high-resolution step *before* the
-	// distance it describes and `Core/Input.h` carries both on one increment.
-	m_Input->m_Pending120 = static_cast<double>(value120) / DetentsPer120;
+	// distance it describes and `Core/Input.h` carries both on one increment. The number crosses in the
+	// unit it arrived in — 120ths of a detent, which is what `Clicks120` is — because the one reader of
+	// it divides, and dividing here made every notch a client heard about vanish.
+	m_Input->m_Pending120 = static_cast<double>(value120);
 }
 
 void NestedInput::Pointer::OnAxis(std::uint32_t, Wayland::WlPointerAxis axis, Wire::Fixed value)
