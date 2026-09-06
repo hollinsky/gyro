@@ -276,10 +276,20 @@ private:
 	// and at `MaxBuffers`, since a press can owe at most one readback per surface it is holding.
 	std::array<Pending, MaxBuffers> m_Pending{};
 
-	// How many of `m_Pending` a press armed. Written by the dispatch thread before any of the states
-	// leave `Idle` and read by the other two, so it needs no ordering of its own: a frame thread that
-	// saw a stale zero simply captures nothing, and the press it missed is the one the person is
-	// about to take again.
+	// How far into `m_Pending` the other two threads must scan.
+	//
+	// **Written by the dispatch thread and by nothing else**, which is not a detail of the ordering but
+	// the reason there is no race to order. It was a high-water mark the writer reset to zero when it
+	// found the table empty, and that made two threads decide a bound from scans neither could see the
+	// other start: a press arming an entry between the writer's scan and its reset had its bound
+	// zeroed, and a bound of zero is a frame thread that offers no window for readback and a keystroke
+	// that writes a picture with no buffers beside it.
+	//
+	// So `Request` recomputes it over the whole table instead. A writer that retires an entry after
+	// that read leaves the bound long by one, which costs a load; nothing can appear above it, because
+	// arming is the dispatch thread's own work. It stays at the last press's bound between presses
+	// rather than falling back to zero, which is a load and a compare on the frame thread for a table
+	// that is empty almost always — and the price of the reset was this bug.
 	std::atomic<std::size_t> m_PendingCount{ 0 };
 
 	// Which press a written buffer belongs to, so a directory holds one set per keystroke.

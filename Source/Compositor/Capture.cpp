@@ -241,12 +241,31 @@ std::size_t PamCapture::Request() noexcept
 				++armed;
 			}
 
-			// The high-water mark of entries the other two threads must scan, which only grows within a
-			// run and is reset by the writer when the table empties. Released after every store above.
-			if (armed > m_PendingCount.load(std::memory_order_relaxed))
+			// **The bound the other two threads scan to, computed here because this is the only thread
+			// that ever puts an entry into the table.** It was a high-water mark the writer reset when
+			// the table emptied, which is a check-then-act split across two threads: the writer decided
+			// *nothing is outstanding* from a scan bounded by a value it had already read, and a press
+			// that armed an entry in between had its bound overwritten with zero. The window was a few
+			// instructions wide and it cost a keystroke its buffers — the frame thread read a bound of
+			// nothing, so no window was ever offered for readback.
+			//
+			// A full pass rather than `armed`, because entries this press did not touch may still be
+			// owed: a `Filled` one the writer has not taken yet sits above whatever this press armed,
+			// and a bound that stopped at `armed` would strand it unwritten.
+			std::size_t bound = 0;
+
+			for (std::size_t index = 0; index < m_Pending.size(); ++index)
 			{
-				m_PendingCount.store(armed, std::memory_order_release);
+				if (m_Pending[index].State.load(std::memory_order_acquire) != Slot::Idle)
+				{
+					bound = index + 1;
+				}
 			}
+
+			// Racing the writer here is harmless in the one direction it can go: an entry it retires
+			// after this read leaves the bound a little long, and a scan of an `Idle` entry costs a
+			// load. Nothing can appear above it, because appearing is this thread's own work.
+			m_PendingCount.store(bound, std::memory_order_release);
 		}
 
 		m_Signal.fetch_add(1, std::memory_order_release);
@@ -459,7 +478,6 @@ void PamCapture::WriteBuffers()
 	// has not happened* rule the output slabs follow.
 	{
 		const std::size_t count = m_PendingCount.load(std::memory_order_acquire);
-		std::size_t outstanding = 0;
 
 		for (std::size_t index = 0; index < count; ++index)
 		{
@@ -496,21 +514,11 @@ void PamCapture::WriteBuffers()
 					// Still owed a frame, or being read right now. An entry stuck in `Armed` is a window
 					// the composite never sampled, and the next press takes it back rather than anything
 					// here waiting on it.
-					++outstanding;
-
 					break;
 				}
 				case Slot::Idle:
 					break;
 			}
-		}
-
-		if (outstanding == 0)
-		{
-			// Every entry is back, so the next press may arm the table. Released after the stores above
-			// rather than before, so a dispatch thread that reads zero here is reading a table nothing
-			// is left in.
-			m_PendingCount.store(0, std::memory_order_release);
 		}
 	}
 
@@ -596,6 +604,13 @@ void PamCapture::Write()
 
 	while (true)
 	{
+		// **Read before the scan below and not after it, which is the whole of the promise made to
+		// `Close`.** The scan is what finds a published capture, so a stop observed afterwards cannot
+		// say whether the pass that just ran happened before or after the publish it is racing. Taken
+		// first, a false here means the scan that follows it ran no earlier than this read, and the
+		// stop that arrives during it is one the *next* pass is guaranteed to scan for.
+		const bool stopping = m_Stopping.load(std::memory_order_acquire);
+
 		bool wrote = false;
 
 		{
@@ -650,10 +665,12 @@ void PamCapture::Write()
 			output.State.store(Slot::Idle, std::memory_order_release);
 		}
 
-		if (m_Stopping.load(std::memory_order_acquire))
+		if (stopping)
 		{
-			// One more pass on the way out, because a capture published between the last scan and the
-			// stop is one the join promised to write.
+			// Nothing was found by a scan that began after the stop was visible, so nothing is left to
+			// find: every publish `Close` promised to write happened before the flag it set, and this
+			// pass looked after reading it. A pass that did write goes round again, because a capture
+			// may have landed while it was writing the one before it.
 			if (!wrote)
 			{
 				return;
@@ -664,6 +681,10 @@ void PamCapture::Write()
 
 		if (!wrote)
 		{
+			// Safe against a stop that lands here rather than a wait nothing will wake: `Close` sets the
+			// flag and then bumps the counter, so a signal this misses is one whose value `seen` does not
+			// carry — and a signal it does carry is one whose stop the read at the top of the next pass
+			// is ordered to see.
 			m_Signal.wait(seen, std::memory_order_acquire);
 		}
 
