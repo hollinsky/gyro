@@ -209,7 +209,7 @@ Result<void> Bar::Open(Session& session, Launcher& launcher, std::uint32_t modif
 		return Failure(EPROTO, "declaring the run bar to be chrome");
 	}
 
-	m_Chrome.SetMaterial(Wayland::GyroChromeV1Material::Glass);
+	m_Chrome.SetMaterial(Wayland::GyroChromeV1Material::Smoke);
 	m_Window.SetTitle("gyro run bar");
 	m_Window.SetAppId("dev.gyro.shell");
 
