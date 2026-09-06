@@ -106,7 +106,7 @@ struct MotionParameters
 struct MotionTable
 {
 	MotionParameters Standard{ .Response = 0.40, .Damping = 1.00 };
-	MotionParameters Snappy{ .Response = 0.22, .Damping = 1.00 };
+	MotionParameters Snappy{ .Response = 0.128, .Damping = 1.00 };
 	MotionParameters Gentle{ .Response = 0.60, .Damping = 1.00 };
 	MotionParameters Expressive{ .Response = 0.55, .Damping = 0.68 };
 	MotionParameters Interactive{ .Response = 0.30, .Damping = 1.00 };

@@ -47,7 +47,7 @@ namespace
 // **Provisional, like the catalog entry it drives.** A tenth of the window over is a value for a
 // review with a screen in front of it rather than one derived from anything — small enough that what
 // the eye reads is a window settling rather than a window shrinking.
-inline constexpr float EntryScale = 1.1F;
+inline constexpr float EntryScale = 1.04F;
 
 // And where it is heading as it leaves, which is the other side of the same absence: the catalog says
 // scale and opacity at Snappy, and a target is not something a transition can hold.
@@ -57,7 +57,7 @@ inline constexpr float EntryScale = 1.1F;
 // window being pushed at the user on its way out, at the moment they have already decided they are
 // done with it. Docs/Animation.md#exit-pixels wants the opposite — a collapse toward where the window
 // came from — so it shrinks by the same tenth it arrived across.
-inline constexpr float ExitScale = 0.9F;
+inline constexpr float ExitScale = 0.96F;
 
 // A surface-local point rounded onto the grid a positioner works on.
 //
