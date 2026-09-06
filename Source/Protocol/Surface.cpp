@@ -493,7 +493,7 @@ void ClientSurface::OnAttach(Wayland::Server::WlBuffer buffer, std::int32_t x, s
 	// release for pixels gyro never looked at.
 	ReleaseStaged();
 
-	m_Attached = buffer;
+	m_Attached.emplace(buffer);
 
 	// The offset is surface state rather than buffer state, which is why it survives the attach being
 	// superseded: the protocol folded `attach`'s `x` and `y` into `wl_surface.offset` at version 5
@@ -853,7 +853,7 @@ void ClientSurface::ReleaseStaged() noexcept
 {
 	if (m_Attached.has_value() && m_Attached->IsValid())
 	{
-		m_Attached->Release();
+		m_Attached->Get().Release();
 	}
 
 	m_Attached.reset();
@@ -868,7 +868,7 @@ void ClientSurface::TakeContent(ITextures& textures)
 
 	// A client that attached nothing is taking its window off the screen. Everything else about the
 	// surface survives, which is what makes the next attach put it straight back.
-	ClientBuffer* const buffer = m_Attached->IsValid() ? ClientBuffer::Of(*m_Attached) : nullptr;
+	ClientBuffer* const buffer = m_Attached->IsValid() ? ClientBuffer::Of(m_Attached->Get()) : nullptr;
 
 	if (buffer != nullptr)
 	{

@@ -166,9 +166,11 @@ function(gyro_add_bindings TARGET)
 		set(SUBDIRECTORY Wayland/Server)
 		set(DIRECTION --server)
 
-		# The fault sink, written by the same run. Listed here rather than discovered, because a build
-		# rule that globbed its own outputs would be a rule that is right only after the first build.
+		# The fault sink and the weak resource, written by the same run. Listed here rather than
+		# discovered, because a build rule that globbed its own outputs would be a rule that is right
+		# only after the first build. `Weak.h` has no source beside it — it is a template.
 		list(APPEND OUTPUTS "${GENERATED}/${SUBDIRECTORY}/Fault.h" "${GENERATED}/${SUBDIRECTORY}/Fault.cpp")
+		list(APPEND OUTPUTS "${GENERATED}/${SUBDIRECTORY}/Weak.h")
 		list(APPEND SOURCES "${GENERATED}/${SUBDIRECTORY}/Fault.cpp")
 	else()
 		set(SUBDIRECTORY Wayland)

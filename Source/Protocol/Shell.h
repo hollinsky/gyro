@@ -14,6 +14,7 @@
 #include "Protocol/Seat.h"
 #include "Protocol/Surface.h"
 #include "Wayland/Server/Wayland.h"
+#include "Wayland/Server/Weak.h"
 #include "Wayland/Server/XdgShell.h"
 #include "World/Material.h"
 
@@ -648,7 +649,7 @@ public:
 	void SyncPopups();
 
 	// The `xdg_wm_base` this surface came from, for the errors that belong to that interface.
-	[[nodiscard]] Wayland::Server::XdgWmBase Base() const noexcept { return m_Base; }
+	[[nodiscard]] Wayland::Server::XdgWmBase Base() const noexcept { return m_Base.Get(); }
 
 private:
 	// Turn a committed surface into a window, or update the one that is already there.
@@ -673,7 +674,12 @@ private:
 
 	HostContext* m_Context = nullptr;
 
-	Wayland::Server::XdgWmBase m_Base;
+	// The `xdg_wm_base` this surface was made from, and weak for the same reason `ClientSurface`'s
+	// staged buffer is: it outlives the request that named it, and the protocol's own answer to a
+	// client destroying it out from under a live surface — `defunct_surfaces` — is not enforced here
+	// yet. Until it is, an empty one is four protocol errors that go unsent rather than four sent
+	// through freed memory.
+	Wayland::Server::Weak<Wayland::Server::XdgWmBase> m_Base;
 
 	// The surface this role was taken on, or null once it has gone. Not owned.
 	ClientSurface* m_Surface = nullptr;

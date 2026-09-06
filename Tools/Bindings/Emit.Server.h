@@ -29,6 +29,10 @@
 [[nodiscard]] EmittedFile EmitFaultHeader();
 [[nodiscard]] EmittedFile EmitFaultSource();
 
+// The weak resource, likewise one file for the whole set: it is a template over the resource
+// classes rather than anything a single protocol owns.
+[[nodiscard]] EmittedFile EmitWeakHeader();
+
 // The header for one protocol: resources, handlers, and the enumerations both sides share.
 [[nodiscard]] std::string EmitServerHeader(
 	const ProtocolSource& source,

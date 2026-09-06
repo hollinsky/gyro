@@ -785,7 +785,7 @@ ClientXdgSurface::OnGetPopup(Wayland::Server::XdgSurface parent, Wayland::Server
 
 	if (rules == nullptr)
 	{
-		m_Base.PostError(
+		m_Base.Get().PostError(
 			Wayland::Server::XdgWmBaseError::InvalidPositioner,
 			"xdg_surface.get_popup with something that is not an xdg_positioner"
 		);
@@ -800,7 +800,7 @@ ClientXdgSurface::OnGetPopup(Wayland::Server::XdgSurface parent, Wayland::Server
 	// This is the first moment the compositor is allowed to have an opinion about it.
 	if (!placement.IsComplete())
 	{
-		m_Base.PostError(
+		m_Base.Get().PostError(
 			Wayland::Server::XdgWmBaseError::InvalidPositioner,
 			"xdg_surface.get_popup with a positioner that has no size or no anchor rectangle"
 		);
@@ -815,7 +815,7 @@ ClientXdgSurface::OnGetPopup(Wayland::Server::XdgSurface parent, Wayland::Server
 
 	if (anchor == nullptr)
 	{
-		m_Base.PostError(
+		m_Base.Get().PostError(
 			Wayland::Server::XdgWmBaseError::InvalidPopupParent,
 			"xdg_surface.get_popup with a parent that is not an xdg_surface this compositor made"
 		);
@@ -832,7 +832,7 @@ ClientXdgSurface::OnGetPopup(Wayland::Server::XdgSurface parent, Wayland::Server
 	if (ClientXdgPopup* const topmost = m_Context->Popups().Topmost();
 	    topmost != nullptr && anchored != topmost->Surface())
 	{
-		m_Base.PostError(
+		m_Base.Get().PostError(
 			Wayland::Server::XdgWmBaseError::NotTheTopmostPopup,
 			"xdg_surface.get_popup while a grabbing popup that is not the parent is open"
 		);

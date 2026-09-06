@@ -8,6 +8,7 @@
 #include "Protocol/Sync.h"
 #include "Wayland/Server/LinuxDrmSyncobjV1.h"
 #include "Wayland/Server/Wayland.h"
+#include "Wayland/Server/Weak.h"
 
 struct wl_event_source;
 
@@ -133,7 +134,7 @@ public:
 	//
 	// False having ended the client, which is what every error in this protocol is.
 	[[nodiscard]] bool TakeCommit(
-		const std::optional<Wayland::Server::WlBuffer>& attached,
+		const std::optional<Wayland::Server::Weak<Wayland::Server::WlBuffer>>& attached,
 		SyncTimelinePoint& acquire,
 		SyncTimelinePoint& release
 	);

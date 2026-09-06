@@ -918,6 +918,56 @@ GYRO_TEST(ProtocolRoundTrip, EveryAttachedFrameIsANewIdAndRetiresTheOneItReplace
 	GYRO_CHECK_EQ(drawn.Released.Released, std::uint32_t{ 2 });
 }
 
+GYRO_TEST(ProtocolRoundTrip, ABufferDestroyedWhileStagedIsNotReleasedAfterwards)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-stale-attach" };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	DrawnSurface drawn;
+	GYRO_REQUIRE(Draw(bound, drawn, std::byte{ 0x41 }));
+
+	BufferEvents secondReleased;
+	const Wayland::WlBuffer second =
+		drawn.Pool.CreateBuffer(Stride * Height, Width, Height, Stride, Wayland::WlShmFormat::Argb8888, secondReleased);
+
+	GYRO_REQUIRE(second.IsValid());
+
+	// **Staged and then destroyed, with no commit in between**, which is the whole of the case. The
+	// attach is the only resource a surface keeps across a return to the event loop, and the protocol
+	// lets a client destroy a buffer it has attached and not committed — a toolkit that reallocates
+	// mid-drag does it on every size it passes through.
+	drawn.Surface.Attach(drawn.Buffer, 0, 0);
+	drawn.Buffer.Destroy();
+
+	// **The region is the point of the test and not scenery.** libwayland frees the `wl_resource` on
+	// destroy and the allocator hands the same block to the next object this client asks for, so the
+	// stale pointer stops being null and starts naming a live object of another interface. A
+	// `wl_buffer.release` sent through it reached a `wl_region`, whose interface has no events, and
+	// took the compositor down — every client of every user with it.
+	const Wayland::WlRegion recycled = bound.Compositor.CreateRegion();
+	GYRO_REQUIRE(recycled.IsValid());
+
+	// The superseding attach, which is what calls the release the buffer no longer exists to hear.
+	drawn.Surface.Attach(second, 0, 0);
+	drawn.Surface.DamageBuffer(0, 0, Width, Height);
+	drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// The surviving buffer went through, which says the surface recovered rather than merely failing
+	// to crash: one adoption, and the release for it back on the buffer that is still there.
+	GYRO_CHECK_EQ(pair.Textures.Adopted, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(secondReleased.Released, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(drawn.Released.Released, std::uint32_t{ 0 });
+}
+
 GYRO_TEST(ProtocolRoundTrip, AttachingNothingTakesTheContentAway)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());

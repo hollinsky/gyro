@@ -98,7 +98,7 @@ void ClientSyncSurface::OnSetReleasePoint(
 }
 
 bool ClientSyncSurface::TakeCommit(
-	const std::optional<Wayland::Server::WlBuffer>& attached,
+	const std::optional<Wayland::Server::Weak<Wayland::Server::WlBuffer>>& attached,
 	SyncTimelinePoint& acquire,
 	SyncTimelinePoint& release
 )
@@ -128,7 +128,7 @@ bool ClientSyncSurface::TakeCommit(
 	// of the two it has to change, and told it at the commit rather than at the request — the protocol
 	// puts the check here for the reason it puts the other three here, that a buffer may legally be
 	// described before it is attached.
-	const ClientBuffer* const buffer = ClientBuffer::Of(*attached);
+	const ClientBuffer* const buffer = ClientBuffer::Of(attached->Get());
 
 	if (buffer == nullptr || !buffer->SupportsExplicitSync())
 	{

@@ -12,6 +12,7 @@
 #include "Protocol/Region.h"
 #include "Protocol/Sync.h"
 #include "Wayland/Server/Wayland.h"
+#include "Wayland/Server/Weak.h"
 
 class ClientPresentationFeedback;
 class ClientBuffer;
@@ -626,7 +627,13 @@ private:
 	// resource inside it is the buffer**, which is not the same question: attaching nothing is a client
 	// taking its window off the screen and has to be told apart from a commit that did not attach at
 	// all, which keeps whatever was there.
-	std::optional<Wayland::Server::WlBuffer> m_Attached;
+	//
+	// **Weak, because this is the one resource on this surface that outlives the request that named
+	// it.** An attach stages a buffer and the commit that consumes it may be several requests later,
+	// and a client is entitled to destroy the buffer in between — at which point libwayland frees the
+	// resource and hands the block back for whatever that client makes next. A raw resource here was a
+	// `wl_buffer.release` sent to a `wl_region`.
+	std::optional<Wayland::Server::Weak<Wayland::Server::WlBuffer>> m_Attached;
 
 	SurfaceState m_Pending;
 	SurfaceState m_Current;

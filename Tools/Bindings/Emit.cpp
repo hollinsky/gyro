@@ -412,6 +412,7 @@ Emit(std::span<const ProtocolSource> protocols, Direction direction, EmitDiagnos
 	{
 		files.push_back(EmitFaultHeader());
 		files.push_back(EmitFaultSource());
+		files.push_back(EmitWeakHeader());
 	}
 
 	for (std::size_t index = 0; index < protocols.size(); ++index)
