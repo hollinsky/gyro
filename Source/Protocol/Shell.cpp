@@ -37,6 +37,18 @@ namespace
 	return client == nullptr ? 0U : wl_display_next_serial(wl_client_get_display(client));
 }
 
+// Where a window's scale channel starts on the frame it arrives, and the one number the entrance
+// needs that the catalog cannot hold. Transition::WindowOpen says *scale and opacity, at this
+// pacing*; it does not say what they are coming from, because a start value is model state and
+// Docs/Animation.md's declarative commit is built on the differ reading state rather than on a
+// transition carrying endpoints. So the displacement is written where the node is created and the
+// commit below simply says where everything is going.
+//
+// **Provisional, like the catalog entry it drives.** A fifth of the window over, arriving from
+// slightly too large, is a value for a review with a screen in front of it rather than one derived
+// from anything.
+inline constexpr float EntryScale = 1.2F;
+
 // A surface-local point rounded onto the grid a positioner works on.
 //
 // **Nearest rather than outward**, because what is being converted is the edge of a screen and the
@@ -1119,7 +1131,29 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 
 	if (mapping)
 	{
-		const std::optional<EntityId> window = scene->CreateContainer(container, { .Extent = natural });
+		// **The window is created already displaced, and that is the entrance's start value rather than a
+		// state anybody sees.** `NodeProperties` is what the author would have set had it been asked (89),
+		// so this is where a scale of EntryScale and an opacity of zero belong; the commit below retargets
+		// both under Transition::WindowOpen and the differ springs from here to there. Nothing publishes
+		// between the two, so no frame is ever drawn with a window at a fifth over size — and under
+		// reduced motion the scale is snapped instead of sprung, which lands it at one in the same
+		// iteration rather than leaving a window stuck too large.
+		//
+		// **The fixed point is the window's middle, and it is a stand-in.** The catalog anchors a window
+		// entrance at the summon point, and nothing routes one: no part of gyro knows today what the user
+		// clicked to make this window, the same absence decision 141 names
+		// when it stamps a placement with the window's arrival because nothing routed it. Growing
+		// out of the corner is the alternative and it is visibly wrong — a window that unfolds from its
+		// own top-left reads as a layout glitch rather than as an entrance — so it settles toward the
+		// middle until there is a summon point to settle toward. With the scale at rest the anchor is
+		// arithmetically inert, so it costs nothing on every window that is merely sitting there.
+		const std::optional<EntityId> window = scene->CreateContainer(
+			container,
+			{ .Scale = { EntryScale, EntryScale, 1.0F },
+		      .Anchor = { natural.Width / 2.0F, natural.Height / 2.0F, 0.0F },
+		      .Extent = natural,
+		      .Opacity = 0.0F }
+		);
 
 		if (!window)
 		{
@@ -1230,9 +1264,29 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		// client asked for — decision 141 has the Floorplanner author it, stamped with the arrival of
 		// the window because nothing routed it and there is no earlier moment an entrance could point
 		// at. Commits do not nest, so the client's closes above before this opens.
-		SceneCommit placement{ *scene, CommitAuthor::Compositor, scene->Now(), Transition::None };
+		const Instant arrival = scene->Now();
 
-		PlaceOnFloor(placement, *scene, m_Context->Session(client), m_Window, natural);
+		{
+			SceneCommit placement{ *scene, CommitAuthor::Compositor, arrival, Transition::None };
+
+			PlaceOnFloor(placement, *scene, m_Context->Session(client), m_Window, natural);
+		}
+
+		// **And the entrance, which is a third transaction because it is a different sentence about the
+		// same moment.** The placement above is not animated and must not be: Transition::WindowOpen is
+		// silent about translation on purpose — a window that grew *and* slid would have to slide from
+		// somewhere, and nothing in the model says where — and a channel a transition is silent about is
+		// a channel a write to it does not reach. So the position lands and the window then arrives at
+		// it, both stamped with the same instant, because a person opened one window rather than two
+		// things happening to it.
+		//
+		// Nothing here names a motion or a channel. The transition is the whole of what this says, which
+		// is Docs/Animation.md's declarative commit: a fifth animatable channel is added to the catalog
+		// entry and every window in the system starts using it without this line changing.
+		SceneCommit entrance{ *scene, CommitAuthor::Compositor, arrival, Transition::WindowOpen };
+
+		static_cast<void>(entrance.Scale(m_Window, { 1.0F, 1.0F, 1.0F }));
+		static_cast<void>(entrance.Fade(m_Window, 1.0F));
 	}
 	else if (m_Popup == nullptr && m_Context->Drag().IsResizing() && m_Context->Drag().Window() == m_Window)
 	{

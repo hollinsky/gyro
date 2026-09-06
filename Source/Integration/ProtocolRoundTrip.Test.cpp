@@ -1493,6 +1493,70 @@ GYRO_TEST(ProtocolRoundTrip, AnAcknowledgedFrameBecomesAWindowCentredOnTheOutput
 	GYRO_CHECK_EQ(content->Extent.Width, static_cast<float>(Width));
 }
 
+// **A window arrives rather than appears.** The frame a client's first buffer lands on, the window is
+// already where it belongs and is still on its way to its size and its opacity — which is what a
+// person sees as an application opening instead of a rectangle that was suddenly there.
+//
+// The test is here rather than beside the shell because the claim spans both: a client did nothing
+// but attach a buffer, and gyro authored the entrance. Nothing in the sequence below asks for motion.
+GYRO_TEST(ProtocolRoundTrip, AWindowThatMapsIsOnItsWayInRatherThanSimplyThere)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-entrance" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x71 }));
+
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.DamageBuffer(0, 0, Width, Height);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	const Entity* const window = WindowNode(pair.Store);
+	GYRO_REQUIRE(window != nullptr);
+
+	// **The placement is not sprung, and that is the half a transition cannot express by animating.**
+	// Transition::WindowOpen is silent about translation on purpose — a window that slid in would have
+	// to slide from somewhere, and nothing in the model says where — so the window is at its centred
+	// position on its first frame rather than travelling to it.
+	GYRO_CHECK(window->Translation.IsAtRest());
+	GYRO_CHECK_EQ(window->Translation.Model().X, (1920.0 - static_cast<double>(Width)) / 2.0);
+
+	// And the two channels the catalog does name are in flight, heading for what a settled window is.
+	GYRO_CHECK(!window->Scale.IsAtRest());
+	GYRO_CHECK(!window->Opacity.IsAtRest());
+	GYRO_CHECK_EQ(window->Scale.Model().X, 1.0F);
+	GYRO_CHECK_EQ(window->Opacity.Model(), 1.0F);
+
+	// Where they are coming *from* is the node's own state rather than anything the transition said,
+	// which is why it is worth reading back: at the instant it was stamped with, the window is over
+	// size and invisible, and every frame after that is the spring closing the gap.
+	GYRO_CHECK(window->Scale.Presentation(pair.Clock.Now()).X > 1.0F);
+	GYRO_CHECK_EQ(window->Opacity.Presentation(pair.Clock.Now()), 0.0F);
+
+	// The fixed point it grows around, which with no summon point to grow out of is its own middle. A
+	// zero here would be a window unfolding from its top-left corner.
+	GYRO_CHECK_EQ(window->Anchor.X, static_cast<float>(Width) / 2.0F);
+	GYRO_CHECK_EQ(window->Anchor.Y, static_cast<float>(Height) / 2.0F);
+}
+
 // **The bug this whole global exists for, end to end.** A client renders at twice the size and says so
 // with a viewport destination rather than a buffer scale — which is what Firefox does for the
 // subsurface its page is in, and what every toolkit does under a fractional scale, because
