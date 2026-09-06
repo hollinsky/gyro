@@ -139,6 +139,11 @@ public:
 			return Failure(EINVAL, "a scene with no outputs publishes a wake schedule nothing can read");
 		}
 
+		// **Before the outputs and not after, because an atlas is made when an output set arrives.**
+		// Decision 46 reserves exit storage at output configuration, so a store told about its texture
+		// space afterwards would have built the first set of atlases with nowhere to put pixels — and
+		// every window closing until the next hotplug would cut instead of fading.
+		m_Store.SetStorage(m_Textures);
 		m_Store.SetOutputs(outputs);
 
 		// **Before the author and not after, which is the whole of what makes it a background.** The

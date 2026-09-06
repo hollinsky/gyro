@@ -408,6 +408,16 @@ public:
 	// renumbers the set when it does, and a set that arrived one output at a time would have a moment
 	// in which it was neither the old set nor the new one — which is precisely the state decision 84's
 	// generation exists to make unreadable rather than to make brief.
+	// Where the exit atlases get their storage. Called once, before the first output set, by the party
+	// that holds both the store and the texture registry — `Dispatch/Loop.h`'s `Open`.
+	//
+	// **Not a constructor argument, because a store exists before a renderer does.** A clock is all a
+	// store needs; a texture space needs the composition root to have brought a device up. Left unset,
+	// the atlases pack rectangles and have nowhere to put pixels, which is what every test has and
+	// what a machine whose device refused the allocation has — and in both a closing window cuts
+	// rather than fading, per decision 46.
+	void SetStorage(ITextures& storage) noexcept { m_Atlases.Attach(&storage); }
+
 	void SetOutputs(std::span<const SceneOutput> outputs)
 	{
 		m_Outputs.assign(outputs.begin(), outputs.end());

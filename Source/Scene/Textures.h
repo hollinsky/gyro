@@ -166,6 +166,38 @@ public:
 	[[nodiscard]] virtual Result<TextureId>
 	Adopt(PixelSize<BufferSpace> size, std::uint32_t stride, std::span<const std::byte> pixels, TextureAlpha alpha) = 0;
 
+	// Give me an id naming storage of this size that gyro owns and nothing has drawn into yet.
+	//
+	// **The one verb here that takes no pixels, because the pixels are gyro's own to produce.** The
+	// snapshot atlas is the caller — a window that closes is drawn from a copy of its last frame, and
+	// Docs/Decisions.md decision 46 keeps those copies in one image per output allocated when that
+	// output is configured, because an image created at the moment a window closes is a stall on
+	// exactly the frame a person is watching something go away. Everything else here hands over pixels
+	// that already exist; this asks for room.
+	//
+	// **One id space and no second one**, per the header above and Core/Texture.h: a closing window's
+	// node goes on naming an id, and the id changing from the client's surface to a rectangle of the
+	// atlas is what makes an exit the same node rather than a different one.
+	//
+	// **Contents are undefined until something draws into them**, and they do not survive a device
+	// being replaced — decision 41 rebuilds the renderer on every boot and decision 46 drops the
+	// retiring set rather than preserving it, so an author gets an empty image back and no promise
+	// about what was in it.
+	//
+	// `EINVAL` for an extent that is not an image; `ENOSPC` where the id space is full; whatever the
+	// importer answered where it refused.
+	//
+	// **Answered by refusing where nothing implements it**, on the descriptor overload's terms: a
+	// texture space with nothing to draw into is an ordinary one, and what a refusal costs is that
+	// closing windows cut rather than fade — decision 46's own answer to running out of room, one step
+	// earlier.
+	[[nodiscard]] virtual Result<TextureId> Reserve(PixelSize<BufferSpace> size)
+	{
+		static_cast<void>(size);
+
+		return Failure(ENOTSUP, "this texture space has no storage of its own to give");
+	}
+
 	// Stop drawing this id. It stays valid for the frames already published that name it, and the
 	// registry is what waits — Seam/Importer.h's watermark rule is one party's to honour and this is not
 	// that party.

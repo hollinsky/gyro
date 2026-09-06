@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -185,6 +186,46 @@ public:
 	// memory kind, format, or modifier this importer cannot take. `ENOMEM` where the device or the
 	// table has no room. Both are the caller's to answer, and neither reaches a frame.
 	[[nodiscard]] virtual Result<void> Adopt(TextureId id, const TextureSource& source) = 0;
+
+	// Make `id` name storage this allocates, with nothing in it yet.
+	//
+	// **The compositor's own image rather than somebody else's memory, which is why it is a verb and
+	// not a third alternative in `TextureSource`.** Every case that variant carries is memory a caller
+	// already has and the importer binds to — a client's descriptors, a mapping the compositor
+	// uploaded — and the contract on all of it is that the memory stays the caller's. Here there is no
+	// caller's memory at all: the pixels do not exist until something draws them, and the party that
+	// allocates is the party that will be drawn into.
+	//
+	// **What wants this is Docs/Decisions.md decision 46's exit atlas.** A window that closes is drawn
+	// from a copy of its last frame (decision 20), the copies live in one image per output reserved
+	// when that output is configured, and *never* in an image created while a window is closing —
+	// decision 36 forbids a `vkCreateImage` on the frame path, and a menu dismissing is exactly the
+	// moment a person would see the stall it would cost. So the allocation happens here, on the
+	// dispatch thread, at the same moment the output set changes.
+	//
+	// **The storage must be both drawable into and samplable**, because a snapshot is written by the
+	// composite and read by the frames after it. An importer that can offer only one of those refuses.
+	//
+	// **Contents are undefined until something writes them, and are lost across a device rebuild.**
+	// Decision 41 destroys and recreates the renderer on every boot and decision 46 answers that by
+	// dropping the retiring set rather than preserving it — hard-settling the springs is entirely
+	// CPU-side and therefore survives a GPU that is gone. So a re-adoption of a reserved id is a fresh
+	// empty image, not a copy of what it held.
+	//
+	// **Refused by default, for the descriptor overload's reason one file over.** A texture space with
+	// nothing to draw into is an ordinary one rather than an incomplete one, and what a refusal costs
+	// is that closing windows cut instead of fading — which is decision 46's own answer to having no
+	// room, arriving one step earlier.
+	//
+	// `EINVAL` for a null id or an extent that is not an image. `ENOMEM` where the device or the table
+	// has no room.
+	[[nodiscard]] virtual Result<void> Reserve(TextureId id, PixelSize<BufferSpace> size)
+	{
+		static_cast<void>(id);
+		static_cast<void>(size);
+
+		return Failure(ENOTSUP, "this importer has nothing to allocate an image out of");
+	}
 
 	// Give up an id, and say nothing about one this does not hold — the same answer a frame gives one.
 	//

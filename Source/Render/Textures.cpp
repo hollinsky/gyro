@@ -385,6 +385,148 @@ Result<void> VulkanTextures::Adopt(TextureId id, const TextureSource& source)
 	return {};
 }
 
+Result<void> VulkanTextures::Reserve(TextureId id, PixelSize<BufferSpace> size)
+{
+	Sweep();
+
+	if (m_Device == nullptr || !m_Device->IsValid() || m_Pool == VK_NULL_HANDLE)
+	{
+		return Failure(ENODEV, "no device to allocate an image on");
+	}
+
+	if (id.IsNull())
+	{
+		return Failure(EINVAL, "storage cannot be allocated against a null id");
+	}
+
+	if (size.IsEmpty() || !size.IsValid())
+	{
+		return Failure(EINVAL, "an image with no extent");
+	}
+
+	// Premultiplied eight-bit, which is what a composite writes and what every item that samples the
+	// result already expects. The atlas holds pictures gyro drew rather than pixels a client chose a
+	// layout for, so there is no foreign fourcc to honour here and no modifier to relay — this image
+	// is never a descriptor anybody outside the device sees.
+	//
+	// **Built to one side and committed only once it is whole**, for `Adopt`'s reason: a reservation
+	// that failed halfway must leave whatever the id named before exactly as it was.
+	Image built{ .Id = id,
+		         .Handle = VK_NULL_HANDLE,
+		         .Memory = VK_NULL_HANDLE,
+		         .View = VK_NULL_HANDLE,
+		         .Set = VK_NULL_HANDLE,
+		         .Size = size,
+		         .Format = PixelFormat{ .Code = FormatArgb8888, .Modifier = ModifierInvalid },
+		         .Imported = false };
+
+	Image* const existing = Lookup(id);
+
+	if (existing == nullptr && m_Count >= MaxTextureImages)
+	{
+		return Failure(ENOMEM, "no room left in the texture table");
+	}
+
+	Result<void> allocated = ReserveStorage(built);
+
+	if (allocated)
+	{
+		allocated = Describe(built, built.Format);
+	}
+
+	if (!allocated)
+	{
+		Doomed partial{
+			.Handle = built.Handle, .Memory = built.Memory, .View = built.View, .Set = built.Set, .At = {}, .Count = 0
+		};
+
+		Release(partial);
+
+		return allocated;
+	}
+
+	if (existing != nullptr)
+	{
+		// The replacing case is a device rebuild coming back through `TextureRegistry::Rebind`, and what
+		// it produces is an empty atlas rather than the one that was there. Decision 46 drops the
+		// retiring set on device loss rather than preserving it, so the windows that were leaving finish
+		// early on the dispatch side and nothing samples the image that went with the old device.
+		Doom(*existing);
+		*existing = built;
+
+		return {};
+	}
+
+	m_Images[m_Count] = built;
+	++m_Count;
+
+	return {};
+}
+
+Result<void> VulkanTextures::ReserveStorage(Image& into)
+{
+	const auto width = static_cast<std::uint32_t>(into.Size.Width);
+	const auto height = static_cast<std::uint32_t>(into.Size.Height);
+
+	// **Drawn into and sampled from, which is the whole difference from every other image here.** A
+	// snapshot is written by one composite and read by the frames after it, so the storage has to be a
+	// colour attachment as well as a texture — and `TextureLayout` is `GENERAL` already, which is what
+	// lets one image be both without a transition between the two uses.
+	const VkImageCreateInfo imageInfo{ .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		                               .pNext = nullptr,
+		                               .flags = 0,
+		                               .imageType = VK_IMAGE_TYPE_2D,
+		                               .format = VulkanFormat(into.Format.Code),
+		                               .extent = { width, height, 1 },
+		                               .mipLevels = 1,
+		                               .arrayLayers = 1,
+		                               .samples = VK_SAMPLE_COUNT_1_BIT,
+		                               .tiling = VK_IMAGE_TILING_OPTIMAL,
+		                               .usage = SampledUsage | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+		                                        VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+		                               .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		                               .queueFamilyIndexCount = 0,
+		                               .pQueueFamilyIndices = nullptr,
+		                               .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+
+	if (Result<void> created =
+	        Check(vkCreateImage(m_Device->Handle(), &imageInfo, nullptr, &into.Handle), "vkCreateImage");
+	    !created)
+	{
+		return created;
+	}
+
+	VkMemoryRequirements requirements{};
+	vkGetImageMemoryRequirements(m_Device->Handle(), into.Handle, &requirements);
+
+	const std::uint32_t type = m_Device->MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+	if (type == MemoryTypeNone)
+	{
+		return Failure(ENOMEM, "no device-local memory type satisfies an image gyro draws into");
+	}
+
+	const VkMemoryAllocateInfo allocation{ .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		                                   .pNext = nullptr,
+		                                   .allocationSize = requirements.size,
+		                                   .memoryTypeIndex = type };
+
+	if (Result<void> reserved =
+	        Check(vkAllocateMemory(m_Device->Handle(), &allocation, nullptr, &into.Memory), "vkAllocateMemory");
+	    !reserved)
+	{
+		return reserved;
+	}
+
+	// **Left in `UNDEFINED` for the recording to move**, rather than transitioned here. Nothing has
+	// been written, so there are no contents for a transition to preserve — and the composite that
+	// captures into it is the party that knows which subregion it is about to write and in what order.
+	// A host transition here would also need `VK_EXT_host_image_copy`, which this path does not
+	// otherwise require: a device with no host image copy can still hold an exit atlas, and refusing
+	// one there would mean closing windows cut on hardware that could have faded them.
+	return Check(vkBindImageMemory(m_Device->Handle(), into.Handle, into.Memory, 0), "vkBindImageMemory");
+}
+
 Result<void> VulkanTextures::AdoptMapped(Image& into, const TextureSource& source)
 {
 	if (!m_Device->SupportsHostTexture(source.Format))

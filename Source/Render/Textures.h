@@ -182,6 +182,12 @@ public:
 	// message. `ENOMEM` where the device or the table has no room.
 	[[nodiscard]] Result<void> Adopt(TextureId id, const TextureSource& source) override;
 
+	// Decision 46's exit atlas, allocated here because it may not be allocated on the frame path.
+	//
+	// `EINVAL` for a null id or an extent that is not an image; `ENOMEM` where no device-local memory
+	// type takes a colour attachment, or where the table has no room.
+	[[nodiscard]] Result<void> Reserve(TextureId id, PixelSize<BufferSpace> size) override;
+
 	void Forget(TextureId id) noexcept override;
 
 	// A renderer that might be recording an image when it is given up. Registered by the composition
@@ -262,6 +268,10 @@ private:
 	[[nodiscard]] Result<void> AdoptMapped(Image& into, const TextureSource& source);
 
 	[[nodiscard]] Result<void> AdoptDmabuf(Image& into, const TextureSource& source);
+
+	// An empty image this device both draws into and samples from. The half of `AdoptMapped` that
+	// creates and binds, with no host copy after it because there is nothing yet to copy.
+	[[nodiscard]] Result<void> ReserveStorage(Image& into);
 
 	// The view and the descriptor set over an image both arms have already created and filled.
 	[[nodiscard]] Result<void> Describe(Image& into, PixelFormat format);

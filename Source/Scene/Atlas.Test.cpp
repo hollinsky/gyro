@@ -25,6 +25,51 @@ using Slot = PixelRect<BufferSpace>;
 		     .Grid = { 1000 * scale, 1000 * scale } };
 }
 
+// A texture space that mints ids and counts what is outstanding, standing in for
+// `Dispatch/Textures.h` — which is the real one and belongs to a module this may not name.
+class FakeStorage final : public ITextures
+{
+public:
+	using ITextures::Adopt;
+
+	[[nodiscard]] Result<TextureId>
+	Adopt(PixelSize<BufferSpace>, std::uint32_t, std::span<const std::byte>, TextureAlpha) override
+	{
+		return Failure(ENOTSUP, "this space takes no pixels");
+	}
+
+	[[nodiscard]] Result<TextureId> Reserve(PixelSize<BufferSpace> size) override
+	{
+		if (m_Refusing)
+		{
+			return Failure(ENOMEM, "this space is refusing");
+		}
+
+		const TextureId id{ m_Next++, 1 };
+
+		Live.push_back(id);
+		Allocated.push_back(size);
+
+		return id;
+	}
+
+	void Retire(TextureId id) noexcept override
+	{
+		std::erase(Live, id);
+		Retired.push_back(id);
+	}
+
+	void Refuse(bool refusing) noexcept { m_Refusing = refusing; }
+
+	std::vector<TextureId> Live;
+	std::vector<TextureId> Retired;
+	std::vector<PixelSize<BufferSpace>> Allocated;
+
+private:
+	std::uint32_t m_Next = 1;
+	bool m_Refusing = false;
+};
+
 // Whether two reservations overlap, which is the property every other test here is really about: a
 // packer that hands the same texels to two exits draws one window's pixels inside another's.
 [[nodiscard]] bool Overlaps(Slot left, Slot right) noexcept
@@ -359,4 +404,142 @@ GYRO_TEST(SceneAtlas, RetiringAWindowTakesItsRectangleAndFreeingItGivesItBack)
 
 	GYRO_CHECK(!store.IsLive(*window));
 	GYRO_CHECK(store.Atlases().IsEmpty());
+}
+
+// Decision 46 reserves exit storage when an output is configured, because an image created at the
+// moment a window closes is a stall on exactly the frame somebody is watching. These are the storage
+// half of that: one image per output, sized from the output's own render target, and given back the
+// moment the screen it belonged to changes shape or goes away.
+
+GYRO_TEST(ExitAtlases, EachScreenGetsAnImageTheSizeOfItsOwnAtlas)
+{
+	FakeStorage storage;
+	ExitAtlases atlases;
+
+	atlases.Attach(&storage);
+
+	const OutputId panel{ 1, 1 };
+	const OutputId monitor{ 2, 1 };
+	const std::array outputs{ Screen(panel, 0.0, 1), Screen(monitor, 1000.0, 2) };
+
+	atlases.Configure(outputs);
+
+	GYRO_REQUIRE_EQ(storage.Live.size(), std::size_t{ 2 });
+	GYRO_CHECK(!atlases.ImageOn(panel).IsNull());
+	GYRO_CHECK(!atlases.ImageOn(monitor).IsNull());
+	GYRO_CHECK(atlases.ImageOn(panel) != atlases.ImageOn(monitor));
+
+	// As wide as the screen and `AtlasRenderTargetMultiple` times as tall, in that screen's own texels
+	// — the scale-2 monitor's atlas is four times the area of the scale-1 panel's, because what has to
+	// fit in it is four times as many texels.
+	GYRO_CHECK(storage.Allocated[0] == PixelSize<BufferSpace>{ 1000, 1000 * AtlasRenderTargetMultiple });
+	GYRO_CHECK(storage.Allocated[1] == PixelSize<BufferSpace>{ 2000, 2000 * AtlasRenderTargetMultiple });
+}
+
+GYRO_TEST(ExitAtlases, AnAtlasKeptAcrossAHotplugKeepsItsImageAndOneUnpluggedGivesItBack)
+{
+	FakeStorage storage;
+	ExitAtlases atlases;
+
+	atlases.Attach(&storage);
+
+	const OutputId panel{ 1, 1 };
+	const OutputId monitor{ 2, 1 };
+	const std::array both{ Screen(panel, 0.0, 1), Screen(monitor, 1000.0, 2) };
+
+	atlases.Configure(both);
+
+	const TextureId kept = atlases.ImageOn(panel);
+	const TextureId lost = atlases.ImageOn(monitor);
+
+	const std::array alone{ Screen(panel, 0.0, 1) };
+
+	atlases.Configure(alone);
+
+	// The screen that is still there keeps the image it had, along with everything reserved in it. An
+	// allocation per hotplug would be thirty megabytes at 4K, on the thread that has a scene to
+	// serialise, every time somebody plugged in a monitor.
+	GYRO_CHECK(atlases.ImageOn(panel) == kept);
+	GYRO_CHECK(atlases.ImageOn(monitor).IsNull());
+
+	// And the one that went gave its image back rather than leaving it resident for a screen nobody can
+	// reserve on.
+	GYRO_REQUIRE_EQ(storage.Retired.size(), std::size_t{ 1 });
+	GYRO_CHECK(storage.Retired[0] == lost);
+	GYRO_CHECK_EQ(storage.Live.size(), std::size_t{ 1 });
+}
+
+GYRO_TEST(ExitAtlases, ChangingAnOutputsGridReplacesItsImageAlongWithItsRectangles)
+{
+	FakeStorage storage;
+	ExitAtlases atlases;
+
+	atlases.Attach(&storage);
+
+	const OutputId panel{ 1, 1 };
+	const std::array before{ Screen(panel, 0.0, 1) };
+
+	atlases.Configure(before);
+
+	const EntityId window{ 4, 1 };
+
+	GYRO_REQUIRE(atlases.Reserve(window, 0b1, { { 0.0, 0.0 }, { 200.0, 100.0 } }));
+
+	const TextureId old = atlases.ImageOn(panel);
+	const std::array after{ Screen(panel, 0.0, 2) };
+
+	atlases.Configure(after);
+
+	// A mode change is a new image and not a resized one, for the reason the rectangles are dropped
+	// with it: what was leaving was leaving on a screen that no longer has those dimensions, and its
+	// rectangle was in that screen's texels.
+	GYRO_CHECK(!atlases.ImageOn(panel).IsNull());
+	GYRO_CHECK(atlases.ImageOn(panel) != old);
+	GYRO_REQUIRE_EQ(storage.Retired.size(), std::size_t{ 1 });
+	GYRO_CHECK(storage.Retired[0] == old);
+	GYRO_CHECK(!atlases.SlotFor(window, panel).has_value());
+}
+
+GYRO_TEST(ExitAtlases, WithNowhereToPutThePixelsTheRectanglesAreStillPacked)
+{
+	FakeStorage storage;
+	ExitAtlases atlases;
+
+	storage.Refuse(true);
+	atlases.Attach(&storage);
+
+	const OutputId panel{ 1, 1 };
+	const std::array outputs{ Screen(panel, 0.0, 1) };
+
+	atlases.Configure(outputs);
+
+	const EntityId window{ 4, 1 };
+
+	// The packing is arithmetic and answers whether there would have been room; the image is what a
+	// device was willing to give. Keeping the first when the second fails is what lets the sizing
+	// question stay measurable on a machine whose driver refused the allocation — and a closing window
+	// cuts there, which is decision 46's answer to having no room, arriving one step earlier.
+	GYRO_CHECK(atlases.ImageOn(panel).IsNull());
+	GYRO_REQUIRE(atlases.Reserve(window, 0b1, { { 0.0, 0.0 }, { 200.0, 100.0 } }));
+	GYRO_CHECK(atlases.SlotFor(window, panel).has_value());
+	GYRO_CHECK(storage.Live.empty());
+}
+
+GYRO_TEST(ExitAtlases, WithNoTextureSpaceAtAllNothingIsAskedForAndNothingBreaks)
+{
+	ExitAtlases atlases;
+
+	const OutputId panel{ 1, 1 };
+	const std::array outputs{ Screen(panel, 0.0, 1) };
+
+	atlases.Configure(outputs);
+
+	const EntityId window{ 4, 1 };
+
+	GYRO_CHECK(atlases.ImageOn(panel).IsNull());
+	GYRO_REQUIRE(atlases.Reserve(window, 0b1, { { 0.0, 0.0 }, { 200.0, 100.0 } }));
+
+	atlases.Release(window);
+
+	GYRO_CHECK(atlases.IsEmpty());
 }

@@ -253,6 +253,54 @@ public:
 		return *id;
 	}
 
+	[[nodiscard]] Result<TextureId> Reserve(PixelSize<BufferSpace> size) override
+	{
+		if (size.IsEmpty() || !size.IsValid())
+		{
+			return Failure(EINVAL, "an image with no extent");
+		}
+
+		if (m_Importers.empty())
+		{
+			return Failure(ENODEV, "no renderer to allocate an image on");
+		}
+
+		const std::optional<TextureId> id = m_Ids.Allocate();
+
+		if (!id)
+		{
+			return Failure(ENOSPC, "the texture id space is exhausted");
+		}
+
+		if (m_Held.size() <= m_Ids.SlotCount())
+		{
+			m_Held.resize(m_Ids.SlotCount() + 1);
+		}
+
+		Held& held = m_Held[id->Index];
+
+		held = Held{};
+
+		held.Id = *id;
+		held.Size = size;
+		held.Storage = true;
+
+		if (const Result<void> allocated = Import(held); !allocated)
+		{
+			held = Held{};
+
+			static_cast<void>(m_Ids.Free(*id));
+
+			return std::unexpected{ allocated.error() };
+		}
+
+		// Not offered to the display engine, which is the one step an adoption takes and this does not.
+		// A scanout importer takes descriptors, and there are none here: the storage is the renderer's
+		// own image and there is nothing for a plane to point at.
+
+		return *id;
+	}
+
 	void Abandon(const ITextureRelease& release) noexcept override
 	{
 		for (Held& held : m_Held)
@@ -424,6 +472,12 @@ private:
 		// `Alpha` below is what the format is derived from instead.
 		PixelFormat Format{};
 
+		// Whether this is storage a renderer allocated rather than memory somebody else owns. Both
+		// vectors above are empty for one, which would be enough to tell them apart and would be telling
+		// them apart by an absence — and the two absences differ in what they mean to `Rebind`, which is
+		// where being wrong costs a device migration.
+		bool Storage = false;
+
 		// Who to tell when this is reclaimed, or null where nobody is owed anything. Borrowed, and cleared
 		// by `Abandon` where the party goes away first.
 		ITextureRelease* Release = nullptr;
@@ -560,13 +614,25 @@ private:
 		static_cast<void>(m_Scanout->Adopt(held.Id, Describe(held)));
 	}
 
+	// Put this id on every renderer, whichever of the two things it is.
+	//
+	// **The branch is the whole of what `Storage` marks.** An adopted image is memory somebody else
+	// owns and the renderers bind to it; a reserved one is memory a renderer allocates, so there is no
+	// source to describe and asking for one would hand every importer a `TextureSource` with no memory
+	// in it. `Rebind` runs through here too, which is what makes a device migration re-allocate an
+	// empty atlas rather than trying to restore pixels that are gone with the device — Docs/Decisions.md
+	// decision 46 drops the retiring set on device loss rather than preserving it, so an empty one back
+	// is the answer that decision already asked for.
 	[[nodiscard]] Result<void> Import(Held& held)
 	{
-		const TextureSource source = Describe(held);
+		const TextureSource source = held.Storage ? TextureSource{} : Describe(held);
 
 		for (std::size_t index = 0; index < m_Importers.size(); ++index)
 		{
-			if (const Result<void> imported = m_Importers[index]->Adopt(held.Id, source); !imported)
+			const Result<void> imported = held.Storage ? m_Importers[index]->Reserve(held.Id, held.Size) :
+			                                             m_Importers[index]->Adopt(held.Id, source);
+
+			if (!imported)
 			{
 				// Undo the ones that took it. A texture that exists on one renderer and not another is a
 				// window that is on one panel and missing from the other, which is worse than a refusal

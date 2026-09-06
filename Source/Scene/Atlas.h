@@ -13,6 +13,7 @@
 #include "Geometry/Scale.h"
 #include "Geometry/Space.h"
 #include "Scene/Output.h"
+#include "Scene/Textures.h"
 
 // Rectangle allocation inside one exit-snapshot atlas.
 //
@@ -291,6 +292,18 @@ inline constexpr std::int32_t AtlasRenderTargetMultiple = 2;
 class ExitAtlases
 {
 public:
+	// Where the storage comes from, or nothing.
+	//
+	// **A separate call rather than a constructor argument, because the two facts arrive at different
+	// moments.** A store exists as soon as there is a clock; a texture space exists once the
+	// composition root has a renderer to put images on. `Dispatch/Loop.h` has both in hand at `Open`
+	// and says so there, once, before the first output set.
+	//
+	// Null is legal and is what a store in a test has: no storage, so no atlas image, so a closing
+	// window cuts rather than fading. That is decision 46's answer to having no room, and it is the
+	// same answer whether the room ran out or was never there.
+	void Attach(ITextures* storage) noexcept { m_Storage = storage; }
+
 	// Take up an output set. Atlases for outputs that are still here with the same grid are kept along
 	// with what is reserved in them; everything else goes.
 	//
@@ -318,9 +331,28 @@ public:
 			if (existing != nullptr)
 			{
 				m_Replaced.push_back(output.Id);
+				Give(existing->Image);
 			}
 
-			m_Kept.push_back(Atlas{ .Output = output.Id, .Packer = ShelfPacker{ extent }, .Density = output.Density });
+			m_Kept.push_back(
+				Atlas{ .Output = output.Id,
+			           .Packer = ShelfPacker{ extent },
+			           .Density = output.Density,
+			           .Image = Take(extent) }
+			);
+		}
+
+		// An old atlas whose output is not in the new set is a monitor that has gone, and its image goes
+		// with it — thirty megabytes at 4K, held for a screen nobody can reserve on. A replaced one was
+		// already given up above, where its output was found and its shape was not.
+		for (const Atlas& atlas : m_Atlases)
+		{
+			const auto survives = [&atlas](const Atlas& kept) { return kept.Output == atlas.Output; };
+
+			if (std::find_if(m_Kept.begin(), m_Kept.end(), survives) == m_Kept.end())
+			{
+				Give(atlas.Image);
+			}
 		}
 
 		m_Atlases.swap(m_Kept);
@@ -418,6 +450,19 @@ public:
 		return {};
 	}
 
+	// The image this output's rectangles are in, or null where there is none.
+	//
+	// **Not folded into `SlotFor`, because the two answers become available at different times.** A
+	// rectangle is reserved the instant a window is observed to be closing; the pixels in it do not
+	// exist until a later frame has room to copy them. A caller that got both together would have
+	// every reason to think it could draw one.
+	[[nodiscard]] TextureId ImageOn(OutputId output) const noexcept
+	{
+		const Atlas* const atlas = Find(output);
+
+		return atlas == nullptr ? TextureId{} : atlas->Image;
+	}
+
 	[[nodiscard]] std::size_t Count() const noexcept { return m_Slots.size(); }
 
 	// The instrumentation Open.md's sizing question asks for, per output and in texels.
@@ -436,6 +481,11 @@ private:
 		OutputId Output{};
 		ShelfPacker Packer{};
 		Scale Density{};
+
+		// The storage the rectangles are in, or null where there is none — no texture space attached, or
+		// one that had nothing to give. A null image is an atlas that packs perfectly well and has
+		// nowhere to put the pixels, which is the same answer to a caller as a refused reservation.
+		TextureId Image{};
 	};
 
 	struct Slot
@@ -448,6 +498,29 @@ private:
 	// The atlas is as wide as the output and `AtlasRenderTargetMultiple` times as tall, which is the
 	// shape that makes the capacity statement true and keeps a maximised window able to fit: anything
 	// that was on the screen is no wider than the screen, so width is never the axis that refuses.
+	// Storage of this size, or null. Every refusal is the same refusal to everything above: no texture
+	// space, a texture space with no renderer behind it, a device with no room. What a person sees in
+	// all of them is a window that cuts instead of fading, which is decision 46's exhaustion answer.
+	[[nodiscard]] TextureId Take(PixelSize<BufferSpace> extent) noexcept
+	{
+		if (m_Storage == nullptr)
+		{
+			return {};
+		}
+
+		const Result<TextureId> image = m_Storage->Reserve(extent);
+
+		return image ? *image : TextureId{};
+	}
+
+	void Give(TextureId image) noexcept
+	{
+		if (m_Storage != nullptr && !image.IsNull())
+		{
+			m_Storage->Retire(image);
+		}
+	}
+
 	[[nodiscard]] static PixelSize<BufferSpace> ExtentFor(const SceneOutput& output) noexcept
 	{
 		return { output.Grid.Width, output.Grid.Height * AtlasRenderTargetMultiple };
@@ -480,6 +553,16 @@ private:
 	{
 		return const_cast<Atlas*>(static_cast<const ExitAtlases*>(this)->Find(output));
 	}
+
+	// **No destructor giving the images back, deliberately.** The texture space is the registry the
+	// dispatch loop holds beside the store, and it is destroyed *first* — so a release at teardown
+	// would be a call into a registry that has gone. What it would buy is nothing either: the ids and
+	// the images die with the registry a moment earlier. Storage is given back where it is actually
+	// lost, which is an output being reconfigured or unplugged while the process goes on running.
+
+	// Where an atlas image comes from. Borrowed, and outlives this — it is the registry the dispatch
+	// loop holds beside the store.
+	ITextures* m_Storage = nullptr;
 
 	std::vector<Atlas> m_Atlases;
 

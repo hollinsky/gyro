@@ -66,6 +66,24 @@ public:
 		}
 	}
 
+	[[nodiscard]] Result<void> Reserve(TextureId id, PixelSize<BufferSpace> size) override
+	{
+		if (m_Refusing)
+		{
+			return Failure(ENOMEM, "this importer is refusing");
+		}
+
+		if (id.IsNull() || size.IsEmpty())
+		{
+			return Failure(EINVAL, "an importer allocates against an id and an extent");
+		}
+
+		Held.push_back(id);
+		Allocated.push_back(size);
+
+		return {};
+	}
+
 	void Refuse(bool refusing) noexcept { m_Refusing = refusing; }
 
 	[[nodiscard]] bool Holds(TextureId id) const noexcept
@@ -83,6 +101,7 @@ public:
 
 	std::vector<TextureId> Held;
 	std::vector<TextureId> Forgotten;
+	std::vector<PixelSize<BufferSpace>> Allocated;
 
 private:
 	bool m_Refusing = false;
@@ -629,4 +648,94 @@ GYRO_TEST(Textures, AnImageThatCannotBeMappedStaysInGyrosOwnMemory)
 	GYRO_REQUIRE(adopted.has_value());
 	GYRO_CHECK(scanout.Offered.empty());
 	GYRO_CHECK(importer.Holds(*adopted));
+}
+
+// Decision 46's exit atlas needs storage gyro owns and nothing handed over, allocated where an
+// allocation is allowed to be slow. These are that verb: the id space is the same one, the renderers
+// all get it, and a device rebuild hands back an empty image rather than the pixels that went with
+// the old device.
+
+GYRO_TEST(DispatchTextures, StorageIsMintedFromTheSameIdSpaceAsEverythingElse)
+{
+	FakeImporter importer;
+	const std::array<ITextureImporter*, 1> importers{ &importer };
+	TextureRegistry textures{ importers };
+
+	const Result<TextureId> surface = textures.Adopt(Extent(), Stride, Pixels, TextureAlpha::Premultiplied);
+	const Result<TextureId> atlas = textures.Reserve({ 1920, 2160 });
+
+	GYRO_REQUIRE(surface && atlas);
+
+	// One id space and no second one, per Core/Texture.h: a closing window's node goes on naming an id
+	// while what it names changes from the client's surface to a rectangle of the atlas, and two spaces
+	// would make that a different node instead of the same one.
+	GYRO_CHECK(*surface != *atlas);
+	GYRO_CHECK(importer.Holds(*atlas));
+	GYRO_REQUIRE_EQ(importer.Allocated.size(), std::size_t{ 1 });
+	GYRO_CHECK(importer.Allocated[0] == PixelSize<BufferSpace>{ 1920, 2160 });
+
+	// And it retires on the same terms, which is what lets an output being unplugged give its atlas
+	// back through the machinery every other image already uses.
+	textures.Retire(*atlas);
+	textures.Seal(1);
+	textures.Reclaim(1);
+
+	GYRO_CHECK(!importer.Holds(*atlas));
+	GYRO_CHECK(importer.Holds(*surface));
+}
+
+GYRO_TEST(DispatchTextures, StorageNoRendererWillAllocateIsRefusedWholeRatherThanInPart)
+{
+	FakeImporter willing;
+	FakeImporter refusing;
+
+	refusing.Refuse(true);
+
+	const std::array<ITextureImporter*, 2> importers{ &willing, &refusing };
+	TextureRegistry textures{ importers };
+
+	const Result<TextureId> atlas = textures.Reserve({ 1920, 2160 });
+
+	GYRO_CHECK(!atlas.has_value());
+
+	// Undone on the one that took it, for an adoption's reason: an atlas that exists on one renderer
+	// and not another is a window that fades out on one panel and vanishes on the other.
+	GYRO_CHECK(willing.Held.empty());
+	GYRO_CHECK_EQ(willing.Forgotten.size(), std::size_t{ 1 });
+
+	// And the id went back, so a refused reservation costs the space nothing.
+	GYRO_CHECK_EQ(textures.Live(), 0U);
+}
+
+GYRO_TEST(DispatchTextures, ARebuiltRendererGetsAnEmptyAtlasRatherThanTheOldOnesPixels)
+{
+	FakeImporter before;
+	const std::array<ITextureImporter*, 1> first{ &before };
+	TextureRegistry textures{ first };
+
+	const Result<TextureId> atlas = textures.Reserve({ 1920, 2160 });
+
+	GYRO_REQUIRE(atlas);
+
+	FakeImporter after;
+	const std::array<ITextureImporter*, 1> second{ &after };
+
+	GYRO_REQUIRE(textures.Rebind(second).has_value());
+
+	// Allocated again rather than adopted from bytes the registry kept, which is the difference the
+	// `Storage` flag marks: there are no bytes to keep. Decision 46 drops the retiring set when a device
+	// goes, and the windows that were leaving hard-settle on the dispatch side — so an empty image is
+	// the right thing to come back with and nothing is left sampling the one that went with the device.
+	GYRO_CHECK(after.Holds(*atlas));
+	GYRO_REQUIRE_EQ(after.Allocated.size(), std::size_t{ 1 });
+	GYRO_CHECK(after.Allocated[0] == PixelSize<BufferSpace>{ 1920, 2160 });
+}
+
+GYRO_TEST(DispatchTextures, WithNoRendererThereIsNothingToAllocateOn)
+{
+	TextureRegistry textures{ {} };
+
+	GYRO_CHECK_EQ(textures.Reserve({ 1920, 2160 }).error().Code(), ENODEV);
+	GYRO_CHECK(!textures.Reserve({ 0, 0 }).has_value());
+	GYRO_CHECK_EQ(textures.Live(), 0U);
 }
