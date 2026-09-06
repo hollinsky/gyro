@@ -4,10 +4,12 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <fcntl.h>
+#include <linux/input-event-codes.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <xkbcommon/xkbcommon-keysyms.h>
 
 #include <algorithm>
 #include <array>
@@ -42,6 +44,7 @@
 #include "Scene/Textures.h"
 #include "Testing/Test.h"
 #include "Wayland/ExtForeignToplevelListV1.h"
+#include "Wayland/GyroBindingsV1.h"
 #include "Wayland/LinuxDmabufV1.h"
 #include "Wayland/PresentationTime.h"
 #include "Wayland/Viewporter.h"
@@ -5575,4 +5578,318 @@ GYRO_TEST(ProtocolRoundTrip, StoppingIsAnsweredAtOnceAndLeavesTheHandlesCurrent)
 	pair.Turn();
 
 	GYRO_CHECK(events.Handles.front()->Title == "after");
+}
+
+namespace
+{
+// One `gyro_binding_v1`, recording the presses it was told about and when they happened.
+class BindingEvents final : public Wayland::GyroBindingV1Listener
+{
+public:
+	void OnPressed(std::uint32_t tvSecHi, std::uint32_t tvSecLo, std::uint32_t tvNsec) override
+	{
+		++Presses;
+
+		Nanoseconds =
+			static_cast<std::int64_t>(((static_cast<std::uint64_t>(tvSecHi) << 32U) | tvSecLo) * 1'000'000'000U) +
+			static_cast<std::int64_t>(tvNsec);
+	}
+
+	std::uint32_t Presses = 0;
+	std::int64_t Nanoseconds = 0;
+};
+
+// A shell, a keyboard and a window on one connection, which is not how a session is arranged and is
+// what makes the assertion sharp: one client, one seat, and a key that has to arrive on one object
+// and not the other.
+struct Shell
+{
+	Wayland::GyroBindingsV1 Manager;
+	BindingEvents ChordEvents;
+	Wayland::GyroBindingV1 Chord;
+	Keyboard Keys;
+	Toplevel Window;
+};
+
+[[nodiscard]] bool Claim(Pair& pair, BoundCompositor& bound, Shell& shell, Wayland::GyroBindingsV1Modifier modifiers)
+{
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	if (!Listen(pair, bound, shell.Keys) || !Show(pair, bound, shell.Window, std::byte{ 0x40 }))
+	{
+		return false;
+	}
+
+	const Registry::Global* const global = bound.Listener.Find(Wayland::GyroBindingsV1::WireName);
+
+	if (global == nullptr)
+	{
+		return false;
+	}
+
+	// No listener, because the manager declares no events — the generated `Bind` has an overload for
+	// exactly that rather than a stub the call site has to invent.
+	shell.Manager = bound.Listener.Object().Bind<Wayland::GyroBindingsV1>(global->Name, global->Version);
+
+	if (!shell.Manager.IsValid())
+	{
+		return false;
+	}
+
+	shell.Chord = shell.Manager.Claim(modifiers, XKB_KEY_space, shell.ChordEvents);
+
+	pair.Turn();
+
+	return shell.Chord.IsValid() && shell.Keys.Listener.Entered == 1;
+}
+} // namespace
+
+GYRO_TEST(ProtocolRoundTrip, AnApplicationCannotClaimAKey)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-bindings-user" };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	// The tier from the far side of the socket, and this is the global whose leak would be the worst of
+	// the two gyro serves a shell: an application handed it takes a chord out of every other
+	// application's reach across the whole machine, and nothing on screen says where the keystroke went.
+	GYRO_CHECK(bound.Listener.Find(Wayland::GyroBindingsV1::WireName) == nullptr);
+
+	// The rest of the registry is untouched, which is the failure a filter is most likely to have.
+	GYRO_CHECK(bound.Listener.Find(Wayland::WlSeat::WireName) != nullptr);
+	GYRO_CHECK(bound.Listener.Find(Wayland::XdgWmBase::WireName) != nullptr);
+}
+
+GYRO_TEST(ProtocolRoundTrip, AClaimedChordReachesTheShellAndNotTheWindow)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-bindings-claim", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Shell shell;
+	GYRO_REQUIRE(Claim(pair, bound, shell, Wayland::GyroBindingsV1Modifier::Super));
+
+	const Instant when = pair.Clock.Now();
+
+	// **The modifier is pressed and counted before the chord is**, because `Super` is itself a key the
+	// window hears about — a chord swallows the key it names and never the modifiers held over it, which
+	// is why the baseline is taken here rather than above.
+	(*pair.Host)->OnKey(Press(KEY_LEFTMETA, true, when), false);
+
+	pair.Turn();
+
+	const std::uint32_t before = shell.Keys.Listener.Keys;
+
+	(*pair.Host)->OnKey(Press(KEY_SPACE, true, when), false);
+	(*pair.Host)->OnKey(Press(KEY_SPACE, false, when), false);
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(shell.ChordEvents.Presses, std::uint32_t{ 1 });
+
+	// **And the window received nothing**, which is the half a shell cannot check for itself. A chord
+	// that let the key through would open a launcher and type a space into whatever was behind it — and
+	// the release is swallowed with it, because a client that received only half a keystroke is a client
+	// holding a key down forever.
+	GYRO_CHECK_EQ(shell.Keys.Listener.Keys, before);
+
+	// **The modifier still went to the window**, and that is not an oversight. What is held down is a
+	// fact about a person's hands: a client told `Super` went down and never told it came up would read
+	// every keystroke afterwards as a shortcut.
+	GYRO_CHECK(shell.Keys.Listener.Modifiers > 0);
+
+	// The instant is the device's own, at nanosecond resolution — which is the point of the event rather
+	// than a detail of it, since it is the origin a shell stamps the animation it starts with.
+	GYRO_CHECK(shell.ChordEvents.Nanoseconds == Monotonic::ToNanoseconds(when));
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	(*pair.Host)->OnKey(Press(KEY_LEFTMETA, false, pair.Clock.Now()), false);
+}
+
+GYRO_TEST(ProtocolRoundTrip, AChordIsNotTheSameKeyWithAnotherModifierOnIt)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-bindings-exact", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Shell shell;
+	GYRO_REQUIRE(Claim(pair, bound, shell, Wayland::GyroBindingsV1Modifier::Super));
+
+	(*pair.Host)->OnKey(Press(KEY_LEFTMETA, true, pair.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(KEY_LEFTCTRL, true, pair.Clock.Now()), false);
+
+	pair.Turn();
+
+	const std::uint32_t before = shell.Keys.Listener.Keys;
+
+	(*pair.Host)->OnKey(Press(KEY_SPACE, true, pair.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(KEY_SPACE, false, pair.Clock.Now()), false);
+
+	pair.Turn();
+
+	// A subset match would be a shell shadowing every chord that contains one it claimed, and the
+	// application that wanted `Ctrl+Super+Space` would never receive a keystroke its author is sure it
+	// sent.
+	GYRO_CHECK_EQ(shell.ChordEvents.Presses, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(shell.Keys.Listener.Keys, before + 2);
+
+	(*pair.Host)->OnKey(Press(KEY_LEFTCTRL, false, pair.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(KEY_LEFTMETA, false, pair.Clock.Now()), false);
+}
+
+GYRO_TEST(ProtocolRoundTrip, AChordsReleaseIsSwallowedEvenWhenTheHandLetGoOfTheModifierFirst)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-bindings-release", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Shell shell;
+	GYRO_REQUIRE(Claim(pair, bound, shell, Wayland::GyroBindingsV1Modifier::Super));
+
+	(*pair.Host)->OnKey(Press(KEY_LEFTMETA, true, pair.Clock.Now()), false);
+
+	pair.Turn();
+
+	const std::uint32_t before = shell.Keys.Listener.Keys;
+
+	(*pair.Host)->OnKey(Press(KEY_SPACE, true, pair.Clock.Now()), false);
+
+	// **`Super` comes up before `Space` does**, which is what a hand does about half the time — and it is
+	// the case a release matched against the chord again would get wrong, because by then the modifiers
+	// no longer say `Super`. The window would receive a release for a press it never saw, which every
+	// toolkit turns into a key stuck down.
+	(*pair.Host)->OnKey(Press(KEY_LEFTMETA, false, pair.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(KEY_SPACE, false, pair.Clock.Now()), false);
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(shell.ChordEvents.Presses, std::uint32_t{ 1 });
+
+	// One, and it is the `Super` release rather than the `Space` one: a modifier is never swallowed,
+	// because what a person is holding is a fact the window has to be able to reconcile.
+	GYRO_CHECK_EQ(shell.Keys.Listener.Keys, before + 1);
+	GYRO_CHECK_EQ(shell.Keys.Listener.LastKey, std::uint32_t{ KEY_LEFTMETA });
+}
+
+GYRO_TEST(ProtocolRoundTrip, AChordTheShellGivesUpGoesBackToTheWindow)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-bindings-drop", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Shell shell;
+	GYRO_REQUIRE(Claim(pair, bound, shell, Wayland::GyroBindingsV1Modifier::Super));
+
+	shell.Chord.Destroy();
+
+	(*pair.Host)->OnKey(Press(KEY_LEFTMETA, true, pair.Clock.Now()), false);
+
+	pair.Turn();
+
+	const std::uint32_t before = shell.Keys.Listener.Keys;
+
+	(*pair.Host)->OnKey(Press(KEY_SPACE, true, pair.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(KEY_SPACE, false, pair.Clock.Now()), false);
+
+	pair.Turn();
+
+	// The key comes back the moment the shell gives it up. A binding whose object is gone and whose chord
+	// is still swallowed would be a key that stops working for the rest of the session with nothing to
+	// point at.
+	GYRO_CHECK_EQ(shell.ChordEvents.Presses, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(shell.Keys.Listener.Keys, before + 2);
+
+	(*pair.Host)->OnKey(Press(KEY_LEFTMETA, false, pair.Clock.Now()), false);
+}
+
+GYRO_TEST(ProtocolRoundTrip, DroppingTheManagerLeavesTheChordsItClaimed)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-bindings-manager", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Shell shell;
+	GYRO_REQUIRE(Claim(pair, bound, shell, Wayland::GyroBindingsV1Modifier::Super));
+
+	// A shell that has claimed everything it wants is entitled to drop the factory, and a chord that
+	// stopped working because of it would be a protocol nobody could use the way it reads.
+	shell.Manager.Destroy();
+
+	pair.Turn();
+
+	(*pair.Host)->OnKey(Press(KEY_LEFTMETA, true, pair.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(KEY_SPACE, true, pair.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(KEY_SPACE, false, pair.Clock.Now()), false);
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(shell.ChordEvents.Presses, std::uint32_t{ 1 });
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	(*pair.Host)->OnKey(Press(KEY_LEFTMETA, false, pair.Clock.Now()), false);
+}
+
+GYRO_TEST(ProtocolRoundTrip, TheCompositorsOwnKeysAreNotAShellsToClaim)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-bindings-leader", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Shell shell;
+	GYRO_REQUIRE(Claim(pair, bound, shell, Wayland::GyroBindingsV1Modifier::Super));
+
+	// A second chord on the leader itself. The composition root feeds every key to `Input::Chord` first
+	// and hands this host what is left, already marked — so `Ctrl+Alt+Esc` arrives here consumed, exactly
+	// as it does on a real run. gyro is a boot service holding the display with no virtual terminal
+	// behind it, and a shell that could take the way out is a shell whose crash takes the machine.
+	BindingEvents leader;
+	const Wayland::GyroBindingV1 claimed = shell.Manager.Claim(
+		Wayland::GyroBindingsV1Modifier::Control | Wayland::GyroBindingsV1Modifier::Alt, XKB_KEY_Escape, leader
+	);
+
+	GYRO_REQUIRE(claimed.IsValid());
+
+	pair.Turn();
+
+	(*pair.Host)->OnKey(Press(KEY_LEFTCTRL, true, pair.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(KEY_LEFTALT, true, pair.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(KEY_ESC, true, pair.Clock.Now()), true);
+
+	pair.Turn();
+
+	GYRO_CHECK_EQ(leader.Presses, std::uint32_t{ 0 });
+
+	(*pair.Host)->OnKey(Press(KEY_ESC, false, pair.Clock.Now()), true);
+	(*pair.Host)->OnKey(Press(KEY_LEFTALT, false, pair.Clock.Now()), false);
+	(*pair.Host)->OnKey(Press(KEY_LEFTCTRL, false, pair.Clock.Now()), false);
 }

@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="gyro_bindings_v1">
+
+  <copyright>
+    Copyright © 2026 Paul Hollinsky
+
+    Permission to use, copy, modify, distribute, and sell this
+    software and its documentation for any purpose is hereby granted
+    without fee, provided that the above copyright notice appear in
+    all copies and that both that copyright notice and this permission
+    notice appear in supporting documentation, and that the name of
+    the copyright holders not be used in advertising or publicity
+    pertaining to distribution of the software without specific,
+    written prior permission.  The copyright holders make no
+    representations about the suitability of this software for any
+    purpose.  It is provided "as is" without express or implied
+    warranty.
+
+    THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
+    SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+    FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
+    SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
+    AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+    ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+    THIS SOFTWARE.
+  </copyright>
+
+  <interface name="gyro_bindings_v1" version="1">
+    <description summary="keys the shell claims before any window sees them">
+      A shell declares the chords it answers to, once, and is told when one is
+      pressed. This is the seam that lets a shell open a launcher, an overview or
+      a switcher without gyro knowing what any of those are.
+
+      A key that matches a declared chord does not reach the surface that has the
+      keyboard. The compositor's own keys are matched first and cannot be claimed
+      here: gyro is a boot service holding the display with no virtual terminal
+      behind it, and the way out of it may not be something a client can take.
+
+      A chord is a keysym and a set of modifiers rather than a keycode, so that a
+      shell configured with the key a person sees printed on the key gets that
+      key under every layout. The keysym is the one the key produces at the first
+      shift level of the layout in effect, so a chord is written the way a person
+      would say it aloud - "super and space" - rather than as whatever character
+      the modifiers would have produced.
+
+      This is not a general shortcut service. Every object here belongs to a
+      client the compositor has granted the run of a session, and an application
+      is never offered this global.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager">
+        Destroys the manager. Bindings already created are unaffected and go on
+        being delivered until they are destroyed themselves.
+      </description>
+    </request>
+
+    <request name="claim">
+      <description summary="claim a chord">
+        Claims a chord and creates the object its presses arrive on.
+
+        Modifiers not named must not be held for the chord to match, so
+        "super and space" does not fire when control is also down. Modifiers that
+        are not one of the four - a lock, a layout switch - are not consulted at
+        all.
+
+        The same chord may be claimed more than once, by this client or another,
+        and every binding that matches is told. There is no ownership of a key
+        here and so no request that can fail because somebody else asked first:
+        a session with both a shell and a screen recorder in it is an ordinary
+        one, and refusing the second is a refusal the second party can do nothing
+        about.
+
+        A keysym that no key on the layout produces is accepted and never fires.
+        The layout is the compositor's to choose and may change under a binding
+        that was correct when it was made, so this cannot be an error.
+      </description>
+      <arg name="id" type="new_id" interface="gyro_binding_v1" summary="the object presses arrive on"/>
+      <arg name="modifiers" type="uint" enum="modifier" summary="the modifiers that must be held"/>
+      <arg name="keysym" type="uint" summary="the XKB keysym of the key itself"/>
+    </request>
+
+    <enum name="modifier" bitfield="true">
+      <description summary="the modifiers a chord can be written in terms of">
+        The four modifiers a person names when describing a shortcut. There is
+        deliberately no entry for a lock or for a layout group: a shortcut that
+        stopped working because caps lock was on would be one nobody could
+        diagnose.
+      </description>
+      <entry name="shift" value="1" summary="shift"/>
+      <entry name="control" value="2" summary="control"/>
+      <entry name="alt" value="4" summary="alt, which XKB calls mod1"/>
+      <entry name="super" value="8" summary="super, which XKB calls logo"/>
+    </enum>
+  </interface>
+
+  <interface name="gyro_binding_v1" version="1">
+    <description summary="one claimed chord">
+      A chord that has been claimed, and the object its presses arrive on. It
+      goes on delivering until the client destroys it.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="release the chord">
+        Releases the chord. The key reaches whatever has the keyboard from the
+        next press onward.
+      </description>
+    </request>
+
+    <event name="pressed">
+      <description summary="the chord was pressed">
+        The chord was pressed. The key did not reach the surface holding the
+        keyboard and no release will be sent for it either.
+
+        The timestamp is the instant the key transition was reported by the
+        input device, on CLOCK_MONOTONIC, and it is the point of this event
+        rather than a detail of it. It is the origin an animation the shell
+        starts should be stamped with: two clients reacting to the same press
+        name the same instant, so the compositor composes what they commit into
+        one gesture, and a commit that arrives a frame late renders already in
+        progress by exactly the right amount rather than starting from nothing.
+        A shell that stamped its own handling time instead would produce a
+        launcher that opens a little later on a busy machine, which is the
+        variability this whole design exists to remove.
+
+        It is sent at nanosecond resolution rather than the truncated
+        milliseconds wl_keyboard.key carries, for the same reason: a millisecond
+        is a fifteenth of a frame at 60Hz and a fortieth at 165Hz, and rounding
+        the origin is rounding where the animation starts.
+
+        There is no released event. A chord that a person holds - a switcher
+        walked with a modifier down - needs one and needs the modifier releases
+        that go with it, and neither is specified here yet.
+      </description>
+      <arg name="tv_sec_hi" type="uint" summary="high 32 bits of the seconds part of the timestamp"/>
+      <arg name="tv_sec_lo" type="uint" summary="low 32 bits of the seconds part of the timestamp"/>
+      <arg name="tv_nsec" type="uint" summary="nanoseconds part of the timestamp"/>
+    </event>
+  </interface>
+
+</protocol>

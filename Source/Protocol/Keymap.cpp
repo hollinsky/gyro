@@ -1,5 +1,6 @@
 #include "Protocol/Keymap.h"
 
+#include <xkbcommon/xkbcommon-keysyms.h>
 #include <xkbcommon/xkbcommon.h>
 
 #include <cerrno>
@@ -116,4 +117,71 @@ Keymap::Modifiers Keymap::Current() const noexcept
 		.Locked = ::xkb_state_serialize_mods(m_State, XKB_STATE_MODS_LOCKED),
 		.Group = ::xkb_state_serialize_layout(m_State, XKB_STATE_LAYOUT_EFFECTIVE),
 	};
+}
+
+KeyModifier Keymap::Held() const noexcept
+{
+	if (m_State == nullptr)
+	{
+		return KeyModifier::None;
+	}
+
+	// **`XKB_STATE_MODS_EFFECTIVE` rather than `DEPRESSED`**, which is the header's point: a latched
+	// modifier is one a person has arranged to have held for them, and a shortcut that ignored it would
+	// work for everyone except the people who turned sticky keys on.
+	const auto held = [this](const char* const name) noexcept {
+		return ::xkb_state_mod_name_is_active(m_State, name, XKB_STATE_MODS_EFFECTIVE) > 0;
+	};
+
+	KeyModifier modifiers = KeyModifier::None;
+
+	if (held(XKB_MOD_NAME_SHIFT))
+	{
+		modifiers = modifiers | KeyModifier::Shift;
+	}
+
+	if (held(XKB_MOD_NAME_CTRL))
+	{
+		modifiers = modifiers | KeyModifier::Control;
+	}
+
+	// XKB's own names for the two nobody spells the way they are printed: `Alt` is `Mod1` and `Super` is
+	// `Logo`, which is what every layout in xkeyboard-config binds them to.
+	if (held(XKB_MOD_NAME_ALT))
+	{
+		modifiers = modifiers | KeyModifier::Alt;
+	}
+
+	if (held(XKB_MOD_NAME_LOGO))
+	{
+		modifiers = modifiers | KeyModifier::Super;
+	}
+
+	return modifiers;
+}
+
+std::uint32_t Keymap::Keysym(std::uint32_t code) const noexcept
+{
+	if (m_Keymap == nullptr || m_State == nullptr)
+	{
+		return XKB_KEY_NoSymbol;
+	}
+
+	const xkb_keycode_t key = code + XkbKeycodeOffset;
+
+	// The group a person is typing in, asked of the state; the level is fixed at zero because the header
+	// says a chord names the key rather than the character it would produce.
+	const xkb_layout_index_t layout = ::xkb_state_key_get_layout(m_State, key);
+
+	if (layout == XKB_LAYOUT_INVALID)
+	{
+		return XKB_KEY_NoSymbol;
+	}
+
+	const xkb_keysym_t* symbols = nullptr;
+	const int count = ::xkb_keymap_key_get_syms_by_level(m_Keymap, key, layout, 0, &symbols);
+
+	// A key with more than one symbol at a level is a multi-symbol binding nothing on an ordinary
+	// keyboard has, and the first is the one a shortcut would be written against.
+	return count > 0 ? symbols[0] : XKB_KEY_NoSymbol;
 }

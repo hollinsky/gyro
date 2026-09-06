@@ -215,12 +215,27 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		return Failure(ENOMEM, "advertising ext_foreign_toplevel_list_v1");
 	}
 
+	m_BindingsGlobal = Wayland::Server::GyroBindingsV1::Advertise(*display, BindingsVersion, m_Bindings);
+
+	if (m_BindingsGlobal == nullptr)
+	{
+		// Fatal like the rest, and the failure it prevents is the quietest one here: a shell that came up
+		// without this binds nothing, is never summoned, and looks from the outside like a shell that
+		// simply did not start.
+		return Failure(ENOMEM, "advertising gyro_bindings_v1");
+	}
+
 	return {};
 }
 
 void ClientHost::OnKey(const KeyEvent& event, bool consumed)
 {
-	m_Seat.Key(event, consumed);
+	// **The keymap is read before the seat folds this key into it**, which is what makes a chord mean
+	// what a person's hands were doing: the modifiers held when `space` went down are the ones its own
+	// press has not yet changed. `Seat::Key` does the folding immediately below.
+	const bool claimed = !consumed && m_Bindings.Takes(event, m_Seat.Layout());
+
+	m_Seat.Key(event, consumed || claimed);
 }
 
 void ClientHost::OnFocusCycle(FocusCycle step)

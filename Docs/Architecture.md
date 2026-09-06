@@ -2475,8 +2475,8 @@ move — [Protocol/Tier.h](../Source/Protocol/Tier.h) is this list transcribed, 
   text-input and input-method, idle-inhibit.
 - **System tier** — screencopy and screencast, [virtual output
   registration](#virtual-outputs-and-why-remote-desktop-is-one), foreign-toplevel management,
-  layer-shell, output configuration, the lock protocol below, and [the shell's](#the-shell) own
-  scene, policy, and background protocols.
+  key bindings, layer-shell, output configuration, the lock protocol below, and
+  [the shell's](#the-shell) own scene, policy, and background protocols.
 
 The last two in the shared tier are there for a reason worth recording, because it is not the usual
 one. `wp_fifo_v1` and `wp_commit_timing_v1` are not advertised to give clients a throttling
@@ -2505,6 +2505,16 @@ where gyro takes listeners from session agents it binds none, because the bounda
 shell and the applications is real there and a socket in gyro's own directory does not express it.
 Who creates a *session's* System listener, where it lives and how a process is judged worthy of it
 remain [open](Open.md), and the shell is what makes that urgent rather than theoretical.
+
+**Two globals occupy the tier**, and between them they are what a shell needs to exist at all rather
+than a sample of the eventual list. `ext_foreign_toplevel_list_v1` says which windows there are;
+`gyro_bindings_v1` is the key that summons a shell, claimed once as a keysym and a modifier mask and
+answered with the instant the device reported the press —
+[decision 186](Decisions.md#186-a-shell-claims-a-chord-by-keysym-once-and-is-told-the-instant-the-key-was-pressed),
+and gyro's own protocol rather than an upstream one, since nothing upstream describes a compositor
+handing a key to a party it has already trusted. It is the sharpest case the tier exists for: an
+application given it takes a chord out of every other application's reach across the whole machine,
+and nothing on screen says where the keystroke went.
 
 ### Locking
 
@@ -2651,6 +2661,14 @@ A shell reaches all of this through the `System` tier of [filtered globals](#fil
 trust is a property of the listener rather than of the connection — so being the shell is something
 a process is granted at the socket it connects to, not something it claims. Which listener that is,
 and who decides who may use it, is [open](Open.md).
+
+**What it can already do is be summoned.** `gyro_bindings_v1` is the first verb of the shell
+interface: a chord claimed once as a keysym and a modifier mask, matched before the window in front of
+a person sees the key, and answered with the instant the *device* reported the press rather than the
+moment gyro got round to it — which is what lets two shell processes reacting to one keystroke stamp
+the same origin and have gyro compose their commits into one gesture. gyro's own keys are matched
+first and cannot be claimed, and a chord a person *holds* is not expressible yet, so the `Alt+Tab`
+stand-in below stays where it is.
 
 ### Declare, do not drive
 

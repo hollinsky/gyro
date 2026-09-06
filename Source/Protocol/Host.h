@@ -13,6 +13,7 @@
 #include "Core/Signal.h"
 #include "Core/Time.h"
 #include "Core/Wake.h"
+#include "Protocol/Bindings.h"
 #include "Protocol/Compositor.h"
 #include "Protocol/Context.h"
 #include "Protocol/Data.h"
@@ -206,6 +207,11 @@ public:
 	// call, because it is what holds both the devices and this host — and it calls it for a consumed key
 	// too, because the modifier state is a fact about a person's hands rather than about who is
 	// listening. [Seat.h](Seat.h) carries the routing.
+	//
+	// **A shell's claimed chords are matched here, between the compositor's own keys and the focused
+	// window's.** That order is the whole of the policy: gyro's escape hatch is not something a client
+	// can take, and a shell's shortcut is not something the application in front of a person can
+	// swallow. [Bindings.h](Bindings.h) carries why a chord is a keysym rather than a keycode.
 	void OnKey(const KeyEvent& event, bool consumed);
 
 	// One step of `Alt+Tab`, or the hand coming off `Alt`. The root's to call, because the chord that
@@ -336,6 +342,9 @@ private:
 
 	ForeignToplevelGlobal m_Foreign{ m_Context };
 	wl_global* m_ForeignGlobal = nullptr;
+
+	BindingsGlobal m_Bindings;
+	wl_global* m_BindingsGlobal = nullptr;
 
 	// One per session, each authored before its session's listener is taken and outliving every client
 	// on it. A development run has exactly one, whose session is `None`.

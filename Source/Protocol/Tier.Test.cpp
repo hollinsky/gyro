@@ -6,6 +6,7 @@
 
 #include "Testing/Test.h"
 #include "Wayland/Server/ExtForeignToplevelListV1.h"
+#include "Wayland/Server/GyroBindingsV1.h"
 #include "Wayland/Server/LinuxDmabufV1.h"
 #include "Wayland/Server/LinuxDrmSyncobjV1.h"
 #include "Wayland/Server/PresentationTime.h"
@@ -45,6 +46,7 @@ constexpr std::array Advertised{
 	Wayland::Server::WlDataDeviceManager::WireName,
 	Wayland::Server::WlSeat::WireName,
 	Wayland::Server::ExtForeignToplevelListV1::WireName,
+	Wayland::Server::GyroBindingsV1::WireName,
 };
 } // namespace
 
@@ -83,6 +85,19 @@ GYRO_TEST(Tier, TheWindowListIsTheShellsAndNotAnApplications)
 
 	GYRO_CHECK(!Visible(TierOf(Wayland::Server::ExtForeignToplevelListV1::WireName), Trust::User));
 	GYRO_CHECK(Visible(TierOf(Wayland::Server::ExtForeignToplevelListV1::WireName), Trust::System));
+}
+
+GYRO_TEST(Tier, TheKeysAShellClaimsAreNotAnApplicationsToTake)
+{
+	// The second occupant, and the one where the tier is doing the most work. An application handed this
+	// could claim a chord and take it out of every other application's reach across the whole machine —
+	// and unlike a window list, nothing it does with the keystroke is visible to the person whose key
+	// went missing.
+	GYRO_CHECK(Listed(Wayland::Server::GyroBindingsV1::WireName));
+	GYRO_CHECK(TierOf(Wayland::Server::GyroBindingsV1::WireName) == GlobalTier::System);
+
+	GYRO_CHECK(!Visible(TierOf(Wayland::Server::GyroBindingsV1::WireName), Trust::User));
+	GYRO_CHECK(Visible(TierOf(Wayland::Server::GyroBindingsV1::WireName), Trust::System));
 }
 
 GYRO_TEST(Tier, TheSeatAndTheDataDeviceAreSessionScopedAndStillAdvertised)

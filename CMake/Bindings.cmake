@@ -24,6 +24,13 @@
 # a `pkgdatadir`, and a distribution is entitled to put them anywhere; `/usr/share` is a guess that is
 # right until it is not, on the machine of whoever is least equipped to work out why.
 #
+# **There is a third root and it is the repository's own**, `Protocols/`, searched first. gyro serves
+# one protocol nobody else has written — the chords a shell claims — and a first-party document is not
+# subject to what a distribution happened to ship: searching it ahead of the two package directories
+# is what makes a `gyro_` name resolve to the file in this tree whatever is installed on the machine.
+# It is a directory rather than a file list because the second one will not be the last, and it sits
+# beside `Source/` rather than inside it because nothing in `Source/` is compiled from XML.
+#
 # **`libwayland-server` is found here rather than in Tools/Bindings.** The generator never links it —
 # it emits text — so the dependency belongs where the emitted text is compiled, which is this file and
 # the server target it declares.
@@ -33,6 +40,10 @@ include(ExternalProject)
 find_package(PkgConfig REQUIRED)
 pkg_get_variable(GYRO_WAYLAND_DATA_DIR wayland-scanner pkgdatadir)
 pkg_get_variable(GYRO_WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+
+# gyro's own, in this repository. Named absolutely because `gyro_add_bindings` is called from the top
+# level and a relative path would be read against whichever directory reached it.
+set(GYRO_FIRST_PARTY_PROTOCOLS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Protocols)
 
 # Named with the package to install, the way the liburing block in CMakeLists.txt is, and for the same
 # reason: the machine that hits this is a machine somebody is setting up and the fix is one command.
@@ -167,7 +178,7 @@ function(gyro_add_bindings TARGET)
 	foreach(PROTOCOL IN LISTS BINDINGS_PROTOCOLS)
 		set(FOUND "")
 
-		foreach(ROOT ${GYRO_WAYLAND_DATA_DIR} ${GYRO_WAYLAND_PROTOCOLS_DIR})
+		foreach(ROOT ${GYRO_FIRST_PARTY_PROTOCOLS_DIR} ${GYRO_WAYLAND_DATA_DIR} ${GYRO_WAYLAND_PROTOCOLS_DIR})
 			if(EXISTS "${ROOT}/${PROTOCOL}.xml")
 				set(FOUND "${ROOT}/${PROTOCOL}.xml")
 				break()
@@ -179,9 +190,11 @@ function(gyro_add_bindings TARGET)
 		# version behind. Both roots are named so the reader can see where it looked.
 		if(NOT FOUND)
 			message(FATAL_ERROR
-				"gyro_add_bindings(${TARGET}): ${PROTOCOL}.xml is in neither "
-				"${GYRO_WAYLAND_DATA_DIR} nor ${GYRO_WAYLAND_PROTOCOLS_DIR}. It arrives with "
-				"wayland-protocols; a distribution one release behind may not carry it yet."
+				"gyro_add_bindings(${TARGET}): ${PROTOCOL}.xml is in none of "
+				"${GYRO_FIRST_PARTY_PROTOCOLS_DIR}, ${GYRO_WAYLAND_DATA_DIR} or "
+				"${GYRO_WAYLAND_PROTOCOLS_DIR}. An upstream protocol arrives with wayland-protocols and "
+				"a distribution one release behind may not carry it yet; a gyro_ one is a file that "
+				"should be in this repository."
 			)
 		endif()
 

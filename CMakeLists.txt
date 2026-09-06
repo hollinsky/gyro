@@ -657,6 +657,12 @@ gyro_add_bindings(WaylandProtocols
 		stable/viewporter/viewporter
 		unstable/xdg-decoration/xdg-decoration-unstable-v1
 		staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1
+
+		# gyro's own, out of Protocols/ rather than out of a package directory. Named in the client list
+		# as well as the server one, and it is the first protocol where that is a test's doing rather
+		# than a nested output's: Integration/ProtocolRoundTrip.Test.cpp is what puts gyro's client codec
+		# in front of gyro's server, and a chord claimed over a real socket is checked nowhere else.
+		gyro-bindings-v1
 )
 
 # The typed server bindings, over libwayland — the other half of decision 2's split, and the wrapper
@@ -682,6 +688,12 @@ gyro_add_bindings(WaylandServerProtocols
 		stable/viewporter/viewporter
 		unstable/xdg-decoration/xdg-decoration-unstable-v1
 		staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1
+
+		# gyro's own, out of Protocols/ rather than out of a package directory. Named in the client list
+		# as well as the server one, and it is the first protocol where that is a test's doing rather
+		# than a nested output's: Integration/ProtocolRoundTrip.Test.cpp is what puts gyro's client codec
+		# in front of gyro's server, and a chord claimed over a real socket is checked nowhere else.
+		gyro-bindings-v1
 )
 
 # The CPU renderer, and PORTABLE is the load-bearing word here for a stronger reason than it is
@@ -992,6 +1004,7 @@ gyro_add_module(Protocol DISPATCH
 		Geometry
 		Scene
 	SOURCES
+		Bindings.cpp
 		Clipboard.cpp
 		Compositor.cpp
 		Data.cpp
@@ -1018,6 +1031,7 @@ gyro_add_module(Protocol DISPATCH
 		Tier.cpp
 		Viewporter.cpp
 	TESTS
+		Bindings.Test.cpp
 		Clipboard.Test.cpp
 		Dmabuf.Test.cpp
 		Drag.Test.cpp

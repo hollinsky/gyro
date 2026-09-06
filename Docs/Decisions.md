@@ -14589,3 +14589,129 @@ do it forever is not.
 letter, a keycode and an action in one row, asked by either — because two switches keyed on the same
 three verbs is how `s` comes to mean a screenshot from a keyboard and nothing from a pipe, six months
 after nobody is looking.
+
+### 186. A shell claims a chord by keysym, once, and is told the instant the key was pressed
+
+`gyro_bindings_v1` is gyro's own protocol and the first document in `Protocols/`. A client the
+compositor has granted the run of a session — a `Trust::System` connection, which today means the
+socket [decision 183](#183-gyro-binds-its-own-system-listener-beside-a-self-bound-socket-and-that-is-the-development-half-alone)
+binds — claims a chord as a keysym plus a modifier mask, and receives a `pressed` event carrying the
+instant the *device* reported the key, in seconds and nanoseconds. The key does not reach the surface
+holding the keyboard, and neither does its release.
+
+**This is the one thing a shell needs before it needs anything else.** A launcher, an overview and a
+switcher are three windows and one shared prerequisite: a key that summons them, taken before the
+application in front of a person sees it. Mapping a surface has xdg-shell, enumerating the windows has
+`ext_foreign_toplevel_list_v1`, and this had nothing — so a shell was a program with no way to be
+called. [Decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) makes window
+management a client's, and until now the client could not hear the key that starts it.
+
+#### Why gyro's own protocol
+
+Nothing upstream describes this. wayland-protocols has no shortcut protocol at all, and the
+compositor-specific ones that exist — Hyprland's global shortcuts, the desktop portals — are built
+for the *opposite* party: an ordinary application asking a desktop environment to route a key at it,
+which needs a registry of named actions, a permission prompt and a broker in the middle to decide
+whether the request is reasonable. Here the client is a shell the compositor has already trusted with
+the session. The whole of that question is answered before the first request arrives, and what is left
+is mechanism.
+
+So `Protocols/` is a directory beside `Source/`, searched ahead of the two package `pkgdatadir`s a
+protocol name resolves in — first, because a first-party document is not subject to what a
+distribution happened to ship.
+
+**Rejected: `wl_keyboard` on a System client, with the shell filtering.** It is the version with no new
+protocol in it, and it is wrong in both directions. A shell would need the keyboard focus to receive
+anything, which is the thing it is trying to take the key *away* from; and gyro would have no idea
+which keys the shell cared about, so it could not withhold one from the application underneath.
+
+#### A keysym, not a keycode
+
+[Decision 148](#148-input-is-a-source-the-dispatch-thread-drains-and-the-way-out-of-gyro-is-a-leader-chord)
+matches gyro's own escape hatch on keycodes so that the way out of a compositor holding DRM master
+with no VT behind it cannot be taken away by a keymap that failed to compile or a layout somebody
+selected. **That argument does not transfer, and reasoning by analogy from it was the tempting
+mistake.** A shell binding is not a way out of anything. It is a preference a person wrote down as
+*control, alt and t*, and matching it on a keycode gives the *position* `t` occupies on a US keyboard
+— which is `y` on Dvorak and `k` on a couple of others. The symptom is a terminal that opens from the
+wrong key, on somebody's machine, with nothing to point at.
+
+So the keysym is the one the key produces at **shift level zero of the layout in effect**. Level zero
+rather than the level the modifiers select, because that is what makes the two halves of a chord
+independent: a person writes *shift and 2*, not *at*, and the same physical key shifts to `"` on a
+German layout. A configuration file that had to be rewritten per layout for a shortcut described
+identically in both is the thing this avoids.
+
+The modifier mask is four values — shift, control, alt, super — and deliberately not XKB's eight. A
+lock and a layout group are not part of how anybody describes a shortcut, and a launcher that stopped
+opening because caps lock was on is a fault nobody diagnoses because nobody looks there. What *is*
+consulted is the **effective** state rather than the depressed one, so a modifier held by sticky keys
+counts: otherwise the feature works for everyone except the people who turned it on because holding
+two keys at once hurts.
+
+#### The match is exact, and every claimant fires
+
+A chord matches when the modifiers held are exactly the ones claimed. **Rejected: a subset match**,
+which is the natural way to write the comparison. Under it a shell claiming `Super+Space` also
+swallows `Ctrl+Super+Space`, and the application that wanted the second one never receives a keystroke
+its author is certain it sent — with nothing on screen to say where it went.
+
+Two clients may claim the same chord and both are told. There is no ownership of a key here and so no
+request that can fail because somebody else asked first: a session holding a shell and a screen
+recorder is an ordinary one, and refusing the second party is a refusal it can do nothing about, while
+a protocol error would end a client over something a person typed into a settings panel. Two claims on
+one chord is a shell's own bug and a shell's own to notice.
+
+#### The timestamp is the point of the event
+
+`pressed` carries seconds and nanoseconds rather than the truncated milliseconds `wl_keyboard.key`
+uses, and that is the reason the event exists in this shape rather than as a bare *it happened*.
+
+[Decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) makes `t₀` the input event's
+own instant rather than the moment of handling, and rests the whole several-clients design on it: two
+processes
+reacting to one press stamp the same origin, so gyro composes what they commit into one gesture, and a
+commit that arrives a frame late renders *already in progress* by exactly the right amount rather than
+starting from nothing. A shell that stamped its own handling time instead would open its launcher a
+little later on a busy machine — which is precisely the variability
+[decision 49](#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot)'s
+consistency argument and this compositor's whole premise exist to remove. A millisecond is a fifteenth
+of a frame at 60Hz and a fortieth at 165Hz; rounding the origin is rounding where the motion starts.
+
+#### Where it sits in the key path
+
+The composition root feeds every key to `Input::Chord` first, then hands the host what is left, marked
+where gyro took it. The host asks the bindings before the seat routes. So the order is **gyro's own
+keys, then a shell's claims, then the focused window**, and the first rung is not negotiable: a shell
+that could claim `Ctrl+Alt+Esc` is a shell whose crash takes the machine with it.
+
+The keymap is read *before* the seat folds the key into it, so the modifiers a chord is matched against
+are the ones already held when the key went down — which is what a chord means.
+
+**The release is swallowed from what the press did rather than matched again.** A person lets go of
+`Super` before `Space` about half the time, so re-matching would let the release through in exactly the
+case the press was taken, and the window would receive half a keystroke — which every toolkit turns
+into a key stuck down. The modifiers themselves are never swallowed: what is held is a fact about a
+person's hands, and a client told `Super` went down and never told it came up reads everything
+afterwards as a shortcut.
+
+**A binding outlives the manager that made it**, which the protocol says and the implementation holds
+structurally: a `Binding` is registered with the global rather than with the `gyro_bindings_v1` object,
+so a shell that has claimed everything it wants and dropped the factory keeps its chords. The first
+version registered them with the manager, and a round trip caught it — a shell written the way the
+interface reads would have found its keys silently stopped working.
+
+#### What is deliberately not here
+
+**No held chord.** A switcher walked with `Alt` down needs a release event and the modifier releases
+that go with it, and neither is specified. Until something wants one, decision 177's `Alt+Tab`
+stand-in stays where it is. Adding an event is a version bump and nothing else, which is why leaving it
+out costs less than guessing at it.
+
+**No session filter.** Every binding on the host is matched, because there is no *which session is at
+the keyboard* to filter against yet — one seat, one focus, and decision 21's several sessions are not
+switched between. What it currently leaks is that somebody pressed a key, to a shell in another
+session, which is small and real; Docs/Open.md carries it.
+
+**No serial.** Activating a window from a chord will want one, and the protocol that carries the verb
+is where it belongs rather than on the key that preceded it.

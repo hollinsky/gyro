@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "Wayland/Server/ExtForeignToplevelListV1.h"
+#include "Wayland/Server/GyroBindingsV1.h"
 #include "Wayland/Server/LinuxDmabufV1.h"
 #include "Wayland/Server/LinuxDrmSyncobjV1.h"
 #include "Wayland/Server/PresentationTime.h"
@@ -61,6 +62,11 @@ constexpr std::array Table{
 	// Protocol/Foreign.h filters the enumeration down to the asking client's own, and the tier is what
 	// decides whether it is asked at all.
 	std::pair{ Wayland::Server::ExtForeignToplevelListV1::WireName, GlobalTier::System },
+
+	// The keys a shell claims before the window in front of a person sees them, which is a shell's
+	// authority stated as plainly as the protocol can state it: an application handed this could take
+	// every keystroke on the machine out of every other application's reach and never be found.
+	std::pair{ Wayland::Server::GyroBindingsV1::WireName, GlobalTier::System },
 };
 
 // The row for an interface, or null where the table does not name it. The two callers below want

@@ -1767,6 +1767,36 @@ the thing 141, 162 and 177 are each careful to say they are only doing because n
 so the question is whether the switcher is the fourth stand-in or the point at which gyro stops adding
 them and grows the surface a shell draws its own on.
 
+**A shell can be summoned now and still cannot take this one.** *(Annotated 2026-09-05.)* Decision 186
+gives a shell a chord and the press's own instant, which is what a launcher and an overview needed —
+but not this: a walk needs the modifier's release to land on, and the binding protocol has no release
+event. So of the three stand-ins, the two that fire on a press are displaceable and `Alt+Tab` is not,
+which is recorded above under the entry that carries the missing half.
+
+## A shell binding is matched against every session at once, and a held chord has no protocol
+
+Decision 186 gives a shell a chord and the instant it was pressed, and leaves two things open that a
+second session on the machine would find first.
+
+**Every binding on the host is matched, whichever session claimed it.** Decision 21 serves every user
+from one process, so two shells can hold `gyro_bindings_v1` at the same time — and the key path has no
+notion of *which session is at the keyboard* to filter against, because there is one seat, one focus
+and no switching between sessions yet. What leaks is small and real: a shell in one session learns that
+somebody in another pressed a key, with no keystroke and no timing beyond that. What it costs when
+session switching arrives is larger, because by then a chord claimed by a session nobody is looking at
+would be swallowing keys from the session somebody is. The fix wants the same *which session has the
+keyboard* that the seat will need, so this is one question rather than two, and answering it for the
+seat answers it here.
+
+**A chord a person holds has no protocol.** `pressed` is the only event; there is no release, and no
+way to hear the modifier come up. That is what `Alt+Tab` is — decision 177's whole argument is that
+cycling needs a held modifier to say *still choosing* and then *this one* — so the stand-in in
+`Input/Chord.h` cannot be displaced by a shell until this grows. It is an event and a version bump
+rather than a redesign, and the reason it is not built is that nothing wants it yet: the run bar and
+the overview are both press-and-release-immediately. What is worth settling before writing it is
+whether a held chord is the same object with two more events or a different request, since a shell that
+claimed one of each on the same keys would want to know which fires.
+
 ## Nothing tells a shell which backgrounds to produce, and a panel with none draws black
 
 Decision 179 makes the fit exact: a background is shown on an output whose device extent it matches
