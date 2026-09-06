@@ -761,7 +761,6 @@ gyro_add_module(Frame PORTABLE
 		Admission.Test.cpp
 		Assign.Test.cpp
 		Budget.Test.cpp
-		Capture.Test.cpp
 		Evaluator.Test.cpp
 		FrameClock.Test.cpp
 		Loop.Test.cpp

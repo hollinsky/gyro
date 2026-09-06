@@ -285,6 +285,38 @@ BoundTexture VulkanTextures::Find(TextureId id) const noexcept
 	return {};
 }
 
+DrawableTexture VulkanTextures::Drawable(TextureId id) const noexcept
+{
+	if (id.IsNull())
+	{
+		return {};
+	}
+
+	const std::uint32_t count = m_Count;
+
+	for (std::uint32_t index = 0; index < count; ++index)
+	{
+		const Image& image = m_Images[index];
+
+		// Imported images are refused rather than skipped over, which is the same statement: an id
+		// naming a client's buffer is not an id anything may attach, and continuing the walk would only
+		// find the same image again.
+		if (image.Id != id)
+		{
+			continue;
+		}
+
+		if (image.Imported)
+		{
+			return {};
+		}
+
+		return { .Handle = image.Handle, .View = image.View, .Size = image.Size };
+	}
+
+	return {};
+}
+
 ReadableTexture VulkanTextures::Readable(TextureId id) const noexcept
 {
 	if (id.IsNull())

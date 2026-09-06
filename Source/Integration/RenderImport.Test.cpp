@@ -965,6 +965,93 @@ GYRO_TEST(RenderImport, ASolidLandsExactlyWhereItsCornersSay)
 	CheckThePlacement(reader.Image());
 }
 
+// **A closing window's picture is kept, and it is the picture that was on the glass.**
+//
+// The whole of decision 20 in one test: a window is drawn, its last frame is kept in the rectangle
+// decision 46 reserved for it, and the frame after — with the window itself gone from the list — the
+// same pixels come back out of that rectangle. What a person sees if this fails is a window that
+// vanishes at the instant it is closed instead of leaving.
+//
+// **Two colours in one window, because one would not catch the interesting failure.** A snapshot is
+// drawn from a run of items rather than copied out of one buffer, so a window made of more than one
+// thing — which is every window, a toplevel being a container (111) — has to come back with its parts
+// in the same places and the same order. A single fill would pass while the second surface was
+// silently dropped.
+GYRO_TEST(RenderImport, AClosingWindowLeavesWithThePictureItHadOnTheScreen)
+{
+	std::optional<Fixture> fixture = Available("AClosingWindowLeavesWithThePictureItHadOnTheScreen");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
+	fixture->Prefill();
+
+	// The rectangle held for one closing window, at the far corner of an atlas that is bigger than it
+	// — because a slot at the origin would pass whether or not the offset was applied at all.
+	const TextureId atlas{ 1, 1 };
+	constexpr PixelRect<BufferSpace> Slot{ { 8, 4 }, { 16, 8 } };
+	GYRO_REQUIRE(fixture->Textures().Reserve(atlas, PixelSize<BufferSpace>{ 32, 16 }).has_value());
+
+	// Where the window is on the screen. The slot agrees with it in size, which is what makes the
+	// snapshot a translation rather than a resample.
+	constexpr Rect<DeviceSpace> Window{ { 24.0F, 12.0F }, { 16.0F, 8.0F } };
+
+	const std::array<DrawItem, 2> window{
+		Solid(Window, DrawSolid{ 1.0F, 0.0F, 0.0F, 1.0F }),
+		Solid({ { 32.0F, 12.0F }, { 8.0F, 8.0F } }, DrawSolid{ 0.0F, 0.0F, 1.0F, 1.0F })
+	};
+	const SnapshotCapture capture{ .Into = atlas, .Slot = Slot, .Source = Window, .First = 0, .Count = 2 };
+
+	Region<DeviceSpace> damage;
+	damage.Add(PixelRect<DeviceSpace>{ {}, Resolution });
+
+	std::optional<std::uint32_t> acquired = fixture->Output().AcquireTarget();
+	GYRO_REQUIRE(acquired.has_value());
+
+	RecordRequest taking = Composite(*acquired, damage, window);
+	taking.Captures = { &capture, 1 };
+
+	const Result<Submission> took = fixture->Renderer().Record(taking);
+	GYRO_REQUIRE_EQ(took.has_value(), true);
+	GYRO_REQUIRE(fixture->Renderer().IsComplete(took->Point));
+
+	// The renderer says what it wrote, and a caller may not believe a picture it did not.
+	GYRO_CHECK_EQ(took->Captured, 1U);
+
+	// The next frame, with the window gone from the scene and its rectangle drawn in its place —
+	// which is what an exit animation does on every frame of a fade.
+	acquired = fixture->Output().AcquireTarget();
+	GYRO_REQUIRE(acquired.has_value());
+
+	const DrawItem fading = Textured(
+		atlas,
+		{ { 4.0F, 4.0F }, { 16.0F, 8.0F } },
+		AlphaMode::Premultiplied,
+		Rect<BufferSpace>{ { 8.0F, 4.0F }, { 16.0F, 8.0F } }
+	);
+
+	const Result<Submission> drawn = fixture->Renderer().Record(Composite(*acquired, damage, { &fading, 1 }));
+	GYRO_REQUIRE_EQ(drawn.has_value(), true);
+	GYRO_REQUIRE(fixture->Renderer().IsComplete(drawn->Point));
+
+	const DmabufBuffer* buffer = fixture->Output().Buffer(*acquired);
+	GYRO_REQUIRE(buffer != nullptr);
+
+	const DmabufRead read{ *buffer };
+
+	// The left half of the window was red and the right half blue, and both are where they were
+	// relative to the window rather than to the screen.
+	GYRO_CHECK_EQ(PixelAt(*buffer, 6, 6), 0xFF0000FFU);
+	GYRO_CHECK_EQ(PixelAt(*buffer, 17, 9), 0xFF0000FFU);
+	GYRO_CHECK_EQ(PixelAt(*buffer, 15, 6), 0xFFFF0000U);
+	GYRO_CHECK_EQ(PixelAt(*buffer, 19, 9), 0xFFFF0000U);
+
+	fixture->Textures().Forget(atlas);
+}
+
 // **The same claim on a real driver.** Everything above runs on lavapipe, which is decision 40's
 // floor tier and is the device this suite defaults to; a shader is the one thing in the tree whose
 // answer can differ between a software rasterizer and hardware — pixel centres, the rounding of a

@@ -349,6 +349,11 @@ private:
 	//
 	// Nothing to fail: the pipeline's existence is checked with every other item's before recording
 	// begins, for the reason `Record` states there.
+	// Draw one closing window's run of items into the rectangle held for it, and say whether it
+	// happened. Seam/Renderer.h's `SnapshotCapture` carries why this is a composite rather than a copy.
+	[[nodiscard]] bool
+	Capture(VkCommandBuffer command, const SnapshotCapture& capture, const RecordRequest& request) const noexcept;
+
 	void Shade(
 		VkCommandBuffer command,
 		const Slot& slot,

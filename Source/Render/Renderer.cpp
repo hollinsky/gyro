@@ -31,6 +31,12 @@ namespace
 // fourth channel is either ignored by the plane or means opaque.
 constexpr VkClearValue Nothing{ .color = { .float32 = { 0.0F, 0.0F, 0.0F, 1.0F } } };
 
+// What a snapshot's rectangle is cleared to, and the alpha is the difference. A composite fills a
+// screen and an opaque black is the honest floor under it; a snapshot is drawn over whatever is
+// behind the window as it leaves, so anything the window does not cover has to be nothing at all
+// rather than black.
+constexpr VkClearValue Transparent{ .color = { .float32 = { 0.0F, 0.0F, 0.0F, 0.0F } } };
+
 // How long the one blocking wait in this file will sit before giving up: a second, which is far
 // past any frame and far short of a hang. It is only reached on a device that cannot export a
 // timeline — decision 108 — where the alternative to waiting is handing out a point that says
@@ -414,6 +420,25 @@ Constants(const DrawItem& item, DrawSolid solid, PixelSize<DeviceSpace> target, 
 
 	return constants;
 }
+// The same item, moved from where it is on the screen to where it goes in the atlas.
+//
+// **A translation and nothing else, which is the property the reservation was built to have.**
+// `Scene/Atlas.h` reserves the rectangle from the window's own bounds at that output's density, so the
+// slot and the window agree in size and every corner moves by one vector. Anything else here would be
+// a resample — a picture softened once on the way in and again by whatever the exit does to it.
+[[nodiscard]] DrawItem Relocated(const DrawItem& item, Point<DeviceSpace> by) noexcept
+{
+	DrawItem moved = item;
+
+	for (Point<DeviceSpace>& corner : moved.Shape.Corners)
+	{
+		corner.X += by.X;
+		corner.Y += by.Y;
+	}
+
+	return moved;
+}
+
 } // namespace
 
 VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device, VulkanTextures& textures, Fusion fusion)
@@ -1101,6 +1126,18 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		}
 	}
 
+	// **A run that runs off the end of the list is refused here rather than clamped**, for decision
+	// 90's reason at the seam it applies to: the caller states a position and a length, and a renderer
+	// that trusted them would index somebody else's memory. A snapshot that would have been wrong is a
+	// window that cuts, and that is already the accepted failure — reading past an array is not.
+	for (const SnapshotCapture& capture : request.Captures)
+	{
+		if (capture.First > request.Items.size() || capture.Count > request.Items.size() - capture.First)
+		{
+			return Failure(EINVAL, "a snapshot names more items than the list it indexes into holds");
+		}
+	}
+
 	// The distinct client images this list reads, collected in the same *nothing has been recorded
 	// yet* window as the checks above, because overflowing the batch is the one thing about sampling
 	// that has to be a refusal rather than a skip: a texture drawn without its ownership acquired is
@@ -1115,7 +1152,11 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 	// Nothing to redraw. The seam is explicit that this is not the same as the caller skipping the
 	// frame — a target stale by age still wants the composite — so it is the caller's judgement that
 	// arrived here as an empty region, and honouring it costs a submission rather than saving one.
-	if (request.Damage.IsEmpty())
+	// **`Captures` is why this is not simply `Damage.IsEmpty()`.** An output with nothing to redraw is
+	// the likeliest moment for a window to have just closed — nothing has moved yet, because the first
+	// frame of an exit is the frame it was authored on — so returning here would defer every snapshot
+	// until something else on that screen happened to move.
+	if (request.Damage.IsEmpty() && request.Captures.empty())
 	{
 		return Submission{ .Point = SyncPoint::Immediate(), .RecordCost = Elapsed(started, m_Clock->Now()) };
 	}
@@ -1224,6 +1265,47 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 	// Before the render pass opens, because a queue-family ownership transfer is not something Vulkan
 	// permits inside a rendering instance — and because everything the pass draws may read them.
 	TransferSampled(command, sampled, true);
+
+	// **The snapshots first, and inside the same submission.** They read the same client images the
+	// composite is about to, so they belong after the acquire above; and they are what the composite
+	// may already be sampling from this very frame, since a window is drawn from its rectangle on the
+	// frame after it stops being drawn from its own buffer. One barrier between the two is what makes
+	// that ordering real rather than assumed.
+	std::uint32_t captured = 0;
+
+	for (const SnapshotCapture& capture : request.Captures)
+	{
+		if (!Capture(command, capture, request))
+		{
+			break;
+		}
+
+		++captured;
+	}
+
+	if (captured > 0)
+	{
+		// A colour write followed by a shader read of the same texels, on an image that never changes
+		// layout — so this is the dependency and nothing else. `GENERAL` is exactly what buys that: the
+		// atlas is drawn into and sampled from without a transition between the two, which is
+		// Render/Textures.cpp's argument for the layout in the first place.
+		const VkMemoryBarrier written{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+			                           .pNext = nullptr,
+			                           .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			                           .dstAccessMask = VK_ACCESS_SHADER_READ_BIT };
+		vkCmdPipelineBarrier(
+			command,
+			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			0,
+			1,
+			&written,
+			0,
+			nullptr,
+			0,
+			nullptr
+		);
+	}
 
 	BeginTarget(command, slot, request);
 
@@ -1546,11 +1628,14 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 			return std::unexpected{ waited.error() };
 		}
 
-		return Submission{ .Point = SyncPoint::Immediate(), .RecordCost = Elapsed(started, m_Clock->Now()) };
+		return Submission{ .Point = SyncPoint::Immediate(),
+			               .RecordCost = Elapsed(started, m_Clock->Now()),
+			               .Captured = captured };
 	}
 
 	return Submission{ .Point = SyncPoint{ .Timeline = m_TimelineFd.Borrow(), .Value = value },
-		               .RecordCost = Elapsed(started, m_Clock->Now()) };
+		               .RecordCost = Elapsed(started, m_Clock->Now()),
+		               .Captured = captured };
 }
 
 void VulkanRenderer::Apply(
@@ -1881,6 +1966,182 @@ void VulkanRenderer::BeginTarget(VkCommandBuffer command, const Slot& slot, cons
 		                                 .pDepthAttachment = nullptr,
 		                                 .pStencilAttachment = nullptr };
 	vkCmdBeginRendering(command, &renderingInfo);
+}
+
+bool VulkanRenderer::Capture(
+	VkCommandBuffer command,
+	const SnapshotCapture& capture,
+	const RecordRequest& request
+) const noexcept
+{
+	const DrawableTexture into = m_Textures->Drawable(capture.Into);
+
+	// Every refusal here is the same picture: a window that cuts instead of fading, which decision 46
+	// already accepts as what running out of room looks like. None of them is an error, because a
+	// frame refused over a window that was leaving anyway would take the whole screen with it.
+	if (!m_Snapshots || !into.IsValid())
+	{
+		return false;
+	}
+
+	const Slot atlas{ .Image = into.Handle,
+		              .Memory = VK_NULL_HANDLE,
+		              .View = into.View,
+		              .Size = PixelSize<DeviceSpace>{ into.Size.Width, into.Size.Height },
+		              .Backdrop = VK_NULL_HANDLE,
+		              .Samplable = false,
+		              .Format = StorageFormat,
+		              .LastSubmit = 0 };
+	const VkRect2D area = Clip(
+		PixelRect<DeviceSpace>{ { capture.Slot.Origin.X, capture.Slot.Origin.Y },
+	                            { capture.Slot.Extent.Width, capture.Slot.Extent.Height } },
+		atlas.Size
+	);
+
+	if (area.extent.width == 0 || area.extent.height == 0)
+	{
+		return false;
+	}
+
+	// **`CLEAR` where the composite loads**, and the shelf is why. A rectangle is handed to the next
+	// window to close as soon as the one before it has finished leaving, so a slot arrives holding
+	// somebody else's picture — and a window that does not cover its own rectangle to the edge, which
+	// is every window with a rounded corner, would wear a rim of it for the length of its fade.
+	const VkRenderingAttachmentInfo attachment{ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+		                                        .pNext = nullptr,
+		                                        .imageView = atlas.View,
+		                                        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+		                                        .resolveMode = VK_RESOLVE_MODE_NONE,
+		                                        .resolveImageView = VK_NULL_HANDLE,
+		                                        .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		                                        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+		                                        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+		                                        .clearValue = Transparent };
+	const VkRenderingInfo rendering{ .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+		                             .pNext = nullptr,
+		                             .flags = 0,
+		                             .renderArea = area,
+		                             .layerCount = 1,
+		                             .viewMask = 0,
+		                             .colorAttachmentCount = 1,
+		                             .pColorAttachments = &attachment,
+		                             .pDepthAttachment = nullptr,
+		                             .pStencilAttachment = nullptr };
+
+	vkCmdBeginRendering(command, &rendering);
+
+	// The whole image, for the composite's reason exactly: the vertex stage divides a corner by the
+	// target it is measured on, and after `Relocated` these corners are measured on the atlas. The
+	// rectangle is the scissor's job, and it is one rectangle rather than a damage region because a
+	// snapshot is written once and in full.
+	const VkViewport viewport{ .x = 0.0F,
+		                       .y = 0.0F,
+		                       .width = static_cast<float>(atlas.Size.Width),
+		                       .height = static_cast<float>(atlas.Size.Height),
+		                       .minDepth = 0.0F,
+		                       .maxDepth = 1.0F };
+	vkCmdSetViewport(command, 0, 1, &viewport);
+	vkCmdSetScissor(command, 0, 1, &area);
+
+	const std::array<VkClearRect, 1> rects{ VkClearRect{ .rect = area, .baseArrayLayer = 0, .layerCount = 1 } };
+	const Point<DeviceSpace> by{ static_cast<float>(capture.Slot.Origin.X) - capture.Source.Origin.X,
+		                         static_cast<float>(capture.Slot.Origin.Y) - capture.Source.Origin.Y };
+
+	VkPipeline bound = VK_NULL_HANDLE;
+
+	for (std::uint32_t index = 0; index < capture.Count; ++index)
+	{
+		const DrawItem item = Relocated(request.Items[capture.First + index], by);
+
+		// **A gathering material is not drawn into a snapshot, and what it leaves behind is its tint.**
+		// A material reads the target it is being drawn onto — decision 104 fixes that as *the target as
+		// of before the item began* — and the target here is an empty rectangle in an atlas rather than
+		// the screen, so a blur taken through it would be a blur of nothing. What is owed is a chain run
+		// against the composite before the window is lifted off it, which is decision 60's offscreen
+		// pointed the other way and is not built. Until it is, a closing panel keeps its colour and
+		// loses its blur at the instant it starts to leave.
+		if (item.Dress != Material::None && Facts(item.Dress).Gathering)
+		{
+			continue;
+		}
+
+		if (item.Lift.Draws())
+		{
+			Shade(command, atlas, item, rects, bound);
+		}
+
+		const DrawSolid* solid = std::get_if<DrawSolid>(&item.Content);
+		const DrawTexture* texture = std::get_if<DrawTexture>(&item.Content);
+
+		if (solid == nullptr && texture == nullptr)
+		{
+			continue;
+		}
+
+		BoundTexture image{};
+
+		if (texture != nullptr)
+		{
+			image = m_Textures->Find(texture->Texture);
+
+			if (!image.IsValid())
+			{
+				continue;
+			}
+		}
+
+		const VkPipeline pipeline = m_Pipeline.For(
+			atlas.Format, QuadVariant::For(item.Color, m_Output, item.Radius > 0.0F, texture != nullptr)
+		);
+
+		// Total by the bind, which prepared this exact pair — and a skip rather than a refusal if it
+		// somehow is not, for the reason every other refusal in this function is one.
+		if (pipeline == VK_NULL_HANDLE)
+		{
+			continue;
+		}
+
+		if (pipeline != bound)
+		{
+			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+			bound = pipeline;
+		}
+
+		if (image.Set != VK_NULL_HANDLE)
+		{
+			vkCmdBindDescriptorSets(
+				command, VK_PIPELINE_BIND_POINT_GRAPHICS, m_Pipeline.Layout(), 0, 1, &image.Set, 0, nullptr
+			);
+		}
+
+		QuadConstants constants = Constants(item, solid != nullptr ? *solid : DrawSolid{}, atlas.Size, m_Output);
+
+		if (texture != nullptr)
+		{
+			const std::array<float, 4> source = SourceRect(*texture, image.Size);
+
+			constants.Fill[0] = source[0];
+			constants.Fill[1] = source[1];
+			constants.Fill[2] = source[2];
+			constants.Fill[3] = source[3];
+		}
+
+		vkCmdPushConstants(
+			command,
+			m_Pipeline.Layout(),
+			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+			0,
+			sizeof constants,
+			&constants
+		);
+
+		vkCmdSetScissor(command, 0, 1, &area);
+		vkCmdDraw(command, 6, 1, 0, 0);
+	}
+
+	vkCmdEndRendering(command);
+
+	return true;
 }
 
 void VulkanRenderer::Shade(

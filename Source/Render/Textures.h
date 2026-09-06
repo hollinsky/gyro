@@ -158,6 +158,22 @@ struct BoundTexture
 	[[nodiscard]] bool IsValid() const noexcept { return Set != VK_NULL_HANDLE; }
 };
 
+// What a frame needs of an image gyro reserved in order to draw *into* it.
+//
+// **A separate lookup from `BoundTexture` because it answers a different question and must refuse a
+// different set of ids.** That one asks what to sample and is asked per item per frame; this asks
+// what to attach, is asked once per closing window, and says nothing at all about a client's image —
+// an imported dmabuf is memory somebody else laid out, and attaching one would be gyro drawing into a
+// buffer a client is still filling.
+struct DrawableTexture
+{
+	VkImage Handle = VK_NULL_HANDLE;
+	VkImageView View = VK_NULL_HANDLE;
+	PixelSize<BufferSpace> Size{};
+
+	[[nodiscard]] bool IsValid() const noexcept { return Handle != VK_NULL_HANDLE && View != VK_NULL_HANDLE; }
+};
+
 // What Seam/Capture.h's texture read needs of an adopted image, which is everything the copy has to
 // state and nothing the frame path does.
 //
@@ -238,6 +254,13 @@ public:
 	// A stale or unknown id comes back invalid, and Core/Texture.h says what a renderer does with
 	// that: draw nothing and say nothing.
 	[[nodiscard]] BoundTexture Find(TextureId id) const noexcept;
+
+	// What an id names as somewhere to draw, on the frame thread and under `Find`'s rule exactly.
+	//
+	// Invalid for an id nothing names and for an imported image, which is the same refusal stated
+	// twice: a snapshot is drawn into storage this device reserved, and there is nothing else here it
+	// would be correct to attach.
+	[[nodiscard]] DrawableTexture Drawable(TextureId id) const noexcept;
 
 	// What an id names for a readback, on the frame thread and only on a captured frame.
 	//

@@ -353,21 +353,37 @@ struct DrawItem
 	friend bool operator==(const DrawItem&, const DrawItem&) = default;
 };
 
-// One window's last frame, copied into the rectangle held for it.
+// One window's last frame, drawn into the rectangle held for it.
 //
-// **A copy and not a composite, which is what decisions 20 and 46 both actually say** — "blit the
-// last committed frame into a compositor-owned texture", and "a rectangle out of a shelf packer plus
-// a blit into that subregion". Nothing here opens a render pass, builds a pipeline, or needs the
-// atlas's format to have variants compiled for it, and that is the difference between a window
-// closing costing a scaled copy and it costing a second composite on the frame somebody clicked the
-// button on.
+// **A composite and not a copy, which is where decisions 20 and 46 have to be read past their own
+// shorthand.** Both say *blit* — "blit the last committed frame into a compositor-owned texture", "a
+// rectangle out of a shelf packer plus a blit into that subregion" — and a transfer cannot do the
+// job for three separate reasons, any one of which is fatal *(2026-09-06, with the offscreen)*:
+//
+//   - **The rectangle is the window's size on that screen, not the buffer's.** `Scene/Atlas.h`
+//     reserves it at the output's density, and a client's buffer is almost never those dimensions.
+//     `vkCmdCopyImage` cannot scale at all.
+//   - **A window is a tree**, per decision 111 — a toplevel is a container. Its picture is the
+//     subsurfaces under it composited in order, with the corner mask and each node's opacity applied.
+//     Copying one buffer would snapshot one surface, so anything with a subsurface would leave the
+//     screen as a fragment of itself.
+//   - **A client's pixels are not in the atlas's colour state**, and a transfer converts numerically
+//     at best. An HDR window blitted into a snapshot is clipped rather than converted, and the usage
+//     bit that would even permit the read is one `Render/Textures.h` declines to ask an imported
+//     dmabuf for, because it narrows the modifier set and drops the window to `wl_shm`.
+//
+// So this names a *run of items* out of the composite the frame was already going to draw, and the
+// renderer draws them again into the atlas through the same programs, the same chain and the same
+// filter. A snapshot is by construction the picture that was on the glass rather than an
+// approximation of it — and what makes that affordable is that the run is already assembled: the
+// window is still on screen on the frame it starts leaving.
 //
 // **It rides on the request the frame is recorded from rather than on a verb of its own.** Three
-// things fall out of that and each of them would otherwise have to be built: the copy is in the same
-// submission as the composite, so it is ordered before anything that samples what it wrote; it is
-// inside the same `Submission::RecordCost`, so decision 29's `C` covers it without a second budget
-// term; and a frame the caller skips is a copy that simply happens on the next one, which is exactly
-// the deferral decision 46 says the reservation exists to bound.
+// things fall out of that and each of them would otherwise have to be built: the snapshot is in the
+// same submission as the composite, so it is ordered before anything that samples what it wrote; it
+// is inside the same `Submission::RecordCost`, so decision 29's `C` covers it without a second budget
+// term; and a frame the caller skips is a snapshot that simply happens on the next one, which is
+// exactly the deferral decision 46 says the reservation exists to bound.
 //
 // **The destination is an image and not a target**, which is what keeps this off `IPresenter`
 // entirely: the atlas belongs to the texture space `Scene/Textures.h` mints and outlives every target
@@ -378,13 +394,26 @@ struct SnapshotCapture
 	// device had no room to give an atlas to, which is a window that cuts instead of fading.
 	TextureId Into;
 
-	// Where in it, in the atlas's own texels.
+	// Where in it, in the atlas's own texels. Cleared to nothing before the run is drawn, so a slot
+	// carries no trace of whatever occupied it before.
 	PixelRect<BufferSpace> Slot;
 
-	// The client's pixels, and the texels of them this window is. Empty means the whole image, the
-	// same reading `DrawTexture::Source` has.
-	TextureId From;
-	Rect<BufferSpace> Source{};
+	// Where those items are on the screen, which is what the run is translated *from*.
+	//
+	// **A rectangle rather than an origin, and its extent is what says the mapping is a translation.**
+	// The slot was reserved at this output's density from these same bounds, so the two agree in size
+	// and the window lands in its rectangle texel for texel — no resample, and none of the softening
+	// one would put on a picture that is about to be scaled again by the exit itself.
+	Rect<DeviceSpace> Source{};
+
+	// The run, as a position in `RecordRequest::Items` and a length. Bottom first, in the painter's
+	// order the list is already in, which is what makes a subtree a contiguous span at all (55).
+	//
+	// Zero items is a window with nothing under it — a container whose content has already gone — and
+	// it draws an empty rectangle rather than being refused, because the alternative is a frame that
+	// fails over a window that was leaving anyway.
+	std::uint32_t First = 0;
+	std::uint32_t Count = 0;
 
 	friend constexpr bool operator==(SnapshotCapture, SnapshotCapture) noexcept = default;
 };
