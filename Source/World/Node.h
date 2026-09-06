@@ -248,9 +248,26 @@ struct Node
 	// Padding that is spelled, so the tail is the publisher's to value-initialise rather than
 	// whatever the arena last held — the obligation Core/Wake.h and Animation/Solve/Spring.h record
 	// for their own, and the reason a publisher builds this from a value-initialised object. It is
-	// also what lands the record on 128: three one-byte fields and five spelled bytes, rather than
-	// three fields and five bytes the compiler inserts where nobody can see them.
-	std::uint8_t Reserved[5]{};
+	// also what lands the record on 128: three one-byte fields, one spelled byte, and the exit slot
+	// below, rather than fields and bytes the compiler inserts where nobody can see them.
+	std::uint8_t Reserved[1]{};
+
+	// Where this node's exit snapshots begin in the exit run, or `NoContent`.
+	//
+	// **Four of the eight bytes this record already spent on its tail, so the walk gets a closing
+	// window for nothing.** Decision 20 draws a window that is leaving from a copy of its last frame
+	// and decision 46 keeps those copies per output, so what a node needs here is a position rather
+	// than a rectangle: the entries from it are this node's, one per screen it is on, and
+	// `World/Exit.h` says how the scan ends. A window on one screen — every window, nearly always —
+	// is one entry read directly.
+	//
+	// **It is not `Content`, and the distinction is the one decision 95 already drew.** `Content` is a
+	// position in the run `Kind` selects, and a closing window is a *container* whose whole subtree the
+	// snapshot stands in for; giving that field a fifth meaning on a kind that names nothing is the
+	// union this record does not have. A separate slot also lets a node that draws keep drawing while
+	// its exit is reserved and not yet captured, which is every frame between a window closing and the
+	// first frame with room to copy it.
+	std::uint32_t Exit = NoContent;
 
 	[[nodiscard]] constexpr bool IsHidden() const noexcept { return (Flags & Hidden) != 0; }
 
@@ -293,6 +310,12 @@ struct Node
 
 	[[nodiscard]] constexpr bool IsDriven() const noexcept { return DrivenRamp != NoCoefficient; }
 
+	// Whether this node has pixels kept for it while it leaves. False for every node on a still
+	// desktop, and for a closing window whose reservation the atlas refused — which decision 46
+	// finishes early rather than growing for, so the window cuts instead of fading and nothing else
+	// on screen misses a frame for it.
+	[[nodiscard]] constexpr bool IsExiting() const noexcept { return Exit != NoContent; }
+
 	// The index the walk moves to when this node's subtree is skipped whole, given this node's own.
 	// Named rather than open-coded because `1 +` is exactly the mistake the run-length-versus-child-count
 	// distinction above invites, and it is a mistake that draws a plausible wrong picture.
@@ -309,7 +332,7 @@ static_assert(std::is_trivially_copyable_v<Node> && std::is_standard_layout_v<No
 static_assert(
 	sizeof(Node) == 128,
 	"A transform, an extent, two model scalars, a length, a flag word, five slots, a content index, "
-	"three one-byte fields, and the spelled tail"
+	"three one-byte fields, the spelled tail, and the exit slot"
 );
 static_assert(alignof(Node) == 8, "The widest member is a global-space coordinate, and nothing here is wider");
 
@@ -323,6 +346,7 @@ static_assert(!Node{}.IsFading() && !Node{}.IsDriven());
 static_assert(!Node{}.IsHidden() && !Node{}.IsGroup() && !Node{}.IsSnapped());
 static_assert(Node{}.IsContainer() && !Node{}.IsReference() && !Node{}.HasContent(), "Nothing drawn is nothing named");
 static_assert(Node{}.Content == NoContent && !Node{}.IsDressed() && !Node{}.IsLifted());
+static_assert(!Node{}.IsExiting(), "A node nobody is closing keeps no pixels anywhere");
 static_assert(Node{}.Opacity == 1.0F && Node{}.TimeScale == 1.0F);
 static_assert(Node{}.Transform.Rotation == Quaternion{}, "The chart's base point, and it crosses always");
 

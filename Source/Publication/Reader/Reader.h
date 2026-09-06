@@ -197,6 +197,21 @@ public:
 		return m_Valid ? Resolve<T>(m_Header.Sessions) : std::span<const T>{};
 	}
 
+	// Where each closing window's pixels are kept while it leaves. Not indexed positionally and not
+	// by a node's `Content`: a node names the first of its own entries and the run is scanned forward
+	// while that node is still the one named, which `World/Exit.h` argues for. Empty is a desktop with
+	// nothing closing on it, which is nearly every frame.
+	template<typename T>
+	[[nodiscard]] std::span<const T> Exits() const noexcept
+	{
+		static_assert(
+			std::is_trivially_copyable_v<T> && std::is_standard_layout_v<T>,
+			"An exit record is reconstituted from bytes at an offset, so it must be one"
+		);
+
+		return m_Valid ? Resolve<T>(m_Header.Exits) : std::span<const T>{};
+	}
+
 private:
 	// Whether the span's base meets the alignment every element depends on. Checked against the actual
 	// address rather than assumed, so that a reader handed an under-aligned mapping refuses it rather

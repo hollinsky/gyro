@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -18,6 +19,7 @@
 #include "Scene/Settle.h"
 #include "Scene/Store.h"
 #include "World/Content.h"
+#include "World/Exit.h"
 #include "World/Node.h"
 #include "World/Root.h"
 
@@ -162,6 +164,7 @@ public:
 	// What the last serialisation produced. Nothing in the design reads these — they are here so a test
 	// can assert that the active set is the active set rather than infer it from a draw list.
 	[[nodiscard]] std::span<const Node> Nodes() const noexcept { return m_Nodes; }
+	[[nodiscard]] std::span<const ExitSnapshot> Exits() const noexcept { return m_Exits; }
 	[[nodiscard]] std::size_t ActiveTranslations() const noexcept { return m_Translations.size(); }
 	[[nodiscard]] std::size_t ActiveScales() const noexcept { return m_Scales.size(); }
 	[[nodiscard]] std::size_t ActiveRotations() const noexcept { return m_Rotations.size(); }
@@ -194,6 +197,7 @@ private:
 		m_Wakes.clear();
 		m_Roots.clear();
 		m_Sessions.clear();
+		m_Exits.clear();
 		m_Open.clear();
 
 		// Where each entity's record landed, indexed by the entity's slot, so a reference can be
@@ -342,7 +346,7 @@ private:
 				m_Roots.push_back(SceneRoot{ .Node = index, .Session = entity->Session });
 			}
 
-			m_Nodes.push_back(Emit(*entity, store, index));
+			m_Nodes.push_back(Emit(*entity, store, cursor, index));
 			m_Published[cursor.Index] = index;
 
 			m_Open.push_back({ .Index = index, .Next = entity->NextSibling });
@@ -353,7 +357,7 @@ private:
 
 	// One entity's record: the fields it carries itself, plus the three that are positions in runs this
 	// walk is building.
-	[[nodiscard]] Node Emit(Entity& entity, const SceneStore& store, std::uint32_t index)
+	[[nodiscard]] Node Emit(Entity& entity, const SceneStore& store, EntityId id, std::uint32_t index)
 	{
 		Node node = entity.Record();
 
@@ -390,7 +394,51 @@ private:
 				break;
 		}
 
+		node.Exit = ExitsOf(entity, store, id, index);
+
 		return node;
+	}
+
+	// Where this node's exit snapshots start in the exit run, or `NoContent`.
+	//
+	// Asked of every node and answered by a flag test for all but the closing ones, which is what
+	// keeps a still desktop paying nothing for a feature that only runs while a window is going away.
+	//
+	// **The reservation is looked up rather than recomputed.** `Scene/Atlas.h` took these rectangles at
+	// the moment the retirement was observed — decision 46 puts the reservation there so that the
+	// frame a window closes on is not also the frame that has to find room — so the walk is reading a
+	// decision that has already been made, on every publication until the exit finishes.
+	//
+	// **Entries go out in output order and stay contiguous**, which is the whole contract `World/Exit.h`
+	// asks the reader to rely on: one node's entries are the run from its slot up to the first entry
+	// naming somebody else. A window whose reservation the atlas refused has no entry at all and names
+	// none, which is decision 46's early finish arriving as an absence rather than as a special case.
+	[[nodiscard]] std::uint32_t ExitsOf(const Entity& entity, const SceneStore& store, EntityId id, std::uint32_t index)
+	{
+		if (!entity.Retiring)
+		{
+			return NoContent;
+		}
+
+		const auto first = static_cast<std::uint32_t>(m_Exits.size());
+		const std::span<const SceneOutput> outputs = store.Outputs();
+
+		for (std::size_t output = 0; output < outputs.size(); ++output)
+		{
+			const std::optional<PixelRect<BufferSpace>> slot = store.Atlases().SlotFor(id, outputs[output].Id);
+
+			if (!slot)
+			{
+				continue;
+			}
+
+			m_Exits.push_back(
+				ExitSnapshot{
+					.Node = index, .Output = static_cast<std::uint32_t>(output), .Texture = {}, .Slot = *slot }
+			);
+		}
+
+		return m_Exits.size() == first ? NoContent : first;
 	}
 
 	// A reference's target, as a node index strictly below this one, or `NoContent`.
@@ -473,6 +521,7 @@ private:
 		m_Publisher.PutSolids<SolidContent>(m_Solids);
 		m_Publisher.PutRoots<SceneRoot>(m_Roots);
 		m_Publisher.PutSessions<SceneAssignment>(m_Sessions);
+		m_Publisher.PutExits<ExitSnapshot>(m_Exits);
 	}
 
 	// One channel's whole story: retire it if it has settled, publish it if it has not, and fold what it
@@ -557,6 +606,7 @@ private:
 	// Decision 21's partition, both halves: one entry per root and one per output.
 	std::vector<SceneRoot> m_Roots;
 	std::vector<SceneAssignment> m_Sessions;
+	std::vector<ExitSnapshot> m_Exits;
 	std::vector<Wake> m_Wakes;
 
 	// The sweep's two scratch lists: what finished dying this pass, and the subtree stack that decides it.

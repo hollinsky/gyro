@@ -42,6 +42,16 @@ struct Skeleton
 	friend bool operator==(const Skeleton&, const Skeleton&) = default;
 };
 
+// A stand-in exit record, on the same terms as the two above: the run this exercises is `World`'s
+// and is carried as bytes, so the shape is what the boundary checks and the provenance is not.
+struct Kept
+{
+	std::uint32_t Node;
+	std::uint32_t Output;
+
+	friend bool operator==(const Kept&, const Kept&) = default;
+};
+
 // Storage aligned as the reader demands of any snapshot it adopts. std::array over-aligned this way
 // gives a base the resolver will accept, which a bare array would not guarantee.
 template<std::size_t N>
@@ -261,4 +271,44 @@ GYRO_TEST(SnapshotReader, TheSameBytesResolveAtADifferentAddress)
 	GYRO_REQUIRE_EQ(run.size(), std::size_t{ 1 });
 	GYRO_CHECK(run[0] == written);
 	GYRO_CHECK(reinterpret_cast<const std::byte*>(run.data()) >= copy.Data.data());
+}
+
+// Decision 20's exit pixels crossing: a run a node names the start of rather than one indexed
+// positionally or by content, so what the reader owes is the run and the same type check every other
+// run gets.
+
+GYRO_TEST(SnapshotReader, ExitsResolveAsARunAndAnEmptyOneIsADesktopWithNothingClosing)
+{
+	constexpr std::uint32_t offset = sizeof(SnapshotHeader);
+	const std::array<Kept, 2> kept{ Kept{ 4, 0 }, Kept{ 4, 1 } };
+
+	Bytes<offset + 2 * sizeof(Kept)> buffer;
+	std::memcpy(buffer.Data.data() + offset, kept.data(), kept.size() * sizeof(Kept));
+
+	SnapshotHeader header{};
+	header.ByteSize = static_cast<std::uint32_t>(buffer.Data.size());
+	header.Exits = { offset, 2, sizeof(Kept), alignof(Kept) };
+	std::memcpy(buffer.Data.data(), &header, sizeof(SnapshotHeader));
+
+	const SnapshotReader reader{ buffer.View() };
+	GYRO_REQUIRE(reader.IsValid());
+
+	const std::span<const Kept> exits = reader.Exits<Kept>();
+	GYRO_REQUIRE_EQ(exits.size(), std::size_t{ 2 });
+	GYRO_CHECK(exits[0] == kept[0]);
+	GYRO_CHECK(exits[1] == kept[1]);
+
+	// The same guard the other runs get: a reader compiled against a record whose size has drifted from
+	// the writer's resolves nothing rather than reinterpreting the bytes as rectangles.
+	GYRO_CHECK(reader.Exits<Coeff>().empty());
+
+	// And a snapshot that never staged the run at all, which is nearly every frame.
+	Bytes<sizeof(SnapshotHeader)> bare;
+	SnapshotHeader quiet{};
+	quiet.ByteSize = sizeof(SnapshotHeader);
+	std::memcpy(bare.Data.data(), &quiet, sizeof(SnapshotHeader));
+
+	const SnapshotReader still{ bare.View() };
+	GYRO_REQUIRE(still.IsValid());
+	GYRO_CHECK(still.Exits<Kept>().empty());
 }

@@ -58,7 +58,7 @@ inline constexpr std::uint32_t SnapshotMagic = 0x6779726Fu;
 // Bumped when the layout below changes in a way a reader compiled against the old one would
 // misinterpret. A reader that does not recognise the version resolves to nothing rather than to
 // garbage — the same conservative direction as every settling and ingest decision in the codebase.
-inline constexpr std::uint32_t SnapshotVersion = 2;
+inline constexpr std::uint32_t SnapshotVersion = 3;
 
 // The coefficient runs, and the order they are indexed in. This is the pinned shape of
 // Docs/Decisions.md decisions 50, 72, and 90: **one run per channel**, plus the driven ramp beside
@@ -208,12 +208,17 @@ struct SnapshotHeader
 	// What each output is showing, what it is leaving, and where the fade is: one entry per output in
 	// output order.
 	RunEntry Sessions = {};
+
+	// Where a closing window's pixels are kept while it leaves, one entry per output the window is on.
+	// Named rather than a channel for `Nodes`' reason and addressed by a node's own slot rather than
+	// positionally, because it is neither per channel nor per output — see `World/Exit.h`.
+	RunEntry Exits = {};
 };
 
 static_assert(std::is_trivially_copyable_v<SnapshotHeader> && std::is_standard_layout_v<SnapshotHeader>);
 static_assert(
-	sizeof(SnapshotHeader) == 216,
-	"One uint64, four uint32, five coefficient run entries, and the seven named ones, exactly"
+	sizeof(SnapshotHeader) == 232,
+	"One uint64, four uint32, five coefficient run entries, and the eight named ones, exactly"
 );
 static_assert(
 	alignof(SnapshotHeader) == 8,

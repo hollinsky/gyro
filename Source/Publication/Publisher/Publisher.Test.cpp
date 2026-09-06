@@ -185,6 +185,31 @@ GYRO_TEST(SnapshotPublisher, ThePartitionCrossesAsTwoRunsCountedDifferently)
 	GYRO_CHECK(reader.Roots<Wide>().empty());
 }
 
+// Decision 20's exit pixels cross as a run of their own, staged like the node run and named by a
+// node rather than indexed positionally or by content. What is asserted here is that it is a run at
+// the waist at all — the shape a node relies on is the serialiser's and is asserted there.
+GYRO_TEST(SnapshotPublisher, TheExitRunCrossesBesideTheSceneItBelongsTo)
+{
+	// One closing window on two screens, which is the arrangement decision 190 exists for and the
+	// smallest one where a node's entries are more than the entry.
+	const std::array<Pair, 2> kept{ Pair{ 4, 0 }, Pair{ 4, 1 } };
+	const std::array<Skeleton, 1> scene{ Skeleton{ 0, 0xFFFF'FFFFu } };
+
+	const SnapshotBuffer buffer = SnapshotPublisher{}.PutNodes<Skeleton>(scene).PutExits<Pair>(kept).Build(9);
+
+	const SnapshotReader reader{ buffer.Bytes() };
+	GYRO_REQUIRE(reader.IsValid());
+
+	const std::span<const Pair> read = reader.Exits<Pair>();
+	GYRO_REQUIRE_EQ(read.size(), std::size_t{ 2 });
+	GYRO_CHECK(read[0] == kept[0]);
+	GYRO_CHECK(read[1] == kept[1]);
+
+	GYRO_CHECK(reinterpret_cast<std::uintptr_t>(read.data()) % alignof(Pair) == 0);
+	GYRO_CHECK(reader.Exits<Wide>().empty());
+	GYRO_REQUIRE_EQ(reader.Nodes<Skeleton>().size(), std::size_t{ 1 });
+}
+
 GYRO_TEST(SnapshotPublisher, EachRunLandsAtAnAlignedAddress)
 {
 	const std::array<Wide, 1> positions{ Wide{ Monotonic::FromNanoseconds(0), 1.0, 2.0 } };

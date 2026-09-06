@@ -228,6 +228,17 @@ public:
 		return *this;
 	}
 
+	// Stage where each closing window's pixels are kept, the entries for one node contiguous and in
+	// the order the node run meets them — a node names the first of its own. A template for
+	// `PutNodes`' reason, one step further out: the record is `World/Exit.h`'s and carries a
+	// coordinate, both of which this module declines to name.
+	template<typename T>
+	SnapshotPublisher& PutExits(std::span<const T> exits)
+	{
+		Stage(m_Exits, exits);
+		return *this;
+	}
+
 	// Assemble the staged runs into one contiguous offset-addressed snapshot, in a buffer the caller
 	// owns. The header goes first, then each non-empty run at an offset aligned for its element, then
 	// the wake schedule; the directory records where each landed. The result is self-describing: its
@@ -275,6 +286,9 @@ public:
 		std::uint32_t sessionOffset = 0;
 		cursor = Place(m_Sessions, cursor, sessionOffset);
 
+		std::uint32_t exitOffset = 0;
+		cursor = Place(m_Exits, cursor, exitOffset);
+
 		const std::size_t byteSize = cursor;
 
 		SnapshotHeader header{};
@@ -291,6 +305,7 @@ public:
 		header.Solids = Entry(m_Solids, solidOffset);
 		header.Roots = Entry(m_Roots, rootOffset);
 		header.Sessions = Entry(m_Sessions, sessionOffset);
+		header.Exits = Entry(m_Exits, exitOffset);
 
 		into.Reset(byteSize);
 		const std::span<std::byte> bytes = into.Bytes();
@@ -307,6 +322,7 @@ public:
 		CopyInto(bytes, solidOffset, m_Solids);
 		CopyInto(bytes, rootOffset, m_Roots);
 		CopyInto(bytes, sessionOffset, m_Sessions);
+		CopyInto(bytes, exitOffset, m_Exits);
 	}
 
 	// The same assembly into a buffer nobody had yet. The outbox never takes this path — it always has
@@ -388,4 +404,5 @@ private:
 	Staged m_Sessions;
 	Staged m_Images;
 	Staged m_Solids;
+	Staged m_Exits;
 };

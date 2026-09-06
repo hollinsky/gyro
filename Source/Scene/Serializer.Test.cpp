@@ -19,6 +19,7 @@
 #include "Scene/Store.h"
 #include "Testing/Test.h"
 #include "World/Content.h"
+#include "World/Exit.h"
 #include "World/Node.h"
 
 // What the store becomes on the wire: Docs/Decisions.md decision 86's preorder run, with the active
@@ -822,4 +823,136 @@ GYRO_TEST(SceneSerializer, AnImmediateReassignmentCarriesNoCoefficientAndNothing
 	GYRO_CHECK(sessions[0].Fading == SessionId::None);
 	GYRO_CHECK(sessions[0].Fade == NoCoefficient);
 	GYRO_CHECK(serializer.SceneWake() == Wake::Never());
+}
+
+// Decision 20's exit pixels, and decision 46's atlas, crossing the waist. What the frame thread gets
+// is a position rather than a rectangle, because decision 190 puts a window that straddles a seam in
+// both screens' atlases and there is no single rectangle to give it.
+
+namespace
+{
+// A thousand logical square, at a given scale, sitting where it is put along x.
+[[nodiscard]] SceneOutput Screen(OutputId id, double left, std::int32_t scale)
+{
+	return { .Id = id,
+		     .Bounds = { { left, 0.0 }, { 1000.0, 1000.0 } },
+		     .Density = Scale::FromInteger(scale),
+		     .Grid = { 1000 * scale, 1000 * scale } };
+}
+} // namespace
+
+GYRO_TEST(SceneSerializer, AClosingWindowCarriesOneRectanglePerScreenItIsOn)
+{
+	ManualClock clock;
+	SceneStore store{ clock };
+
+	const OutputId panel{ 1, 1 };
+	const OutputId monitor{ 2, 1 };
+	const SceneOutput outputs[] = { Screen(panel, 0.0, 1), Screen(monitor, 1000.0, 2) };
+
+	store.SetOutputs(outputs);
+
+	// Four hundred logical wide, across the boundary at x = 1000 — so half of it is on each screen and
+	// each screen keeps the whole of it, at its own scale.
+	const EntityId window =
+		store.CreateContainer({}, { .Position = { 800.0, 100.0, 0.0 }, .Extent = { 400.0F, 300.0F } }).value();
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{}, Transition::WindowClose };
+
+		GYRO_REQUIRE(commit.Fade(window, 0.0F));
+		GYRO_REQUIRE(commit.Retire(window));
+	}
+
+	SceneSerializer serializer;
+	serializer.Serialize(store);
+
+	GYRO_REQUIRE_EQ(serializer.Nodes().size(), std::size_t{ 1 });
+	GYRO_REQUIRE_EQ(serializer.Exits().size(), std::size_t{ 2 });
+
+	const Node& node = serializer.Nodes()[0];
+
+	GYRO_REQUIRE(node.IsExiting());
+	GYRO_CHECK_EQ(node.Exit, std::uint32_t{ 0 });
+
+	// Contiguous and in output order, which is the whole of what a node's slot promises: the run from
+	// it up to the first entry naming somebody else is this node's.
+	const std::span<const ExitSnapshot> exits = serializer.Exits();
+
+	GYRO_CHECK_EQ(exits[0].Node, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(exits[1].Node, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(exits[0].Output, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(exits[1].Output, std::uint32_t{ 1 });
+
+	// The same window in each screen's own texels — 400x300 logical is 400x300 at scale 1 and 800x600
+	// at scale 2. A single rectangle for both would have to be resampled onto one of them, and a window
+	// resampled while it fades is a picture that goes soft on the way out.
+	GYRO_CHECK(exits[0].Slot.Extent == PixelSize<BufferSpace>{ 400, 300 });
+	GYRO_CHECK(exits[1].Slot.Extent == PixelSize<BufferSpace>{ 800, 600 });
+
+	// Nothing has been captured into them yet, and a null id draws nothing rather than drawing
+	// whatever was last at that address.
+	GYRO_CHECK(exits[0].Texture.IsNull());
+	GYRO_CHECK(exits[1].Texture.IsNull());
+}
+
+GYRO_TEST(SceneSerializer, AWindowNobodyIsClosingKeepsNoPixelsAnywhere)
+{
+	ManualClock clock;
+	SceneStore store{ clock };
+
+	const OutputId panel{ 1, 1 };
+	const SceneOutput outputs[] = { Screen(panel, 0.0, 1) };
+
+	store.SetOutputs(outputs);
+
+	const EntityId window = store.CreateContainer({}, { .Extent = { 400.0F, 300.0F } }).value();
+
+	SceneSerializer serializer;
+	serializer.Serialize(store);
+
+	GYRO_REQUIRE_EQ(serializer.Nodes().size(), std::size_t{ 1 });
+	GYRO_CHECK(!serializer.Nodes()[0].IsExiting());
+	GYRO_CHECK(serializer.Exits().empty());
+	GYRO_CHECK(store.Atlases().IsEmpty());
+	GYRO_CHECK(store.IsLive(window));
+}
+
+GYRO_TEST(SceneSerializer, TheRectangleIsGivenBackOnThePassTheExitFinishes)
+{
+	ManualClock clock;
+	SceneStore store{ clock };
+
+	const OutputId panel{ 1, 1 };
+	const SceneOutput outputs[] = { Screen(panel, 0.0, 1) };
+
+	store.SetOutputs(outputs);
+
+	const EntityId window = store.CreateContainer({}, { .Extent = { 400.0F, 300.0F } }).value();
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{}, Transition::WindowClose };
+
+		GYRO_REQUIRE(commit.Fade(window, 0.0F));
+		GYRO_REQUIRE(commit.Retire(window));
+	}
+
+	SceneSerializer serializer;
+	serializer.Serialize(store);
+
+	GYRO_REQUIRE_EQ(serializer.Exits().size(), std::size_t{ 1 });
+
+	const Wake owed = serializer.Republish();
+
+	GYRO_REQUIRE(owed.Which == Wake::Kind::Timed);
+	clock.Set(owed.When);
+
+	// The pass that publishes the scene without the window is the pass that gives its rectangle back.
+	// Held past that, an atlas sized for what is leaving would fill up with windows that have finished
+	// leaving, and the exit that then found no room would cut instead of fading.
+	serializer.Serialize(store);
+
+	GYRO_CHECK(!store.IsLive(window));
+	GYRO_CHECK(serializer.Exits().empty());
+	GYRO_CHECK(store.Atlases().IsEmpty());
 }
