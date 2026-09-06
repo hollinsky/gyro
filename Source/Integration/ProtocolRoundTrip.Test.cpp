@@ -6256,3 +6256,194 @@ GYRO_TEST(ProtocolRoundTrip, DroppingTheManagerLeavesTheSurfaceItDeclared)
 	GYRO_CHECK(!pair.Client.Fault().has_value());
 	GYRO_CHECK(ChromeNode(pair.Store)->Dress == Material::Smoke);
 }
+
+namespace
+{
+// The newest chrome surface rather than the backmost, which is a distinction only a remap introduces.
+// `ChromeNode` above takes the chrome root's *first* child and is right for every test that maps one
+// launcher once. A surface taken down and put back is a **new entity appended beside the old one**,
+// and the old one goes on being a child of that root for as long as its exit is still running (114) —
+// so the launcher a person is actually looking at is the last child, which is also decision 55's
+// frontmost.
+[[nodiscard]] EntityId NewestChrome(const SceneStore& scene)
+{
+	const Entity* const root = scene.Find(ChromeRoot(scene));
+
+	return root == nullptr ? EntityId{} : root->LastChild;
+}
+
+// The whole of taking a launcher off the screen, and it is the only request a client has for it:
+// attach nothing and commit. There is no hide verb in xdg-shell and gyro's chrome protocol does not
+// add one, so this is the path a run bar takes on every press of its own chord.
+void Hide(Pair& pair, Toplevel& toplevel)
+{
+	toplevel.Drawn.Surface.Attach(Wayland::WlBuffer{}, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+}
+
+// And putting it back, which is deliberately **not** a second attach. Unmapping takes the configure
+// and the acknowledgement away with the window (Protocol/Shell.cpp), so the client negotiates from
+// the start exactly as it did the first time — the extra turn here is that sequence rather than the
+// test being impatient, because the commit carrying the buffer maps nothing and asks to be configured.
+[[nodiscard]] bool Reveal(Pair& pair, Toplevel& toplevel)
+{
+	const std::uint32_t before = toplevel.SurfaceEvents.Configured;
+
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	// A compositor that mapped on this commit would have skipped the negotiation it just tore down,
+	// which is the failure this returns false for rather than asserting on: the caller is what says
+	// where it happened.
+	if (toplevel.SurfaceEvents.Configured == before)
+	{
+		return false;
+	}
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	return true;
+}
+} // namespace
+
+GYRO_TEST(ProtocolRoundTrip, ALauncherTakenDownAndPutBackIsChromeAgainAndWearsTheMaterialItHad)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	// **The path a run bar is on every single time a person presses its chord**, and the one nothing
+	// had walked: chrome is declared once, before the first map and never again, while the surface it
+	// was declared on goes up and down all day. Everything that makes a launcher a launcher is decided
+	// inside `ClientXdgSurface::Map` — which root it hangs on, which kind of focus it takes, what it is
+	// dressed in — so a second map is a second chance to decide all three wrongly, and what a person
+	// would see is their launcher coming back as an ordinary window: behind whatever they had open,
+	// with its glass gone.
+	Pair pair{ "gyro-roundtrip-chrome-again", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Chrome chrome;
+	GYRO_REQUIRE(Declare(pair, bound, chrome, std::byte{ 0x60 }));
+
+	chrome.Object.SetMaterial(Wayland::GyroChromeV1Material::Glass);
+	chrome.Window.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	const EntityId first = NewestChrome(pair.Store);
+	GYRO_REQUIRE(!first.IsNull());
+	GYRO_REQUIRE(pair.Store.Find(first) != nullptr);
+	GYRO_CHECK(pair.Store.Find(first)->Dress == Material::Glass);
+
+	Hide(pair, chrome.Window);
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// The window it was is on its way out rather than gone, which is decision 114 and is why the walk
+	// above takes the last child: the entity is still hanging on the chrome root, still being drawn,
+	// and the next map appends a second one beside it.
+	GYRO_REQUIRE(pair.Store.Find(first) != nullptr);
+	GYRO_CHECK(pair.Store.Find(first)->Retiring);
+
+	GYRO_REQUIRE(Reveal(pair, chrome.Window));
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	const EntityId second = NewestChrome(pair.Store);
+	GYRO_REQUIRE(!second.IsNull());
+	GYRO_CHECK(second != first);
+
+	// **On the chrome root and not on the floor**, which is the whole of being drawn in front (187).
+	// The declaration lives on the `xdg_toplevel` rather than on the entity, so it survives an unmap
+	// that threw the entity away — and this is what says so.
+	GYRO_CHECK_EQ(pair.Store.Find(second)->Parent, ChromeRoot(pair.Store));
+	GYRO_CHECK(!pair.Store.Find(second)->Retiring);
+
+	// And the material with it. `set_material` is double-buffered onto the toplevel's own commit and
+	// the shell sent it once, before the surface ever came down; a compositor that kept the material on
+	// the entity rather than on the toplevel would bring the launcher back as plain glass-less pixels
+	// over whatever a person had open, with no request the shell could have sent to prevent it.
+	GYRO_CHECK(pair.Store.Find(second)->Dress == Material::Glass);
+
+	// The floor is untouched throughout: a launcher is never among the windows, on its first map or on
+	// its tenth. This is the walk `WindowNode` does, asked for nothing rather than for a window.
+	const Entity* const floor = pair.Store.Find(pair.Store.FirstRoot());
+	GYRO_REQUIRE(floor != nullptr);
+	GYRO_CHECK(floor->FirstChild.IsNull());
+}
+
+GYRO_TEST(ProtocolRoundTrip, ALauncherGivesTheKeyboardBackToTheWindowUnderItAndTakesItAgainWhenItReturns)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	// **What a person feels rather than what the scene holds**: they press the chord, type into the run
+	// bar, press escape, and go on typing into the document that was in front of them. The middle step
+	// is the one that has never run — focus leaves a chrome surface at its retirement (114), and the
+	// window it leaves to is whatever was underneath, which is the stack `Scene/Focus.h` keeps rather
+	// than anything the shell says.
+	Pair pair{ "gyro-roundtrip-chrome-keyboard", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Keyboard keyboard;
+	GYRO_REQUIRE(Listen(pair, bound, keyboard));
+
+	Toplevel document;
+	GYRO_REQUIRE(Show(pair, bound, document, std::byte{ 0x20 }));
+
+	pair.Turn();
+
+	GYRO_REQUIRE(keyboard.Listener.Entered == 1);
+	GYRO_CHECK(keyboard.Listener.Focused.Id() == document.Drawn.Surface.Id());
+
+	Chrome chrome;
+	GYRO_REQUIRE(Declare(pair, bound, chrome, std::byte{ 0x60 }));
+
+	// The launcher takes the keyboard when it maps, because one a person cannot type into is not one.
+	// This transition does send a `leave`, and it is the only one of the three that does — see below.
+	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 2 });
+	GYRO_CHECK_EQ(keyboard.Listener.Left, std::uint32_t{ 1 });
+	GYRO_CHECK(keyboard.Listener.Focused.Id() == chrome.Window.Drawn.Surface.Id());
+
+	Hide(pair, chrome.Window);
+
+	// **And gives it back to the window that had it**, rather than to nothing. A compositor that let
+	// focus fall to null here would leave a person's next keystroke going nowhere after they dismissed
+	// a launcher — which reads as the keyboard having died rather than as a bug in the shell.
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 3 });
+	GYRO_CHECK(keyboard.Listener.Focused.Id() == document.Drawn.Surface.Id());
+
+	GYRO_REQUIRE(Reveal(pair, chrome.Window));
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(keyboard.Listener.Entered, std::uint32_t{ 4 });
+	GYRO_CHECK(keyboard.Listener.Focused.Id() == chrome.Window.Drawn.Surface.Id());
+
+	// **What is deliberately not asserted here is the `leave` count, and it is a gap rather than a
+	// preference.** An unmap sends no `wl_keyboard.leave` at all: `ClientXdgSurface::Unmap` takes the
+	// entity out of the window-to-surface table before it retires the entity, and `SeatGlobal::SendLeave`
+	// resolves the surface it is leaving *through that table* — so by the time the seat compares the
+	// world's focus against what it has told the client, there is nothing left for it to name. Its own
+	// comment says a destroyed surface takes its focus with it and owes no leave, which is true, and the
+	// path arrives there for a surface that is merely unmapped, which is not.
+	//
+	// A client is therefore told `enter` on the window under the launcher without ever being told it
+	// left the launcher, and what a toolkit does with that is go on drawing a caret in a surface it has
+	// taken off the screen. It costs nothing while one process owns both — the shell dismissed its own
+	// launcher and knows — and it is wrong the moment the surface that had focus belongs to somebody
+	// else. `SeatGlobal::SendPointerLeave` is the same code and the same gap.
+	//
+	// Asserting the counts that are right today would write the bug into the suite, so what stands here
+	// instead is the sentence naming it.
+}
