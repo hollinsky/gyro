@@ -5,6 +5,7 @@
 
 #include "Core/Result.h"
 #include "Shell/Canvas.h"
+#include "Shell/Launch.h"
 #include "Shell/Session.h"
 #include "Wayland/GyroBindingsV1.h"
 #include "Wayland/GyroChromeV1.h"
@@ -45,7 +46,8 @@ public:
 
 	// Builds the surface, declares it chrome, dresses it in glass, claims the chord and asks for a
 	// keyboard. Nothing is on screen when this returns: the bar is summoned rather than started.
-	[[nodiscard]] Result<void> Open(Session& session, std::uint32_t modifiers, std::uint32_t keysym);
+	[[nodiscard]] Result<void>
+	Open(Session& session, Launcher& launcher, std::uint32_t modifiers, std::uint32_t keysym);
 
 	// Brings the bar up as though the chord had been pressed.
 	//
@@ -57,7 +59,7 @@ public:
 	// Whether the bar is on screen, which is what the loop reports and what a test would assert.
 	[[nodiscard]] bool Shown() const noexcept { return m_Shown; }
 
-	// What has been typed, for the caller that will turn it into a program to run.
+	// What has been typed, for a test that wants to see the edit without a panel in front of it.
 	[[nodiscard]] const std::string& Query() const noexcept { return m_Query; }
 
 private:
@@ -138,7 +140,11 @@ private:
 	// this does not cost a redraw.
 	[[nodiscard]] bool Edit(std::uint32_t keycode);
 
+	// The bar comes down and what was typed is started, in that order — see the definition.
+	void Launch();
+
 	Session* m_Session = nullptr;
+	Launcher* m_Launcher = nullptr;
 	ChordEvents m_ChordEvents{ *this };
 	SurfaceEvents m_SurfaceEvents{ *this };
 	WindowEvents m_WindowEvents{ *this };

@@ -1245,7 +1245,10 @@ gyro_add_module(Shell
 	SOURCES
 		Bar.cpp
 		Canvas.cpp
+		Launch.cpp
 		Session.cpp
+	TESTS
+		Launch.Test.cpp
 )
 
 # The generated client bindings, xkbcommon for the layout, and spdlog for the handful of lines that

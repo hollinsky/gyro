@@ -1,5 +1,6 @@
 #include "Shell/Bar.h"
 
+#include <spdlog/spdlog.h>
 #include <sys/mman.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 #include <xkbcommon/xkbcommon.h>
@@ -155,9 +156,10 @@ Bar::~Bar()
 	::xkb_context_unref(m_Xkb);
 }
 
-Result<void> Bar::Open(Session& session, std::uint32_t modifiers, std::uint32_t keysym)
+Result<void> Bar::Open(Session& session, Launcher& launcher, std::uint32_t modifiers, std::uint32_t keysym)
 {
 	m_Session = &session;
+	m_Launcher = &launcher;
 
 	m_Xkb = ::xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 
@@ -263,6 +265,27 @@ void Bar::Hide()
 	m_Surface.Commit();
 }
 
+void Bar::Launch()
+{
+	// **Taken before the bar comes down, because coming down is what clears it.** Hiding first is also
+	// the order a person perceives: the screen is theirs again on the keystroke rather than after a
+	// fork, and a browser takes long enough to put a window up that a launcher still on screen while it
+	// starts would read as a press that did not register.
+	const std::string query = m_Query;
+
+	Hide();
+
+	if (m_Launcher == nullptr || query.empty())
+	{
+		return;
+	}
+
+	if (Result<void> started = m_Launcher->Run(query); !started)
+	{
+		spdlog::error("gyro-shell: running {}: {}", query, started.error());
+	}
+}
+
 bool Bar::Edit(std::uint32_t keycode)
 {
 	if (m_State == nullptr)
@@ -275,6 +298,13 @@ bool Bar::Edit(std::uint32_t keycode)
 	if (keysym == XKB_KEY_Escape)
 	{
 		Hide();
+
+		return false;
+	}
+
+	if (keysym == XKB_KEY_Return || keysym == XKB_KEY_KP_Enter)
+	{
+		Launch();
 
 		return false;
 	}
@@ -305,8 +335,9 @@ bool Bar::Edit(std::uint32_t keycode)
 
 	if (written <= 0 || text[0] < ' ')
 	{
-		// A control character is not an edit. Return and the rest — the key that runs what was typed —
-		// belongs to the caller that knows how to run it, and is not built yet.
+		// A control character is not an edit. Enter is answered above, before this, because it arrives
+		// here as an ordinary carriage return and would otherwise be indistinguishable from a key that
+		// does nothing.
 		return false;
 	}
 

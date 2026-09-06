@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "Shell/Bar.h"
+#include "Shell/Launch.h"
 #include "Shell/Session.h"
 
 // gyro's shell, and the third binary this project ships.
@@ -36,10 +37,23 @@ constexpr std::uint32_t SummonKeysym = XKB_KEY_space;
 int main(int argument, char** arguments)
 {
 	bool summon = false;
+	std::optional<std::string_view> display;
+
+	// **Read before the connection, because opening it takes the variable away.** Wire/Connection.h
+	// `unsetenv`s `WAYLAND_SOCKET` the moment it adopts the descriptor, and whether it was there is
+	// exactly the question below.
+	const bool handed = ::getenv("WAYLAND_SOCKET") != nullptr;
 
 	for (int index = 1; index < argument; ++index)
 	{
 		const std::string_view option{ arguments[index] };
+
+		if (option.starts_with("--display="))
+		{
+			display = option.substr(std::string_view{ "--display=" }.size());
+
+			continue;
+		}
 
 		if (option == "--summon")
 		{
@@ -71,9 +85,38 @@ int main(int argument, char** arguments)
 
 	spdlog::info("gyro-shell: connected, {}x{} at scale {}", session.Width(), session.Height(), session.Scale());
 
+	// **What everything this shell starts will be told the display is, and it is not always the one
+	// this process connected on.** The agent puts the applications' socket in `WAYLAND_DISPLAY` and
+	// hands the shell its own connection as `WAYLAND_SOCKET` (Session/Child.h), so inheriting is right
+	// there and is what happens. A development run has no agent: the shell is started by name against
+	// `gyro-system-N`, and that name is the socket that grants the run of the session — passing it on
+	// would give a browser everything a shell is trusted with. So it is deliberately dropped, and
+	// `--display=NAME` is how such a run says what applications should reach instead.
+	Launcher launcher;
+
+	if (display.has_value())
+	{
+		launcher.Adopt(*display);
+	}
+	else if (handed)
+	{
+		const char* const inherited = ::getenv("WAYLAND_DISPLAY");
+
+		launcher.Adopt(inherited != nullptr ? std::string_view{ inherited } : std::string_view{});
+	}
+	else
+	{
+		launcher.Adopt({});
+
+		spdlog::warn(
+			"gyro-shell: connected by name, so nothing started from the bar is told a display; "
+			"pass --display=NAME to say which socket applications should reach"
+		);
+	}
+
 	Bar bar;
 
-	if (Result<void> opened = bar.Open(session, SummonModifiers, SummonKeysym); !opened)
+	if (Result<void> opened = bar.Open(session, launcher, SummonModifiers, SummonKeysym); !opened)
 	{
 		spdlog::error("gyro-shell: {}", opened.error());
 
