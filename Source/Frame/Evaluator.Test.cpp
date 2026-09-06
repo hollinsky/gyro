@@ -1832,3 +1832,144 @@ GYRO_TEST(Evaluator, AWindowClosingInsideAClosingWindowGetsARunInsideTheOtherOne
 	GYRO_CHECK_EQ(list.Captures[1].First, 0U);
 	GYRO_CHECK_EQ(list.Captures[1].Count, 1U);
 }
+
+// A window's shadow is not the window's pixels — it is its height applied to its rectangle, and the
+// slot holds the rectangle. Drawing it here would square it off at the window's own edges, so the
+// walk drops it and the frame that draws the picture back casts it again.
+GYRO_TEST(Evaluator, AClosingWindowsOwnShadowIsNotInItsPicture)
+{
+	Wire wire;
+
+	// A lifted container with one image under it. The container has no content of its own, so with
+	// its shadow dropped the whole run is that one image.
+	std::array nodes{ Container(1, 300.0, 200.0), Image(0, 300.0, 200.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Lift = Elevation::Floating;
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_REQUIRE_EQ(list.Captures.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Captures[0].First, 0U);
+	GYRO_CHECK_EQ(list.Captures[0].Count, 1U);
+
+	// Nothing in the picture casts one, which is the whole of it.
+	for (const DrawItem& item : list.Items)
+	{
+		GYRO_CHECK(!item.Lift.Draws());
+	}
+}
+
+// The same window without an exit still casts its shadow, so the test above is measuring the
+// snapshot rather than an evaluator that stopped emitting shadows.
+GYRO_TEST(Evaluator, TheSameWindowStayingCastsItsShadowAsBefore)
+{
+	Wire wire;
+
+	std::array nodes{ Container(1, 300.0, 200.0), Image(0, 300.0, 200.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Lift = Elevation::Floating;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 2 });
+	GYRO_CHECK(list.Items[0].Lift.Draws());
+	GYRO_CHECK(list.Captures.empty());
+}
+
+// Only the closing window's own shadow is dropped. A lift below it falls on its siblings inside the
+// picture, where the slot holds it and nothing clips it.
+GYRO_TEST(Evaluator, AShadowUnderAClosingWindowStaysInThePicture)
+{
+	Wire wire;
+
+	// The closing container is unlifted; the image under it is the one with a height.
+	std::array nodes{ Container(1, 300.0, 200.0), Image(0, 310.0, 210.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+	nodes[1].Lift = Elevation::Resting;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_REQUIRE_EQ(list.Captures.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Captures[0].Count, 1U);
+	GYRO_CHECK(list.Items[0].Lift.Draws());
+}
+
+// A group flattens the subtree it declares, and it takes the level with it — so a closing window
+// that declares one has to lose the shadow before the group item is emitted, or the shadow is baked
+// into the flattened result instead of being clipped by it.
+GYRO_TEST(Evaluator, AClosingWindowThatDeclaredAGroupDoesNotBakeItsShadowIntoTheGroup)
+{
+	Wire wire;
+
+	std::array nodes{ Container(1, 300.0, 200.0), Image(0, 300.0, 200.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Lift = Elevation::Floating;
+	nodes[0].Opacity = 0.5F;
+	nodes[0].Flags |= Node::Group;
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 2 });
+	GYRO_REQUIRE_EQ(list.Captures.size(), std::size_t{ 1 });
+
+	// The group is the first item of its own run, and it carries the opacity without the level.
+	GYRO_CHECK_EQ(list.Captures[0].First, 0U);
+	GYRO_CHECK_EQ(list.Captures[0].Count, 2U);
+	GYRO_CHECK(!list.Items[0].Lift.Draws());
+	GYRO_CHECK(list.Items[0].Opacity > 0.4F && list.Items[0].Opacity < 0.6F);
+}

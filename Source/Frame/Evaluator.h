@@ -641,6 +641,23 @@ private:
 		// immediately for a window with nothing under it.
 		const ExitCapture pending = Reserved(node, index, chain, view, runs.Exits, request.Output, m_Count);
 
+		// **And the picture stops at the window, so its own shadow is not drawn into it.** The slot is
+		// the window's rectangle and nothing more, so a shadow emitted here would be scissored off at
+		// the window's edges — but squaring it off is not what is wanted either. A shadow is not the
+		// window's pixels: it is this height applied to this quad, and the frame that draws the
+		// snapshot back has the node and can cast it again around the same rectangle, which is what
+		// decision 105 asks for when it says the shadow animates with its window rather than being
+		// carried along by it.
+		//
+		// **Above the group for the group's own reason**, one field over: a group takes the level with
+		// it, so leaving this until after would bake the shadow into the flattened result instead.
+		// Only the closing node's own is dropped — a lift below it casts inside the picture, where it
+		// belongs and where nothing clips it.
+		if (pending.Reservation != 0)
+		{
+			lift = {};
+		}
+
 		// **A group takes the node's dressing along with its opacity, and for the same reason.** Both
 		// belong to the flattened result: a glass window that declares a group blurs what is behind the
 		// *group*, and leaving the material on the member as well would blur it twice — visibly, at the
@@ -900,11 +917,19 @@ private:
 	// two agreeing is what makes the copy a translation, so measuring anything else here would slide
 	// the picture inside its own rectangle by however far the subtree overhangs.
 	//
-	// **A shadow overhangs and is therefore clipped**, which is the one thing this leaves owed: an
-	// elevation spreads past the quad it is cast from, the slot is the quad's size, and the renderer
-	// scissors to the slot. A window with a shadow leaves with that shadow squared off at its own
-	// edges. Fixing it means the reservation growing by the spread on the far side, where the
-	// elevation is still a level rather than a distance.
+	// **Which is also why the closing node's own shadow is not in the picture**, and the caller drops
+	// it rather than this rectangle growing to hold it. A shadow reaches past the quad it is cast
+	// from, so a slot the size of the quad squares it off at the window's own edges — but the fix is
+	// not a bigger slot. The shadow is not the window's pixels; it is arithmetic on the window's
+	// rectangle and its height, and the frame that draws the snapshot back has both. Casting it there
+	// is what keeps decision 105's promise that the shadow animates with its window: a shadow baked
+	// into the picture is scaled along with it, so a window shrinking as it leaves would carry a
+	// shrinking shadow, when what a person expects is one cast fresh from where the window now is.
+	//
+	// The rectangle stopping at the quad is what leaves `Scene/Atlas.h` reserving from
+	// `Scene/Reach.h`'s bound with nothing added, and the elevation a level rather than a distance on
+	// the side that could not spell the distance anyway — `Scene` may not name `Seam`, where the one
+	// light's numbers live.
 	[[nodiscard]] static ExitCapture Reserved(
 		const Node& node,
 		std::size_t index,
