@@ -94,30 +94,44 @@ struct Window
 }
 
 // The open, as the catalog states it: scale and opacity, under two different motions.
+//
+// Neither write names a motion, and there is no table in sight. The commit says what happened and the
+// catalog says what that looks like, which is Docs/Animation.md#declarative-commits' whole claim — the
+// day the catalog gives `WindowOpen` a translation channel, this function animates one without being
+// edited.
 void Open(SceneStore& store, EntityId node, Instant origin)
 {
-	const ChannelTable channels = Channels(Definition(Transition::WindowOpen), MotionPolicy::Ordinary);
+	SceneCommit commit{ store, CommitAuthor::Shell, origin, Transition::WindowOpen };
 
-	SceneCommit commit{ store, CommitAuthor::Shell, origin };
-
-	GYRO_REQUIRE(commit.Scale(node, { 1.0F, 1.0F, 1.0F }, channels.Scale));
-	GYRO_REQUIRE(commit.Fade(node, 1.0F, channels.Opacity));
+	GYRO_REQUIRE(commit.Scale(node, { 1.0F, 1.0F, 1.0F }));
+	GYRO_REQUIRE(commit.Fade(node, 1.0F));
 }
 
-// Focus moving away from this window and the window moving with it: the second event, one commit.
+// Focus moving away from this window and the window moving with it: the second event, two transitions.
+//
+// **Two scopes rather than one, sharing an origin, and that is what a transition per commit costs and
+// buys.** These are two catalog entries — a focus change is a dim and a matched move is a travel — and
+// one scope could only have named one of them, so the window would have dimmed where it stood. The
+// shared `t₀` is what keeps them one gesture anyway: the origin is the event's timestamp rather than
+// the moment either scope opened, so the dim and the travel start on the same instant however many
+// transactions carry them.
 //
 // The scale channel is written by neither, which is decision 89's third case and the one that is easy
 // to lose — a channel no transition names keeps doing what it was doing, so the open's scale spring has
-// to come through this commit untouched rather than restarted at the new origin.
+// to come through both of these untouched rather than restarted at the new origin.
 void FocusElsewhere(SceneStore& store, EntityId node, Instant origin)
 {
-	const ChannelTable dim = Channels(Definition(Transition::FocusChange), MotionPolicy::Ordinary);
-	const ChannelTable move = Channels(Definition(Transition::MatchedMove), MotionPolicy::Ordinary);
+	{
+		SceneCommit dim{ store, CommitAuthor::Shell, origin, Transition::FocusChange };
 
-	SceneCommit commit{ store, CommitAuthor::Shell, origin };
+		GYRO_REQUIRE(dim.Fade(node, 0.7F));
+	}
 
-	GYRO_REQUIRE(commit.Fade(node, 0.7F, dim.Opacity));
-	GYRO_REQUIRE(commit.Move(node, { 900.0, 300.0, 0.0 }, move.Translation));
+	{
+		SceneCommit move{ store, CommitAuthor::Shell, origin, Transition::MatchedMove };
+
+		GYRO_REQUIRE(move.Move(node, { 900.0, 300.0, 0.0 }));
+	}
 }
 
 // What crossed, as the frame side would find it: the one node, and the coefficient each channel names.
@@ -231,12 +245,21 @@ GYRO_TEST(SceneCommit, ResolvingOncePerFrameWouldHaveThrownTheOpeningAway)
 	// The rejected shape, which is decision 14 read literally: the frame's dirty set resolved once, at
 	// the last origin it saw. Both mutations touch opacity, so the second target is the only one that
 	// survives and the open starts where the focus starts.
+	// Uncatalogued, because the shape being modelled is not a transition: it is three channels belonging
+	// to three different catalog entries collapsed into one scope at one origin, which is exactly the
+	// summary this test exists to reject. Naming a transition here would be modelling the rejected shape
+	// as something the vocabulary can say, and it cannot.
 	{
-		SceneCommit commit{ summarised.Store, CommitAuthor::Shell, Focus };
+		SceneCommit commit{ summarised.Store,
+			                CommitAuthor::Shell,
+			                Focus,
+			                SceneCommit::Uncatalogued{ { .Translation = Animate(Motion::Snappy),
+			                                             .Scale = Animate(Motion::Standard),
+			                                             .Opacity = Animate(Motion::Gentle) } } };
 
-		GYRO_REQUIRE(commit.Scale(summarised.Node, { 1.0F, 1.0F, 1.0F }, Animate(Motion::Standard)));
-		GYRO_REQUIRE(commit.Fade(summarised.Node, 0.7F, Animate(Motion::Gentle)));
-		GYRO_REQUIRE(commit.Move(summarised.Node, { 900.0, 300.0, 0.0 }, Animate(Motion::Snappy)));
+		GYRO_REQUIRE(commit.Scale(summarised.Node, { 1.0F, 1.0F, 1.0F }));
+		GYRO_REQUIRE(commit.Fade(summarised.Node, 0.7F));
+		GYRO_REQUIRE(commit.Move(summarised.Node, { 900.0, 300.0, 0.0 }));
 	}
 
 	SceneSerializer serializer;
@@ -279,10 +302,15 @@ GYRO_TEST(SceneCommit, TwoRetargetsAtOneOriginAreExactlyIdempotent)
 	// write inside one commit is arithmetic rather than motion, and this is the claim decision 89 makes
 	// that a rounding error would falsify.
 	{
-		SceneCommit commit{ window.Store, CommitAuthor::Shell, Focus };
+		SceneCommit dim{ window.Store, CommitAuthor::Shell, Focus, Transition::FocusChange };
 
-		GYRO_REQUIRE(commit.Fade(window.Node, 0.7F, Animate(Motion::Gentle)));
-		GYRO_REQUIRE(commit.Move(window.Node, { 900.0, 300.0, 0.0 }, Animate(Motion::Snappy)));
+		GYRO_REQUIRE(dim.Fade(window.Node, 0.7F));
+	}
+
+	{
+		SceneCommit move{ window.Store, CommitAuthor::Shell, Focus, Transition::MatchedMove };
+
+		GYRO_REQUIRE(move.Move(window.Node, { 900.0, 300.0, 0.0 }));
 	}
 
 	const Published twice = Publish(serializer, window.Store, 2);
@@ -298,12 +326,17 @@ GYRO_TEST(SceneCommit, TwoRetargetsAtOneOriginAreExactlyIdempotent)
 	Open(overwritten.Store, overwritten.Node, Opening);
 
 	{
-		SceneCommit commit{ overwritten.Store, CommitAuthor::Shell, Focus };
+		SceneCommit dim{ overwritten.Store, CommitAuthor::Shell, Focus, Transition::FocusChange };
 
-		GYRO_REQUIRE(commit.Fade(overwritten.Node, 0.2F, Animate(Motion::Gentle)));
-		GYRO_REQUIRE(commit.Fade(overwritten.Node, 0.5F, Animate(Motion::Gentle)));
-		GYRO_REQUIRE(commit.Fade(overwritten.Node, 0.7F, Animate(Motion::Gentle)));
-		GYRO_REQUIRE(commit.Move(overwritten.Node, { 900.0, 300.0, 0.0 }, Animate(Motion::Snappy)));
+		GYRO_REQUIRE(dim.Fade(overwritten.Node, 0.2F));
+		GYRO_REQUIRE(dim.Fade(overwritten.Node, 0.5F));
+		GYRO_REQUIRE(dim.Fade(overwritten.Node, 0.7F));
+	}
+
+	{
+		SceneCommit move{ overwritten.Store, CommitAuthor::Shell, Focus, Transition::MatchedMove };
+
+		GYRO_REQUIRE(move.Move(overwritten.Node, { 900.0, 300.0, 0.0 }));
 	}
 
 	const Published last = Publish(serializer, overwritten.Store, 3);

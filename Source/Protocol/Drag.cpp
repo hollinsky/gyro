@@ -99,9 +99,9 @@ void WindowDrag::Track(SceneStore& scene, Instant origin)
 	// **`Compositor`, because gyro is handling input it routed** — the author decision 112 gives to
 	// exactly this case, and the origin is the instant the hand moved so that anything this composes
 	// with reads the same `t₀`. Nothing here is sprung, so the origin is carried rather than used.
-	SceneCommit commit{ scene, CommitAuthor::Compositor, origin };
+	SceneCommit commit{ scene, CommitAuthor::Compositor, origin, Transition::None };
 
-	static_cast<void>(commit.Move(m_Window, position, Immediate()));
+	static_cast<void>(commit.Move(m_Window, position));
 }
 
 Offset<GlobalSpace> WindowDrag::Between(Size<SurfaceSpace, float> from, Size<SurfaceSpace, float> to) const noexcept

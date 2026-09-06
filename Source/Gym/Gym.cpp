@@ -96,10 +96,16 @@ static_assert(FadePeriod > Duration::zero() && TurnPeriod > Duration::zero());
 // that happened at two instants, and sharing a scope would stamp both with whichever origin was
 // written first. It also keeps every write in this file inside a scope that closes at the end of the
 // statement that opened it, which is what the guard is.
+//
+// **It opens an uncatalogued commit, which is the one place in the tree that is right.** A gym exists
+// to put a single channel in front of a renderer under a motion somebody picked, and a catalog
+// transition is four channels designed together — so an instrument for looking at one of them cannot
+// name one. `Scene/Commit.h`'s `Uncatalogued` says why that door exists and who may use it; this is
+// the caller it was opened for.
 template<typename Write>
-[[nodiscard]] bool Tick(SceneStore& scene, Instant origin, Write write)
+[[nodiscard]] bool Tick(SceneStore& scene, Instant origin, ChannelTable channels, Write write)
 {
-	SceneCommit commit{ scene, CommitAuthor::Compositor, origin };
+	SceneCommit commit{ scene, CommitAuthor::Compositor, origin, SceneCommit::Uncatalogued{ channels } };
 
 	return commit.IsOpen() && write(commit);
 }
@@ -129,8 +135,8 @@ public:
 		const Quaternion orientation =
 			Quaternion::FromAxisAngle({ 0.0F, 0.0F, 1.0F }, static_cast<float>(m_Step) * TurnStepRadians);
 
-		const bool written = Tick(scene, m_Edge, [&](SceneCommit& commit) {
-			return commit.Turn(marker, orientation, Animate(TurnMotion));
+		const bool written = Tick(scene, m_Edge, { .Rotation = Animate(TurnMotion) }, [&](SceneCommit& commit) {
+			return commit.Turn(marker, orientation);
 		});
 
 		m_Edge = NextEdge(m_Edge, TurnPeriod, now);
@@ -213,10 +219,8 @@ public:
 		if (m_Slide <= now)
 		{
 			m_SlideFar = !m_SlideFar;
-			m_Driving = Tick(scene, m_Slide, [&](SceneCommit& commit) {
-				return commit.Move(
-					m_Lanes.Slide.Marker, m_SlideFar ? m_Lanes.SlideFar : m_Lanes.SlideNear, Animate(SlideMotion)
-				);
+			m_Driving = Tick(scene, m_Slide, { .Translation = Animate(SlideMotion) }, [&](SceneCommit& commit) {
+				return commit.Move(m_Lanes.Slide.Marker, m_SlideFar ? m_Lanes.SlideFar : m_Lanes.SlideNear);
 			});
 
 			m_Slide = NextEdge(m_Slide, SlidePeriod, now);
@@ -225,10 +229,9 @@ public:
 		if (m_Grow <= now)
 		{
 			m_GrowFull = !m_GrowFull;
-			m_Driving =
-				m_Driving && Tick(scene, m_Grow, [&](SceneCommit& commit) {
-					return commit.Scale(m_Lanes.Grow.Marker, m_GrowFull ? GrowFull : GrowSmall, Animate(GrowMotion));
-				});
+			m_Driving = m_Driving && Tick(scene, m_Grow, { .Scale = Animate(GrowMotion) }, [&](SceneCommit& commit) {
+							return commit.Scale(m_Lanes.Grow.Marker, m_GrowFull ? GrowFull : GrowSmall);
+						});
 
 			m_Grow = NextEdge(m_Grow, GrowPeriod, now);
 		}
@@ -236,10 +239,9 @@ public:
 		if (m_Fade <= now)
 		{
 			m_FadeFull = !m_FadeFull;
-			m_Driving =
-				m_Driving && Tick(scene, m_Fade, [&](SceneCommit& commit) {
-					return commit.Fade(m_Lanes.Fade.Marker, m_FadeFull ? FadeFull : FadeDim, Animate(FadeMotion));
-				});
+			m_Driving = m_Driving && Tick(scene, m_Fade, { .Opacity = Animate(FadeMotion) }, [&](SceneCommit& commit) {
+							return commit.Fade(m_Lanes.Fade.Marker, m_FadeFull ? FadeFull : FadeDim);
+						});
 
 			m_Fade = NextEdge(m_Fade, FadePeriod, now);
 		}
@@ -300,16 +302,20 @@ public:
 		// arrangement and is right for the same reason: this is one event. The three channels start
 		// together and finish apart, because they are paced differently and not because they were
 		// written in some order.
-		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+		SceneCommit commit{ scene,
+			                CommitAuthor::Compositor,
+			                scene.Now(),
+			                SceneCommit::Uncatalogued{ { .Translation = Animate(SlideMotion),
+			                                             .Scale = Animate(GrowMotion),
+			                                             .Opacity = Animate(FadeMotion) } } };
 
 		if (!commit.IsOpen())
 		{
 			return Failure(EBUSY, "a gym opens a commit of its own, and one was already open");
 		}
 
-		const bool written = commit.Move(m_Lanes.Slide.Marker, m_Lanes.SlideFar, Animate(SlideMotion)) &&
-		                     commit.Scale(m_Lanes.Grow.Marker, GrowFull, Animate(GrowMotion)) &&
-		                     commit.Fade(m_Lanes.Fade.Marker, FadeFull, Animate(FadeMotion));
+		const bool written = commit.Move(m_Lanes.Slide.Marker, m_Lanes.SlideFar) &&
+		                     commit.Scale(m_Lanes.Grow.Marker, GrowFull) && commit.Fade(m_Lanes.Fade.Marker, FadeFull);
 
 		if (!written)
 		{
@@ -517,10 +523,8 @@ public:
 		if (m_Slide <= now)
 		{
 			m_SlideFar = !m_SlideFar;
-			m_Driving = Tick(scene, m_Slide, [&](SceneCommit& commit) {
-				return commit.Move(
-					m_Scene.Sliding, m_SlideFar ? m_Scene.SlideFar : m_Scene.SlideNear, Animate(SlideMotion)
-				);
+			m_Driving = Tick(scene, m_Slide, { .Translation = Animate(SlideMotion) }, [&](SceneCommit& commit) {
+				return commit.Move(m_Scene.Sliding, m_SlideFar ? m_Scene.SlideFar : m_Scene.SlideNear);
 			});
 
 			m_Slide = NextEdge(m_Slide, SlidePeriod, now);
@@ -529,10 +533,9 @@ public:
 		if (m_Grow <= now)
 		{
 			m_Small = !m_Small;
-			m_Driving =
-				m_Driving && Tick(scene, m_Grow, [&](SceneCommit& commit) {
-					return commit.Scale(m_Scene.Scaled, m_Small ? CardScaleSmall : CardScaleFull, Animate(GrowMotion));
-				});
+			m_Driving = m_Driving && Tick(scene, m_Grow, { .Scale = Animate(GrowMotion) }, [&](SceneCommit& commit) {
+							return commit.Scale(m_Scene.Scaled, m_Small ? CardScaleSmall : CardScaleFull);
+						});
 
 			m_Grow = NextEdge(m_Grow, GrowPeriod, now);
 		}
@@ -540,8 +543,8 @@ public:
 		if (m_Fade <= now)
 		{
 			m_Dim = !m_Dim;
-			m_Driving = m_Driving && Tick(scene, m_Fade, [&](SceneCommit& commit) {
-							return commit.Fade(m_Scene.Faded, m_Dim ? CardFadeDim : CardFadeFull, Animate(FadeMotion));
+			m_Driving = m_Driving && Tick(scene, m_Fade, { .Opacity = Animate(FadeMotion) }, [&](SceneCommit& commit) {
+							return commit.Fade(m_Scene.Faded, m_Dim ? CardFadeDim : CardFadeFull);
 						});
 
 			m_Fade = NextEdge(m_Fade, FadePeriod, now);
@@ -591,7 +594,7 @@ private:
 		// The same texel count every phase, because the two buffers are the same card drawn twice.
 		const Rect<BufferSpace> source{ {}, { static_cast<float>(CardTexels), static_cast<float>(CardTexels) } };
 
-		const bool attached = Tick(scene, m_Swap, [&](SceneCommit& commit) {
+		const bool attached = Tick(scene, m_Swap, {}, [&](SceneCommit& commit) {
 			return commit.Attach(m_Scene.Still, m_Texture, source) &&
 			       commit.Attach(m_Scene.Scaled, m_Texture, source) &&
 			       commit.Attach(m_Scene.Faded, m_Texture, source) && commit.Attach(m_Scene.Sliding, m_Texture, source);
@@ -673,10 +676,8 @@ public:
 		if (m_Glide <= now)
 		{
 			m_Far = !m_Far;
-			m_Driving = Tick(scene, m_Glide, [&](SceneCommit& commit) {
-				return commit.Move(
-					m_Scene.MovingArrow, m_Far ? m_Scene.SlideFar : m_Scene.SlideNear, Animate(GlideMotion)
-				);
+			m_Driving = Tick(scene, m_Glide, { .Translation = Animate(GlideMotion) }, [&](SceneCommit& commit) {
+				return commit.Move(m_Scene.MovingArrow, m_Far ? m_Scene.SlideFar : m_Scene.SlideNear);
 			});
 
 			m_Glide = NextEdge(m_Glide, GlidePeriod, now);

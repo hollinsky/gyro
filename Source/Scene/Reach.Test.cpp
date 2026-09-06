@@ -122,9 +122,9 @@ GYRO_TEST(Reach, TheAnswerFollowsTheParentTheWindowWasMovedBy)
 	GYRO_REQUIRE_EQ(Reach(store, content), OutputReach{ 0b01 });
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Compositor, store.Now() };
+		SceneCommit commit{ store, CommitAuthor::Compositor, store.Now(), Transition::None };
 
-		static_cast<void>(commit.Move(frame, { 2100.0, 0.0, 0.0 }, Immediate()));
+		static_cast<void>(commit.Move(frame, { 2100.0, 0.0, 0.0 }));
 	}
 
 	// The chain is composed rather than the node read, which is what makes dragging a window across the

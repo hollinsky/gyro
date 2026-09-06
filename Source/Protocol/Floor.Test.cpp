@@ -205,7 +205,7 @@ GYRO_TEST(Floor, AWindowIsPlacedOnAnOutputShowingItsOwnSession)
 	GYRO_REQUIRE(window.has_value());
 
 	{
-		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now(), Transition::None };
 
 		PlaceOnFloor(commit, scene, Second, *window, Window(800.0F, 600.0F));
 	}
@@ -233,7 +233,7 @@ GYRO_TEST(Floor, AWindowOfASessionOnNoOutputIsNotPlaced)
 	GYRO_REQUIRE(window.has_value());
 
 	{
-		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now(), Transition::None };
 
 		PlaceOnFloor(commit, scene, Second, *window, Window(800.0F, 600.0F));
 	}
@@ -257,7 +257,7 @@ GYRO_TEST(Floor, AWindowIsCentredOnTheOutputHoldingThePointer)
 	GYRO_REQUIRE(window.has_value());
 
 	{
-		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now(), Transition::None };
 
 		PlaceOnFloor(commit, scene, Nobody, *window, Window(800.0F, 600.0F));
 	}
@@ -289,7 +289,7 @@ GYRO_TEST(Floor, ThePlacementIsInTheOutputsOwnCornerRatherThanTheWorldsOrigin)
 	GYRO_REQUIRE(window.has_value());
 
 	{
-		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now(), Transition::None };
 
 		PlaceOnFloor(commit, scene, Nobody, *window, Window(800.0F, 600.0F));
 	}
@@ -312,7 +312,7 @@ GYRO_TEST(Floor, AWindowLargerThanTheScreenHangsOffBothEdgesEqually)
 	GYRO_REQUIRE(window.has_value());
 
 	{
-		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now(), Transition::None };
 
 		PlaceOnFloor(commit, scene, Nobody, *window, Window(2400.0F, 1400.0F));
 	}
@@ -396,9 +396,9 @@ GYRO_TEST(Floor, AWindowIsToldAboutTheScreenItIsMostlyOn)
 	GYRO_REQUIRE(window.has_value());
 
 	const auto put = [&](double x) {
-		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now(), Transition::None };
 
-		static_cast<void>(commit.Move(*window, { x, 0.0, 0.0 }, Immediate()));
+		static_cast<void>(commit.Move(*window, { x, 0.0, 0.0 }));
 		static_cast<void>(commit.Resize(*window, Window(600.0F, 400.0F)));
 	};
 
@@ -429,7 +429,7 @@ GYRO_TEST(Floor, APlacementWithNoOutputsChangesNothing)
 	GYRO_REQUIRE(window.has_value());
 
 	{
-		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now(), Transition::None };
 
 		PlaceOnFloor(commit, scene, Nobody, *window, Window(800.0F, 600.0F));
 	}

@@ -117,10 +117,14 @@ GYRO_TEST(SceneSerializer, OnlyAMovingChannelCrossesAsACoefficient)
 	GYRO_CHECK(!serializer.Nodes()[0].IsTranslating());
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+		SceneCommit commit{ store,
+			                CommitAuthor::Shell,
+			                Instant{},
+			                SceneCommit::Uncatalogued{
+								{ .Translation = Animate(Motion::Standard), .Opacity = Animate(Motion::Standard) } } };
 
-		GYRO_REQUIRE(commit.Move(moving, { 40.0, 0.0, 0.0 }, Animate(Motion::Standard)));
-		GYRO_REQUIRE(commit.Fade(moving, 0.0F, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Move(moving, { 40.0, 0.0, 0.0 }));
+		GYRO_REQUIRE(commit.Fade(moving, 0.0F));
 	}
 
 	serializer.Serialize(store);
@@ -325,9 +329,9 @@ GYRO_TEST(SceneSerializer, ASecondSerialisationKeepsNothingOfTheFirst)
 	const EntityId panel = store.CreateImage(moving, Panel(10.0F, 10.0F), ImageContent{}).value();
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{}, Transition::MatchedMove };
 
-		GYRO_REQUIRE(commit.Move(moving, { 40.0, 0.0, 0.0 }, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Move(moving, { 40.0, 0.0, 0.0 }));
 	}
 
 	SceneSerializer serializer;
@@ -338,9 +342,9 @@ GYRO_TEST(SceneSerializer, ASecondSerialisationKeepsNothingOfTheFirst)
 	// The same channel written again with no motion, which is how a commit spells *land it here*. What
 	// the serialisation has to notice is that the run it staged last time is not this scene's.
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{}, Transition::None };
 
-		GYRO_REQUIRE(commit.Move(moving, { 40.0, 0.0, 0.0 }, Immediate()));
+		GYRO_REQUIRE(commit.Move(moving, { 40.0, 0.0, 0.0 }));
 	}
 
 	const SnapshotBuffer buffer = serializer.Serialize(store).Build(2);
@@ -375,9 +379,9 @@ GYRO_TEST(SceneSerializer, AMovingSceneOwesEveryFrameAndSaysSoOncePerOutput)
 	store.SetOutputs(outputs);
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{}, Transition::MatchedMove };
 
-		GYRO_REQUIRE(commit.Move(window, { 400.0, 0.0, 0.0 }, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Move(window, { 400.0, 0.0, 0.0 }));
 	}
 
 	SceneSerializer serializer;
@@ -418,9 +422,9 @@ GYRO_TEST(SceneSerializer, ASettledChannelIsRetiredRatherThanRepublished)
 	store.SetOutputs(outputs);
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{}, Transition::MatchedMove };
 
-		GYRO_REQUIRE(commit.Move(window, { 400.0, 0.0, 0.0 }, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Move(window, { 400.0, 0.0, 0.0 }));
 	}
 
 	SceneSerializer serializer;
@@ -466,9 +470,9 @@ GYRO_TEST(SceneSerializer, AnOutputlessSceneStillSettlesAndStagesNoSchedule)
 	const EntityId window = store.CreateContainer({}, {}).value();
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{}, Transition::FocusChange };
 
-		GYRO_REQUIRE(commit.Fade(window, 0.0F, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Fade(window, 0.0F));
 	}
 
 	SceneSerializer serializer;
@@ -506,9 +510,9 @@ GYRO_TEST(SceneSerializer, ARetiringSubtreeIsPublishedUntilItHasFinishedAndThenI
 	// The exit: something on the subtree is still moving when the author goes away, which is the case the
 	// whole two-step shape exists for.
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{}, Transition::FocusChange };
 
-		GYRO_REQUIRE(commit.Fade(child, 0.0F, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Fade(child, 0.0F));
 		GYRO_REQUIRE(commit.Retire(closing));
 	}
 
@@ -586,9 +590,9 @@ GYRO_TEST(SceneSerializer, OneChannelStillMovingKeepsTheWholeRetiringSubtreeAliv
 	store.SetOutputs(outputs);
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, Instant{} };
+		SceneCommit commit{ store, CommitAuthor::Shell, Instant{}, Transition::MatchedMove };
 
-		GYRO_REQUIRE(commit.Move(sliding, { 900.0, 0.0, 0.0 }, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Move(sliding, { 900.0, 0.0, 0.0 }));
 		GYRO_REQUIRE(commit.Retire(window));
 	}
 

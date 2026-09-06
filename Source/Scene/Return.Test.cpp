@@ -438,9 +438,9 @@ GYRO_TEST(SceneReturn, AWindowOnNoOutputWaitsAndIsAnsweredWhenItComesIntoView)
 	GYRO_CHECK(drain.Owing());
 
 	{
-		SceneCommit moved{ store, CommitAuthor::Compositor, store.Now() };
+		SceneCommit moved{ store, CommitAuthor::Compositor, store.Now(), Transition::None };
 
-		static_cast<void>(moved.Move(frame, { 100.0, 0.0, 0.0 }, Immediate()));
+		static_cast<void>(moved.Move(frame, { 100.0, 0.0, 0.0 }));
 	}
 
 	// Re-armed rather than abandoned, which is the half that makes the rule above survivable: the frame

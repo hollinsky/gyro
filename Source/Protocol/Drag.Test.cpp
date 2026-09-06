@@ -150,9 +150,9 @@ GYRO_TEST(Drag, AWindowGrabbedMidFlightIsAnchoredWhereItIsSeen)
 	const EntityId window = Window(scene, { 0.0, 0.0, 0.0 });
 
 	{
-		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now(), Transition::MatchedMove };
 
-		GYRO_REQUIRE(commit.Move(window, { 800.0, 0.0, 0.0 }, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Move(window, { 800.0, 0.0, 0.0 }));
 	}
 
 	// A few milliseconds in, which is where a person's hand lands on a window that is still opening.

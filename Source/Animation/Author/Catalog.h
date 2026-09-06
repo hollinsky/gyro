@@ -37,6 +37,7 @@
 
 enum class Transition : std::uint8_t
 {
+	None,
 	WindowOpen,
 	WindowClose,
 	MenuAppear,
@@ -44,19 +45,21 @@ enum class Transition : std::uint8_t
 	WorkspaceSwitch,
 	FocusChange,
 	MatchedMove,
+	BackgroundChange,
 };
 
-inline constexpr std::size_t TransitionCount = 7;
+inline constexpr std::size_t TransitionCount = 9;
 
 // Unlike Motion.h's five, this number carries no ceiling. The motion vocabulary is capped because
 // growth past seven is cohesion leaking; the transition list is capped by nothing but how many things
 // the system does, and a shell that does more has more. The assertion is here for the reason the
 // switch below needs it — a new enumerator has to be given an entry, not inherit one.
-static_assert(static_cast<std::size_t>(Transition::MatchedMove) + 1 == TransitionCount);
+static_assert(static_cast<std::size_t>(Transition::BackgroundChange) + 1 == TransitionCount);
 
 inline constexpr std::array<Transition, TransitionCount> AllTransitions{
-	Transition::WindowOpen,      Transition::WindowClose, Transition::MenuAppear,  Transition::MenuDismiss,
-	Transition::WorkspaceSwitch, Transition::FocusChange, Transition::MatchedMove,
+	Transition::None,        Transition::WindowOpen,  Transition::WindowClose,
+	Transition::MenuAppear,  Transition::MenuDismiss, Transition::WorkspaceSwitch,
+	Transition::FocusChange, Transition::MatchedMove, Transition::BackgroundChange,
 };
 
 // The list is the enumeration in order, so every sweep below is a sweep over the catalog. The size is
@@ -76,6 +79,29 @@ static_assert([] {
 
 namespace Detail
 {
+// A change that is not a transition: every channel lands where it was put, nothing moves, and the
+// commit that names this is stating that fact rather than forgetting to state anything.
+//
+// **It is first so that a default-constructed Transition is this one**, which is the safe direction
+// for a value that reached a commit without anybody choosing it: a change that arrives with no motion
+// is a change somebody has to come back and animate, where a change that arrives with WindowOpen on it
+// is a window growing out of a corner in the middle of a resize.
+//
+// **Immediate rather than Absent on all four**, and the difference is the whole reason this entry can
+// exist at all. Absent means *this transition has no opinion about that channel, so whatever it was
+// doing continues* — which for a channel a caller explicitly wrote would silently drop the write, and
+// decision 89 spends the staged model value precisely so that a written value is the value. Immediate
+// says the opposite and says it about a channel somebody wrote: it lands, with no motion. Every client
+// commit in the tree is this entry.
+//
+// Its reduced form is a Cut because it already is one, and Bundle.h's Reduce leaves an immediate table
+// untouched — so the ordinary and the reduced path are the same table, which is what *not animated*
+// has to mean on both.
+inline constexpr Bundle None{
+	.Channels = { .Translation = Immediate(), .Rotation = Immediate(), .Scale = Immediate(), .Opacity = Immediate() },
+	.Reduced = { .Form = ReducedForm::Cut },
+};
+
 // A window arriving. Scale and opacity, and no translation — the window is at its layout position from
 // the first frame and grows into it, because a window that also slides has to slide from somewhere and
 // nothing in the model says where. Anchored at the summon point so it grows out of whatever launched
@@ -201,6 +227,21 @@ inline constexpr Bundle MatchedMove{
 	.Channels = { .Translation = Animate(Motion::Snappy), .Scale = Animate(Motion::Standard) },
 	.Reduced = { .Form = ReducedForm::Cut },
 };
+// One wallpaper replacing another, and the first one arriving over black.
+//
+// **Opacity alone, and the two halves are one transition rather than an enter and an exit.** A
+// cross-fade is what a background change is: the outgoing nodes fade to nothing and the incoming ones
+// fade up in the same commit, so they share an origin and neither is the other's reverse. Splitting it
+// into a pair would let the two halves be tuned apart, and a wallpaper that faded out faster than its
+// replacement faded in would show the desktop's own black through the gap.
+//
+// Gentle because nothing about a wallpaper is direct manipulation, and an overshoot on one is a
+// flicker of the picture that was just replaced. Its own reduced form, because it is already the fade
+// that reduced motion would substitute — there is no movement in it to remove.
+inline constexpr Bundle BackgroundChange{
+	.Channels = { .Opacity = Animate(Motion::Gentle) },
+	.Reduced = { .Form = ReducedForm::Unchanged },
+};
 } // namespace Detail
 
 // What a transition is.
@@ -214,6 +255,8 @@ inline constexpr Bundle MatchedMove{
 {
 	switch (transition)
 	{
+		case Transition::None:
+			return Detail::None;
 		case Transition::WindowOpen:
 			return Detail::WindowOpen;
 		case Transition::WindowClose:
@@ -228,6 +271,8 @@ inline constexpr Bundle MatchedMove{
 			return Detail::FocusChange;
 		case Transition::MatchedMove:
 			return Detail::MatchedMove;
+		case Transition::BackgroundChange:
+			return Detail::BackgroundChange;
 	}
 
 	return Detail::WindowOpen;
@@ -247,12 +292,29 @@ inline constexpr Bundle MatchedMove{
 
 // Each entry is the one its name says, checked at the two places a switch can go wrong: the first
 // case and the last.
-static_assert(Definition(Transition::WindowOpen).Anchor == AnchorPolicy::SummonPoint);
+static_assert(Definition(Transition::None).Channels.Translation == Immediate());
 static_assert(Definition(Transition::MatchedMove).Reduced.Form == ReducedForm::Cut);
+
+// Not animating is a claim the whole table has to make, and the sweeps below cannot make it: every one
+// of them is quantified over animated channels, so an entry that quietly sprang one would satisfy all
+// of them and be a window sliding on a path that says it does not move.
+static_assert(Channels(Transition::None, MotionPolicy::Ordinary) == Channels(Transition::None, MotionPolicy::Reduced));
+static_assert([] {
+	for (const Channel channel : AllChannels)
+	{
+		if (Definition(Transition::None).Channels[channel].How != Disposition::Immediate)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}());
 
 // The anchor is declared exactly where something summoned the transition. Windows and menus are opened
 // by a control the user hit and grow out of it; a workspace switch, a focus change, and a matched move
 // have no summoning point to grow from, and the centre is right for all three.
+static_assert(Definition(Transition::WindowOpen).Anchor == AnchorPolicy::SummonPoint);
 static_assert(Definition(Transition::MenuAppear).Anchor == AnchorPolicy::SummonPoint);
 static_assert(Definition(Transition::MenuDismiss).Anchor == AnchorPolicy::SummonPoint);
 static_assert(Definition(Transition::WorkspaceSwitch).Anchor == AnchorPolicy::Centre);

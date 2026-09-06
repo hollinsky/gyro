@@ -532,7 +532,7 @@ void SceneCursor::Step(SceneStore& scene, ITextures& textures)
 	// an immediate write and *never animated* are one state and not two.
 	SceneCommit commit{ scene, CommitAuthor::Compositor };
 
-	static_cast<void>(commit.Move(m_Container, { at.X, at.Y, 0.0 }, Immediate()));
+	static_cast<void>(commit.Move(m_Container, { at.X, at.Y, 0.0 }));
 }
 
 bool SceneCursor::Author(SceneStore& scene, ITextures& textures, Scale density)

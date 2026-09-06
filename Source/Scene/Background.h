@@ -66,11 +66,6 @@
 // outgoing image is given up when the last node naming it has left the world, which is what a sheet
 // below is counting.
 
-// Which motion a background moves under. `Gentle` is the catalog's own *ambient and background
-// changes, no bounce*, which is this in as many words: nothing about a wallpaper is direct
-// manipulation and an overshoot on one is a flicker of the previous picture.
-inline constexpr Motion BackgroundMotion = Motion::Gentle;
-
 // SPEC: how long the first background waits before it begins to fade up.
 //
 // Two seconds is a boot's worth of everything else — the splash gyro draws over the firmware's logo,
@@ -271,7 +266,7 @@ private:
 	// Everything current stops being current and starts leaving.
 	void Dismiss(SceneStore& scene)
 	{
-		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now(), Transition::BackgroundChange };
 
 		for (BackgroundSheet& sheet : m_Sheets)
 		{
@@ -299,7 +294,7 @@ private:
 	// the frame it was asked to fade, which is the single most visible thing this file could get wrong.
 	static void Leave(SceneCommit& commit, EntityId node)
 	{
-		static_cast<void>(commit.Fade(node, 0.0F, Animate(BackgroundMotion)));
+		static_cast<void>(commit.Fade(node, 0.0F));
 		static_cast<void>(commit.Retire(node));
 	}
 
@@ -336,7 +331,7 @@ private:
 	{
 		const std::span<const SceneOutput> outputs = scene.Outputs();
 
-		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now() };
+		SceneCommit commit{ scene, CommitAuthor::Compositor, scene.Now(), Transition::BackgroundChange };
 
 		// An output that has gone away, or whose extent no longer matches, loses its node. A monitor
 		// unplugged takes its own with it; a mode change is the case worth having, because the image
@@ -386,7 +381,7 @@ private:
 
 			// Created transparent and faded up, in the same commit the departing nodes are fading down
 			// in, so the two halves of a cross-fade share one origin and start on the same instant.
-			static_cast<void>(commit.Fade(*node, 1.0F, Animate(BackgroundMotion)));
+			static_cast<void>(commit.Fade(*node, 1.0F));
 
 			sheet.Panels.push_back(BackgroundSheet::Panel{ .Output = output.Id, .Node = *node });
 		}

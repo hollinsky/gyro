@@ -342,7 +342,7 @@ void ClientSubsurface::Sync()
 		{
 			// Immediate, per decision 68's neighbouring argument: a spring between a video player's
 			// controls and the video underneath would make them lag it.
-			static_cast<void>(commit.Move(m_Node, origin, Immediate()));
+			static_cast<void>(commit.Move(m_Node, origin));
 		}
 	}
 }

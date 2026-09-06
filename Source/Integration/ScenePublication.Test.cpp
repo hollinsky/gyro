@@ -92,9 +92,9 @@ struct Authored
 		authored.Store.CreateImage(authored.Submenu, PanelProperties(80.0F, 30.0F), ImageContent{}).value();
 
 	{
-		SceneCommit commit{ authored.Store, CommitAuthor::Shell, origin };
+		SceneCommit commit{ authored.Store, CommitAuthor::Shell, origin, Transition::MatchedMove };
 
-		commit.Move(authored.Submenu, { 40.0, 4.0, 0.0 }, Animate(Motion::Standard));
+		commit.Move(authored.Submenu, { 40.0, 4.0, 0.0 });
 	}
 
 	const SceneOutput primary{ .Density = Scale::FromInteger(1), .Grid = Screen };

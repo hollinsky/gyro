@@ -1230,7 +1230,7 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		// client asked for — decision 141 has the Floorplanner author it, stamped with the arrival of
 		// the window because nothing routed it and there is no earlier moment an entrance could point
 		// at. Commits do not nest, so the client's closes above before this opens.
-		SceneCommit placement{ *scene, CommitAuthor::Compositor, scene->Now() };
+		SceneCommit placement{ *scene, CommitAuthor::Compositor, scene->Now(), Transition::None };
 
 		PlaceOnFloor(placement, *scene, m_Context->Session(client), m_Window, natural);
 	}
@@ -1249,9 +1249,9 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		// the cost Docs/Architecture.md#doing-nothing-must-cost-nothing exists to keep out.
 		if (window != nullptr && window->Translation.Model() != anchored)
 		{
-			SceneCommit placement{ *scene, CommitAuthor::Compositor, scene->Now() };
+			SceneCommit placement{ *scene, CommitAuthor::Compositor, scene->Now(), Transition::None };
 
-			static_cast<void>(placement.Move(m_Window, anchored, Immediate()));
+			static_cast<void>(placement.Move(m_Window, anchored));
 		}
 	}
 
@@ -1267,7 +1267,7 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		const PixelRect<SurfaceSpace> placed = m_Popup->Placement();
 
 		static_cast<void>(placement.Move(
-			m_Window, { static_cast<double>(placed.Origin.X), static_cast<double>(placed.Origin.Y), 0.0 }, Immediate()
+			m_Window, { static_cast<double>(placed.Origin.X), static_cast<double>(placed.Origin.Y), 0.0 }
 		));
 
 		m_Popup->PlacementApplied();

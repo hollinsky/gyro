@@ -4,6 +4,7 @@
 #include <optional>
 
 #include "Animation/Author/Bundle.h"
+#include "Animation/Author/Catalog.h"
 #include "Animation/Author/Motion.h"
 #include "Animation/Solve/Spring.h"
 #include "Core/Handle.h"
@@ -47,12 +48,21 @@
 // rather than allocated per one, which is what decision 112 means by the commit being a member of the
 // scene. The guard itself is two words and a pointer either way.
 //
-// **A bundle is not applied here either, and that is the same boundary.** `Animation/Author/Bundle.h`
-// resolves a `Transition` to a per-channel `ChannelMotion` — including the reduced-motion overlay, via
-// `Channels(bundle, policy)` — and every write below takes one of those. What a bundle *also* carries
-// is an anchor policy, which decision 89 puts squarely in phase two: a transition resolved at the write
-// captures the node's extent as it stood then, so a window whose extent changes later in the same
-// commit grows out of a corner it never had.
+// **The transition is a property of the scope and not of the write**, which is
+// Docs/Animation.md#declarative-commits: a caller says what kind of event this is, once, and mutates
+// world state — it never animates a property, so it cannot forget to. What that buys is retroactive:
+// a channel added to the catalog later animates at every site already written, because no site named a
+// channel. The shape this replaced took a `ChannelMotion` per write, which is per-property animation
+// with a nicer spelling and would have made a fifth channel a fifth line everywhere.
+//
+// **`Channels(transition, policy)` is resolved in the constructor**, so the table and the origin are
+// fixed together for the whole scope. That is what makes write order unobservable in the second axis
+// as well as the first: two channels of one transition cannot resolve against two answers to what the
+// reduced-motion preference is.
+//
+// **What a bundle *also* carries is an anchor policy, and that is still not here.** Decision 89 puts it
+// squarely in phase two: an anchor resolved at the write captures the node's extent as it stood then,
+// so a window whose extent changes later in the same commit grows out of a corner it never had.
 
 // Who opened it. Decision 112's three, and the split that matters is whether an input event is behind
 // the commit: the shell over the protocol and gyro handling input it routes both carry that event's
@@ -78,8 +88,31 @@ public:
 	// clock, which is at or before the presentation instant it evaluates for. The backward direction is
 	// self-limiting and needs nothing: a stale origin reads as a motion that has already finished, and a
 	// decaying exponential evaluated far along is settled rather than wrong.
-	SceneCommit(SceneStore& scene, CommitAuthor author, Instant origin) noexcept
-		: m_Scene{ &scene }, m_Origin{ Earlier(origin, scene.Now()) }, m_Author{ author }, m_Open{ scene.OpenCommit() }
+	SceneCommit(SceneStore& scene, CommitAuthor author, Instant origin, Transition transition) noexcept
+		: m_Scene{ &scene }, m_Origin{ Earlier(origin, scene.Now()) },
+		  m_Channels{ Channels(transition, scene.Policy()) }, m_Author{ author }, m_Open{ scene.OpenCommit() }
+	{}
+
+	// **The escape hatch, and it is a constructor rather than an argument on every write.**
+	// Docs/Animation.md#escape-hatch asks for exactly this shape: something greppable in a single
+	// command and obvious in review, reachable from gyro's own code and never from a shell — which a
+	// per-write parameter is not, because a parameter present on every call site is not an escape from
+	// anything. `Uncatalogued` is that command.
+	//
+	// **What it is for is the instrument rather than the desktop.** `Gym` exists to put one channel in
+	// front of a renderer under a motion somebody chose, which is precisely what naming a transition
+	// forbids and precisely what the gym is: a transition is four channels designed together, and a
+	// tool for looking at one of them cannot be expressed as one. Nothing that draws a person's desktop
+	// belongs here — if a real change wants a table the catalog does not have, the answer is a catalog
+	// entry, and `Transition::BackgroundChange` is one that was found this way.
+	struct Uncatalogued
+	{
+		ChannelTable Channels;
+	};
+
+	SceneCommit(SceneStore& scene, CommitAuthor author, Instant origin, Uncatalogued channels) noexcept
+		: m_Scene{ &scene }, m_Origin{ Earlier(origin, scene.Now()) }, m_Channels{ channels.Channels },
+		  m_Author{ author }, m_Open{ scene.OpenCommit() }
 	{}
 
 	// A commit with no origin, which is the client shape. Every immediate write works; an animating one
@@ -87,7 +120,8 @@ public:
 	// whatever it started, on the one axis a person judges most harshly. If a client-driven change ever
 	// does want motion it is given an origin deliberately, through the constructor above.
 	SceneCommit(SceneStore& scene, CommitAuthor author) noexcept
-		: m_Scene{ &scene }, m_Author{ author }, m_Open{ scene.OpenCommit() }
+		: m_Scene{ &scene }, m_Channels{ Channels(Transition::None, scene.Policy()) }, m_Author{ author },
+		  m_Open{ scene.OpenCommit() }
 	{}
 
 	// Close is the destructor because the scope is the transaction: `wl_surface.commit` is atomic for
@@ -122,32 +156,39 @@ public:
 
 	// The four sprung channels, and the one field that is not a channel.
 	//
-	// Each takes the disposition the transition gave this channel, which is `Animation/Author/Bundle.h`'s
-	// vocabulary rather than a second one: `Animate(motion)` springs it, `Immediate()` lands it with no
-	// movement, and a default-constructed `ChannelMotion` is `Absent` — not part of this transition, so
-	// whatever the channel was doing continues. Absent is a write that says nothing and not a refusal.
+	// **None of them takes a motion**, because the scope already said what kind of change this is. Each
+	// resolves against the disposition the commit's transition gave that channel — `Animate(motion)`
+	// springs it, `Immediate()` lands it with no movement, and `Absent` means this transition has no
+	// opinion about the channel, so whatever it was doing continues.
+	//
+	// **Absent is a write that says nothing rather than a refusal**, and a caller writing a channel its
+	// transition is silent about gets exactly that: nothing. That is the sharp edge of naming the
+	// transition once — `Transition::WindowOpen` is silent about position, so placing a window inside a
+	// WindowOpen commit does not place it. Placement belongs to a `Transition::None` scope, or to
+	// `Scene/Entity.h`'s `NodeProperties` at creation, which is the state the author would have set had
+	// it been asked.
 	//
 	// False is the refusal, and there are three of them: a scope that is not the open one, an id that
 	// names nothing live, and an animating write in a commit with no origin.
-	bool Move(EntityId id, Vector3<double> position, ChannelMotion how) noexcept
+	bool Move(EntityId id, Vector3<double> position) noexcept
 	{
 		Entity* entity = Mutable(id);
 
-		return entity != nullptr && Write(entity->Translation, position, how);
+		return entity != nullptr && Write(entity->Translation, position, m_Channels.Translation);
 	}
 
-	bool Scale(EntityId id, Vector3<float> scale, ChannelMotion how) noexcept
+	bool Scale(EntityId id, Vector3<float> scale) noexcept
 	{
 		Entity* entity = Mutable(id);
 
-		return entity != nullptr && Write(entity->Scale, scale, how);
+		return entity != nullptr && Write(entity->Scale, scale, m_Channels.Scale);
 	}
 
-	bool Fade(EntityId id, float opacity, ChannelMotion how) noexcept
+	bool Fade(EntityId id, float opacity) noexcept
 	{
 		Entity* entity = Mutable(id);
 
-		return entity != nullptr && Write(entity->Opacity, opacity, how);
+		return entity != nullptr && Write(entity->Opacity, opacity, m_Channels.Opacity);
 	}
 
 	// The one channel that composes rather than replaces, and the reason it is not three lines like the
@@ -162,7 +203,7 @@ public:
 	// speed. The transport is exact arithmetic on paper and a quaternion round trip in floating point,
 	// so routing an unchanged base point through it would cost the idempotence the rest of this file
 	// has: writing one orientation twice at one `t₀` would drift, where here it is bit-identical.
-	bool Turn(EntityId id, Quaternion orientation, ChannelMotion how) noexcept
+	bool Turn(EntityId id, Quaternion orientation) noexcept
 	{
 		Entity* entity = Mutable(id);
 
@@ -170,6 +211,8 @@ public:
 		{
 			return false;
 		}
+
+		const ChannelMotion how = m_Channels.Rotation;
 
 		if (how.How == Disposition::Absent)
 		{
@@ -393,6 +436,13 @@ private:
 
 	SceneStore* m_Scene;
 	std::optional<Instant> m_Origin;
+
+	// Resolved once, in the constructor, from the transition this scope was opened with and the policy
+	// in force when it opened. Held rather than looked up per write for the reason the origin is: the
+	// two together are what makes write order inside a commit unobservable, and a table re-resolved per
+	// write would let a reduced-motion preference change land on half a window.
+	ChannelTable m_Channels;
+
 	CommitAuthor m_Author;
 	bool m_Open;
 };

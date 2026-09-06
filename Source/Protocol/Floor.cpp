@@ -38,7 +38,7 @@ Result<void> SessionFloors::Open(SceneStore& scene, SessionId session)
 	// floor with no chrome root above it would take a shell's launcher onto the floor at its first
 	// commit, where a click on a window would put the window in front of it.
 	const auto abandon = [&scene, &container, &chrome](int error, const char* what) {
-		SceneCommit undo{ scene, CommitAuthor::Compositor, scene.Now() };
+		SceneCommit undo{ scene, CommitAuthor::Compositor, scene.Now(), Transition::None };
 
 		static_cast<void>(undo.Retire(*container));
 
@@ -88,7 +88,7 @@ void SessionFloors::Close(SceneStore& scene, SessionId session) noexcept
 	// rather than an input timestamp for the reason the Floorplanner's placement has none: nothing
 	// routed this, and what ended the session was a socket closing.
 	{
-		SceneCommit closing{ scene, CommitAuthor::Compositor, scene.Now() };
+		SceneCommit closing{ scene, CommitAuthor::Compositor, scene.Now(), Transition::None };
 
 		static_cast<void>(closing.Retire(found->Container));
 
@@ -214,7 +214,7 @@ void PlaceOnFloor(
 	// already. What it does not have is a catalog to name the entrance, so the window lands where it
 	// belongs instead of growing into it, and the day the catalog arrives this is the one call that
 	// changes.
-	static_cast<void>(commit.Move(window, { x, y, 0.0 }, Immediate()));
+	static_cast<void>(commit.Move(window, { x, y, 0.0 }));
 }
 
 void FocusByClick(SceneStore& scene, EntityId hit)

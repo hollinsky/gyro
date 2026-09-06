@@ -6,6 +6,7 @@
 #include <span>
 #include <vector>
 
+#include "Animation/Author/Bundle.h"
 #include "Animation/Author/Motion.h"
 #include "Core/Clock.h"
 #include "Core/Handle.h"
@@ -149,10 +150,7 @@ public:
 	//
 	// Scene-wide because it is a preference rather than a property of anything authored: a person who
 	// has asked for slower motion has asked for all of it, and `Animation/Author/Motion.h`'s `Overlay`
-	// exists to fold a configured pair onto the authored table without a call site knowing either. The
-	// reduced-motion policy is not here, because it is not a modifier of the same kind — it replaces a
-	// bundle's channels rather than rescaling them, which `Channels(bundle, policy)` does upstream of
-	// any write.
+	// exists to fold a configured pair onto the authored table without a call site knowing either.
 	void SetMotions(const MotionTable& table, MotionModifiers modifiers = {}) noexcept
 	{
 		m_Motions = table;
@@ -161,6 +159,22 @@ public:
 
 	[[nodiscard]] const MotionTable& Motions() const noexcept { return m_Motions; }
 	[[nodiscard]] MotionModifiers Modifiers() const noexcept { return m_Modifiers; }
+
+	// Whether motion is being watched or is being made accessible, which `Channels(transition, policy)`
+	// resolves a commit's transition through.
+	//
+	// **Beside the motion table rather than folded into it**, for the reason `Animation/Author/Bundle.h`
+	// gives: a modifier rescales the vocabulary and this substitutes one channel table for another, so
+	// the two are different operations and would read as one slider if they sat in one struct. What they
+	// share is this scope — a person who has asked for reduced motion has asked for all of it, and a
+	// policy handed in per commit would be a preference two call sites could answer differently.
+	//
+	// **Read once per commit rather than once per write**, which is `Scene/Commit.h`'s doing: a commit
+	// resolves its table in its constructor, so a policy that changed mid-transaction cannot land half a
+	// window on each side of it.
+	void SetMotionPolicy(MotionPolicy policy) noexcept { m_MotionPolicy = policy; }
+
+	[[nodiscard]] MotionPolicy Policy() const noexcept { return m_MotionPolicy; }
 
 	// Who the keyboard is on, per [Focus.h](Focus.h). Held here rather than beside the store because
 	// `ISceneAuthor::Advance` hands an author the world as one argument, and focus is part of the world
@@ -1087,6 +1101,7 @@ private:
 
 	MotionTable m_Motions{};
 	MotionModifiers m_Modifiers{};
+	MotionPolicy m_MotionPolicy = MotionPolicy::Ordinary;
 
 	bool m_Committing = false;
 };

@@ -212,7 +212,7 @@ GYRO_TEST(Hit, ThePointerFollowsAWindowThatHasBeenMoved)
 
 	{
 		SceneCommit commit{ store, CommitAuthor::Client };
-		commit.Move(window.Frame, { 600.0, 400.0, 0.0 }, Immediate());
+		commit.Move(window.Frame, { 600.0, 400.0, 0.0 });
 	}
 
 	GYRO_CHECK(!HitTest(store, At(100.0, 100.0)));

@@ -33,6 +33,36 @@ constexpr Instant Origin = Monotonic::FromNanoseconds(1'000'000'000);
 	return store.CreateContainer({}, {}).value();
 }
 
+// **Every commit in this file is uncatalogued, and that is the file's subject rather than a shortcut.**
+// What is asserted here is the scope — which disposition does what, what a stale id answers, what a
+// nested scope refuses — and a transition is four channels designed together, so naming one would test
+// the catalog's opinion instead of the machinery underneath it. The catalog's own entries are asserted
+// in `Animation/Author/Catalog.Test.cpp`, and what a *named* transition means once it has crossed the
+// waist is `Integration/SceneCommit.Test.cpp`. Rotation makes the point sharpest: no entry animates it,
+// so `Turn`'s retarget has no transition to reach it through at all.
+[[nodiscard]] SceneCommit::Uncatalogued Springing(Channel channel, Motion motion)
+{
+	ChannelTable table{};
+
+	switch (channel)
+	{
+		case Channel::Translation:
+			table.Translation = Animate(motion);
+			break;
+		case Channel::Rotation:
+			table.Rotation = Animate(motion);
+			break;
+		case Channel::Scale:
+			table.Scale = Animate(motion);
+			break;
+		case Channel::Opacity:
+			table.Opacity = Animate(motion);
+			break;
+	}
+
+	return { table };
+}
+
 // Two quaternions naming the same rotation, to within what a float chart round trip costs. The sign is
 // free — decision 55's transform reads a rotation and not a quaternion — so the comparison is on the
 // magnitude of the dot product.
@@ -42,15 +72,26 @@ constexpr Instant Origin = Monotonic::FromNanoseconds(1'000'000'000);
 }
 } // namespace
 
-GYRO_TEST(SceneCommit, AWriteWithNoOriginBehindItIsRefusedRatherThanStampedWithNow)
+// The client shape cannot start a motion, and since the transition moved onto the scope it cannot try.
+//
+// **This used to be a refusal and is now an absence, which is the stronger of the two.** A write took a
+// disposition, so a client commit could ask for a spring and be told no at the write; the transition is
+// the scope's now, and the constructor a client goes through is the one that names `Transition::None`.
+// There is no argument left to pass, so the thing that has to be refused cannot be spelled — which is
+// what decision 89 wanted from *nothing a client authors is a sprung channel*, and what a runtime
+// `false` only approximated.
+//
+// The `!m_Origin` refusal underneath is kept as the backstop for a constructor that does not exist yet:
+// every door onto this scope either supplies an origin or supplies a table with no motion in it.
+GYRO_TEST(SceneCommit, TheClientShapeHasNoOriginAndCanAskForNoMotion)
 {
 	ManualClock clock{ Origin };
 	SceneStore store{ clock };
 
 	const EntityId node = Only(store);
 
-	// The client shape: `wl_surface.commit` carries no timestamp, and nothing a client authors is a
-	// sprung channel. An extent and an immediate placement are exactly what it does write.
+	// The client shape: `wl_surface.commit` carries no timestamp, and an extent and a placement are
+	// exactly what it does write.
 	SceneCommit commit{ store, CommitAuthor::Client };
 
 	GYRO_REQUIRE(commit.IsOpen());
@@ -58,11 +99,11 @@ GYRO_TEST(SceneCommit, AWriteWithNoOriginBehindItIsRefusedRatherThanStampedWithN
 	GYRO_CHECK(commit.Author() == CommitAuthor::Client);
 
 	GYRO_CHECK(commit.Resize(node, { 640.0F, 480.0F }));
-	GYRO_CHECK(commit.Move(node, { 40.0, 0.0, 0.0 }, Immediate()));
+	GYRO_CHECK(commit.Move(node, { 40.0, 0.0, 0.0 }));
 
-	// And a motion is refused rather than given the dispatch thread's own now, which would add a frame
-	// of lag to whatever it started, invisibly, on the axis a person judges most harshly.
-	GYRO_CHECK(!commit.Fade(node, 0.0F, Animate(Motion::Standard)));
+	// Every channel of it, including the one a shell would animate. It lands rather than being refused,
+	// and it lands without a spring, which is `Transition::None` being what a client commit is.
+	GYRO_CHECK(commit.Fade(node, 0.5F));
 
 	const Entity& entity = *store.Find(node);
 
@@ -70,7 +111,7 @@ GYRO_TEST(SceneCommit, AWriteWithNoOriginBehindItIsRefusedRatherThanStampedWithN
 	GYRO_CHECK_EQ(entity.Translation.Model(), Vector3<double>(40.0, 0.0, 0.0));
 	GYRO_CHECK(entity.Translation.IsAtRest());
 	GYRO_CHECK(entity.Opacity.IsAtRest());
-	GYRO_CHECK_EQ(entity.Opacity.Model(), 1.0F);
+	GYRO_CHECK_EQ(entity.Opacity.Model(), 0.5F);
 }
 
 GYRO_TEST(SceneCommit, AnOriginFromTheFutureIsClampedToDispatchsOwnNow)
@@ -84,10 +125,13 @@ GYRO_TEST(SceneCommit, AnOriginFromTheFutureIsClampedToDispatchsOwnNow)
 	// catches up: the closed form evaluated before its origin is the state it began in, so a window
 	// dragged under a bad timestamp would sit still for as long as the stamp was wrong.
 	{
-		SceneCommit ahead{ store, CommitAuthor::Shell, Advanced(Origin, Duration{ 10'000'000'000 }) };
+		SceneCommit ahead{ store,
+			               CommitAuthor::Shell,
+			               Advanced(Origin, Duration{ 10'000'000'000 }),
+			               Springing(Channel::Opacity, Motion::Standard) };
 
 		GYRO_CHECK(ahead.Origin() == Origin);
-		GYRO_CHECK(ahead.Fade(node, 0.0F, Animate(Motion::Standard)));
+		GYRO_CHECK(ahead.Fade(node, 0.0F));
 	}
 
 	GYRO_CHECK(store.Find(node)->Opacity.Coefficients().Origin == Origin);
@@ -97,10 +141,10 @@ GYRO_TEST(SceneCommit, AnOriginFromTheFutureIsClampedToDispatchsOwnNow)
 	const Instant stale = Monotonic::FromNanoseconds(1'000'000);
 
 	{
-		SceneCommit late{ store, CommitAuthor::Shell, stale };
+		SceneCommit late{ store, CommitAuthor::Shell, stale, Springing(Channel::Opacity, Motion::Standard) };
 
 		GYRO_CHECK(late.Origin() == stale);
-		GYRO_CHECK(late.Fade(node, 1.0F, Animate(Motion::Standard)));
+		GYRO_CHECK(late.Fade(node, 1.0F));
 	}
 
 	GYRO_CHECK(store.Find(node)->Opacity.Coefficients().Origin == stale);
@@ -113,7 +157,7 @@ GYRO_TEST(SceneCommit, ACommitOpenedInsideAnotherRefusesEveryWrite)
 
 	const EntityId node = Only(store);
 
-	SceneCommit outer{ store, CommitAuthor::Shell, Origin };
+	SceneCommit outer{ store, CommitAuthor::Shell, Origin, Springing(Channel::Opacity, Motion::Standard) };
 
 	GYRO_REQUIRE(outer.IsOpen());
 
@@ -121,17 +165,20 @@ GYRO_TEST(SceneCommit, ACommitOpenedInsideAnotherRefusesEveryWrite)
 		// Commits do not nest: the double buffering Wayland requires resolves in `Protocol` before
 		// anything reaches the store, so a second scope inside this one is a bug at a call site. It
 		// refuses rather than borrowing an origin that belongs to a different event.
-		SceneCommit inner{ store, CommitAuthor::Shell, Advanced(Origin, Duration{ 8'000'000 }) };
+		SceneCommit inner{ store,
+			               CommitAuthor::Shell,
+			               Advanced(Origin, Duration{ 8'000'000 }),
+			               Springing(Channel::Opacity, Motion::Standard) };
 
 		GYRO_CHECK(!inner.IsOpen());
-		GYRO_CHECK(!inner.Fade(node, 0.0F, Animate(Motion::Standard)));
+		GYRO_CHECK(!inner.Fade(node, 0.0F));
 		GYRO_CHECK(!inner.Resize(node, { 10.0F, 10.0F }));
 	}
 
 	// And closing it did not close the scope around it, which is the failure that would make the next
 	// write in the outer body a motion with no transaction around it.
 	GYRO_CHECK(outer.IsOpen());
-	GYRO_CHECK(outer.Fade(node, 0.0F, Animate(Motion::Standard)));
+	GYRO_CHECK(outer.Fade(node, 0.0F));
 	GYRO_CHECK(store.Find(node)->Opacity.Coefficients().Origin == Origin);
 }
 
@@ -142,16 +189,17 @@ GYRO_TEST(SceneCommit, AStaleIdIsARefusalAndAnAbsentChannelIsNot)
 
 	const EntityId node = Only(store);
 
-	SceneCommit commit{ store, CommitAuthor::Shell, Origin };
+	// A default-constructed table is `Absent` on all four, which is the disposition this test is about.
+	SceneCommit commit{ store, CommitAuthor::Shell, Origin, SceneCommit::Uncatalogued{} };
 
-	GYRO_CHECK(!commit.Move(EntityId{ 7, 2 }, { 1.0, 0.0, 0.0 }, Animate(Motion::Standard)));
+	GYRO_CHECK(!commit.Move(EntityId{ 7, 2 }, { 1.0, 0.0, 0.0 }));
 	GYRO_CHECK(!commit.Resize(EntityId{ 7, 2 }, { 10.0F, 10.0F }));
 
-	// A default-constructed disposition is decision 89's *absent*: not part of this transition, so
-	// whatever the channel was doing continues. It is a write that says nothing rather than one that
-	// failed, which is what lets a caller hand a whole `ChannelTable` through without filtering it.
-	GYRO_CHECK(commit.Fade(node, 0.0F, ChannelMotion{}));
-	GYRO_CHECK(commit.Move(node, { 99.0, 0.0, 0.0 }, ChannelMotion{}));
+	// An absent channel is decision 89's: not part of this transition, so whatever it was doing
+	// continues. It is a write that says nothing rather than one that failed, which is what lets a
+	// caller write every channel of a node without first asking which of them its transition names.
+	GYRO_CHECK(commit.Fade(node, 0.0F));
+	GYRO_CHECK(commit.Move(node, { 99.0, 0.0, 0.0 }));
 
 	GYRO_CHECK_EQ(store.Find(node)->Opacity.Model(), 1.0F);
 	GYRO_CHECK_EQ(store.Find(node)->Translation.Model(), Vector3<double>(0.0, 0.0, 0.0));
@@ -165,9 +213,9 @@ GYRO_TEST(SceneCommit, AnImmediateWriteStopsTheMotionRatherThanRetargetingIt)
 	const EntityId node = Only(store);
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, Origin };
+		SceneCommit commit{ store, CommitAuthor::Shell, Origin, Springing(Channel::Translation, Motion::Standard) };
 
-		GYRO_REQUIRE(commit.Move(node, { 400.0, 0.0, 0.0 }, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Move(node, { 400.0, 0.0, 0.0 }));
 	}
 
 	GYRO_REQUIRE(!store.Find(node)->Translation.IsAtRest());
@@ -178,7 +226,7 @@ GYRO_TEST(SceneCommit, AnImmediateWriteStopsTheMotionRatherThanRetargetingIt)
 	{
 		SceneCommit commit{ store, CommitAuthor::Client };
 
-		GYRO_REQUIRE(commit.Move(node, { 400.0, 0.0, 0.0 }, Immediate()));
+		GYRO_REQUIRE(commit.Move(node, { 400.0, 0.0, 0.0 }));
 	}
 
 	GYRO_CHECK(store.Find(node)->Translation.IsAtRest());
@@ -193,9 +241,9 @@ GYRO_TEST(SceneCommit, TheScenesPacingIsWhatAMotionResolvesThrough)
 	const EntityId node = Only(store);
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, Origin };
+		SceneCommit commit{ store, CommitAuthor::Shell, Origin, Springing(Channel::Opacity, Motion::Standard) };
 
-		GYRO_REQUIRE(commit.Fade(node, 0.0F, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Fade(node, 0.0F));
 	}
 
 	const float authored = store.Find(node)->Opacity.Coefficients().Parameters.Frequency;
@@ -205,9 +253,9 @@ GYRO_TEST(SceneCommit, TheScenesPacingIsWhatAMotionResolvesThrough)
 	store.SetMotions(MotionTable{}, { .Speed = 2.0 });
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, Origin };
+		SceneCommit commit{ store, CommitAuthor::Shell, Origin, Springing(Channel::Opacity, Motion::Standard) };
 
-		GYRO_REQUIRE(commit.Fade(node, 1.0F, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Fade(node, 1.0F));
 	}
 
 	GYRO_CHECK_EQ(store.Find(node)->Opacity.Coefficients().Parameters.Frequency, authored * 2.0F);
@@ -227,9 +275,9 @@ GYRO_TEST(SceneCommit, TwoWritesAtOneOriginAreIdenticalInEveryRegime)
 	store.SetMotions(MotionTable{ .Standard = { .Response = 0.4, .Damping = 4.0 } });
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, Origin };
+		SceneCommit commit{ store, CommitAuthor::Shell, Origin, Springing(Channel::Opacity, Motion::Standard) };
 
-		GYRO_REQUIRE(commit.Fade(node, 0.0F, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Fade(node, 0.0F));
 	}
 
 	const Instant interrupted = Advanced(Origin, Duration{ 8'000'000 });
@@ -239,17 +287,17 @@ GYRO_TEST(SceneCommit, TwoWritesAtOneOriginAreIdenticalInEveryRegime)
 	GYRO_REQUIRE(store.Find(node)->Opacity.Coefficients().Regime() == SpringRegime::Overdamped);
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, interrupted };
+		SceneCommit commit{ store, CommitAuthor::Shell, interrupted, Springing(Channel::Opacity, Motion::Standard) };
 
-		GYRO_REQUIRE(commit.Fade(node, 0.4F, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Fade(node, 0.4F));
 	}
 
 	const Spring<float> once = store.Find(node)->Opacity.Coefficients();
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, interrupted };
+		SceneCommit commit{ store, CommitAuthor::Shell, interrupted, Springing(Channel::Opacity, Motion::Standard) };
 
-		GYRO_REQUIRE(commit.Fade(node, 0.4F, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Fade(node, 0.4F));
 	}
 
 	const Spring<float> twice = store.Find(node)->Opacity.Coefficients();
@@ -274,9 +322,9 @@ GYRO_TEST(SceneCommit, ARotationRetargetMovesTheChartAndCarriesTheVelocityIntoIt
 	const Quaternion sideways = Quaternion::FromAxisAngle({ 1.0F, 0.0F, 0.0F }, 1.5707963F);
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, Origin };
+		SceneCommit commit{ store, CommitAuthor::Shell, Origin, Springing(Channel::Rotation, Motion::Standard) };
 
-		GYRO_REQUIRE(commit.Turn(node, quarter, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Turn(node, quarter));
 	}
 
 	// Sixty milliseconds later, with dispatch's clock where it would be: a commit's origin is the event's
@@ -292,9 +340,9 @@ GYRO_TEST(SceneCommit, ARotationRetargetMovesTheChartAndCarriesTheVelocityIntoIt
 	GYRO_REQUIRE(!entity.Turn.IsAtRest());
 
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, interrupted };
+		SceneCommit commit{ store, CommitAuthor::Shell, interrupted, Springing(Channel::Rotation, Motion::Standard) };
 
-		GYRO_REQUIRE(commit.Turn(node, sideways, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Turn(node, sideways));
 	}
 
 	// The orientation the frame side reconstructs does not jump: the deviation is re-expressed against
@@ -313,9 +361,9 @@ GYRO_TEST(SceneCommit, ARotationRetargetMovesTheChartAndCarriesTheVelocityIntoIt
 	// A retarget that does not move the base point is the flat case, exactly. Two of them at one origin
 	// are bit-identical, which is what routing an unchanged chart through the transport would cost.
 	{
-		SceneCommit commit{ store, CommitAuthor::Shell, interrupted };
+		SceneCommit commit{ store, CommitAuthor::Shell, interrupted, Springing(Channel::Rotation, Motion::Standard) };
 
-		GYRO_REQUIRE(commit.Turn(node, sideways, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Turn(node, sideways));
 	}
 
 	const SpringState<RotationVector> again = entity.Turn.PresentationState(interrupted);

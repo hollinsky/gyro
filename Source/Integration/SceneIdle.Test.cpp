@@ -294,10 +294,14 @@ GYRO_TEST(SceneIdle, AnAnimatingSceneIsDrawnEveryFrameUntilItSettles)
 	const Instant origin = desktop.Now();
 
 	{
-		SceneCommit commit{ desktop.Store(), CommitAuthor::Shell, origin };
+		SceneCommit commit{ desktop.Store(),
+			                CommitAuthor::Shell,
+			                origin,
+			                SceneCommit::Uncatalogued{
+								{ .Translation = Animate(Motion::Standard), .Opacity = Animate(Motion::Standard) } } };
 
-		GYRO_REQUIRE(commit.Move(window, { 180.0, 20.0, 0.0 }, Animate(Motion::Standard)));
-		GYRO_REQUIRE(commit.Fade(window, 0.25F, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Move(window, { 180.0, 20.0, 0.0 }));
+		GYRO_REQUIRE(commit.Fade(window, 0.25F));
 	}
 
 	desktop.Commit();
@@ -344,9 +348,12 @@ GYRO_TEST(SceneIdle, DispatchIsWokenByTheAnalyticSettleAndNotByEveryFrame)
 	const EntityId window = Window(desktop.Store());
 
 	{
-		SceneCommit commit{ desktop.Store(), CommitAuthor::Shell, desktop.Now() };
+		SceneCommit commit{ desktop.Store(),
+			                CommitAuthor::Shell,
+			                desktop.Now(),
+			                SceneCommit::Uncatalogued{ { .Translation = Animate(Motion::Standard) } } };
 
-		GYRO_REQUIRE(commit.Move(window, { 180.0, 20.0, 0.0 }, Animate(Motion::Standard)));
+		GYRO_REQUIRE(commit.Move(window, { 180.0, 20.0, 0.0 }));
 	}
 
 	desktop.Commit();
