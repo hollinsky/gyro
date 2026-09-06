@@ -2364,10 +2364,21 @@ without `CAP_CHOWN` — so the handover is inverted. See below.
 
 ### Listener handover
 
-A small session agent, running as the user, creates the listening socket in its own runtime
-directory and passes the fd to gyro over a world-writable control socket. gyro verifies the offering
-process with `SO_PEERCRED` and binds the listener to that uid's session, creating it if this is the
+A small session agent, running as the user, creates the listening sockets in its own runtime
+directory and passes the fds to gyro over a world-writable control socket. gyro verifies the offering
+process with `SO_PEERCRED` and binds the listeners to that uid's session, creating it if this is the
 first offer.
+
+**A session is offered whole: every listener it has, in one message, each with the role it plays**
+([decision 189](Decisions.md#189-a-session-is-offered-whole--every-listener-it-has-each-with-the-role-it-plays--and-the-shell-is-handed-a-descriptor-rather-than-a-path)).
+There are two roles. `Applications` is the `wayland-N` in `WAYLAND_DISPLAY` and every session has
+one; `Shell` is where the session's shell connects and is what carries `Trust::System`, so it is the
+answer to [filtered globals](#filtered-globals)' question of where a `System` connection comes from.
+An agent that starts no shell offers no such socket, and nothing in that session can claim a chord or
+declare a surface to be chrome. The agent connects to the shell socket itself and starts the shell on
+the connected descriptor, so its path enters no environment: `WAYLAND_SOCKET` is unset by the client
+library before the shell has run a line of its own, and everything the shell launches inherits
+`WAYLAND_DISPLAY` and an ordinary client's view of the session.
 
 The capability saving is secondary. What earns this shape is that **the handover is the
 session-start event.** gyro learns a session exists because a listener arrived, not because it
@@ -2388,8 +2399,19 @@ What the shape obliges:
   every session on the machine. Bounded by `SO_PEERCRED` on the offer, validation that the offered
   fd is a listening `AF_UNIX` stream socket bound inside the offering uid's runtime directory, a
   per-uid offer cap, and one accepted listener per session.
-- **The handshake is a stable ABI.** It must survive gyro restarting — every listener is lost, so
-  helpers re-offer — and version skew across upgrades.
+- **The handshake is a stable ABI, from the first shipped package onwards.** It must survive gyro
+  restarting — every listener is lost, so helpers re-offer — and version skew across upgrades. Before
+  that first package both binaries are built together, so the format is free to change shape; the
+  greeting is the exception and exists from the start, a version being the one field that cannot be
+  added later. See `Source/Session/Handover.h`.
+- **Trust belongs to the socket, so the party that decides which process is the shell is the party
+  that can create a socket in the user's runtime directory.** That is the agent, and gyro is not
+  it ([decision 22](Decisions.md#22-gyro-runs-as-a-dedicated-unprivileged-uid-with-cap_sys_nice-and-nothing-else)).
+  What this buys is a boundary between users and none within one: a process at the same uid that
+  goes looking for the shell socket's path can still connect to it, which is not a hole so much as
+  the shape of a uid on Linux — it can read the shell's memory either way. **`Trust::System` is
+  therefore granted per user rather than per program**, and a judgement about the executable is a
+  separate mechanism that does not exist.
 - **`WAYLAND_DISPLAY` must be in the session environment before the first client starts.** Ordering
   mistakes here present as "sometimes applications cannot find the display".
 - **The greeter has no user session**, so the privileged login agent performs the handover for the

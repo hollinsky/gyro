@@ -110,12 +110,32 @@ Result<AgentOptions> ParseAgentOptions(std::span<const std::string_view> argumen
 			continue;
 		}
 
+		if (Matches(argument, "shell", value))
+		{
+			if (!value.empty())
+			{
+				return Failure(EINVAL, "--shell takes no value");
+			}
+
+			options.Shell = true;
+
+			continue;
+		}
+
 		return Failure(EINVAL, "unrecognised option");
 	}
 
 	for (; index < arguments.size(); ++index)
 	{
 		options.Command.emplace_back(arguments[index]);
+	}
+
+	// **Refused here rather than ignored**, because the two ways of reading a `--shell` with nothing
+	// after it are *bind a socket nobody will use* and *the command went missing*, and the second is
+	// what a person who typed it meant. A session with no shell is what leaving the flag off says.
+	if (options.Shell && options.Command.empty())
+	{
+		return Failure(EINVAL, "--shell says the command is the session's shell, and there is no command");
 	}
 
 	return options;

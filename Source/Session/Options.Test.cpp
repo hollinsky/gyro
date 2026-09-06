@@ -2,7 +2,9 @@
 
 #include <array>
 #include <cerrno>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "Testing/Test.h"
 
@@ -79,4 +81,43 @@ GYRO_TEST(AgentOptions, NamesWhatItWillNotTake)
 	const Result<AgentOptions> path = Parse(std::array<std::string_view, 1>{ "--display=/tmp/wayland-0" });
 	GYRO_REQUIRE(!path.has_value());
 	GYRO_CHECK(path.error().Code() == EINVAL);
+}
+
+GYRO_TEST(AgentOptions, ShellSaysTheCommandIsTheSessionsShell)
+{
+	const std::array arguments{ std::string_view{ "--shell" }, std::string_view{ "gyro-shell" } };
+	const Result<AgentOptions> options = Parse(arguments);
+
+	GYRO_REQUIRE(options.has_value());
+	GYRO_CHECK(options->Shell);
+	GYRO_CHECK(options->Command == std::vector<std::string>{ "gyro-shell" });
+}
+
+// The default, and the one every session has had: no second listener, and nothing in the session can
+// reach the System tier.
+GYRO_TEST(AgentOptions, ASessionHasNoShellUnlessAskedFor)
+{
+	const std::array arguments{ std::string_view{ "foot" } };
+	const Result<AgentOptions> options = Parse(arguments);
+
+	GYRO_REQUIRE(options.has_value());
+	GYRO_CHECK(!options->Shell);
+}
+
+// The two readings of a bare `--shell` are *bind a socket nobody will use* and *the command went
+// missing*, and refusing says which one this build thinks a person meant.
+GYRO_TEST(AgentOptions, ShellWithNoCommandIsRefused)
+{
+	const std::array arguments{ std::string_view{ "--shell" } };
+	const Result<AgentOptions> options = Parse(arguments);
+
+	GYRO_REQUIRE(!options.has_value());
+	GYRO_CHECK_EQ(options.error().Code(), EINVAL);
+}
+
+GYRO_TEST(AgentOptions, ShellTakesNoValue)
+{
+	const std::array arguments{ std::string_view{ "--shell=yes" }, std::string_view{ "gyro-shell" } };
+
+	GYRO_CHECK(!Parse(arguments).has_value());
 }

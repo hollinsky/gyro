@@ -145,34 +145,50 @@ public:
 	// loop, behind this number, exactly as a client connecting does.
 	[[nodiscard]] int PollFd() const noexcept { return m_Server.PollFd(); }
 
-	// Serve a session's clients on the listener its agent offered. The composition root's to call, on
+	// Serve a session's clients on the listeners its agent offered. The composition root's to call, on
 	// the dispatch thread, because it is the party holding both this host and the control socket the
 	// offer arrived on.
-	// **The floor is authored first and the listener is taken second**, so a window cannot arrive before
-	// the container it hangs under — and a session that could not be given a floor is not served at all,
-	// which is a failure the agent is told about rather than one a person meets as an application that
-	// starts and never appears.
 	//
-	// `trust` is what the offered socket grants the clients that arrive on it, forwarded verbatim to
-	// [Server.h](Server.h) — the host does not read it and has no business doing so, since a global's
-	// tier is [Tier.h](Tier.h)'s and the filter is the display's. Defaulted to `User`, which is every
-	// caller: the listener that carries `System` is Docs/Open.md's and does not exist yet.
-	[[nodiscard]] Result<void>
-	Adopt(SceneStore& scene, Fd listener, std::uint32_t uid, SessionId session, Trust trust = Trust::User)
+	// **The floor is authored first and the listeners are taken second**, so a window cannot arrive
+	// before the container it hangs under — and a session that could not be given a floor is not served
+	// at all, which is a failure the agent is told about rather than one a person meets as an
+	// application that starts and never appears.
+	//
+	// **Both listeners in one call, because a session is offered whole** (Session/Handover.h). `shell`
+	// is the socket a session's shell arrives on and is what carries `Trust::System`; an invalid one is
+	// an agent that offered none, which is an ordinary session with nothing able to claim a chord or
+	// declare a surface to be chrome. The trust level is *this* function's rather than the caller's —
+	// which listener grants what is a fact about the protocol, and a composition root that could pass
+	// it would be a composition root that could pass the wrong one.
+	//
+	// A shell listener that cannot be taken ends the whole adoption, for the reason it arrived in one
+	// message: a session established without the socket its agent has already connected its shell to is
+	// a session whose shell hangs.
+	[[nodiscard]] Result<void> Adopt(SceneStore& scene, Fd listener, Fd shell, std::uint32_t uid, SessionId session)
 	{
 		if (const Result<void> floor = m_Floors.Open(scene, session); !floor)
 		{
 			return floor;
 		}
 
-		Result<void> adopted = m_Server.Adopt(std::move(listener), uid, session, trust);
-
-		if (!adopted)
+		if (Result<void> adopted = m_Server.Adopt(std::move(listener), uid, session, Trust::User); !adopted)
 		{
 			m_Floors.Close(scene, session);
+
+			return adopted;
 		}
 
-		return adopted;
+		if (shell.IsValid())
+		{
+			if (Result<void> adopted = m_Server.Adopt(std::move(shell), uid, session, Trust::System); !adopted)
+			{
+				Release(scene, session);
+
+				return adopted;
+			}
+		}
+
+		return {};
 	}
 
 	// The agent went away, so the session did. Ends every client that arrived on that listener, which

@@ -168,6 +168,71 @@ GYRO_TEST(SessionAgent, OffersItsListenerAndEstablishesASession)
 	GYRO_CHECK(Reachable(listener->Path));
 }
 
+// An agent starting a shell offers both sockets in one message, and gyro holds a session with both.
+// **This is the end-to-end shape of decision 189**: there is no second handshake, no ordering, and no
+// state in which a session exists without the shell socket its agent has already been given.
+GYRO_TEST(SessionAgent, OffersTheShellListenerBesideTheDisplayInOneMessage)
+{
+	Fixture fixture;
+	GYRO_REQUIRE(fixture.Control() != nullptr);
+
+	const Result<WaylandListener> listener = BindWaylandListener(fixture.RuntimeDirectory());
+	GYRO_REQUIRE(listener.has_value());
+
+	const Result<ShellListener> shell = BindShellListener(fixture.RuntimeDirectory(), listener->Name);
+	GYRO_REQUIRE(shell.has_value());
+
+	SessionAgent agent{ listener->Socket.Borrow(), shell->Socket.Borrow() };
+
+	GYRO_REQUIRE(agent.Connect(fixture.ControlPath()).has_value());
+	GYRO_REQUIRE(Settle(fixture, agent));
+	GYRO_CHECK(agent.State() == AgentState::Established);
+
+	std::optional<AcceptedOffer> offer = fixture.Control()->TakeOffer();
+
+	GYRO_REQUIRE(offer.has_value());
+	GYRO_CHECK(offer->Listener.IsValid());
+	GYRO_CHECK(offer->Shell.IsValid());
+	GYRO_CHECK(Reachable(shell->Path));
+}
+
+// gyro restarting loses every listener it held, and what the agent offers on the next connection is
+// the same pair — so a shell that was connected across the gap is served out of a queue that was
+// never torn down.
+GYRO_TEST(SessionAgent, ReoffersBothListenersAfterGyroRestarts)
+{
+	Fixture fixture;
+	GYRO_REQUIRE(fixture.Control() != nullptr);
+
+	const Result<WaylandListener> listener = BindWaylandListener(fixture.RuntimeDirectory());
+	GYRO_REQUIRE(listener.has_value());
+
+	const Result<ShellListener> shell = BindShellListener(fixture.RuntimeDirectory(), listener->Name);
+	GYRO_REQUIRE(shell.has_value());
+
+	SessionAgent agent{ listener->Socket.Borrow(), shell->Socket.Borrow() };
+
+	GYRO_REQUIRE(agent.Connect(fixture.ControlPath()).has_value());
+	GYRO_REQUIRE(Settle(fixture, agent));
+
+	fixture.Stop();
+
+	GYRO_REQUIRE(agent.Drain().has_value());
+	GYRO_REQUIRE(agent.State() == AgentState::Apart);
+
+	fixture.Start();
+	GYRO_REQUIRE(fixture.Control() != nullptr);
+
+	GYRO_REQUIRE(agent.Connect(fixture.ControlPath()).has_value());
+	GYRO_REQUIRE(Settle(fixture, agent));
+	GYRO_CHECK(agent.State() == AgentState::Established);
+
+	std::optional<AcceptedOffer> offer = fixture.Control()->TakeOffer();
+
+	GYRO_REQUIRE(offer.has_value());
+	GYRO_CHECK(offer->Shell.IsValid());
+}
+
 GYRO_TEST(SessionAgent, ConnectingBeforeGyroIsUpFails)
 {
 	const TemporaryDirectory directory;

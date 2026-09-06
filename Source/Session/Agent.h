@@ -74,8 +74,16 @@ enum class AgentState : std::uint8_t
 class SessionAgent
 {
 public:
-	// `listener` is the socket to offer and is borrowed for the whole of this object's life.
-	explicit SessionAgent(RawFd listener) noexcept : m_Listener{ listener } {}
+	// The sockets to offer, borrowed for the whole of this object's life. `applications` is the
+	// session's `wayland-N`; `shell` is where its shell connects and may be invalid, which is an agent
+	// that starts no shell.
+	//
+	// **Both are held rather than one, because a session is offered whole** (Session/Handover.h): what
+	// crosses on the wire is every listener this session has, in one message, so what this object holds
+	// is the same set.
+	explicit SessionAgent(RawFd applications, RawFd shell = {}) noexcept
+		: m_Applications{ applications }, m_Shell{ shell }
+	{}
 
 	~SessionAgent() = default;
 
@@ -123,9 +131,11 @@ private:
 	// Act on one datagram. Answers false where the connection is finished.
 	[[nodiscard]] bool Handle(std::span<const std::byte> message);
 
-	[[nodiscard]] Result<void> Say(std::span<const std::byte> message, RawFd attached);
+	[[nodiscard]] Result<void> Say(std::span<const std::byte> message, std::span<const RawFd> attached = {});
 
-	RawFd m_Listener;
+	RawFd m_Applications;
+
+	RawFd m_Shell;
 
 	Fd m_Socket;
 

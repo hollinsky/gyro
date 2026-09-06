@@ -48,7 +48,7 @@ Result<void> SessionAgent::Connect(std::string_view controlPath)
 	std::array<std::byte, MaxMessageBytes> bytes{};
 	const std::size_t written = Hello{}.Encode(bytes);
 
-	if (const Result<void> said = Say(std::span<const std::byte>{ bytes }.first(written), RawFd{}); !said)
+	if (const Result<void> said = Say(std::span<const std::byte>{ bytes }.first(written)); !said)
 	{
 		Part();
 
@@ -86,9 +86,10 @@ Result<void> SessionAgent::Drain()
 			return {};
 		}
 
-		// **Descriptors are a refusal on this side, whatever the message.** `DescriptorsFor` says gyro
-		// never attaches one, so anything that arrives with a message is a peer that is not gyro or a
-		// gyro speaking something this build does not — and the `Received` closes them either way.
+		// **Descriptors are a refusal on this side, whatever the message.** `CarriesListeners` is only
+		// ever true of a message travelling the other way, so anything that arrives with one attached is
+		// a peer that is not gyro or a gyro speaking something this build does not — and the `Received`
+		// closes them either way.
 		if (received->AttachedCount != 0 || received->Truncated)
 		{
 			spdlog::warn("gyro sent a handover message this agent cannot read");
@@ -156,15 +157,32 @@ bool SessionAgent::Handle(std::span<const std::byte> message)
 
 		m_Version = welcome->Version;
 
-		std::array<std::byte, MaxMessageBytes> bytes{};
-		const std::size_t written = Offer{}.Encode(bytes);
+		// **The roles are read off which descriptors this agent has**, so there is one statement of
+		// whether a session has a shell and it is the socket's own existence. The order is the bitmap's,
+		// ascending, which is what `IndexOf` reads it back by.
+		std::uint32_t roles = static_cast<std::uint32_t>(ListenerRole::Applications);
+		std::array<RawFd, MaxListeners> listeners{ m_Applications };
+		std::size_t count = 1;
 
-		// **The listener is attached rather than moved**, which is Session/Listener.h's point: the same
-		// socket is offered again on the next connection, so what crosses here is a copy of the
-		// descriptor the kernel makes and not the agent's own.
-		if (const Result<void> said = Say(std::span<const std::byte>{ bytes }.first(written), m_Listener); !said)
+		if (m_Shell.IsValid())
 		{
-			spdlog::warn("offering the listener failed: {}", said.error());
+			roles |= static_cast<std::uint32_t>(ListenerRole::Shell);
+			listeners[count] = m_Shell;
+			++count;
+		}
+
+		std::array<std::byte, MaxMessageBytes> bytes{};
+		const std::size_t written = Offer{ .Roles = roles }.Encode(bytes);
+
+		// **The listeners are attached rather than moved**, which is Session/Listener.h's point: the
+		// same sockets are offered again on the next connection, so what crosses here are copies of the
+		// descriptors the kernel makes and not the agent's own.
+		if (const Result<void> said =
+		        Say(std::span<const std::byte>{ bytes }.first(written),
+		            std::span<const RawFd>{ listeners }.first(count));
+		    !said)
+		{
+			spdlog::warn("offering the session's listeners failed: {}", said.error());
 
 			return false;
 		}
@@ -189,7 +207,7 @@ bool SessionAgent::Handle(std::span<const std::byte> message)
 	return true;
 }
 
-Result<void> SessionAgent::Say(std::span<const std::byte> message, RawFd attached)
+Result<void> SessionAgent::Say(std::span<const std::byte> message, std::span<const RawFd> attached)
 {
 	return Send(m_Socket.Borrow(), message, attached);
 }

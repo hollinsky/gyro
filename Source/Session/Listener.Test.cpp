@@ -1,5 +1,6 @@
 #include "Session/Listener.h"
 
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -155,4 +156,92 @@ GYRO_TEST(WaylandListener, RefusesADirectoryThatIsNotThere)
 	const Result<WaylandListener> nowhere = BindWaylandListener("");
 	GYRO_REQUIRE(!nowhere.has_value());
 	GYRO_CHECK(nowhere.error().Code() == ENOENT);
+}
+
+// The shell's socket is bound beside the display it is named after, and gyro would take it: the same
+// four questions are asked of both listeners, because both are sockets a user bound in their own
+// runtime directory and only the agent knows which is which.
+GYRO_TEST(ShellListener, BindsBesideTheDisplayAndIsSomethingGyroWouldAccept)
+{
+	const TemporaryDirectory directory;
+	GYRO_REQUIRE(!directory.Path().empty());
+
+	const Result<WaylandListener> display = BindWaylandListener(directory.Path(), "wayland-4");
+	GYRO_REQUIRE(display.has_value());
+
+	const Result<ShellListener> shell = BindShellListener(directory.Path(), display->Name);
+	GYRO_REQUIRE(shell.has_value());
+
+	GYRO_CHECK(shell->Path == directory.Path() + "/wayland-4-shell");
+	GYRO_CHECK(Reachable(shell->Path));
+	GYRO_CHECK(InspectOffer(shell->Socket.Borrow(), directory.Path()).has_value());
+
+	// **No lock of its own**, which is what makes the name free: it exists only because the display's
+	// number was locked, so there is nobody left to race with.
+	GYRO_CHECK(!std::filesystem::exists(shell->Path + ".lock"));
+}
+
+// A stale socket from a machine that lost power is taken, exactly as the display's is, and under the
+// same protection — the caller holds the display's lock by the time this runs.
+GYRO_TEST(ShellListener, TakesAStaleSocketLeftBehind)
+{
+	const TemporaryDirectory directory;
+	GYRO_REQUIRE(!directory.Path().empty());
+
+	{
+		const Result<WaylandListener> display = BindWaylandListener(directory.Path(), "wayland-2");
+		GYRO_REQUIRE(display.has_value());
+		GYRO_REQUIRE(BindShellListener(directory.Path(), display->Name).has_value());
+	}
+
+	const Result<WaylandListener> again = BindWaylandListener(directory.Path(), "wayland-2");
+	GYRO_REQUIRE(again.has_value());
+
+	const Result<ShellListener> shell = BindShellListener(directory.Path(), again->Name);
+
+	GYRO_REQUIRE(shell.has_value());
+	GYRO_CHECK(Reachable(shell->Path));
+}
+
+GYRO_TEST(ShellListener, RefusesWithNoDisplayToBeNamedAfter)
+{
+	const TemporaryDirectory directory;
+	GYRO_REQUIRE(!directory.Path().empty());
+
+	const Result<ShellListener> nameless = BindShellListener(directory.Path(), "");
+
+	GYRO_REQUIRE(!nameless.has_value());
+	GYRO_CHECK_EQ(nameless.error().Code(), EINVAL);
+}
+
+// The connection the agent makes on the shell's behalf, which is the whole of how the socket's path
+// stays out of every environment on the machine.
+GYRO_TEST(ShellListener, ConnectsForTheShellSoNothingHasToBeToldThePath)
+{
+	const TemporaryDirectory directory;
+	GYRO_REQUIRE(!directory.Path().empty());
+
+	const Result<WaylandListener> display = BindWaylandListener(directory.Path(), "wayland-0");
+	GYRO_REQUIRE(display.has_value());
+
+	const Result<ShellListener> shell = BindShellListener(directory.Path(), display->Name);
+	GYRO_REQUIRE(shell.has_value());
+
+	const Result<Fd> connection = ConnectTo(shell->Path);
+
+	GYRO_REQUIRE(connection.has_value());
+	GYRO_CHECK(connection->IsValid());
+
+	// **Inheritable, which is the point rather than an oversight**: this descriptor goes through a fork
+	// and an exec into the shell, and one that closed there would leave a `WAYLAND_SOCKET` naming
+	// nothing.
+	GYRO_CHECK((::fcntl(connection->Get(), F_GETFD) & FD_CLOEXEC) == 0);
+}
+
+GYRO_TEST(ShellListener, RefusesADirectoryThatIsNotThere)
+{
+	const Result<ShellListener> nowhere = BindShellListener("", "wayland-0");
+
+	GYRO_REQUIRE(!nowhere.has_value());
+	GYRO_CHECK_EQ(nowhere.error().Code(), ENOENT);
 }

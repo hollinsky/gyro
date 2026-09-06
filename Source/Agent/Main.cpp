@@ -29,6 +29,12 @@
 // lets gyro learn one is over without subscribing to anything — and starts the session's first client
 // with `WAYLAND_DISPLAY` already in its environment.
 //
+// **Under `--shell` it binds a second listener and that is what makes a session have a shell.** Trust
+// belongs to the socket a client arrived on (decision 23), so the party that decides which process
+// gets the run of a session is the party that can create a socket in that user's runtime directory —
+// which gyro cannot (decision 22) and this can. The agent connects to it itself and hands the child
+// the connected descriptor, so the path never enters an environment anything could inherit.
+//
 // **The pieces are in `Session` and only the sequencing is here**, which is Source/Main.cpp's
 // arrangement: the parse is total and tested, each mechanism is tested against a real socket, and
 // what is left is a wait and a handful of transitions.
@@ -65,6 +71,11 @@ void PrintUsage()
 			  << "                      which covers both the client exiting and gyro restarting.\n"
 			  << "                      Without it the agent exits when the command does, with the\n"
 			  << "                      status the command exited with\n"
+			  << "  --shell             The command is this session's shell. Binds a second listener\n"
+			  << "                      beside the display, offers it to gyro as the socket that\n"
+			  << "                      grants the run of the session, and starts the command on a\n"
+			  << "                      connection to it. Without this the session has no shell and\n"
+			  << "                      nothing in it can claim a chord or draw chrome\n"
 			  << "\n";
 }
 
@@ -173,7 +184,29 @@ int main(int argc, char** argv)
 
 	spdlog::info("listening on {}", listener->Path);
 
-	Session::SessionAgent agent{ listener->Socket.Borrow() };
+	// **Bound before the first offer and never rebound.** gyro restarting loses every listener it held
+	// and the agent offers the same two again — Session/Listener.h's argument for the display's socket
+	// applies unchanged to this one, and a shell whose connection survived the gap is served out of this
+	// queue when gyro adopts it.
+	Session::ShellListener shell;
+
+	if (options->Shell)
+	{
+		Result<Session::ShellListener> bound = Session::BindShellListener(directory, listener->Name);
+
+		if (!bound)
+		{
+			std::cerr << std::format("{}\n", bound.error());
+
+			return 1;
+		}
+
+		shell = std::move(*bound);
+
+		spdlog::info("the session's shell reaches gyro on {}, and nothing else is told where that is", shell.Path);
+	}
+
+	Session::SessionAgent agent{ listener->Socket.Borrow(), shell.Socket.Borrow() };
 	Session::Child client;
 
 	// Whether a client should be started when there is a session and none running. **One flag covering
@@ -204,7 +237,31 @@ int main(int argc, char** argv)
 
 		if (agent.State() == Session::AgentState::Established && starting && !client.IsRunning())
 		{
-			if (const Result<void> started = client.Start(options->Command, listener->Name); !started)
+			// **Connected here rather than when the socket was bound**, and a fresh connection every
+			// start: a respawned shell needs one of its own, and one made before gyro had adopted the
+			// listener would be a connection sitting in a queue for however long the compositor took to
+			// arrive. The descriptor goes no further than the child's environment — see
+			// Session/Child.h — so it is closed here as soon as the fork has been done with it.
+			Fd connection;
+
+			if (options->Shell)
+			{
+				Result<Fd> opened = Session::ConnectTo(shell.Path);
+
+				if (!opened)
+				{
+					std::cerr << std::format("{}\n", opened.error());
+
+					status = 1;
+
+					break;
+				}
+
+				connection = std::move(*opened);
+			}
+
+			if (const Result<void> started = client.Start(options->Command, listener->Name, connection.Borrow());
+			    !started)
 			{
 				std::cerr << std::format("{}\n", started.error());
 

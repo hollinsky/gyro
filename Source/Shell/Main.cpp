@@ -125,7 +125,16 @@ int main(int argument, char** arguments)
 			// failure of this process: gyro released the listener the shell arrived on.
 			if (const std::optional<Wire::ProtocolFault>& fault = session.Connection().Fault(); fault.has_value())
 			{
-				spdlog::error("gyro-shell: protocol error: {}", drained.error());
+				// **The fault's own sentence rather than the drain's**, because the drain's is a fixed
+				// string — `Error` carries a `string_view` over static storage and cannot hold what gyro
+				// said. The object and the code beside it are what turn *a protocol error* into a line
+				// naming the request that caused it, which is the only diagnostic a client ever gets.
+				spdlog::error(
+					"gyro-shell: protocol error on object {}, code {}: {}",
+					static_cast<std::uint32_t>(fault->Object),
+					fault->Code,
+					fault->Message
+				);
 
 				return EXIT_FAILURE;
 			}

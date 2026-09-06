@@ -63,6 +63,34 @@ constexpr int Backlog = 128;
 
 	return lock;
 }
+
+// Create, bind and listen. The tail both listeners share, which is every part of making one that is
+// not about the name.
+[[nodiscard]] Result<Fd> BindAt(const std::string& path)
+{
+	Fd socket{ ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0) };
+
+	if (!socket.IsValid())
+	{
+		return FailFromErrno("creating a listening socket");
+	}
+
+	::sockaddr_un address{};
+	address.sun_family = AF_UNIX;
+	std::memcpy(address.sun_path, path.data(), path.size());
+
+	if (::bind(socket.Get(), reinterpret_cast<const ::sockaddr*>(&address), sizeof address) != 0)
+	{
+		return FailFromErrno("binding a listening socket", Subject{ path });
+	}
+
+	if (::listen(socket.Get(), Backlog) != 0)
+	{
+		return FailFromErrno("listening on a socket", Subject{ path });
+	}
+
+	return socket;
+}
 } // namespace
 
 Result<WaylandListener> BindWaylandListener(std::string_view directory, std::string_view name)
@@ -112,32 +140,89 @@ Result<WaylandListener> BindWaylandListener(std::string_view directory, std::str
 		return FailFromErrno("removing a stale display socket", Subject{ path });
 	}
 
-	Fd socket{ ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0) };
+	Result<Fd> socket = BindAt(path);
+
+	if (!socket)
+	{
+		return std::unexpected{ socket.error() };
+	}
+
+	return WaylandListener{
+		.Socket = std::move(*socket),
+		.Lock = std::move(*lock),
+		.Name = std::string{ name },
+		.Path = std::move(path),
+	};
+}
+
+Result<ShellListener> BindShellListener(std::string_view directory, std::string_view display)
+{
+	if (directory.empty())
+	{
+		return Failure(ENOENT, "no runtime directory to bind a shell listener in");
+	}
+
+	if (display.empty())
+	{
+		return Failure(EINVAL, "a shell listener is named after a display and there is none");
+	}
+
+	std::string path = std::format("{}/{}{}", directory, display, ShellSuffix);
+
+	if (!Fits(path))
+	{
+		return Failure(ENAMETOOLONG, "the shell listener's path is longer than a socket address", Subject{ path });
+	}
+
+	// **No lock of its own, and the display's is what makes that safe.** This name exists only because
+	// that display name was locked, so anybody who could collide here has already been refused one
+	// step earlier — and a lock file is a thing the rest of the world reads to find a free display
+	// number, which this is not.
+	//
+	// A stale socket is unlinked for `BindWaylandListener`'s reason, and under the same protection: the
+	// display's lock is held by the time this runs.
+	if (::unlink(path.c_str()) != 0 && errno != ENOENT)
+	{
+		return FailFromErrno("removing a stale shell socket", Subject{ path });
+	}
+
+	Result<Fd> socket = BindAt(path);
+
+	if (!socket)
+	{
+		return std::unexpected{ socket.error() };
+	}
+
+	return ShellListener{ .Socket = std::move(*socket), .Path = std::move(path) };
+}
+
+Result<Fd> ConnectTo(std::string_view path)
+{
+	if (!Fits(path))
+	{
+		return Failure(ENAMETOOLONG, "the listener's path is not one an address can hold", Subject{ path });
+	}
+
+	// **Not `CLOEXEC`, and that is the point of the call.** This descriptor is going through a `fork`
+	// and an `exec` into the shell, so closing it there would leave a `WAYLAND_SOCKET` naming nothing.
+	// It costs the agent one inheritable descriptor, which every other program it starts would also
+	// inherit — so the agent starts exactly one program and this is it.
+	Fd socket{ ::socket(AF_UNIX, SOCK_STREAM, 0) };
 
 	if (!socket.IsValid())
 	{
-		return FailFromErrno("creating a display socket");
+		return FailFromErrno("creating a socket to the shell's listener");
 	}
 
 	::sockaddr_un address{};
 	address.sun_family = AF_UNIX;
 	std::memcpy(address.sun_path, path.data(), path.size());
 
-	if (::bind(socket.Get(), reinterpret_cast<const ::sockaddr*>(&address), sizeof address) != 0)
+	if (::connect(socket.Get(), reinterpret_cast<const ::sockaddr*>(&address), sizeof address) != 0)
 	{
-		return FailFromErrno("binding a display socket", Subject{ path });
+		return FailFromErrno("connecting to the shell's listener", Subject{ path });
 	}
 
-	if (::listen(socket.Get(), Backlog) != 0)
-	{
-		return FailFromErrno("listening on a display socket", Subject{ path });
-	}
-
-	return WaylandListener{
-		.Socket = std::move(socket),
-		.Lock = std::move(*lock),
-		.Name = std::string{ name },
-		.Path = std::move(path),
-	};
+	return socket;
 }
 } // namespace Session

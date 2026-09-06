@@ -39,9 +39,22 @@ struct AgentOptions
 	// `gyro-session -- foot` mean what a person expects it to.
 	bool Respawn = false;
 
+	// The command is this session's shell, so give it the run of the session.
+	//
+	// **One flag decides two things and they are the same thing**: whether to bind the second listener
+	// at all, and whether the child is started on a connection to it. A socket that grants
+	// `Trust::System` exists because a shell is being started on it — Session/Listener.h's
+	// `ShellListener` — so an agent that starts no shell creates none, and the tier is unreachable in
+	// that session rather than sitting there waiting for somebody to find it.
+	//
+	// Refused with an empty `Command`, because there would be nothing for it to be about.
+	bool Shell = false;
+
 	// What to start once the session exists, argv[0] first. Empty is an agent that offers a listener
 	// and starts nothing — which is the login agent's case, where the shell is started by the session
-	// manager rather than by this.
+	// manager rather than by this. **How a shell started that way is given its socket is not yet
+	// answered**: this agent hands over a descriptor, and a session manager that starts the shell
+	// itself has no descriptor to be handed.
 	std::vector<std::string> Command;
 };
 

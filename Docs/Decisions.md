@@ -15042,3 +15042,121 @@ position: live, so nothing freezes, and bounded, since the fade then samples one
 offscreen the size of the output and a full-screen sample per frame to save the difference between
 compositing a settled scene and compositing it under an opacity — which is not where the cost is.
 The blur is what is expensive, and this pays for the blur anyway.
+
+### 189. A session is offered whole — every listener it has, each with the role it plays — and the shell is handed a descriptor rather than a path
+
+*(Decided 2026-09-05, answering the remaining half of [Open.md](Open.md)'s "The System tier needs its
+own listener" — the half [decision 183](#183-gyro-binds-its-own-system-listener-beside-a-self-bound-socket-and-that-is-the-development-half-alone)
+deliberately left alone. 183 gave a development run a `Trust::System` socket of gyro's own; under the
+handover gyro binds nothing, so `gyro_bindings_v1` and `gyro_chrome_v1` —
+[186](#186-a-shell-claims-a-chord-by-keysym-once-and-is-told-the-instant-the-key-was-pressed) and
+[187](#187-a-shell-declares-a-surface-to-be-chrome-once-and-that-one-word-takes-it-out-of-the-floor-the-walk-and-the-list),
+the two globals that make a shell a shell — were in no real session's registry.)*
+
+**An agent offers a session in one message: a listener per role, with the roles named in the payload
+and the descriptors riding in the same datagram. Bit 0 is the applications listener and is mandatory;
+bit 1 is the shell's, and clients arriving there are granted `Trust::System`. The agent connects to
+that second listener itself and starts the shell on the connected descriptor, so the path to a
+session's most privileged socket never enters an environment.**
+
+**The unit of the handover is a session and not a listener, which is the correction this makes to
+what [Session/Handover.h](../Source/Session/Handover.h) already had.** A session is one thing an
+agent knows about all at once — it created every socket before it connected — so offering it in
+pieces invents states that should not exist: gyro holding a privileged listener for a session that is
+not yet established, a first offer accepted and a second refused, and an ordering rule between them
+that somebody has to remember. Offered whole, the session either exists with everything it has or
+does not exist. Every listener is inspected before any is taken, for the same reason. The lifetime
+came for free: `Server::Release` already walked *every* listener carrying the ending session's id, so
+a session going away takes its shell socket with it and nothing was written for that.
+
+**A role rather than a trust level on the wire.** The agent knows *this is the socket my shell will
+reach gyro on*; gyro knows what a shell may see. Putting `Trust` on the wire would move a policy
+question into an ABI and give [Protocol/Tier.h](../Source/Protocol/Tier.h) a second copy of itself,
+which that file says in its own comments it must not have. The mapping from role to trust is one line
+inside `Protocol/Host.h`, which is also why `Adopt` takes both listeners and no trust argument: which
+socket grants what is a fact about the protocol, and a composition root that could pass it would be
+one that could pass the wrong one.
+
+**A bitmap rather than a count, and the reason is which mistake it prevents.** With *n* descriptors
+in a fixed order, *which one is the shell's* is knowledge held in a comment, and the way to get it
+wrong is to grant `Trust::System` to the applications listener — silently, to every client in the
+session, which is the exact failure this whole design exists to prevent. With a bitmap the message
+says which socket is which, a mismatch between the bits set and the descriptors attached is a
+refusal, and a role added later needs no ordering rule. The cost is four bytes. With two roles the
+two forms carry identical information and the choice is a coin-flip on everything except that.
+
+**The descriptor count moved from the opcode to the payload, and the receiver's bound stayed where it
+was.** `DescriptorsFor(Opcode)` could not answer this any more — a control buffer is sized before
+`recvmsg` can tell anyone what the payload says — so it became `CarriesListeners`, a yes-or-no about
+whether descriptors are allowed at all, and the count is checked afterwards against the offer's own
+bitmap. The bound on what one datagram can cost stays in
+[Session/Transport.h](../Source/Session/Transport.h)'s `MaxAttached`, which is where it has to be.
+
+**The descriptor rather than the path, and this is the part that carries the weight.** The obvious
+implementation puts the shell socket's path in the shell's environment — and then the browser the
+shell launches inherits it, connects, enumerates every window in the session and claims chords out
+from under the compositor. That is not an attack, it is the ordinary case, and it would have made the
+tier a fiction on the first day it ran. `WAYLAND_SOCKET` is the way out and was already built at both
+ends: the agent `connect`s to its own listener and passes the connected descriptor, and
+[Wire/Connection.cpp](../Source/Wire/Connection.cpp) takes it and **`unsetenv`s the variable before
+the client has done anything with it**, so a child of the shell inherits nothing. Both variables are
+set, and the pair is the design: only the socket would leave everything the shell starts with no
+display at all, and only the display would make the shell an application. Nothing in `Source/Shell`
+changed.
+
+**The socket is named after the display rather than scanned for, which inverts 183's argument by
+taking its own reason seriously.** There the name had to be predictable, because a person points a
+shell at it by hand. Here nothing does — the agent connects to it itself — so the name only has to be
+unique, and `wayland-N-shell` beside a display number that is already locked is unique for free, with
+no lock and no search of its own.
+
+**What this is honestly worth: a boundary between users, and none within one.** The socket is a path
+in a `0700` runtime directory, so another user cannot reach it — that part is real. Another process
+at the *same* uid that goes looking for the path can still connect and be granted System, and passing
+the descriptor removes the accident rather than the search. Saying so plainly is better than implying
+otherwise, because a process at that uid can `ptrace` the shell, read its memory and use its
+connection directly — Linux offers no boundary inside a uid, so there is none to build on here. What
+follows is that **`Trust::System` is granted per user rather than per program**, and Open.md's "how a
+client is judged worthy of it" is answered as *the agent started it* rather than as a property of the
+binary. The peer credentials on the shell's connection are in fact the *agent's*, since the agent
+made it, which is the same statement from the other side. A judgement about the executable —
+`SO_PEERPIDFD` and an identity the kernel vouches for, or a policy service — is a different decision
+and stays open.
+
+**The greeting stays, and it is the only part of this built for a future.** `Hello` and `Welcome`
+negotiate a version nothing yet branches on, worth keeping for one reason that does not apply to
+anything else in the file: a version is the one field that cannot be added later, because adding it
+is the thing it would have to negotiate. Everything else in this ABI is free to change until the
+first release and is not free after it — so `Offer` grew a payload in place and `HandoverVersion`
+stayed at 1, there being no build in the world to be compatible with. `Handover.h` now says which
+side of that line it is on, because its own prose did not: it argued for exact lengths and
+never-reused opcodes as though the freeze were already in force, and an earlier draft of this entry
+designed to it.
+
+**Rejected: a second offer on the same connection, carried by a second opcode.** It is what
+`Handover.h` read as though it obliged — `IsMessage` checks a datagram's length exactly, so no
+message in this protocol can grow a field, so every extension is a new opcode. That rule is correct
+*after* a release and is a self-inflicted constraint before one, and following it here would have
+bought a second round trip, an ordering rule and a half-established session in exchange for
+compatibility with a build nobody is running.
+
+**Rejected: identifying the shell by the pid the agent forked.** A pid is a recycled number and a
+fork is not a socket, so gyro would be trusting an integer a peer sent instead of a file whose
+permissions it can see. It also cannot survive the shell restarting, which is an ordinary thing for a
+shell to do.
+
+**Rejected: granting System to the first client on the session's own listener.** It needs no new
+socket and no ABI, and it is a race the user loses: whichever of the shell and the first autostarted
+application connects first wins, silently, with no error and no way to tell afterwards which one it
+was.
+
+**Rejected: an abstract or unlinked listener, to keep the path unguessable.** An abstract socket is
+reachable across the whole network namespace, which is strictly worse than a file in a `0700`
+directory; and unlinking a bound path once the shell has connected would mean a shell that crashes
+can never come back, which is the thing a person notices.
+
+**What is not answered is the agent that starts nothing.** `--shell` binds the second listener and
+starts the command on a connection to it, which are one decision because a socket granting the run of
+a session exists in order to have a shell on it. An agent with an empty command — the login agent's
+case, where a session manager starts the shell — has no descriptor to hand anybody, and how a shell
+started that way is given one is still open.

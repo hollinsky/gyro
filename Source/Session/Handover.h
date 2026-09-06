@@ -43,10 +43,88 @@
 // on one machine, so they agree on endianness by construction. Every field below is explicitly sized
 // and every message is a whole number of four-byte words with no implicit padding, so the layout does
 // not depend on the compiler that built either end.
+//
+// **Nothing here has shipped, and the rules below are about the day it does.** Exact lengths,
+// never-reused opcodes, a message that cannot grow a field: those are what makes an ABI diffable
+// across a release, and every one of them is a self-inflicted constraint before the first one — both
+// binaries are in this tree and are built together. So until a package exists the shape is chosen for
+// being right rather than for being additive to what is already written, and after it the rules bite.
+// The one exception is the greeting: `Hello` and `Welcome` negotiate a version nothing yet branches
+// on, and it is kept because a version is the single field that cannot be added later, adding it
+// being the thing it would have to negotiate.
 
 namespace Session
 {
-// Where an agent offers its listener when nothing says otherwise.
+// What a listener in an offer is for.
+//
+// **A role rather than a trust level, and the split is which end knows what.** The agent knows *this
+// is the socket my shell will reach gyro on*; gyro knows what a shell may see, which is
+// Protocol/Tier.h's table and is deliberately the only copy of that policy in the tree. Putting
+// `Trust` on the wire would make a second one, and an ABI would then have to change whenever a tier
+// did.
+//
+// **Bit values, because an offer carries a set of these and not one of them.** A session is handed
+// over whole — every listener it has, in one message — so what crosses is a bitmap, and the
+// descriptors ride in ascending bit order beside it.
+enum class ListenerRole : std::uint32_t
+{
+	// Where this session's applications connect: the `wayland-N` in `WAYLAND_DISPLAY`. Every offer has
+	// one, because a session without it is a session no client can reach.
+	Applications = 1U << 0,
+
+	// Where this session's shell connects, and clients arriving there are granted `Trust::System`
+	// (Protocol/Tier.h). Optional: an agent that starts no shell offers no such socket, and a session
+	// with none is one where nothing can claim a chord or declare a surface to be chrome.
+	Shell = 1U << 1,
+};
+
+// Every bit this build has a meaning for. A peer setting one outside it is speaking a dialect this
+// build does not, which is a refusal rather than something to mask off — the bits *are* the
+// descriptor count, so ignoring one would leave a descriptor nobody has a name for.
+inline constexpr std::uint32_t KnownRoles =
+	static_cast<std::uint32_t>(ListenerRole::Applications) | static_cast<std::uint32_t>(ListenerRole::Shell);
+
+// The most listeners one offer can carry, which is every role there is.
+inline constexpr std::size_t MaxListeners = 2;
+
+[[nodiscard]] constexpr bool Offers(std::uint32_t roles, ListenerRole role) noexcept
+{
+	return (roles & static_cast<std::uint32_t>(role)) != 0;
+}
+
+// How many descriptors a set of roles says are attached.
+[[nodiscard]] constexpr std::size_t ListenersIn(std::uint32_t roles) noexcept
+{
+	std::size_t count = 0;
+
+	for (std::uint32_t bit = 1; bit != 0; bit <<= 1U)
+	{
+		count += (roles & bit) != 0 ? 1U : 0U;
+	}
+
+	return count;
+}
+
+// Which descriptor is this role's, given the whole set. **Ascending bit order, so the answer is how
+// many roles sit below it** — which is what lets a role be added later without an ordering rule and
+// without renumbering what an older agent sends.
+[[nodiscard]] constexpr std::size_t IndexOf(std::uint32_t roles, ListenerRole role) noexcept
+{
+	return ListenersIn(roles & (static_cast<std::uint32_t>(role) - 1U));
+}
+
+// Whether a set of roles is one this build can act on: no bit it has no name for, and the
+// applications listener present. **Checked before a descriptor is counted**, because the bitmap is
+// what says how many arrived.
+[[nodiscard]] constexpr bool RolesAreWellFormed(std::uint32_t roles) noexcept
+{
+	return (roles & ~KnownRoles) == 0 && Offers(roles, ListenerRole::Applications);
+}
+} // namespace Session
+
+namespace Session
+{
+// Where an agent offers its session when nothing says otherwise.
 //
 // **It is in the ABI because it is the rendezvous rather than a default either end chose.** The two
 // binaries are started by different parties — gyro by the service manager, the agent by the login
@@ -72,7 +150,7 @@ enum class Opcode : std::uint16_t
 	// Agent to gyro, first on the connection and once. Nothing else is accepted before it.
 	Hello = 1,
 
-	// Agent to gyro, carrying the listening descriptor out of band.
+	// Agent to gyro, carrying the session's listeners out of band and their roles in the payload.
 	Offer = 2,
 
 	// gyro to agent, in answer to `Hello`.
@@ -98,13 +176,19 @@ enum class Opcode : std::uint16_t
 	return op == Opcode::Hello || op == Opcode::Offer;
 }
 
-// How many descriptors ride with it. **Part of the message rather than a rule in the receiver**,
-// because the count is the one thing a peer controls that costs the receiver a resource: a datagram
-// carrying descriptors nobody asked for is a file table filling up on the process that must not die,
-// and the check that closes it belongs where every reader can see the number.
-[[nodiscard]] constexpr std::size_t DescriptorsFor(Opcode op) noexcept
+// Whether descriptors ride with it, which is `Offer` and nothing else.
+//
+// **How many is the message's own business rather than the opcode's**, because a session is offered
+// whole and the number of listeners it has is in the payload. That leaves the receiver two checks
+// instead of one and both are load-bearing: nothing but an `Offer` may carry a descriptor at all —
+// which is what stops a peer filling the file table of the process that must not die — and an
+// `Offer`'s bitmap has to account for exactly the descriptors that arrived, which is what stops a
+// socket being adopted at a role nobody named. The bound on what one datagram can cost is
+// Session/Transport.h's `MaxAttached`, where it has to be: a control buffer is sized before `recvmsg`
+// can tell anybody what the payload says.
+[[nodiscard]] constexpr bool CarriesListeners(Opcode op) noexcept
 {
-	return op == Opcode::Offer ? 1U : 0U;
+	return op == Opcode::Offer;
 }
 
 // An opcode and the bytes after it.
@@ -372,20 +456,45 @@ struct Accepted
 	}
 };
 
-// Agent to gyro: *here is the listener.* The descriptor rides out of band and the message says
-// nothing, which is the shape rather than an omission — everything gyro needs to judge the offer it
-// reads off the descriptor itself, and a path or a uid stated here would be a claim it would have to
-// ignore in favour of what it can verify.
+// Agent to gyro: *here is my session.* The listeners ride out of band and the payload says what each
+// of them is for.
+//
+// **A session rather than a listener is the unit, and it is what makes the handshake atomic.** An
+// agent knows every socket its session has before it connects — it created them — so offering them
+// one at a time would invent states that should not exist: gyro holding a privileged listener for a
+// session that is not established, a first offer taken and a second refused, and an ordering rule
+// between the two for somebody to remember. Offered whole, a session either exists with everything
+// it has or does not exist.
+//
+// **The roles are the only thing stated, and everything else is read off the descriptors.** A path
+// or a uid in this message would be a claim gyro would have to ignore in favour of what it can
+// verify; a role is the one fact that is not discoverable from a socket, because two listeners a
+// user bound in their own runtime directory are indistinguishable and only the agent knows which one
+// it will point its shell at.
 struct Offer
 {
 	static constexpr Opcode Op = Opcode::Offer;
-	static constexpr std::size_t PayloadBytes = 0;
+	static constexpr std::size_t PayloadBytes = 4;
+
+	// Which listeners are attached, as `ListenerRole` bits. The descriptors are in ascending bit
+	// order, so `IndexOf` answers which is which.
+	std::uint32_t Roles = static_cast<std::uint32_t>(ListenerRole::Applications);
 
 	[[nodiscard]] std::size_t Encode(std::span<std::byte> into) const noexcept
 	{
-		return WriteHeader(into, Op, PayloadBytes);
+		const std::size_t total = WriteHeader(into, Op, PayloadBytes);
+
+		if (total != 0)
+		{
+			StoreWord(into, HeaderBytes, Roles);
+		}
+
+		return total;
 	}
 
+	// **Decodes a bitmap it has no name for rather than refusing it**, which is `Hello`'s arrangement
+	// with the version: what a peer said is separate from whether gyro will act on it, and only the
+	// second is a refusal a sentence can be written for. `RolesAreWellFormed` is that question.
 	[[nodiscard]] static std::optional<Offer> Decode(std::span<const std::byte> message) noexcept
 	{
 		if (!IsMessage(message, Op, PayloadBytes))
@@ -393,7 +502,7 @@ struct Offer
 			return std::nullopt;
 		}
 
-		return Offer{};
+		return Offer{ .Roles = LoadWord(message, HeaderBytes) };
 	}
 };
 

@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 
+#include "Core/Fd.h"
 #include "Core/Result.h"
 
 // The session's first client, started by the party that is allowed to start it.
@@ -45,9 +46,16 @@ public:
 
 	// Start `command` with `WAYLAND_DISPLAY` set to `display`, inheriting everything else.
 	//
+	// `connection` is an already-connected Wayland socket to hand the child as `WAYLAND_SOCKET`, and is
+	// how a shell reaches the listener that grants it `Trust::System` — see Session/Listener.h's
+	// `ShellListener`. An invalid one starts an ordinary client, which finds the display by name like
+	// anything else. The descriptor is borrowed: it is cleared of `FD_CLOEXEC` in the forked child and
+	// never in this process, so nothing else the agent does inherits it.
+	//
 	// Searches `PATH`, because what a person types on the agent's command line is a program name and
 	// not a path. Refused where a child is already running.
-	[[nodiscard]] Result<void> Start(std::span<const std::string> command, std::string_view display);
+	[[nodiscard]] Result<void>
+	Start(std::span<const std::string> command, std::string_view display, RawFd connection = {});
 
 	[[nodiscard]] bool IsRunning() const noexcept { return m_Pid > 0; }
 

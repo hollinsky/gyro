@@ -61,6 +61,33 @@ struct WaylandListener
 	std::string Path;
 };
 
+// What a session's shell socket is called, appended to the display's own name.
+//
+// **Derived from the display rather than scanned for, which is the inverse of
+// [decision
+// 183](../../Docs/Decisions.md#183-gyro-binds-its-own-system-listener-beside-a-self-bound-socket-and-that-is-the-development-half-alone)
+// and for the reason that decision gave.** There the name had to be predictable, because a person
+// points a shell at it by hand. Here nothing points at it by hand — the agent connects to it itself
+// and hands the shell the connected descriptor — so the name only has to be *unique*, and deriving it
+// from a display name that is already locked makes it unique for free.
+inline constexpr std::string_view ShellSuffix = "-shell";
+
+// The listener a session's shell connects to, and clients arriving on it are granted `Trust::System`.
+//
+// **No lock and no name in any environment.** It is bound beside the display it is named after and
+// borrows that name's lock, and its path is never exported — see Session/Child.h, which starts the
+// shell on a descriptor rather than telling it where to look. A path in an environment variable is
+// one every program the shell launches inherits, and a browser that inherited this one could
+// enumerate every window in the session and claim chords out from under the compositor.
+struct ShellListener
+{
+	Fd Socket;
+
+	// Where it is bound. For a log line and for the `connect` the agent makes to it, and for nothing
+	// else — in particular it does not go in anybody's environment.
+	std::string Path;
+};
+
 // Bind a listener in `directory`, taking `name` if it is given and the first free display number if
 // it is not.
 //
@@ -69,4 +96,18 @@ struct WaylandListener
 // by a process that died is unlinked, because holding the lock is what says nobody owns it — which is
 // the ordinary state of the path after a machine loses power.
 [[nodiscard]] Result<WaylandListener> BindWaylandListener(std::string_view directory, std::string_view name = {});
+
+// Bind the shell listener beside the display called `display`, in the same directory.
+//
+// The display's lock must already be held by the caller, which is what makes the stale socket at this
+// path safe to unlink — see `ShellSuffix`. Refused where there is no display to name it after.
+[[nodiscard]] Result<ShellListener> BindShellListener(std::string_view directory, std::string_view display);
+
+// Connect to a listener at `path`, for an agent handing the connected descriptor to a child.
+//
+// **The agent connects on the shell's behalf rather than telling it where to connect**, which is the
+// whole of how the socket's path stays out of every environment on the machine. What comes back is an
+// ordinary Wayland connection: Wire/Connection.h takes it from `WAYLAND_SOCKET` and unsets the
+// variable before the client has done anything, so nothing the shell starts inherits it.
+[[nodiscard]] Result<Fd> ConnectTo(std::string_view path);
 } // namespace Session

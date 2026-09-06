@@ -78,20 +78,29 @@ inline constexpr std::string_view DefaultRuntimeRoot = "/run/user";
 // claimed, `EACCES` where it is bound somewhere it should not be.
 [[nodiscard]] Result<void> InspectOffer(RawFd offered, std::string_view directory) noexcept;
 
-// A listener gyro has accepted, on its way to the party that will adopt it.
+// A session gyro has accepted, on its way to the party that will adopt it.
 //
 // **It is taken rather than broadcast, and Core/Fd.h says why**: a signal carries a fact and never a
 // resource, because with N observers at most one could take it and nothing in the signature says
-// which. A listener is the resource — exactly one party may call `wl_display_add_socket_fd` with it —
-// so it leaves through a verb that can only be called once. `Ended` beside it *is* a fact, and is a
-// signal.
+// which. A listener is the resource — exactly one party may serve clients on it — so it leaves
+// through a verb that can only be called once. `Ended` beside it *is* a fact, and is a signal.
+//
+// **A session rather than a listener, which is Session/Handover.h's `Offer` arriving intact.** The
+// two sockets are established together or not at all, so the party that adopts them cannot be handed
+// a session that is missing half of itself.
 struct AcceptedOffer
 {
 	SessionId Id = SessionId::None;
 
 	std::uint32_t Uid = 0;
 
+	// Where this session's applications connect. Always present.
 	Fd Listener;
+
+	// Where this session's shell connects, granted `Trust::System` (Protocol/Tier.h), or invalid for a
+	// session whose agent offered none — which is an agent that starts no shell, and is an ordinary
+	// state of a machine rather than a failure.
+	Fd Shell;
 };
 
 // SPEC: how many agents may be mid-handshake at once, across every user on the machine. Decision 27's

@@ -127,6 +127,14 @@ public:
 	template<typename Message>
 	[[nodiscard]] bool SendMessage(const Message& message, RawFd attached = RawFd{})
 	{
+		const std::array<RawFd, 1> one{ attached };
+
+		return SendMessage(message, std::span<const RawFd>{ one });
+	}
+
+	template<typename Message>
+	[[nodiscard]] bool SendMessage(const Message& message, std::span<const RawFd> attached)
+	{
 		std::array<std::byte, MaxMessageBytes> bytes{};
 		const std::size_t written = message.Encode(bytes);
 
@@ -268,6 +276,116 @@ GYRO_TEST(SessionControl, OfferIsAcceptedAndHandedOver)
 	GYRO_CHECK(offer->Listener.IsValid());
 
 	// Taken once. The listener is a resource and `TakeOffer` is where ownership stops travelling.
+	GYRO_CHECK(!fixture.Control().TakeOffer().has_value());
+}
+
+// A session is offered whole, so a shell listener arrives on the same message as the applications one
+// and is handed over beside it. There is nothing to do afterwards to give a session a shell.
+GYRO_TEST(SessionControl, AShellListenerIsAcceptedWithTheSessionThatHasIt)
+{
+	Fixture fixture;
+	Peer peer;
+
+	GYRO_REQUIRE(fixture.Greet(peer));
+
+	const Fd applications = MakeListener(std::format("{}/wayland-0", fixture.RuntimeDirectory()));
+	const Fd shell = MakeListener(std::format("{}/wayland-0-shell", fixture.RuntimeDirectory()));
+
+	GYRO_REQUIRE(applications.IsValid());
+	GYRO_REQUIRE(shell.IsValid());
+
+	const std::array<RawFd, 2> both{ applications.Borrow(), shell.Borrow() };
+	const Offer offer{ .Roles = KnownRoles };
+
+	GYRO_REQUIRE(peer.SendMessage(offer, std::span<const RawFd>{ both }));
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+	GYRO_REQUIRE(peer.Answer() == Opcode::Accepted);
+
+	std::optional<AcceptedOffer> taken = fixture.Control().TakeOffer();
+
+	GYRO_REQUIRE(taken.has_value());
+	GYRO_CHECK(taken->Listener.IsValid());
+	GYRO_CHECK(taken->Shell.IsValid());
+}
+
+// The ordinary session, and the one an agent that starts no shell offers: nothing on the machine can
+// then reach the System tier in it, which is the answer rather than an omission.
+GYRO_TEST(SessionControl, ASessionWithNoShellListenerHasNone)
+{
+	Fixture fixture;
+	Peer peer;
+
+	GYRO_REQUIRE(fixture.Greet(peer));
+
+	const Fd listener = MakeListener(std::format("{}/wayland-0", fixture.RuntimeDirectory()));
+
+	GYRO_REQUIRE(listener.IsValid());
+	GYRO_REQUIRE(peer.SendMessage(Offer{}, listener.Borrow()));
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+	GYRO_REQUIRE(peer.Answer() == Opcode::Accepted);
+
+	std::optional<AcceptedOffer> taken = fixture.Control().TakeOffer();
+
+	GYRO_REQUIRE(taken.has_value());
+	GYRO_CHECK(taken->Listener.IsValid());
+	GYRO_CHECK(!taken->Shell.IsValid());
+}
+
+// The bitmap is the descriptor count, so the two have to agree — and a peer that says two and sends
+// one would otherwise have gyro adopt a socket at a role nobody named.
+GYRO_TEST(SessionControl, AnOfferWhoseRolesDoNotMatchItsDescriptorsIsRefused)
+{
+	Fixture fixture;
+	Peer peer;
+
+	GYRO_REQUIRE(fixture.Greet(peer));
+
+	const Fd listener = MakeListener(std::format("{}/wayland-0", fixture.RuntimeDirectory()));
+
+	GYRO_REQUIRE(listener.IsValid());
+	GYRO_REQUIRE(peer.SendMessage(Offer{ .Roles = KnownRoles }, listener.Borrow()));
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+	GYRO_CHECK(peer.Answer() == Opcode::Refused);
+}
+
+// A bit this build has no name for is refused rather than masked off, and an offer with no
+// applications listener is a session no client could reach.
+GYRO_TEST(SessionControl, AnOfferNamingRolesGyroDoesNotHaveIsRefused)
+{
+	Fixture fixture;
+	Peer peer;
+
+	GYRO_REQUIRE(fixture.Greet(peer));
+
+	const Fd listener = MakeListener(std::format("{}/wayland-0", fixture.RuntimeDirectory()));
+
+	GYRO_REQUIRE(listener.IsValid());
+	GYRO_REQUIRE(peer.SendMessage(Offer{ .Roles = 1U << 8U }, listener.Borrow()));
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+	GYRO_CHECK(peer.Answer() == Opcode::Refused);
+}
+
+// Every listener is judged before any is taken, so a shell socket bound where it should not be costs
+// the session rather than being quietly dropped — which would leave a shell connected to a queue
+// nobody will ever accept from.
+GYRO_TEST(SessionControl, AnOfferIsRefusedWholeWhenOnlyTheShellListenerIsWrong)
+{
+	Fixture fixture;
+	Peer peer;
+
+	GYRO_REQUIRE(fixture.Greet(peer));
+
+	const Fd applications = MakeListener(std::format("{}/wayland-0", fixture.RuntimeDirectory()));
+	const Fd shell = MakeListener(fixture.OutsidePath("elsewhere-shell"));
+
+	GYRO_REQUIRE(applications.IsValid());
+	GYRO_REQUIRE(shell.IsValid());
+
+	const std::array<RawFd, 2> both{ applications.Borrow(), shell.Borrow() };
+
+	GYRO_REQUIRE(peer.SendMessage(Offer{ .Roles = KnownRoles }, std::span<const RawFd>{ both }));
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+	GYRO_CHECK(peer.Answer() == Opcode::Refused);
 	GYRO_CHECK(!fixture.Control().TakeOffer().has_value());
 }
 

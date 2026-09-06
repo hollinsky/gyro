@@ -17,18 +17,24 @@
 // vocabulary under it; this is the syscall between them and it decides nothing.
 //
 // **Nothing here reads the message.** A datagram comes back as bytes and a descriptor count, and
-// whether those two agree is `DescriptorsFor`'s question — asked by the receiver, because the answer
-// is different at each end.
+// whether those two agree is Session/Handover.h's question — `CarriesListeners` for whether any are
+// allowed at all and an `Offer`'s own role bitmap for how many — asked by the receiver, because the
+// answer is different at each end.
 
 namespace Session
 {
 // How many descriptors are lifted off one datagram before the rest are dropped.
 //
-// **Four, where the protocol's largest answer is one.** The number is not a capacity to grow into: a
+// **Four, where the protocol's largest answer is two.** The number is not a capacity to grow into: a
 // peer choosing to attach eight is a peer this end is going to refuse, and the only thing the extra
 // room buys is that the refusal can *say* how many arrived instead of reporting the truncation the
-// kernel would perform at exactly one. What it costs is three descriptors held for the microseconds
-// before the refusal closes them.
+// kernel would perform at exactly the legitimate count. What it costs is two descriptors held for the
+// microseconds before the refusal closes them.
+//
+// **This is where the bound on one datagram lives, and it has to be here rather than in the
+// message.** A control buffer is sized before `recvmsg` runs, so nothing has read the payload that
+// says how many listeners an offer claims — the receiver takes up to this many and then checks them
+// against what the message said.
 inline constexpr std::size_t MaxAttached = 4;
 
 // What a receive found. `Empty` is an ordinary answer — Seam/EventSource.h's drain reads to empty, so
@@ -62,11 +68,13 @@ struct Received
 	bool Truncated = false;
 };
 
-// Send one datagram, with at most one descriptor attached. `attached` invalid sends none.
+// Send one datagram, with the valid descriptors in `attached` riding on it. An empty span, or one
+// holding nothing valid, sends none.
 //
 // The whole message goes in one call or the call fails: a sequenced-packet socket does not do partial
 // writes, so there is no resume path to write and none to test.
-[[nodiscard]] Result<void> Send(RawFd socket, std::span<const std::byte> message, RawFd attached) noexcept;
+[[nodiscard]] Result<void>
+Send(RawFd socket, std::span<const std::byte> message, std::span<const RawFd> attached = {}) noexcept;
 
 // Take one datagram, without blocking.
 [[nodiscard]] Result<Received> Receive(RawFd socket, std::span<std::byte> into) noexcept;

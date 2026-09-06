@@ -146,14 +146,58 @@ GYRO_TEST(Handover, AcceptedCarriesTheSession)
 	GYRO_CHECK(accepted->Id == SessionId{ 7 });
 }
 
-// The descriptor is the whole of an offer, so the message is a header and nothing else.
-GYRO_TEST(Handover, OfferIsHeaderOnly)
+// An offer carries which listeners are attached and nothing else, the descriptors being everything
+// else gyro needs to judge it.
+GYRO_TEST(Handover, OfferCarriesItsRoles)
 {
 	Datagram bytes{};
-	const std::size_t written = Offer{}.Encode(bytes);
+	const std::uint32_t both =
+		static_cast<std::uint32_t>(ListenerRole::Applications) | static_cast<std::uint32_t>(ListenerRole::Shell);
+	const std::size_t written = Offer{ .Roles = both }.Encode(bytes);
 
-	GYRO_REQUIRE_EQ(written, HeaderBytes);
-	GYRO_CHECK(Offer::Decode(std::span<const std::byte>{ bytes }.first(written)).has_value());
+	GYRO_REQUIRE_EQ(written, HeaderBytes + Offer::PayloadBytes);
+
+	const std::optional<Offer> offer = Offer::Decode(std::span<const std::byte>{ bytes }.first(written));
+
+	GYRO_REQUIRE(offer.has_value());
+	GYRO_CHECK_EQ(offer->Roles, both);
+}
+
+// A session offered by an agent that starts no shell, which is the default and is the ordinary one.
+GYRO_TEST(Handover, AnOfferIsApplicationsOnlyUnlessItSaysOtherwise)
+{
+	GYRO_CHECK(Offers(Offer{}.Roles, ListenerRole::Applications));
+	GYRO_CHECK(!Offers(Offer{}.Roles, ListenerRole::Shell));
+	GYRO_CHECK_EQ(ListenersIn(Offer{}.Roles), std::size_t{ 1 });
+}
+
+// The bitmap is what says how many descriptors arrived and which is which, so both answers are read
+// off it rather than off an order somebody has to remember.
+GYRO_TEST(Handover, RolesSayHowManyListenersAndWhichIsWhich)
+{
+	const std::uint32_t applications = static_cast<std::uint32_t>(ListenerRole::Applications);
+	const std::uint32_t both = applications | static_cast<std::uint32_t>(ListenerRole::Shell);
+
+	GYRO_CHECK_EQ(ListenersIn(both), std::size_t{ 2 });
+	GYRO_CHECK_EQ(IndexOf(both, ListenerRole::Applications), std::size_t{ 0 });
+	GYRO_CHECK_EQ(IndexOf(both, ListenerRole::Shell), std::size_t{ 1 });
+
+	// Ascending bit order rather than a fixed slot per role: with the shell absent, the applications
+	// listener is still the first descriptor, and a role added later takes the position its bit gives it
+	// without moving anything below it.
+	GYRO_CHECK_EQ(IndexOf(applications, ListenerRole::Applications), std::size_t{ 0 });
+}
+
+// A bit this build has no name for is a peer speaking a dialect it does not, and the reason it cannot
+// be masked off is that the bits *are* the descriptor count.
+GYRO_TEST(Handover, RolesWithNoApplicationsListenerOrAnUnknownBitAreNotWellFormed)
+{
+	GYRO_CHECK(RolesAreWellFormed(static_cast<std::uint32_t>(ListenerRole::Applications)));
+	GYRO_CHECK(RolesAreWellFormed(KnownRoles));
+
+	GYRO_CHECK(!RolesAreWellFormed(0));
+	GYRO_CHECK(!RolesAreWellFormed(static_cast<std::uint32_t>(ListenerRole::Shell)));
+	GYRO_CHECK(!RolesAreWellFormed(KnownRoles | 1U << 8U));
 }
 
 GYRO_TEST(Handover, RefusedCarriesCodeAndSentence)
@@ -211,11 +255,11 @@ GYRO_TEST(Handover, DirectionIsPartOfTheMessage)
 
 GYRO_TEST(Handover, OnlyAnOfferCarriesADescriptor)
 {
-	GYRO_CHECK_EQ(DescriptorsFor(Opcode::Offer), std::size_t{ 1 });
-	GYRO_CHECK_EQ(DescriptorsFor(Opcode::Hello), std::size_t{ 0 });
-	GYRO_CHECK_EQ(DescriptorsFor(Opcode::Welcome), std::size_t{ 0 });
-	GYRO_CHECK_EQ(DescriptorsFor(Opcode::Accepted), std::size_t{ 0 });
-	GYRO_CHECK_EQ(DescriptorsFor(Opcode::Refused), std::size_t{ 0 });
+	GYRO_CHECK(CarriesListeners(Opcode::Offer));
+	GYRO_CHECK(!CarriesListeners(Opcode::Hello));
+	GYRO_CHECK(!CarriesListeners(Opcode::Welcome));
+	GYRO_CHECK(!CarriesListeners(Opcode::Accepted));
+	GYRO_CHECK(!CarriesListeners(Opcode::Refused));
 }
 
 // A buffer that will not hold the message is answered with zero rather than a partial write, since a
@@ -228,6 +272,7 @@ GYRO_TEST(Handover, EncodeRefusesABufferItWouldOverrun)
 	GYRO_CHECK_EQ(Hello{}.Encode(cramped), std::size_t{ 0 });
 	GYRO_CHECK_EQ(Welcome{}.Encode(cramped), std::size_t{ 0 });
 	GYRO_CHECK_EQ(Refused{}.Encode(cramped), std::size_t{ 0 });
+	GYRO_CHECK_EQ(Offer{}.Encode(cramped), std::size_t{ 0 });
 
 	std::array<std::byte, HeaderBytes - 1> tiny{};
 

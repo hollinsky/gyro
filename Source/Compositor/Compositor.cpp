@@ -2303,8 +2303,11 @@ private:
 		{
 			const SessionId id = offer->Id;
 
-			const Result<void> adopted =
-				m_Clients->Adopt(m_Dispatch->Store(), std::move(offer->Listener), offer->Uid, id);
+			// Both listeners in one call, because the offer carried both: which of them grants
+			// `Trust::System` is `Protocol/Host.h`'s to know, not this root's.
+			const Result<void> adopted = m_Clients->Adopt(
+				m_Dispatch->Store(), std::move(offer->Listener), std::move(offer->Shell), offer->Uid, id
+			);
 
 			if (!adopted)
 			{

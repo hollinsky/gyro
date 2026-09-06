@@ -12,6 +12,8 @@
 #include <cerrno>
 #include <cstring>
 #include <format>
+#include <optional>
+#include <string>
 #include <utility>
 
 #include "Session/Transport.h"
@@ -37,7 +39,7 @@ void Refuse(RawFd socket, int code, const char* reason)
 
 	// Nothing to do about a refusal that could not be sent, and nothing worth logging either: the
 	// connection is being closed, which is the part that matters.
-	const Result<void> sent = Send(socket, std::span<const std::byte>{ bytes }.first(written), RawFd{});
+	const Result<void> sent = Send(socket, std::span<const std::byte>{ bytes }.first(written));
 
 	spdlog::warn("session handover refused: {} ({}){}", reason, code, sent ? "" : ", and the refusal did not send");
 }
@@ -460,9 +462,12 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 		return false;
 	}
 
-	if (attached.size() != DescriptorsFor(header->Op))
+	// **Only an offer may carry a descriptor at all, and how many is checked below against what the
+	// offer said.** The two halves are separate because the second cannot be asked here: the roles are
+	// in the payload, and this runs before anything has decoded one.
+	if (!CarriesListeners(header->Op) && !attached.empty())
 	{
-		Refuse(socket, EPROTO, "the message carries the wrong number of descriptors");
+		Refuse(socket, EPROTO, "the message carries descriptors its kind never does");
 
 		return false;
 	}
@@ -501,7 +506,7 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 		std::array<std::byte, MaxMessageBytes> bytes{};
 		const std::size_t written = Welcome{ .Version = agreed }.Encode(bytes);
 
-		if (const Result<void> sent = Send(socket, std::span<const std::byte>{ bytes }.first(written), RawFd{}); !sent)
+		if (const Result<void> sent = Send(socket, std::span<const std::byte>{ bytes }.first(written)); !sent)
 		{
 			spdlog::warn("answering a handover greeting failed: {}", sent.error());
 
@@ -532,13 +537,45 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 		return false;
 	}
 
-	if (const Result<void> acceptable =
-	        InspectOffer(attached[0].Borrow(), RuntimeDirectoryFor(connection.Uid, m_RuntimeRoot));
-	    !acceptable)
+	const std::optional<Offer> offer = Offer::Decode(message);
+
+	if (!offer)
 	{
-		Refuse(socket, acceptable.error().Code(), acceptable.error().Sentence());
+		Refuse(socket, EPROTO, "the offer is malformed");
 
 		return false;
+	}
+
+	// **The bitmap before the descriptors, because the bitmap is what says how many there are.** A set
+	// with a bit this build has no name for is refused rather than masked: the bits *are* the count, so
+	// ignoring one would leave a socket attached that nobody has a role for.
+	if (!RolesAreWellFormed(offer->Roles))
+	{
+		Refuse(socket, EPROTO, "the offer names listener roles this gyro does not have");
+
+		return false;
+	}
+
+	if (attached.size() != ListenersIn(offer->Roles))
+	{
+		Refuse(socket, EPROTO, "the offer carries a different number of listeners than it names");
+
+		return false;
+	}
+
+	const std::string directory = RuntimeDirectoryFor(connection.Uid, m_RuntimeRoot);
+
+	// **Every listener is judged before any of them is taken.** A session is offered whole, so it is
+	// accepted whole or not at all — half a session established with a shell socket refused is exactly
+	// the state offering it in one message exists to make impossible.
+	for (const Fd& listener : attached)
+	{
+		if (const Result<void> acceptable = InspectOffer(listener.Borrow(), directory); !acceptable)
+		{
+			Refuse(socket, acceptable.error().Code(), acceptable.error().Sentence());
+
+			return false;
+		}
 	}
 
 	const SessionId id{ m_NextSession };
@@ -546,19 +583,35 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 
 	connection.Session = id;
 	m_Sessions.emplace(connection.Uid, id);
-	m_Offered.push_back(AcceptedOffer{ .Id = id, .Uid = connection.Uid, .Listener = std::move(attached[0]) });
+
+	AcceptedOffer accepted;
+	accepted.Id = id;
+	accepted.Uid = connection.Uid;
+	accepted.Listener = std::move(attached[IndexOf(offer->Roles, ListenerRole::Applications)]);
+
+	if (Offers(offer->Roles, ListenerRole::Shell))
+	{
+		accepted.Shell = std::move(attached[IndexOf(offer->Roles, ListenerRole::Shell)]);
+	}
+
+	m_Offered.push_back(std::move(accepted));
 
 	std::array<std::byte, MaxMessageBytes> bytes{};
 	const std::size_t written = Accepted{ .Id = id }.Encode(bytes);
 
-	if (const Result<void> sent = Send(socket, std::span<const std::byte>{ bytes }.first(written), RawFd{}); !sent)
+	if (const Result<void> sent = Send(socket, std::span<const std::byte>{ bytes }.first(written)); !sent)
 	{
 		spdlog::warn("answering a handover offer failed: {}", sent.error());
 
 		return false;
 	}
 
-	spdlog::info("session {} established for uid {}", static_cast<std::uint32_t>(id), connection.Uid);
+	spdlog::info(
+		"session {} established for uid {}{}",
+		static_cast<std::uint32_t>(id),
+		connection.Uid,
+		Offers(offer->Roles, ListenerRole::Shell) ? " with a shell listener beside it" : " with no shell listener"
+	);
 
 	return true;
 }

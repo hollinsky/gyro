@@ -1,5 +1,6 @@
 #include "Session/Child.h"
 
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -16,15 +17,24 @@ namespace Session
 namespace
 {
 constexpr std::string_view DisplayVariable = "WAYLAND_DISPLAY=";
+constexpr std::string_view SocketVariable = "WAYLAND_SOCKET=";
 
-// The child's environment: this process's, with any `WAYLAND_DISPLAY` replaced.
+// The child's environment: this process's, with any `WAYLAND_DISPLAY` replaced and — where the child
+// is being handed a connection — a `WAYLAND_SOCKET` naming it.
+//
+// **Both, and the pair is the whole design.** `WAYLAND_SOCKET` is the shell's own connection to a
+// socket whose path nothing else on the machine knows, and Wire/Connection.h `unsetenv`s it the moment
+// it is taken — so the browser the shell launches an hour later inherits `WAYLAND_DISPLAY` and an
+// ordinary client's view of the session, and cannot inherit the shell's. Setting only the socket would
+// leave everything the shell starts with no display at all; setting only the display would make the
+// shell an application.
 //
 // **Built before the fork and never after it.** Between `fork` and `exec` only async-signal-safe
 // calls are permitted, and `setenv` is not one — it allocates, and in a process that forked from a
 // thread holding the allocator's lock it deadlocks a child that no longer has the thread that would
 // release it. This agent is single-threaded today, which is precisely the kind of premise that stops
 // being true quietly; composing the environment in the parent means it never has to be checked.
-[[nodiscard]] std::vector<std::string> ComposeEnvironment(std::string_view display)
+[[nodiscard]] std::vector<std::string> ComposeEnvironment(std::string_view display, RawFd connection)
 {
 	std::vector<std::string> composed;
 
@@ -32,13 +42,21 @@ constexpr std::string_view DisplayVariable = "WAYLAND_DISPLAY=";
 	{
 		const std::string_view variable{ *entry };
 
-		if (!variable.starts_with(DisplayVariable))
+		// An inherited `WAYLAND_SOCKET` is dropped whether or not one is being set. A number left over
+		// from whatever started the agent names a descriptor in *this* process, and a client that took
+		// it would be talking to somebody else's compositor over a connection nobody meant it to have.
+		if (!variable.starts_with(DisplayVariable) && !variable.starts_with(SocketVariable))
 		{
 			composed.emplace_back(variable);
 		}
 	}
 
 	composed.emplace_back(std::format("{}{}", DisplayVariable, display));
+
+	if (connection.IsValid())
+	{
+		composed.emplace_back(std::format("{}{}", SocketVariable, connection.Value));
+	}
 
 	return composed;
 }
@@ -51,7 +69,7 @@ Child::~Child()
 	// destructor that waited would hang the agent on a terminal somebody left open.
 }
 
-Result<void> Child::Start(std::span<const std::string> command, std::string_view display)
+Result<void> Child::Start(std::span<const std::string> command, std::string_view display, RawFd connection)
 {
 	if (IsRunning())
 	{
@@ -63,7 +81,7 @@ Result<void> Child::Start(std::span<const std::string> command, std::string_view
 		return Failure(EINVAL, "there is no command to start");
 	}
 
-	const std::vector<std::string> environment = ComposeEnvironment(display);
+	const std::vector<std::string> environment = ComposeEnvironment(display, connection);
 
 	// The two `char*` arrays, built here so the child does nothing but `execvpe`. `const_cast` is the
 	// API's rather than a choice: `execvpe` does not write through either of them.
@@ -104,6 +122,15 @@ Result<void> Child::Start(std::span<const std::string> command, std::string_view
 		::sigset_t empty;
 		::sigemptyset(&empty);
 		::sigprocmask(SIG_SETMASK, &empty, nullptr);
+
+		// **The connection's descriptor is cleared of `FD_CLOEXEC` here rather than never being given
+		// it**, so that the agent's own copy stays ordinary for every path that is not this one.
+		// `fcntl` is async-signal-safe, which the rest of what happens between the fork and the exec has
+		// to be.
+		if (connection.IsValid())
+		{
+			::fcntl(connection.Value, F_SETFD, 0);
+		}
 
 		::execvpe(arguments[0], arguments.data(), variables.data());
 

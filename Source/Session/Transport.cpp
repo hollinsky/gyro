@@ -2,6 +2,7 @@
 
 #include <sys/socket.h>
 
+#include <array>
 #include <cerrno>
 #include <cstring>
 
@@ -21,9 +22,29 @@ struct alignas(::cmsghdr) ControlBuffer
 };
 } // namespace
 
-Result<void> Send(RawFd socket, std::span<const std::byte> message, RawFd attached) noexcept
+Result<void> Send(RawFd socket, std::span<const std::byte> message, std::span<const RawFd> attached) noexcept
 {
+	if (attached.size() > MaxAttached)
+	{
+		return Failure(EINVAL, "sending more descriptors on one handover message than the protocol has roles");
+	}
+
 	ControlBuffer control{};
+
+	std::array<int, MaxAttached> descriptors{};
+	std::size_t count = 0;
+
+	// **Invalid descriptors are dropped rather than sent as `-1`**, so a caller that has nothing to
+	// attach can pass a span of one and get a message with no control data — which is what makes the
+	// `Refuse` path below able to answer any message with the same call.
+	for (const RawFd one : attached)
+	{
+		if (one.IsValid())
+		{
+			descriptors[count] = one.Value;
+			++count;
+		}
+	}
 
 	// `msg_iov` is not const in the struct and the bytes are, so the cast is the API's rather than a
 	// choice: `sendmsg` does not write through it.
@@ -36,18 +57,21 @@ Result<void> Send(RawFd socket, std::span<const std::byte> message, RawFd attach
 	header.msg_iov = &segment;
 	header.msg_iovlen = 1;
 
-	if (attached.IsValid())
+	if (count != 0)
 	{
+		const std::size_t bytes = sizeof(int) * count;
+
 		header.msg_control = control.Bytes.data();
-		header.msg_controllen = CMSG_SPACE(sizeof(int));
+		header.msg_controllen = CMSG_SPACE(bytes);
 
 		::cmsghdr* rights = CMSG_FIRSTHDR(&header);
 		rights->cmsg_level = SOL_SOCKET;
 		rights->cmsg_type = SCM_RIGHTS;
-		rights->cmsg_len = CMSG_LEN(sizeof(int));
+		rights->cmsg_len = CMSG_LEN(bytes);
 
-		const int descriptor = attached.Value;
-		std::memcpy(CMSG_DATA(rights), &descriptor, sizeof descriptor);
+		// One `SCM_RIGHTS` carrying every descriptor rather than one per descriptor: the kernel
+		// installs them as a unit, so a receiver cannot be handed a message with half a session on it.
+		std::memcpy(CMSG_DATA(rights), descriptors.data(), bytes);
 	}
 
 	while (true)

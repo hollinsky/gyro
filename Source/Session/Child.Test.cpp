@@ -1,5 +1,7 @@
 #include "Session/Child.h"
 
+#include <stdlib.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -7,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "Core/Fd.h"
 #include "Testing/Test.h"
 
 // The fork, against real programs.
@@ -59,6 +62,52 @@ GYRO_TEST(Child, StartsAProgramAndCollectsIt)
 	// Reaped once. A second call answers nothing rather than waiting on a pid that is no longer this
 	// process's, which is what would happen if the field were not cleared.
 	GYRO_CHECK(!child.Reap().has_value());
+}
+
+// The shell's connection, and the whole reason it is a descriptor rather than a path: the variable
+// names a file the child inherited, so nothing had to be told where the socket is.
+GYRO_TEST(Child, PassesAConnectionAsAnInheritedDescriptor)
+{
+	int pair[2] = { -1, -1 };
+	GYRO_REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0);
+
+	const Fd mine{ pair[0] };
+	const Fd theirs{ pair[1] };
+
+	Child child;
+
+	// `test -e /proc/self/fd/N` is the child asking whether the descriptor the variable names actually
+	// survived the exec, which is the part that would silently not — a `WAYLAND_SOCKET` naming a closed
+	// descriptor is a client that fails to connect for a reason nothing in its log explains.
+	GYRO_REQUIRE(child
+	                 .Start(
+						 Shell("test -n \"$WAYLAND_SOCKET\" && test -e \"/proc/self/fd/$WAYLAND_SOCKET\""),
+						 "wayland-0",
+						 theirs.Borrow()
+					 )
+	                 .has_value());
+
+	const int status = Await(child);
+	GYRO_REQUIRE(WIFEXITED(status));
+	GYRO_CHECK(WEXITSTATUS(status) == 0);
+}
+
+// A client that is not the shell is started with no connection at all, so nothing it inherits could
+// be mistaken for one — including a `WAYLAND_SOCKET` left in the agent's own environment by whatever
+// started it, which would otherwise name a descriptor in the wrong process.
+GYRO_TEST(Child, StartsAnOrdinaryClientWithNoSocketVariable)
+{
+	GYRO_REQUIRE(::setenv("WAYLAND_SOCKET", "7", 1) == 0);
+
+	Child child;
+
+	GYRO_REQUIRE(child.Start(Shell("test -z \"$WAYLAND_SOCKET\""), "wayland-0").has_value());
+
+	const int status = Await(child);
+
+	GYRO_REQUIRE(::unsetenv("WAYLAND_SOCKET") == 0);
+	GYRO_REQUIRE(WIFEXITED(status));
+	GYRO_CHECK(WEXITSTATUS(status) == 0);
 }
 
 GYRO_TEST(Child, PassesTheDisplayInTheEnvironment)

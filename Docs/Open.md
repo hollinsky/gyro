@@ -712,6 +712,62 @@ is to do the work.
   left is the whole of what the entry was about — which listener carries System trust for a real
   session, who creates it, where it lives, and how a process is judged worthy of it — and it is still
   an ABI between gyro and the session agent rather than something gyro can settle alone.
+
+  **Answered, and the entry closes.** *(2026-09-05 by
+  [decision 189](Decisions.md#189-a-session-is-offered-whole--every-listener-it-has-each-with-the-role-it-plays--and-the-shell-is-handed-a-descriptor-rather-than-a-path).)*
+  An agent offers its session whole — a listener per role, in one message — and the `Shell` role is
+  the listener that carries `Trust::System`. Who creates it: the session agent, because trust belongs
+  to the socket and gyro cannot put a file in a user's runtime directory. Where it lives: beside the
+  display, named after it, with no lock and no name in any environment. How a client is judged worthy
+  of it: the agent started it, and the socket's path is never told to anything else — the agent
+  connects on the shell's behalf and hands over the descriptor. What that is worth is a boundary
+  between users and none within one, so **the trust is per user rather than per program**; a judgement
+  about the executable is a separate mechanism and is the entry below.
+- **`Trust::System` is per user, and a judgement about the program is not built.** Left standing by
+  decision 189. A process at the session's own uid that finds the shell listener's path can connect to
+  it and be granted the run of the session; the path is never exported, so this takes looking rather
+  than inheriting, and nothing stops it. It is not obviously worth closing — a process at that uid can
+  `ptrace` the shell and use its connection directly — but the pieces exist if it is: `SO_PEERPIDFD`
+  gives a peer's process a handle that cannot be recycled out from under the check, and what would be
+  asked of it is an identity the kernel vouches for rather than a path the peer chose. What is missing
+  first is a reason: a threat this closes that `ptrace` does not already open.
+- **A shell cannot compose itself out of more than one process.** Surfaced reading decision 189 back
+  rather than while writing it, which is why it is here instead of in the entry. The System listener is
+  per *session* and accepts as many clients as connect — `Server::OnConnection` admits each one with
+  the same session and trust, and nothing caps it — so several System clients per session is already
+  the mechanism. What is missing is a way for a second one to arrive: the agent connects on the shell's
+  behalf and the shell is never told the path, so only the agent can add anybody and only at session
+  start. It cannot even be done crudely, since two clients sharing one `wl_display` share an object id
+  space.
+
+  That is a limitation decision 189 created without arguing for it, and the tree already assumes the
+  opposite: [decision 187](Decisions.md#187-a-shell-declares-a-surface-to-be-chrome-once-and-that-one-word-takes-it-out-of-the-floor-the-walk-and-the-list)'s
+  focus walk is written for "a panel and a launcher up at once", and a notification daemon that crashes
+  should not take the panel with it.
+
+  The candidate is **delegation on the wire**: a request on the shell's own System connection asking
+  gyro for a fresh connection, answered with a descriptor the shell passes to a child it spawns. One
+  connection per call and never a listener, since handing back a listener would put a path back in the
+  world. It does not contradict trust belonging to the listener — an application cannot call it,
+  the global being System tier, so what the shell does is *share* trust it holds rather than acquire
+  trust it does not, which is delegation in the ordinary capability sense. The distinction is worth
+  writing into [Protocol/Tier.h](../Source/Protocol/Tier.h) when it is built, because the two look
+  alike at a glance. Rejected as the alternative: the agent starting every component from a repeatable
+  `--shell`, which needs no mechanism and works today, but puts the composition of a desktop in the
+  command line of a process that knows nothing about shells and cannot start anything in response to
+  anything.
+
+  Two things it does not fix, and neither is new: gyro cannot tell a delegated child from the shell
+  afterwards — as it cannot tell the shell from the agent, which is the per-user entry above — and a
+  delegated connection lives until it closes, there being no revocation. **Nothing is built and
+  deferring costs nothing**, the whole of it being one request on a global that already exists: no ABI
+  change and no change to the agent. What is missing first is a shell that wants to spawn something.
+- **How a shell the agent did not start gets its socket.** Also left standing by decision 189.
+  `gyro-session --shell` binds the second listener and starts the shell on a connection to it, which
+  works because one process does both. The login agent's case is an agent with an empty command whose
+  session manager starts the shell later, and it has no descriptor to hand anybody. Telling it the
+  path is the obvious answer and is the one decision 189 rejected, since a path in an environment is
+  a path every program the shell launches inherits.
 - **When gyro reads an X11 client's frame extents, relative to the buffer they describe.**
   [Decision 106](Decisions.md#106-an-x11-client-has-no-window-geometry-gyros-window-manager-computes-the-frame-rect)
   found that no window geometry crosses from Xwayland at all, so gyro's own window manager reads
