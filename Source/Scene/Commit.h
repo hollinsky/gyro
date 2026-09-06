@@ -383,6 +383,12 @@ public:
 	// exit still drawing from it ends now. `Protocol/Surface.h` is the caller, on destruction, and it
 	// reaches for this rather than the verb above because by then it no longer knows which entity it
 	// drew into — the role that held the id was destroyed one request earlier.
+	//
+	// **True where an exit has been held open instead of ended, and then the pixels are still owed.**
+	// A closing window with a rectangle reserved for it is given one more published scene so that the
+	// frame thread can copy its last frame into that rectangle, which is the only thing that lets the
+	// window go on being drawn after its client stops existing (20). The caller must not give the id up
+	// until this says no — see `SceneStore::Abandon`, which is where the whole of it is argued.
 	bool Abandon(TextureId texture) noexcept { return m_Open && m_Scene->Abandon(texture); }
 
 	// What this node accepts of the pointer: the whole of its extent where `shape` is nothing, and the

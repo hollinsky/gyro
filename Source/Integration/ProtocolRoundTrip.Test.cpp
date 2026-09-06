@@ -40,6 +40,7 @@
 #include "Scene/Entity.h"
 #include "Scene/Output.h"
 #include "Scene/Return.h"
+#include "Scene/Serializer.h"
 #include "Scene/Store.h"
 #include "Scene/Textures.h"
 #include "Testing/Test.h"
@@ -2496,7 +2497,7 @@ GYRO_TEST(ProtocolRoundTrip, AClosingWindowGoesOnLeavingAfterTheClientHasStopped
 // copy of the last committed frame, outliving the client that drew it. Until it exists, a departure
 // with nothing to draw is cut rather than played out as an empty rectangle, which is decision 46's
 // answer to a shortfall reached one step earlier than that entry reaches for it.
-GYRO_TEST(ProtocolRoundTrip, AWindowWhoseClientTookItsPixelsLeavesAtOnceRatherThanFadingEmpty)
+GYRO_TEST(ProtocolRoundTrip, AWindowWhoseClientTookItsPixelsKeepsTheOneSceneItsPictureComesFrom)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
@@ -2540,16 +2541,40 @@ GYRO_TEST(ProtocolRoundTrip, AWindowWhoseClientTookItsPixelsLeavesAtOnceRatherTh
 	const Entity* const window = WindowNode(pair.Store);
 	GYRO_REQUIRE(window != nullptr);
 
-	// Still retiring and still in the tree — the free is the serialisation pass's, and this harness has
-	// no dispatch loop under it — but with nothing left in flight, so the pass that does run frees it
-	// rather than finding a fade with no pixels behind it.
+	// **Still fading, which is the grace and the whole of what changed.** A rectangle was reserved for
+	// this window when it retired, so the exit is held open for one scene — long enough for that scene
+	// to cross and the frame thread to copy the window's last frame into the rectangle. Cut here and no
+	// published scene would ever have said this window was leaving, which is the reason closing a
+	// window never animated.
 	GYRO_CHECK(window->Retiring);
-	GYRO_CHECK(window->Scale.IsAtRest());
-	GYRO_CHECK(window->Opacity.IsAtRest());
+	GYRO_CHECK(!window->Opacity.IsAtRest());
 
-	// It stops where it was going rather than snapping back to where it started, which is what makes a
-	// cut exit the same shape as a finished one.
-	GYRO_CHECK_EQ(window->Opacity.Presentation(pair.Clock.Now()), 0.0F);
+	// **And the buffer is still the client's own**, because that copy has to read it. Retiring the id
+	// on the destroy would hand it back on the very step that asked for the picture.
+	GYRO_CHECK_EQ(pair.Textures.Retired, std::uint32_t{ 0 });
+
+	SceneSerializer serializer;
+
+	// The pass that publishes the scene the picture is taken from. It spends the grace rather than
+	// ending it, so the window is still here and still leaving.
+	static_cast<void>(serializer.Serialize(pair.Store));
+
+	GYRO_REQUIRE(WindowNode(pair.Store) != nullptr);
+	GYRO_CHECK(WindowNode(pair.Store)->Retiring);
+
+	// The pass after it, where the grace is spent: the exit ends where it was going rather than
+	// snapping back, the subtree is freed, and the window is gone. That is still a cut — nothing draws
+	// from a snapshot yet — but it is a cut one scene later than it was, and that scene is the one the
+	// picture comes out of.
+	static_cast<void>(serializer.Serialize(pair.Store));
+
+	GYRO_CHECK(WindowNode(pair.Store) == nullptr);
+
+	// **And now the pixels go back.** `HostContext` gives up what it was holding on the first step
+	// after the scene that stopped naming it, which is this one.
+	pair.Turn();
+
+	GYRO_CHECK_EQ(pair.Textures.Retired, std::uint32_t{ 1 });
 }
 
 // The whole of what a person does with a keyboard, in the order it happens: bind a seat, be told

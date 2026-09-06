@@ -229,6 +229,12 @@ private:
 	// that would have done it is the walk this sweep is keeping the entity out of.
 	void Sweep(SceneStore& store)
 	{
+		// **First, because a grace is spent in scenes rather than in steps.** A closing window whose
+		// client destroyed the surface under it is held here for one published scene so the frame thread
+		// can take its picture; ageing it at the top of the sweep is what makes the pass that ends the
+		// grace the same pass that then finds the exit finished and frees it.
+		store.ExpireExitGrace();
+
 		m_Dead.clear();
 
 		for (const EntityId root : store.RetiringRoots())

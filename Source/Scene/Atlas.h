@@ -470,6 +470,25 @@ public:
 		return {};
 	}
 
+	// Whether this entity has a rectangle anywhere, which is the question *is a picture owed for it*
+	// asked without naming an output.
+	//
+	// `Scene/Store.h` is the caller and the case is a client destroying the surface its closing window
+	// was drawing: the exit ends there unless a snapshot is coming, so what it needs is the existence
+	// of a reservation rather than the placement of one.
+	[[nodiscard]] bool Holds(EntityId id) const noexcept
+	{
+		for (const Slot& slot : m_Slots)
+		{
+			if (slot.Entity == id)
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	// The image this output's rectangles are in, or null where there is none.
 	//
 	// **Not folded into `SlotFor`, because the two answers become available at different times.** A

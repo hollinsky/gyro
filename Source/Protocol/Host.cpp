@@ -350,6 +350,12 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// [Context.h](Context.h) carries the argument for.
 	const HostContext::Dispatching dispatching{ m_Context, scene, textures };
 
+	// **Before the requests, because what it gives back is what the last step held on to.** A buffer
+	// kept alive so a closing window could be copied out of it is released on the first step after the
+	// scene that carried it, which is a step whose snapshot no longer names the id — so the registry's
+	// own watermark rule holds without this having to know about sequences at all.
+	m_Context.ReleaseHeld(scene, textures);
+
 	// **A failed dispatch is swallowed here and cannot be otherwise**, which is `ISceneAuthor`'s shape
 	// rather than an omission: `Advance` runs on every wake and returns no `Result`, because a failure
 	// on that path is one nothing is in a position to act on. What `Server::Poll` calls a failure is the

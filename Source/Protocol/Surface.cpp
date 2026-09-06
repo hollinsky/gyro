@@ -252,30 +252,43 @@ ClientSurface::~ClientSurface()
 	// the texture space is the composition root's and on its way out too.
 	if (ITextures* const textures = m_Context->Textures(); textures != nullptr)
 	{
-		textures->Retire(m_Current.Content);
-
-		// **And the id a cache is holding, which is a second live name rather than the same one.** A
-		// synchronized subsurface that committed and was never applied has adopted pixels the world has
-		// not seen; nobody else will ever give that name up.
-		if (m_Pending.Content != m_Current.Content)
-		{
-			textures->Retire(m_Pending.Content);
-		}
-
-		// **And the exit those pixels were going to be drawn with ends here rather than fading without
-		// them.** The line above is the id being given up: the frame thread's watermark reclaims it a
-		// frame or two later, and everything decision 114 keeps on screen after that is a window
-		// leaving with nothing in it. Decision 20's snapshot is what makes the exit survive its client
-		// — a compositor-owned copy of the last committed frame — and until that exists a departure
-		// whose author took its pixels is cut instead of drawn wrong.
+		// **And the exit those pixels were going to be drawn with, which is asked before the id is given
+		// up rather than after.** Decision 20's snapshot is what lets an exit survive its client — a
+		// compositor-owned copy of the last committed frame — and the copy is made on the frame thread,
+		// so the exit needs one published scene that still carries both the retirement and the buffer
+		// under it. `Scene/Store.h` grants that scene and says so by answering true here; a window with
+		// nowhere to copy to is cut in there instead, which is what this line always did.
 		//
 		// Only where a surface is destroyed, which is not every unmap: a toolkit that hides a window
 		// keeps its `wl_surface` and its buffer, so that exit still has pixels and still runs.
+		bool owed = false;
+
 		if (SceneStore* const scene = m_Context->Store(); scene != nullptr)
 		{
 			SceneCommit commit{ *scene, CommitAuthor::Client };
 
-			static_cast<void>(commit.Abandon(m_Current.Content));
+			owed = commit.Abandon(m_Current.Content);
+		}
+
+		// Held rather than retired where a picture is still owed, and given up by `HostContext` on the
+		// step after the scene that carried it. Retiring it here would be the id going back while the
+		// scene about to be published still names it.
+		if (owed)
+		{
+			m_Context->Hold(m_Current.Content);
+		}
+		else
+		{
+			textures->Retire(m_Current.Content);
+		}
+
+		// **And the id a cache is holding, which is a second live name rather than the same one.** A
+		// synchronized subsurface that committed and was never applied has adopted pixels the world has
+		// not seen; nobody else will ever give that name up. It is never the one an exit is drawing, so
+		// it goes back regardless.
+		if (m_Pending.Content != m_Current.Content)
+		{
+			textures->Retire(m_Pending.Content);
 		}
 	}
 

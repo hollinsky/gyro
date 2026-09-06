@@ -4,11 +4,14 @@
 #include <optional>
 #include <vector>
 
+#include "Animation/Author/Catalog.h"
 #include "Core/Clock.h"
+#include "Core/ColorState.h"
 #include "Scene/Commit.h"
 #include "Scene/Serializer.h"
 #include "Scene/Store.h"
 #include "Testing/Test.h"
+#include "World/Content.h"
 
 namespace
 {
@@ -550,4 +553,110 @@ GYRO_TEST(ExitAtlases, WithNoTextureSpaceAtAllNothingIsAskedForAndNothingBreaks)
 	atlases.Release(window);
 
 	GYRO_CHECK(atlases.IsEmpty());
+}
+
+// A client that destroys the surface under a closing window takes the pixels the exit was going to be
+// drawn from. Decision 20's answer is a compositor-owned copy of the last frame — but the copy is made
+// on the frame thread, so the exit has to survive long enough for one scene carrying both the
+// retirement and the buffer to cross. That scene is what this grants.
+//
+// Ending the exit here instead is what closing a window used to do, and it is why closing one never
+// animated: `Scene/Serializer.h` sweeps finished retirements before it walks, so the window was freed
+// on the same pass it retired and no published scene ever said it was leaving.
+GYRO_TEST(SceneAtlas, AWindowWhosePixelsWentAwayKeepsTheOneSceneItsPictureComesFrom)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1'000'000'000) };
+	SceneStore store{ clock };
+
+	const OutputId panel{ 1, 1 };
+	const std::array outputs{ Screen(panel, 0.0, 1) };
+
+	store.SetOutputs(outputs);
+
+	constexpr TextureId pixels{ 4, 1 };
+
+	const std::optional<EntityId> window = store.CreateImage(
+		store.FirstRoot(),
+		{ .Extent = { 300.0F, 200.0F } },
+		ImageContent{ .Texture = pixels, .Source = {}, .Frame = {}, .Color = ColorState::Srgb() }
+	);
+
+	GYRO_REQUIRE(window.has_value());
+
+	{
+		// The fade before the retirement, which is the order `Protocol/Shell.cpp` writes them in and the
+		// order decision 114 requires: a retired subtree has stopped listening to its author.
+		SceneCommit commit{ store, CommitAuthor::Compositor, store.Now(), Transition::WindowClose };
+
+		GYRO_REQUIRE(commit.Fade(*window, 0.0F));
+		GYRO_REQUIRE(commit.Retire(*window));
+		GYRO_REQUIRE(store.Atlases().SlotFor(*window, panel).has_value());
+
+		// True is the pixels still being owed, which is what keeps the caller from giving the id back on
+		// the very step that asked for the picture.
+		GYRO_CHECK(commit.Abandon(pixels));
+	}
+
+	GYRO_CHECK(store.AwaitsSnapshot(pixels));
+
+	SceneSerializer serializer;
+
+	// The pass that publishes the scene the picture comes out of. It spends the grace and does not end
+	// it, so the window is still here and its rectangle is still held.
+	static_cast<void>(serializer.Serialize(store));
+
+	GYRO_REQUIRE(store.IsLive(*window));
+	GYRO_CHECK(store.Find(*window)->Retiring);
+	GYRO_CHECK(store.AwaitsSnapshot(pixels));
+
+	// And the pass after it, where the grace is spent: the exit ends, the sweep frees the subtree, and
+	// the rectangle goes back. The pixels stop being owed on the same pass, which is what lets the
+	// holder give the id up against a scene that no longer names it.
+	static_cast<void>(serializer.Serialize(store));
+
+	GYRO_CHECK(!store.IsLive(*window));
+	GYRO_CHECK(!store.AwaitsSnapshot(pixels));
+	GYRO_CHECK(store.Atlases().IsEmpty());
+}
+
+// Decision 46 answers a window with no rectangle by cutting rather than fading, and a client that took
+// its pixels away is the same shortfall arriving by a different road: there is nowhere to copy to, so
+// there is nothing to wait for. Holding a scene open for it would fade an empty rectangle, which is
+// worse than the cut and is the thing decision 20 exists to avoid.
+GYRO_TEST(SceneAtlas, AWindowWithNoRectangleIsStillCutWhenItsPixelsGoAway)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1'000'000'000) };
+	SceneStore store{ clock };
+
+	// No outputs, so there is no atlas and nothing to reserve out of.
+	constexpr TextureId pixels{ 4, 1 };
+
+	const std::optional<EntityId> window = store.CreateImage(
+		store.FirstRoot(),
+		{ .Extent = { 300.0F, 200.0F } },
+		ImageContent{ .Texture = pixels, .Source = {}, .Frame = {}, .Color = ColorState::Srgb() }
+	);
+
+	GYRO_REQUIRE(window.has_value());
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Compositor, store.Now(), Transition::WindowClose };
+
+		GYRO_REQUIRE(commit.Fade(*window, 0.0F));
+		GYRO_REQUIRE(commit.Retire(*window));
+		GYRO_CHECK(store.Atlases().IsEmpty());
+
+		// False is the caller keeping the id, because nothing is going to read it.
+		GYRO_CHECK(!commit.Abandon(pixels));
+	}
+
+	GYRO_CHECK(!store.AwaitsSnapshot(pixels));
+
+	SceneSerializer serializer;
+
+	// One pass and it is gone, fade and all — the cut is the exit stopping where it was going, which is
+	// the same shape a finished exit has.
+	static_cast<void>(serializer.Serialize(store));
+
+	GYRO_CHECK(!store.IsLive(*window));
 }

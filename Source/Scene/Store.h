@@ -389,6 +389,21 @@ public:
 
 	[[nodiscard]] bool IsLive(EntityId id) const noexcept { return m_Ids.IsValid(id); }
 
+	// Whether a texture is still owed to a picture nobody has taken yet, which is the question
+	// `Abandon` answered once and the holder asks again on every step until it is no.
+	[[nodiscard]] bool AwaitsSnapshot(TextureId texture) const noexcept
+	{
+		for (const Reprieved& held : m_Grace)
+		{
+			if (held.Texture == texture)
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	// The top of the tree, as the first of a sibling chain. Decision 55 makes the list order the z
 	// order, so the last root is the frontmost.
 	[[nodiscard]] EntityId FirstRoot() const noexcept { return m_FirstRoot; }
@@ -877,6 +892,22 @@ private:
 		return false;
 	}
 
+	// Arm a grace for this root, or leave the one it already has alone — a window is one subtree and
+	// its client can destroy several of the surfaces under it, so the second arrival must not reset a
+	// count the first one started.
+	void Reprieve(EntityId root, TextureId texture)
+	{
+		for (const Reprieved& held : m_Grace)
+		{
+			if (held.Root == root)
+			{
+				return;
+			}
+		}
+
+		m_Grace.push_back(Reprieved{ .Root = root, .Texture = texture });
+	}
+
 	bool FinishRetirement(EntityId root) noexcept
 	{
 		const Entity* const entity = Find(root);
@@ -942,6 +973,33 @@ private:
 		return m_Atlases.Reserve(id, reach, bounds);
 	}
 
+	// **A closing window whose picture is owed gets one more scene, and that is the whole of the
+	// grace.** Decision 20 draws a leaving window from a copy of its last frame, and the copy is made
+	// on the frame thread — so an exit that ends the instant its client destroys the surface is one
+	// the frame thread never hears about at all. `Scene/Serializer.h` sweeps finished retirements
+	// before the walk, so the retirement and the destruction land in the same pass and no published
+	// scene ever says this window is leaving. That is why closing a window has never animated: not a
+	// missing fade, but a fade nothing was ever told about.
+	//
+	// So a root with a rectangle reserved for it is held rather than finished, for exactly one
+	// published scene. That scene carries the window, its exit and the pixels still under it, which is
+	// everything the frame thread needs to take the picture — and the pass after it finishes the exit
+	// the way this always did.
+	//
+	// **The caller keeps the pixels for as long as this says so**, which is what `true` means and why
+	// it is worth returning. The id would otherwise be given up during this same step and reclaimed
+	// once the frame thread reached the scene that still names it, which is a window copying itself out
+	// of memory the registry had already handed back.
+	//
+	// **One scene and not the length of the fade**, because nothing draws from the atlas yet: past that
+	// scene the window has a picture and no way to show it, so holding it longer would fade a rectangle
+	// with nothing in it — worse than the cut, and decision 20's own reason for the snapshot. When the
+	// walk can draw from a snapshot the grace becomes the exit's whole length and this becomes the
+	// question of whether the picture was taken.
+	//
+	// A root with no reservation is cut here as it always was: decision 46 answers exhaustion with a
+	// window that cuts instead of fading, and a client that took its pixels away with nowhere to copy
+	// them to is the same case arriving by a different road.
 	bool Abandon(TextureId texture) noexcept
 	{
 		if (texture.IsNull())
@@ -949,20 +1007,58 @@ private:
 			return false;
 		}
 
-		bool finished = false;
+		bool held = false;
 
 		// A copy, because finishing a retirement is a write and the list is the thing being walked.
 		m_Abandoning.assign(m_Retiring.begin(), m_Retiring.end());
 
 		for (const EntityId root : m_Abandoning)
 		{
-			if (DrawsFrom(root, texture))
+			if (!DrawsFrom(root, texture))
 			{
-				finished = FinishRetirement(root) || finished;
+				continue;
 			}
+
+			if (!m_Atlases.Holds(root))
+			{
+				static_cast<void>(FinishRetirement(root));
+
+				continue;
+			}
+
+			Reprieve(root, texture);
+
+			held = true;
 		}
 
-		return finished;
+		return held;
+	}
+
+	// Age every grace by one pass and end the ones that have had theirs.
+	//
+	// **Called from the sweep and therefore before the walk**, which is what makes the count a count of
+	// *published* scenes rather than of steps: an entry armed while a client's requests were being read
+	// is marked here on the same pass, is published by the walk below, and is finished by the next
+	// sweep — so the one scene it was granted is a scene that actually crossed.
+	void ExpireExitGrace() noexcept
+	{
+		std::erase_if(m_Grace, [this](Reprieved& held) {
+			if (Find(held.Root) == nullptr)
+			{
+				return true;
+			}
+
+			if (!held.Published)
+			{
+				held.Published = true;
+
+				return false;
+			}
+
+			static_cast<void>(FinishRetirement(held.Root));
+
+			return true;
+		});
 	}
 
 	// The retirement roots, for the sweep that decides which of them have finished. `Scene/Serializer.h`
@@ -1334,6 +1430,21 @@ private:
 	// through the list it is walking. A member rather than a local for `m_Work`'s reason: it is reused
 	// across surface destructions rather than allocated per one.
 	std::vector<EntityId> m_Abandoning;
+
+	// A retirement holding a scene open until its picture can be taken, and the pixels it is holding
+	// them with. One entry per closing window whose client destroyed the surface under it, which is at
+	// most the windows one burst of client teardown takes down at once.
+	struct Reprieved
+	{
+		EntityId Root;
+		TextureId Texture;
+
+		// Whether the scene this grace bought has been walked yet. Set by the first sweep that sees the
+		// entry, read by the second, which is what spends it.
+		bool Published = false;
+	};
+
+	std::vector<Reprieved> m_Grace;
 
 	// The subtree walk's stack, a member rather than a local for decision 112's reason: it is reused
 	// across transactions instead of allocated per one, so retiring and destroying a window allocate
