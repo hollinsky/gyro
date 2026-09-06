@@ -108,11 +108,16 @@ inline constexpr Bundle None{
 // it, which is the difference between a window appearing and a window being opened by the thing the
 // user clicked.
 //
-// Opacity is snappier than scale on purpose: a window that is still translucent while it is nearly
-// full size reads as unfinished, so the fade lands first and the geometry catches up.
+// **Snappy on both, and the two channels landing together is the point rather than an economy.** The
+// scale ran at Standard while the fade ran at Snappy, so that a window would not sit translucent at
+// nearly its full size — the fade led and the geometry caught up. That asymmetry was paying for a
+// large scale travel, and the entrance no longer has one: a window arrives from a tenth over size
+// (`Protocol/Shell.cpp`), which is close enough that there is nothing for the fade to lead. What is
+// left is a window that takes about as long to arrive as a menu does, which is what an entrance
+// should cost when the user is waiting to use the thing that is arriving.
 inline constexpr Bundle WindowOpen{
-	.Channels = { .Scale = Animate(Motion::Standard), .Opacity = Animate(Motion::Snappy) },
-	.Reduced = { .Form = ReducedForm::Fade, .Using = Motion::Standard },
+	.Channels = { .Scale = Animate(Motion::Snappy), .Opacity = Animate(Motion::Snappy) },
+	.Reduced = { .Form = ReducedForm::Fade, .Using = Motion::Snappy },
 	.Anchor = AnchorPolicy::SummonPoint,
 };
 

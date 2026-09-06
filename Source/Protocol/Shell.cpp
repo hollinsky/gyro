@@ -44,10 +44,10 @@ namespace
 // transition carrying endpoints. So the displacement is written where the node is created and the
 // commit below simply says where everything is going.
 //
-// **Provisional, like the catalog entry it drives.** A fifth of the window over, arriving from
-// slightly too large, is a value for a review with a screen in front of it rather than one derived
-// from anything.
-inline constexpr float EntryScale = 1.2F;
+// **Provisional, like the catalog entry it drives.** A tenth of the window over is a value for a
+// review with a screen in front of it rather than one derived from anything — small enough that what
+// the eye reads is a window settling rather than a window shrinking.
+inline constexpr float EntryScale = 1.1F;
 
 // A surface-local point rounded onto the grid a positioner works on.
 //
@@ -1135,7 +1135,7 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		// state anybody sees.** `NodeProperties` is what the author would have set had it been asked (89),
 		// so this is where a scale of EntryScale and an opacity of zero belong; the commit below retargets
 		// both under Transition::WindowOpen and the differ springs from here to there. Nothing publishes
-		// between the two, so no frame is ever drawn with a window at a fifth over size — and under
+		// between the two, so no frame is ever drawn with a window at a tenth over size — and under
 		// reduced motion the scale is snapped instead of sprung, which lands it at one in the same
 		// iteration rather than leaving a window stuck too large.
 		//
