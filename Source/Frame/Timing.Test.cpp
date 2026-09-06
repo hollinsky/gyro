@@ -172,6 +172,55 @@ GYRO_TEST(Timing, TheTierDrawnIsTheOneThatReachesTheEarliestFrame)
 	GYRO_CHECK_EQ(decision.Finish, At(1011));
 }
 
+// The same clause one frame in, which is where it stops being worth what it costs.
+//
+// **What the floor tier spends here is a picture and what it buys is one refresh.** Both tiers have
+// missed the frame owed, so nothing is being held to a cadence — the loop has been idle and is picking
+// which future frame to draw, not saving one in a moving picture. Taking the cheap composite to be a
+// single refresh earlier drops every glass surface on the screen to the flat tint Seam/Dressing.h's
+// third rung draws and brings it back on the next frame, which a person sees as the panel flashing.
+//
+// **A capture of the run bar is where this came from.** The loop had been idle three refreshes and woke
+// 1.9 ms before a vblank because a hand moved the pointer; the floor tier reached that vblank and the
+// planned tier the one after it. gyro gave up the glass to be one refresh earlier — and the cheap
+// composite still took longer than the time that was left, so the frame landed a refresh late anyway.
+// The numbers below are that frame's, scaled onto this file's 100 Hz panel.
+GYRO_TEST(Timing, OneFrameIsNotWorthAMaterialWhereNeitherTierMakesTheFrameOwed)
+{
+	const FrameClock clock = Anchored();
+	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
+	const Timing timing;
+
+	// Frame 8 is owed and 1027ms is seventeen milliseconds past its deadline, so it is gone at either
+	// tier. The floor composite finishes at 1029ms and reaches frame 10; the planned one finishes at
+	// 1032ms and reaches 11. One frame between them.
+	const FrameDecision decision = timing.Assess(clock, budget, At(1027), FrameClock::NoSequence);
+
+	GYRO_CHECK(decision.Renders());
+	GYRO_CHECK(decision.Verdict == Admission::Planned);
+	GYRO_CHECK(decision.Mode() == RenderMode::Planned);
+	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 11 });
+	GYRO_CHECK_EQ(decision.Presentation, At(1040));
+	GYRO_CHECK_EQ(decision.Finish, At(1032));
+}
+
+// And the frame that *is* owed keeps the floor tier however narrow the margin, because that is the one
+// place the cheap composite buys a cadence rather than a refresh. `FallsToTheFloorWhenThePlannedTierWillNotFit`
+// above is the same statement from the other side; this is it stated as the boundary, so a change that
+// generalises the rule above onto that branch fails here rather than in a schedulability sweep.
+GYRO_TEST(Timing, TheFrameOwedTakesTheFloorTierEvenWhereThePlannedTierIsOneFrameBehind)
+{
+	const FrameClock clock = Anchored();
+	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
+	const Timing timing;
+
+	// The floor tier reaches frame 8, which is owed; the planned tier reaches 9, one frame later.
+	const FrameDecision decision = timing.Assess(clock, budget, At(1006), FrameClock::NoSequence);
+
+	GYRO_CHECK(decision.Verdict == Admission::Floor);
+	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 8 });
+}
+
 GYRO_TEST(Timing, ABusyDeviceRefusesAFrameTheRecordAloneWouldMake)
 {
 	const FrameClock clock = Anchored();

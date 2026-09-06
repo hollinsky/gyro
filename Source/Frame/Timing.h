@@ -553,7 +553,34 @@ public:
 		// or a lead.
 		const bool takeFloor = floorReach > owed && (plannedReach < owed || floorReach < plannedReach);
 
-		if (takeFloor)
+		// **A material is worth more than one refresh, and this is the one branch where that trade is
+		// the whole question.** Above, the floor tier lands the frame that is *owed* — the loop is on
+		// cadence and the alternative is a dropped frame in a moving picture, so the cheap composite is
+		// taken and decision 35's second promise is exactly that. Here the owed frame has already gone
+		// past both tiers, so nothing is being held to a cadence: the only question left is which future
+		// frame, and buying one of them with the flat tint of Seam/Dressing.h's third rung is a bad
+		// trade. Every glass surface on the screen goes flat for a refresh and comes back the next one,
+		// which a person sees as the panel flashing; what it saves them is 16 ms of latency on a frame
+		// nobody was waiting on a cadence for.
+		//
+		// **This is what a capture of the run bar recorded.** The loop had been idle for three refreshes
+		// and woke 1.9 ms before a vblank because a hand moved the pointer. The owed frame was two
+		// refreshes in the past; the floor tier reached the vblank in front of it and the planned tier
+		// reached the one after, so the glass was given up to be a single refresh earlier — and the
+		// cheap composite then took longer than the time that was left, so the frame landed a refresh
+		// late anyway. It spent the picture and bought nothing.
+		//
+		// **Two frames or more and the floor tier is still right**, which is the case the clause was
+		// written for: a planned composite too expensive for a period reaches far past what the cheap
+		// one can make, and taking the expensive one there sleeps through frames that could have been
+		// drawn. That is decision 35's second promise the other way round, and it is unchanged.
+		//
+		// `plannedReach < owed` is the other half of `takeFloor` and keeps the tier unconditionally: the
+		// planned tier reaches only a frame already spoken for, so there is no later planned frame to
+		// prefer and the subtraction below would have nothing to measure.
+		const bool worthTheTier = plannedReach < owed || plannedReach - floorReach > 1;
+
+		if (takeFloor && worthTheTier)
 		{
 			return Decide(clock, Admission::Floor, floorReach, floor);
 		}
