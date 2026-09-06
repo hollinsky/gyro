@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 
+#include "Core/FrameSection.h"
 #include "Seam/RenderTarget.h"
 #include "Testing/Test.h"
 
@@ -40,9 +41,14 @@ public:
 
 		for (std::uint64_t press = 0; press < 4; ++press)
 		{
-			for (std::uint32_t surface = 0; surface < 8; ++surface)
+			// The clients the tests use rather than a range, now that one of them is about pids being
+			// far apart: a sweep wide enough to cover 2222 would be a hundred thousand `unlink`s.
+			for (const std::uint32_t client : { std::uint32_t{ 1 }, std::uint32_t{ 1111 }, std::uint32_t{ 2222 } })
 			{
-				::unlink(std::format("{}/surface-{:08}-{:08}.pam", m_Path, press, surface).c_str());
+				for (std::uint32_t surface = 0; surface < 20; ++surface)
+				{
+					::unlink(std::format("{}/surface-{:08}-{:08}-{:08}.pam", m_Path, press, client, surface).c_str());
+				}
 			}
 		}
 
@@ -56,9 +62,11 @@ public:
 
 	// What one buffer's file says, or empty where there is none. The header is where a capture puts the
 	// facts a picture cannot carry, so reading it back is how the damage list is checked at all.
-	[[nodiscard]] std::string Header(std::uint64_t press, std::uint32_t surface) const
+	// `client` defaults to the one every test that is not about the collision uses, so the argument
+	// appears only where two of them are the point.
+	[[nodiscard]] std::string Header(std::uint64_t press, std::uint32_t surface, std::uint32_t client = 1) const
 	{
-		const std::string file = std::format("{}/surface-{:08}-{:08}.pam", m_Path, press, surface);
+		const std::string file = std::format("{}/surface-{:08}-{:08}-{:08}.pam", m_Path, press, client, surface);
 
 		std::FILE* const open = std::fopen(file.c_str(), "rb");
 
@@ -221,10 +229,15 @@ namespace
 constexpr PixelSize<BufferSpace> Tiny{ 2, 2 };
 
 // One committed buffer of a colour, with the damage a client claimed for it.
-[[nodiscard]] SurfaceCapture
-Committed(std::uint32_t surface, std::span<const std::byte> pixels, std::span<const PixelRect<BufferSpace>> damage)
+[[nodiscard]] SurfaceCapture Committed(
+	std::uint32_t surface,
+	std::span<const std::byte> pixels,
+	std::span<const PixelRect<BufferSpace>> damage,
+	std::uint32_t client = 1
+)
 {
 	return SurfaceCapture{ .Surface = surface,
+		                   .Client = client,
 		                   .Size = Tiny,
 		                   .Stride = 8,
 		                   .Alpha = TextureAlpha::Premultiplied,
@@ -234,10 +247,15 @@ Committed(std::uint32_t surface, std::span<const std::byte> pixels, std::span<co
 
 // One committed *descriptor*: an extent, a damage list and an id, and no rows at all. What a
 // `zwp_linux_dmabuf_v1` client's commit looks like arriving at Scene/Capture.h.
-[[nodiscard]] SurfaceCapture
-Borrowed(std::uint32_t surface, TextureId texture, std::span<const PixelRect<BufferSpace>> damage)
+[[nodiscard]] SurfaceCapture Borrowed(
+	std::uint32_t surface,
+	TextureId texture,
+	std::span<const PixelRect<BufferSpace>> damage,
+	std::uint32_t client = 1
+)
 {
 	return SurfaceCapture{ .Surface = surface,
+		                   .Client = client,
 		                   .Size = Tiny,
 		                   .Stride = 0,
 		                   .Alpha = TextureAlpha::Premultiplied,
@@ -279,7 +297,7 @@ GYRO_TEST(Capture, WritesTheBufferACommitHandedOverBeforeThePress)
 	// exists for: whether what the client said it repainted covers the row that went stale.
 	GYRO_CHECK(header.contains("# damage 1\n"));
 	GYRO_CHECK(header.contains("# damage 1 2 3 4\n"));
-	GYRO_CHECK(header.contains("# gyro surface 9 commit 1 2x2 stride 8 argb8888\n"));
+	GYRO_CHECK(header.contains("# gyro client 1 surface 9 commit 1 2x2 stride 8 argb8888\n"));
 }
 
 // **Newest wins per surface**, so a window redrawing at sixty hertz costs one entry and the press
@@ -305,6 +323,38 @@ GYRO_TEST(Capture, KeepsOnlyTheNewestBufferOfASurface)
 	GYRO_CHECK_EQ(capture.Buffers(), std::uint64_t{ 2 });
 	GYRO_CHECK(scratch.Header(1, 3).contains("commit 2 "));
 	GYRO_CHECK(scratch.Header(1, 4).contains("commit 3 "));
+}
+
+// **Two clients own the same wire id, and both windows survive the press.** This is the one that
+// shipped: libwayland mints low object ids per connection, so a terminal and a browser started a
+// second apart both call their window `wl_surface@18`, and a table keyed on the id alone kept one
+// entry for the pair — each repaint of one discarding the other, and the press writing whichever had
+// committed last. On a real desktop that is the window a person pressed the key to look at going
+// missing from the directory with nothing said.
+GYRO_TEST(Capture, KeepsBothClientsWhereTwoOfThemOwnTheSameWireId)
+{
+	Scratch scratch;
+	PamCapture capture{ scratch.Path(), 1 };
+
+	GYRO_REQUIRE(capture.Open().has_value());
+
+	const std::array<std::byte, 16> pixels{};
+
+	capture.Offer(Committed(18, pixels, {}, 1111));
+	capture.Offer(Committed(18, pixels, {}, 2222));
+
+	// And the newest-wins rule still holds *within* a client, which is the half the pair must not lose:
+	// this replaces the first client's entry rather than adding a third.
+	capture.Offer(Committed(18, pixels, {}, 1111));
+
+	static_cast<void>(capture.Request());
+	capture.Close();
+
+	GYRO_CHECK_EQ(capture.Buffers(), std::uint64_t{ 2 });
+
+	// Named apart on disk, so neither file is the other's overwrite.
+	GYRO_CHECK(scratch.Header(1, 18, 1111).contains("# gyro client 1111 surface 18 commit 3 "));
+	GYRO_CHECK(scratch.Header(1, 18, 2222).contains("# gyro client 2222 surface 18 commit 2 "));
 }
 
 // A buffer whose rows the pool could not produce — a client that truncated its own file — must not
@@ -375,7 +425,7 @@ GYRO_TEST(Capture, ReadsADescriptorBackAtThePressRatherThanAtTheCommit)
 	GYRO_REQUIRE(!header.empty());
 	GYRO_CHECK(header.contains("# damage 1\n"));
 	GYRO_CHECK(header.contains("# damage 5 6 7 8\n"));
-	GYRO_CHECK(header.contains("# gyro surface 11 commit 1 2x2 stride 8 argb8888\n"));
+	GYRO_CHECK(header.contains("# gyro client 1 surface 11 commit 1 2x2 stride 8 argb8888\n"));
 }
 
 // A texture two draw items name — a window and a thumbnail of it — is offered twice on one frame and
@@ -423,7 +473,18 @@ GYRO_TEST(Capture, WritesNothingForARefusedTextureReadback)
 
 	GYRO_REQUIRE(capture.ReserveTexture(texture).IsValid());
 
-	capture.PublishTexture(texture, false);
+	{
+		// **Inside a frame section, because that is where Frame/Loop.h calls it from**, and handing the
+		// entry back is where this used to free the client's rows: the pending record is a *copy* the
+		// press allocated, so the frame thread held the only reference and dropping it ran `~Buffer` —
+		// megabytes of a window's pixels released under decision 36's ban. It aborted the compositor on
+		// the first refused readback of the first press on real hardware, which is a desktop that
+		// vanishes the moment somebody asks for a screenshot.
+		const FrameSection section;
+
+		capture.PublishTexture(texture, false);
+	}
+
 	capture.Close();
 
 	GYRO_CHECK_EQ(capture.Buffers(), std::uint64_t{ 0 });

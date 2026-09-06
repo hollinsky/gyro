@@ -107,11 +107,14 @@ void PamCapture::Offer(const SurfaceCapture& buffer) noexcept
 		return;
 	}
 
-	// **Newest wins, per surface.** A window that redraws sixty times a second replaces its entry sixty
-	// times and costs one copy each; what is kept is the buffer a press would find, which is the only
-	// one a diff against the glass can use.
+	// **Newest wins, per surface — and a surface is a client and an id together.** A window that
+	// redraws sixty times a second replaces its entry sixty times and costs one copy each; what is kept
+	// is the buffer a press would find, which is the only one a diff against the glass can use. Keying
+	// on the wire id alone made that replacement happen *across* clients, which Scene/Capture.h
+	// records: two toolkits both own a `wl_surface@18`, so a terminal's repaint threw away the
+	// browser's window and every press wrote one of the two at random.
 	const auto matches = [&buffer](const std::shared_ptr<const Buffer>& held) noexcept {
-		return held->Surface == buffer.Surface;
+		return held->Surface == buffer.Surface && held->Client == buffer.Client;
 	};
 	const auto at = std::find_if(m_Held.begin(), m_Held.end(), matches);
 
@@ -125,6 +128,7 @@ void PamCapture::Offer(const SurfaceCapture& buffer) noexcept
 	auto held = std::make_shared<Buffer>();
 
 	held->Surface = buffer.Surface;
+	held->Client = buffer.Client;
 
 	if (!borrowed)
 	{
@@ -345,8 +349,16 @@ void PamCapture::PublishTexture(TextureId texture, bool complete) noexcept
 			// Handed back unwritten, per Seam/Capture.h. A file of zeroes beside a picture of a window
 			// that is plainly drawn is the worst answer available: it reads as a client that committed
 			// nothing, which is precisely the bug somebody would be here to diagnose.
-			slot.Held.reset();
-			slot.State.store(Slot::Idle, std::memory_order_release);
+			//
+			// **Labelled rather than released**, for the reason on `Slot::Dropped`: this is the frame
+			// thread and the record is its own to free, so a `reset()` here is a client's rows going
+			// back to the allocator inside a frame section. The writer takes it from `Dropped` to
+			// `Idle`, so it is signalled exactly as a filled one is — an entry nobody woke would hold
+			// the table shut until the next press abandoned it.
+			slot.State.store(Slot::Dropped, std::memory_order_release);
+
+			m_Signal.fetch_add(1, std::memory_order_release);
+			m_Signal.notify_one();
 		}
 		else
 		{
@@ -468,6 +480,16 @@ void PamCapture::WriteBuffers()
 
 					break;
 				}
+				case Slot::Dropped:
+				{
+					// The frame thread refused this readback and may not free what it holds. Nothing is
+					// written and nothing is counted — a refusal is not a failure to write, and
+					// `Failed` is the writer's own tally.
+					slot.Held.reset();
+					slot.State.store(Slot::Idle, std::memory_order_release);
+
+					break;
+				}
 				case Slot::Armed:
 				case Slot::Reserved:
 				{
@@ -512,7 +534,8 @@ void PamCapture::WriteBuffers()
 		);
 
 		std::string note = std::format(
-			"gyro surface {} commit {} {}x{} stride {} {}",
+			"gyro client {} surface {} commit {} {}x{} stride {} {}",
+			held->Client,
 			held->Surface,
 			held->Commit,
 			held->Size.Width,
@@ -536,7 +559,11 @@ void PamCapture::WriteBuffers()
 
 		(void)::mkdir(m_Directory.c_str(), 0755);
 
-		const std::string path = std::format("{}/surface-{:08}-{:08}.pam", m_Directory, press, held->Surface);
+		// The client before the id, so a directory sorts into one block per application: a person
+		// reading a press wants a window's buffers together far more often than they want the same wire
+		// id across two of them.
+		const std::string path =
+			std::format("{}/surface-{:08}-{:08}-{:08}.pam", m_Directory, press, held->Client, held->Surface);
 
 		if (!image)
 		{

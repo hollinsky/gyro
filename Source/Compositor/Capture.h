@@ -158,6 +158,17 @@ private:
 		// It is also the deduplication: a texture two draw items name is offered twice on one frame,
 		// and the second claim fails because the first moved the entry out of `Armed`.
 		Reserved,
+
+		// **A fifth, and it exists because the frame thread may not run a destructor.** A refused
+		// readback hands its entry back, and the entry is a *copy* the press allocated — so the frame
+		// thread holds the only reference to it and `reset()` there runs `~Buffer`, freeing a window's
+		// rows inside Core/FrameSection.h's ban. That is not a latency worry to be weighed: decision
+		// 36's allocator aborts, so the first client whose modifier the device would not copy out of
+		// took the whole compositor down with it, on the first press, on real hardware.
+		//
+		// So the frame thread only ever *labels* the entry and the writer thread does the freeing —
+		// which is where the filled ones are already freed, on the thread that was built to block.
+		Dropped,
 	};
 
 	struct Output
@@ -180,7 +191,10 @@ private:
 	// the writer's queue takes one, and whichever outlives the other frees it.
 	struct Buffer
 	{
+		// The pair, because neither half is an identity on its own: Scene/Capture.h says why a wire id
+		// alone held one entry for two clients' windows.
 		std::uint32_t Surface = 0;
+		std::uint32_t Client = 0;
 
 		// Filled at the commit for a `wl_shm` buffer and by the frame thread for a descriptor. Empty on
 		// a dmabuf record until a press has it read back, which is what `Texture` below is for.

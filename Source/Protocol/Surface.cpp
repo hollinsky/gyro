@@ -961,11 +961,19 @@ void ClientSurface::Capture(ClientBuffer& buffer, TextureId content)
 	}
 
 	// The wire id rather than a name of gyro's own, so a capture reads beside a `WAYLAND_DEBUG` log
-	// with no table in between.
+	// with no table in between — and the pid beside it, because a wire id is per connection and two
+	// clients own the same low numbers. Scene/Capture.h carries what that cost before it was sent.
 	const std::uint32_t id = ::wl_resource_get_id(Object().WireResource());
+
+	pid_t pid = 0;
+	uid_t uid = 0;
+	gid_t gid = 0;
+
+	::wl_client_get_credentials(Object().WireClient(), &pid, &uid, &gid);
 
 	sink->Offer(
 		SurfaceCapture{ .Surface = id,
+	                    .Client = static_cast<std::uint32_t>(pid),
 	                    .Size = buffer.Extent(),
 	                    .Stride = buffer.MappedStride(),
 	                    .Alpha = buffer.MappedAlpha(),

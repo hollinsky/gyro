@@ -52,7 +52,27 @@ struct SurfaceCapture
 {
 	// Which surface, as the wire names it. The client's own object id, so a capture can be read beside
 	// a protocol log without a table in between.
+	//
+	// **Not an identity on its own, which is what `Client` is here for.** A wire id is minted per
+	// connection and libwayland hands out low numbers, so two toolkits started a second apart both own
+	// a `wl_surface@18` — and a table keyed on this alone holds *one* entry for the two of them. That
+	// shipped: a run with a terminal and a browser open captured two surfaces per press for as long as
+	// both were up, one client's window replacing the other's on every commit, and the window a person
+	// pressed the key to look at was the one silently missing from the directory.
 	std::uint32_t Surface = 0;
+
+	// Whose surface it is, as the kernel names the process on the far end of the connection.
+	//
+	// **A pid rather than a `wl_client*` or an ordinal of gyro's own**, for the reason the wire id is a
+	// wire id: the number has to mean something to the person reading the directory, and a pid is the
+	// one name a client already answers to outside this process — `ps`, a `WAYLAND_DEBUG` log's own
+	// prefix, and the terminal the application was started from all agree with it. A pointer names a
+	// heap address that is gone by the time the file is read, and an ordinal would be a table nobody
+	// has.
+	//
+	// It is `std::uint32_t` rather than `pid_t` because this tier is portable and `pid_t` is POSIX's;
+	// the party that fetches it is Protocol/Surface.cpp, which is not.
+	std::uint32_t Client = 0;
 
 	// What the buffer says it is. `Stride` is the client's, which is not `Width * 4` in general.
 	PixelSize<BufferSpace> Size{};
