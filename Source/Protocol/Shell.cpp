@@ -49,6 +49,16 @@ namespace
 // the eye reads is a window settling rather than a window shrinking.
 inline constexpr float EntryScale = 1.1F;
 
+// And where it is heading as it leaves, which is the other side of the same absence: the catalog says
+// scale and opacity at Snappy, and a target is not something a transition can hold.
+//
+// **Under one rather than over it, because an exit is not the enter played backwards.** The entrance
+// settles inward from a tenth over size; a departure that expanded back out to it would read as the
+// window being pushed at the user on its way out, at the moment they have already decided they are
+// done with it. Docs/Animation.md#exit-pixels wants the opposite — a collapse toward where the window
+// came from — so it shrinks by the same tenth it arrived across.
+inline constexpr float ExitScale = 0.9F;
+
 // A surface-local point rounded onto the grid a positioner works on.
 //
 // **Nearest rather than outward**, because what is being converted is the edge of a screen and the
@@ -1376,10 +1386,23 @@ void ClientXdgSurface::Unmap()
 
 	if (scene != nullptr)
 	{
-		SceneCommit commit{ *scene, CommitAuthor::Client };
+		// **gyro's commit rather than the client's, for the reason the entrance is one.** What the client
+		// did was take its window down; the leaving is gyro's, and Transition::WindowClose is the whole
+		// of what is said about it. The origin is now for decision 141's reason, the same one the
+		// placement rests on: an unmap carries no timestamp, nothing routed it, and there is no earlier
+		// moment a departure could point at.
+		SceneCommit commit{ *scene, CommitAuthor::Compositor, scene->Now(), Transition::WindowClose };
+
+		// The two channels the catalog names, written before the retirement rather than after it — a
+		// retired subtree is one nothing authors again, and these are the last thing anybody says about
+		// this window.
+		static_cast<void>(commit.Scale(m_Window, { ExitScale, ExitScale, 1.0F }));
+		static_cast<void>(commit.Fade(m_Window, 0.0F));
 
 		// The subtree keeps its links and its place, which is what lets a closing window go on being
-		// drawn while it is still closing. The store frees it when everything on it has settled.
+		// drawn while it is still closing. The store frees it when everything on it has settled — which
+		// until now was the next pass every time, because nothing on a window was ever in flight when it
+		// was retired. The two writes above are what make decision 114's second step take time.
 		// Focus goes with it, and the store does that from `Retire` rather than from here: a window is
 		// unmapped by its client and retired by anything, and focus has to leave in both cases.
 		static_cast<void>(commit.Retire(m_Window));

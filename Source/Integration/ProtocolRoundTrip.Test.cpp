@@ -2410,6 +2410,82 @@ GYRO_TEST(ProtocolRoundTrip, DestroyingTheToplevelRetiresTheWindowRatherThanRemo
 	GYRO_CHECK(window->Retiring);
 }
 
+// **A window leaves rather than vanishes**, which is what decision 114's retirement was built to buy
+// and what nothing was spending until now: a retired subtree used to be at rest the moment it was
+// retired, so it was freed on the next pass and the two-step lifetime was a step and a half.
+//
+// The client destroyed its toplevel and said nothing else. Everything below is gyro's.
+GYRO_TEST(ProtocolRoundTrip, AClosingWindowGoesOnLeavingAfterTheClientHasStoppedTalking)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-exit" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x55 }));
+
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	// Long enough that the entrance has visibly finished, so what is measured below is the departure
+	// rather than the tail of the arrival. Nothing calls Settle here — that is the serialisation pass,
+	// and this harness is the protocol half without a dispatch loop under it — so the spring is read
+	// where it has got to rather than through its at-rest flag.
+	pair.Clock.Advance(Duration{ 2'000'000'000 });
+
+	pair.Turn();
+
+	GYRO_REQUIRE(WindowNode(pair.Store) != nullptr);
+	GYRO_CHECK_EQ(WindowNode(pair.Store)->Scale.Presentation(pair.Clock.Now()).X, 1.0F);
+
+	toplevel.Window.Destroy();
+
+	pair.Turn();
+
+	const Entity* const window = WindowNode(pair.Store);
+	GYRO_REQUIRE(window != nullptr);
+
+	// Retired and still moving, which are the two halves of leaving: the author is gone, and the thing
+	// it authored is still on screen going somewhere.
+	GYRO_CHECK(window->Retiring);
+	GYRO_CHECK(!window->Scale.IsAtRest());
+	GYRO_CHECK(!window->Opacity.IsAtRest());
+
+	// Toward nothing, and inward — a window that grew as it left would be pushing itself at a person
+	// who has already decided they are finished with it.
+	GYRO_CHECK_EQ(window->Opacity.Model(), 0.0F);
+	GYRO_CHECK(window->Scale.Model().X < 1.0F);
+
+	// **And it is still where it was.** An exit that also travelled would be a window sliding off to
+	// somewhere nothing chose, so the position it had is the position it leaves from.
+	GYRO_CHECK(window->Translation.IsAtRest());
+	GYRO_CHECK_EQ(window->Translation.Model().X, (1920.0 - static_cast<double>(Width)) / 2.0);
+
+	// And a frame into it the window is part way gone rather than either still whole or already
+	// absent, which is the difference between a window that left and a window that was taken away.
+	pair.Clock.Advance(Duration{ 60'000'000 });
+
+	const float fading = window->Opacity.Presentation(pair.Clock.Now());
+
+	GYRO_CHECK(fading < 1.0F);
+	GYRO_CHECK(fading > 0.0F);
+}
+
 // The whole of what a person does with a keyboard, in the order it happens: bind a seat, be told
 // there is one keyboard on it, receive the layout, open a window, and type into it.
 GYRO_TEST(ProtocolRoundTrip, ASeatOffersOneKeyboardAndHandsOverALayoutBeforeAnythingIsTyped)
