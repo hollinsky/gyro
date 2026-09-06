@@ -11,6 +11,7 @@
 #include "Protocol/Region.h"
 #include "Protocol/Subcompositor.h"
 #include "Protocol/Viewporter.h"
+#include "Scene/Commit.h"
 
 namespace
 {
@@ -259,6 +260,22 @@ ClientSurface::~ClientSurface()
 		if (m_Pending.Content != m_Current.Content)
 		{
 			textures->Retire(m_Pending.Content);
+		}
+
+		// **And the exit those pixels were going to be drawn with ends here rather than fading without
+		// them.** The line above is the id being given up: the frame thread's watermark reclaims it a
+		// frame or two later, and everything decision 114 keeps on screen after that is a window
+		// leaving with nothing in it. Decision 20's snapshot is what makes the exit survive its client
+		// — a compositor-owned copy of the last committed frame — and until that exists a departure
+		// whose author took its pixels is cut instead of drawn wrong.
+		//
+		// Only where a surface is destroyed, which is not every unmap: a toolkit that hides a window
+		// keeps its `wl_surface` and its buffer, so that exit still has pixels and still runs.
+		if (SceneStore* const scene = m_Context->Store(); scene != nullptr)
+		{
+			SceneCommit commit{ *scene, CommitAuthor::Client };
+
+			static_cast<void>(commit.Abandon(m_Current.Content));
 		}
 	}
 

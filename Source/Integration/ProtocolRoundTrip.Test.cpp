@@ -2486,6 +2486,71 @@ GYRO_TEST(ProtocolRoundTrip, AClosingWindowGoesOnLeavingAfterTheClientHasStopped
 	GYRO_CHECK(fading > 0.0F);
 }
 
+// **And a window whose client took its pixels with it goes at once instead.** Destroying the toplevel
+// above left the `wl_surface` and its buffer alone, which is a toolkit hiding a window; this is the
+// application quitting, and the difference is that the texture the exit would have been drawn from is
+// given up in the same breath.
+//
+// Decision 20's snapshot is what will make the second case look like the first — a compositor-owned
+// copy of the last committed frame, outliving the client that drew it. Until it exists, a departure
+// with nothing to draw is cut rather than played out as an empty rectangle, which is decision 46's
+// answer to a shortfall reached one step earlier than that entry reaches for it.
+GYRO_TEST(ProtocolRoundTrip, AWindowWhoseClientTookItsPixelsLeavesAtOnceRatherThanFadingEmpty)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-cut" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x55 }));
+
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	pair.Clock.Advance(Duration{ 2'000'000'000 });
+
+	pair.Turn();
+
+	// The order a toolkit tears a window down in, and the order xdg-shell requires: the role objects
+	// go before the surface they were given to.
+	toplevel.Window.Destroy();
+	toplevel.XdgSurface.Destroy();
+	toplevel.Drawn.Surface.Destroy();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	const Entity* const window = WindowNode(pair.Store);
+	GYRO_REQUIRE(window != nullptr);
+
+	// Still retiring and still in the tree — the free is the serialisation pass's, and this harness has
+	// no dispatch loop under it — but with nothing left in flight, so the pass that does run frees it
+	// rather than finding a fade with no pixels behind it.
+	GYRO_CHECK(window->Retiring);
+	GYRO_CHECK(window->Scale.IsAtRest());
+	GYRO_CHECK(window->Opacity.IsAtRest());
+
+	// It stops where it was going rather than snapping back to where it started, which is what makes a
+	// cut exit the same shape as a finished one.
+	GYRO_CHECK_EQ(window->Opacity.Presentation(pair.Clock.Now()), 0.0F);
+}
+
 // The whole of what a person does with a keyboard, in the order it happens: bind a seat, be told
 // there is one keyboard on it, receive the layout, open a window, and type into it.
 GYRO_TEST(ProtocolRoundTrip, ASeatOffersOneKeyboardAndHandsOverALayoutBeforeAnythingIsTyped)

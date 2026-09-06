@@ -327,6 +327,32 @@ public:
 	// a double retire arriving through a handle that has already gone stale.
 	bool Retire(EntityId id) noexcept { return m_Open && m_Scene->Retire(id); }
 
+	// End a retirement that is already running: every channel under `id` stops where its target is, so
+	// the next serialisation pass finds the subtree at rest and frees it.
+	//
+	// **The exit that cannot be drawn is the exit that should not be attempted.** Decision 20 draws a
+	// leaving window from a compositor-owned snapshot of its last committed frame, and until that
+	// exists a client that destroyed its surface has taken the pixels with it — the texture id is given
+	// up, and the frame thread reclaims it partway through the exit. A window fading out as an empty
+	// rectangle is worse than one that goes at once. `Protocol/Surface.h` is the caller, on destruction
+	// and nowhere else.
+	//
+	// **Decision 46 reaches for the same operation twice more**, which is why it is a verb rather than
+	// a branch inside the retire: atlas exhaustion hard-settles older exits so their rectangles free,
+	// and device loss hard-settles the whole retiring set because freeing a snapshot must not need the
+	// GPU that has just been unplugged.
+	//
+	// A commit verb for `Retire`'s reason and with `Retire`'s shape — no motion and no origin, since
+	// what it does is take motion away — and refused on anything whose author has not gone away, since
+	// hard-settling a live node would stop a transition somebody is watching.
+	bool FinishRetirement(EntityId id) noexcept { return m_Open && m_Scene->FinishRetirement(id); }
+
+	// The same thing said about pixels rather than about a node: this texture is being given up, so any
+	// exit still drawing from it ends now. `Protocol/Surface.h` is the caller, on destruction, and it
+	// reaches for this rather than the verb above because by then it no longer knows which entity it
+	// drew into — the role that held the id was destroyed one request earlier.
+	bool Abandon(TextureId texture) noexcept { return m_Open && m_Scene->Abandon(texture); }
+
 	// What this node accepts of the pointer: the whole of its extent where `shape` is nothing, and the
 	// shape's interior otherwise. See [Scene/Input.h](Input.h) for why the two are not the same absence.
 	//

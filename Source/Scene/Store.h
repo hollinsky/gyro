@@ -715,6 +715,143 @@ private:
 		return true;
 	}
 
+	// Finish a retirement now: every channel under the root stops where its target is, so the next
+	// serialisation pass finds the subtree at rest and frees it.
+	//
+	// **The exit that cannot be drawn is the exit that should not be attempted.** Decision 20 draws a
+	// leaving window from a compositor-owned snapshot of its last frame, and until that snapshot exists
+	// the pixels under a retiring subtree belong to a client that has destroyed its surface — the
+	// texture registry has been told the id is given up, and the frame thread's watermark will reclaim
+	// it partway through the exit. A window that fades out as an empty rectangle is worse than one that
+	// goes at once, so this is how a retirement says it has no pixels to leave with.
+	//
+	// **Cutting rather than degrading, which is decision 46's answer to the same shortfall.** That
+	// entry resolves atlas exhaustion by hard-settling older exits so their rectangles free, and
+	// device loss by hard-settling the whole retiring set — both of them this operation, reached for a
+	// different reason. It is CPU-side by construction, which is what makes it available on the path
+	// where a GPU has just been unplugged.
+	//
+	// **Only a retiring subtree, and the guard is the point rather than defensive.** Hard-settling a
+	// live node would stop a transition somebody is watching, at whatever value it had reached; there
+	// is no caller that wants that, and a verb that could do it is one that eventually does.
+	//
+	// False for an id that names nothing live, and for one whose author has not gone away.
+	// Whether anything in this subtree is drawn from the given texture. Iteratively, for the reason every
+	// other walk in this file is: the depth is the author's.
+	[[nodiscard]] bool DrawsFrom(EntityId root, TextureId texture) noexcept
+	{
+		m_Work.clear();
+		m_Work.push_back(root);
+
+		while (!m_Work.empty())
+		{
+			const EntityId at = m_Work.back();
+			m_Work.pop_back();
+
+			const Entity* const node = Find(at);
+
+			if (node == nullptr)
+			{
+				continue;
+			}
+
+			if (const ImageContent* const image = MutableImage(at); image != nullptr && image->Texture == texture)
+			{
+				return true;
+			}
+
+			for (EntityId child = node->FirstChild; !child.IsNull();)
+			{
+				const Entity* const next = Find(child);
+
+				m_Work.push_back(child);
+				child = next != nullptr ? next->NextSibling : EntityId{};
+			}
+		}
+
+		return false;
+	}
+
+	bool FinishRetirement(EntityId root) noexcept
+	{
+		const Entity* const entity = Find(root);
+
+		if (entity == nullptr || !entity->Retiring)
+		{
+			return false;
+		}
+
+		m_Work.clear();
+		m_Work.push_back(root);
+
+		while (!m_Work.empty())
+		{
+			const EntityId at = m_Work.back();
+			m_Work.pop_back();
+
+			Entity* const node = Mutable(at);
+
+			if (node == nullptr)
+			{
+				continue;
+			}
+
+			node->Translation.Settle();
+			node->Turn.Settle();
+			node->Scale.Settle();
+			node->Opacity.Settle();
+
+			for (EntityId child = node->FirstChild; !child.IsNull();)
+			{
+				const Entity* const next = Find(child);
+
+				m_Work.push_back(child);
+				child = next != nullptr ? next->NextSibling : EntityId{};
+			}
+		}
+
+		return true;
+	}
+
+	// The pixels behind an id have been given up, so any exit still being drawn from them ends now.
+	//
+	// **The texture is the link and the entity is not**, which is what this looked for first and did not
+	// find. A client tears a window down in the order xdg-shell requires — the role objects, then the
+	// `wl_surface` they were given to — so by the time the surface takes its texture away, the role that
+	// knew which entity it drew into is already gone. What survives the whole sequence is the id the
+	// pixels are named by, which the retiring subtree is still holding because that is exactly what
+	// decision 114 keeps it around to draw.
+	//
+	// A walk of the retirements rather than an index, because the retiring set is the deaths in flight —
+	// a handful at the very worst — and this runs when a surface is destroyed rather than per frame. An
+	// index would be a second structure to keep true for a scan that is already shorter than it.
+	//
+	// The whole root is finished rather than the image that named the texture, because the exit is on the
+	// window: decision 111's toplevel animates the container and the pixels hang under it, so settling
+	// the child alone would leave the frame around it fading with nothing inside.
+	bool Abandon(TextureId texture) noexcept
+	{
+		if (texture.IsNull())
+		{
+			return false;
+		}
+
+		bool finished = false;
+
+		// A copy, because finishing a retirement is a write and the list is the thing being walked.
+		m_Abandoning.assign(m_Retiring.begin(), m_Retiring.end());
+
+		for (const EntityId root : m_Abandoning)
+		{
+			if (DrawsFrom(root, texture))
+			{
+				finished = FinishRetirement(root) || finished;
+			}
+		}
+
+		return finished;
+	}
+
 	// The retirement roots, for the sweep that decides which of them have finished. `Scene/Serializer.h`
 	// is the caller and the header says why it rather than something here: the question is whether every
 	// channel in the subtree has settled, and settling is a question about thresholds that only the
@@ -1069,6 +1206,11 @@ private:
 	// push is guarded on — so the list length is the number of *independent* things dying, which is one
 	// per window a person closed.
 	std::vector<EntityId> m_Retiring;
+
+	// The retirement roots being asked about, held apart from `m_Retiring` because `Abandon` writes
+	// through the list it is walking. A member rather than a local for `m_Work`'s reason: it is reused
+	// across surface destructions rather than allocated per one.
+	std::vector<EntityId> m_Abandoning;
 
 	// The subtree walk's stack, a member rather than a local for decision 112's reason: it is reused
 	// across transactions instead of allocated per one, so retiring and destroying a window allocate
