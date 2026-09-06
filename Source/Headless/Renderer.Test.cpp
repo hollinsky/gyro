@@ -32,7 +32,7 @@ RenderTarget Mapped()
 
 RecordRequest Frame(RenderMode mode = RenderMode::Planned, std::uint32_t generation = 0)
 {
-	return RecordRequest{ .Target = 0, .Mode = mode, .CostGeneration = generation, .Damage = {}, .Items = {} };
+	return RecordRequest{ .Target = 0, .Mode = mode, .CostGeneration = generation, .Damage = {}, .Items = {}, .Captures = {} };
 }
 
 // A renderer is neither copyable nor movable, per Seam/Renderer.h — Docs/Architecture.md#device-

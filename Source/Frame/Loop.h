@@ -17,6 +17,7 @@
 #include "Frame/Admission.h"
 #include "Frame/Assign.h"
 #include "Frame/Budget.h"
+#include "Frame/Capture.h"
 #include "Frame/Evaluator.h"
 #include "Frame/FrameClock.h"
 #include "Frame/Timing.h"
@@ -1466,6 +1467,20 @@ private:
 			Region<DeviceSpace> stale = output.m_Damage;
 			stale.Add(output.m_Backlog[*composite]);
 
+			// **What a window that is closing owes this screen, gathered where the composite is about to
+			// be recorded because it travels on the same submission.** Decision 20 gives an exit its own
+			// copy of the window's last frame and decision 46 keeps that copy in a rectangle reserved
+			// when the output was configured; `Frame/Capture.h` is what turns those reservations into
+			// copies, and what keeps each of them from happening twice.
+			//
+			// **A frame the display engine drew whole takes no snapshot**, which is the one case this
+			// misses and is a deferral rather than a loss: a fully promoted frame is a screen where
+			// nothing changed enough for the GPU to be asked, and the window that just closed is a change
+			// — so the ceiling drops, the composite comes back, and the copy happens on that frame.
+			const std::span<const SnapshotCapture> captures = m_Captures.Gather(m_Snapshot, index);
+
+			TraceCount("captures", static_cast<std::int64_t>(captures.size()), output.m_Trace);
+
 			const RecordRequest request{ .Target = *composite,
 				                         .Mode = decision.Mode(),
 				                         .Trace = output.m_TraceGpu,
@@ -1482,7 +1497,8 @@ private:
 				                         // The suffix is on planes and the composite must not draw it twice — an
 				                         // item drawn under an opaque plane is invisible, and one drawn under a
 				                         // plane the driver later refuses is a window in two places.
-				                         .Items = list.Items.first(partition.Composited) };
+				                         .Items = list.Items.first(partition.Composited),
+				                         .Captures = captures };
 
 			TraceSpan record{ "record", output.m_Trace };
 
@@ -1527,6 +1543,12 @@ private:
 
 				return;
 			}
+
+			// **The copies are in that submission, so they are done being owed.** Confirmed on the record
+			// rather than on the flip: what a fading window needs is that its pixels were written before
+			// anything samples them, which one queue's ordering already gives, and whether the panel
+			// showed this particular frame is a question about the panel.
+			m_Captures.Landed(submission->Captured);
 
 			// The device is busy from here whatever happens to the present, so the next output on this queue
 			// starts from the new figure even if the flip below is refused.
@@ -2159,6 +2181,11 @@ private:
 
 	std::uint64_t m_Held = 0;
 	SnapshotReader m_Snapshot{};
+
+	// Which closing windows have already had their last frame copied into the rectangle held for them,
+	// per output. It is the loop's rather than the evaluator's because the fact it records is *the
+	// submission happened*, which is knowledge this step has and the walk does not.
+	ExitCaptures m_Captures{};
 
 	// Scratch for the run `Presentations` hands the return channel, a member rather than a local so that
 	// the span it returns outlives the call. Nothing reads it between iterations.

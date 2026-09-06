@@ -122,7 +122,7 @@ private:
 [[nodiscard]] RecordRequest
 Composite(std::uint32_t target, const Region<DeviceSpace>& damage, std::span<const DrawItem> items)
 {
-	return RecordRequest{ .Target = target, .Quality = Tier::High, .Damage = damage, .Items = items };
+	return RecordRequest{ .Target = target, .Quality = Tier::High, .Damage = damage, .Items = items, .Captures = {} };
 }
 
 constexpr std::uint32_t Stride = static_cast<std::uint32_t>(Resolution.Width) * 4U;

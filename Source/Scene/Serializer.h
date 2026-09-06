@@ -425,16 +425,23 @@ private:
 
 		for (std::size_t output = 0; output < outputs.size(); ++output)
 		{
-			const std::optional<PixelRect<BufferSpace>> slot = store.Atlases().SlotFor(id, outputs[output].Id);
+			const std::optional<ExitSlot> slot = store.Atlases().SlotFor(id, outputs[output].Id);
 
 			if (!slot)
 			{
 				continue;
 			}
 
+			// The atlas image travels from the first publication rather than from the one after the
+			// copy lands, because it is the *destination* the frame thread needs before it can copy
+			// anything. What it does not say is whether the pixels are there yet — `World/Exit.h` has
+			// that argument, and the reservation beside it is how the frame thread answers it itself.
 			m_Exits.push_back(
-				ExitSnapshot{
-					.Node = index, .Output = static_cast<std::uint32_t>(output), .Texture = {}, .Slot = *slot }
+				ExitSnapshot{ .Node = index,
+			                  .Output = static_cast<std::uint32_t>(output),
+			                  .Reservation = slot->Reservation,
+			                  .Texture = store.Atlases().ImageOn(outputs[output].Id),
+			                  .Slot = slot->Rectangle }
 			);
 		}
 

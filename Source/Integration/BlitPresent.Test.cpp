@@ -100,7 +100,12 @@ constexpr std::byte Untouched{ 0xAB };
 Composite(std::uint32_t target, const Region<DeviceSpace>& damage = {}, std::span<const DrawItem> items = {})
 {
 	return RecordRequest{
-		.Target = target, .Mode = RenderMode::Planned, .CostGeneration = 0, .Damage = damage, .Items = items
+		.Target = target,
+		.Mode = RenderMode::Planned,
+		.CostGeneration = 0,
+		.Damage = damage,
+		.Items = items,
+		.Captures = {}
 	};
 }
 

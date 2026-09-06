@@ -58,7 +58,7 @@ inline constexpr std::uint32_t SnapshotMagic = 0x6779726Fu;
 // Bumped when the layout below changes in a way a reader compiled against the old one would
 // misinterpret. A reader that does not recognise the version resolves to nothing rather than to
 // garbage — the same conservative direction as every settling and ingest decision in the codebase.
-inline constexpr std::uint32_t SnapshotVersion = 3;
+inline constexpr std::uint32_t SnapshotVersion = 4;
 
 // The coefficient runs, and the order they are indexed in. This is the pinned shape of
 // Docs/Decisions.md decisions 50, 72, and 90: **one run per channel**, plus the driven ramp beside

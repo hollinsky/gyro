@@ -267,8 +267,8 @@ GYRO_TEST(SceneAtlas, AWindowAcrossTheSeamReservesOnBothScreensAtEachDensity)
 	GYRO_REQUIRE(atlases.Reserve(window, 0b11, bounds));
 	GYRO_CHECK_EQ(atlases.Count(), std::size_t{ 2 });
 
-	const std::optional<Slot> onPanel = atlases.SlotFor(window, panel);
-	const std::optional<Slot> onMonitor = atlases.SlotFor(window, monitor);
+	const std::optional<ExitSlot> onPanel = atlases.SlotFor(window, panel);
+	const std::optional<ExitSlot> onMonitor = atlases.SlotFor(window, monitor);
 
 	GYRO_REQUIRE(onPanel.has_value());
 	GYRO_REQUIRE(onMonitor.has_value());
@@ -276,8 +276,16 @@ GYRO_TEST(SceneAtlas, AWindowAcrossTheSeamReservesOnBothScreensAtEachDensity)
 	// The same window, in each screen's own texels: 400x300 logical is 400x300 at scale 1 and 800x600
 	// at scale 2. One atlas holding both would have to pick one of these and stretch it onto the other
 	// screen, which is the resample decision 52 forbids being made by storage.
-	GYRO_CHECK(onPanel->Extent == PixelSize<BufferSpace>{ 400, 300 });
-	GYRO_CHECK(onMonitor->Extent == PixelSize<BufferSpace>{ 800, 600 });
+	GYRO_CHECK(onPanel->Rectangle.Extent == PixelSize<BufferSpace>{ 400, 300 });
+	GYRO_CHECK(onMonitor->Rectangle.Extent == PixelSize<BufferSpace>{ 800, 600 });
+
+	// **Two rectangles, two reservations, and neither of them zero.** The frame thread copies pixels
+	// into each screen's atlas separately, so a straddling window that named one count on both would be
+	// captured on whichever screen was asked first and left empty on the other — which is the artefact
+	// decision 190 splits the snapshot to avoid, arriving through the bookkeeping instead of the
+	// storage.
+	GYRO_CHECK(onPanel->Reservation != 0 && onMonitor->Reservation != 0);
+	GYRO_CHECK(onPanel->Reservation != onMonitor->Reservation);
 }
 
 // All or nothing across the outputs a surface is on. A reservation that took on one screen and was
@@ -390,10 +398,10 @@ GYRO_TEST(SceneAtlas, RetiringAWindowTakesItsRectangleAndFreeingItGivesItBack)
 		GYRO_REQUIRE(commit.Retire(*window));
 	}
 
-	const std::optional<Slot> slot = store.Atlases().SlotFor(*window, panel);
+	const std::optional<ExitSlot> slot = store.Atlases().SlotFor(*window, panel);
 
 	GYRO_REQUIRE(slot.has_value());
-	GYRO_CHECK(slot->Extent == PixelSize<BufferSpace>{ 300, 200 });
+	GYRO_CHECK(slot->Rectangle.Extent == PixelSize<BufferSpace>{ 300, 200 });
 
 	// The free is the serialisation pass's, and it is what returns the rectangle — so an atlas drains
 	// with the exits in it rather than on a sweep that has to be remembered. Nothing on this window is

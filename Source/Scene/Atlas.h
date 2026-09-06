@@ -272,6 +272,24 @@ static_assert([] {
 // everything that leaves beside it. An eviction outside a stress test means this is wrong.
 inline constexpr std::int32_t AtlasRenderTargetMultiple = 2;
 
+// One entity's rectangle on one output, and which reservation it is.
+//
+// **Two facts rather than one because the second cannot be derived from the first.** A shelf gives
+// the same texels to the next occupant the moment the one before it is finished, so a rectangle names
+// a *place* and never an occupant — and the party that has to tell one occupant from the next is the
+// frame thread, which sees only what is published. `World/Exit.h` carries the count across for that
+// reason and says what goes wrong without it.
+struct ExitSlot
+{
+	PixelRect<BufferSpace> Rectangle{};
+
+	// Counted once for the whole process, so no two reservations anywhere are ever the same. Zero is
+	// no reservation, which is what a default-constructed one is.
+	std::uint32_t Reservation = 0;
+
+	friend constexpr bool operator==(ExitSlot, ExitSlot) noexcept = default;
+};
+
 // The exit-snapshot atlases, one per output, and the reservations standing in them.
 //
 // Decision 190: **a snapshot belongs to a surface on an output.** A retiring surface takes a
@@ -406,7 +424,9 @@ public:
 				return false;
 			}
 
-			m_Slots.push_back(Slot{ .Entity = id, .Output = atlas.Output, .Rectangle = *slot });
+			++m_Next;
+
+			m_Slots.push_back(Slot{ .Entity = id, .Output = atlas.Output, .Rectangle = *slot, .Reservation = m_Next });
 		}
 
 		return m_Slots.size() != before;
@@ -437,13 +457,13 @@ public:
 	// surface that is not retiring, one whose reservation was refused, and one whose output has been
 	// unplugged since. All three mean the same thing to a caller: there is no snapshot, so do not
 	// draw from one.
-	[[nodiscard]] std::optional<PixelRect<BufferSpace>> SlotFor(EntityId id, OutputId output) const noexcept
+	[[nodiscard]] std::optional<ExitSlot> SlotFor(EntityId id, OutputId output) const noexcept
 	{
 		for (const Slot& slot : m_Slots)
 		{
 			if (slot.Entity == id && slot.Output == output)
 			{
-				return slot.Rectangle;
+				return ExitSlot{ .Rectangle = slot.Rectangle, .Reservation = slot.Reservation };
 			}
 		}
 
@@ -493,6 +513,7 @@ private:
 		EntityId Entity{};
 		OutputId Output{};
 		PixelRect<BufferSpace> Rectangle{};
+		std::uint32_t Reservation = 0;
 	};
 
 	// The atlas is as wide as the output and `AtlasRenderTargetMultiple` times as tall, which is the
@@ -563,6 +584,13 @@ private:
 	// Where an atlas image comes from. Borrowed, and outlives this — it is the registry the dispatch
 	// loop holds beside the store.
 	ITextures* m_Storage = nullptr;
+
+	// The last reservation handed out. It counts up and never restarts, including across a hotplug that
+	// throws every atlas away — which is the case it exists for, since the rectangles come back looking
+	// exactly like the ones that just went. Sixty-four bits would be the cautious width and is not
+	// needed: at four billion reservations, one per window closing, a machine has been closing a window
+	// every millisecond for seven weeks.
+	std::uint32_t m_Next = 0;
 
 	std::vector<Atlas> m_Atlases;
 

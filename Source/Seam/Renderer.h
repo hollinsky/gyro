@@ -353,6 +353,42 @@ struct DrawItem
 	friend bool operator==(const DrawItem&, const DrawItem&) = default;
 };
 
+// One window's last frame, copied into the rectangle held for it.
+//
+// **A copy and not a composite, which is what decisions 20 and 46 both actually say** — "blit the
+// last committed frame into a compositor-owned texture", and "a rectangle out of a shelf packer plus
+// a blit into that subregion". Nothing here opens a render pass, builds a pipeline, or needs the
+// atlas's format to have variants compiled for it, and that is the difference between a window
+// closing costing a scaled copy and it costing a second composite on the frame somebody clicked the
+// button on.
+//
+// **It rides on the request the frame is recorded from rather than on a verb of its own.** Three
+// things fall out of that and each of them would otherwise have to be built: the copy is in the same
+// submission as the composite, so it is ordered before anything that samples what it wrote; it is
+// inside the same `Submission::RecordCost`, so decision 29's `C` covers it without a second budget
+// term; and a frame the caller skips is a copy that simply happens on the next one, which is exactly
+// the deferral decision 46 says the reservation exists to bound.
+//
+// **The destination is an image and not a target**, which is what keeps this off `IPresenter`
+// entirely: the atlas belongs to the texture space `Scene/Textures.h` mints and outlives every target
+// set, because a window keeps leaving across a mode set that replaces every buffer on the panel.
+struct SnapshotCapture
+{
+	// The output's exit atlas. Null draws nothing and says nothing, per Core/Texture.h — an output the
+	// device had no room to give an atlas to, which is a window that cuts instead of fading.
+	TextureId Into;
+
+	// Where in it, in the atlas's own texels.
+	PixelRect<BufferSpace> Slot;
+
+	// The client's pixels, and the texels of them this window is. Empty means the whole image, the
+	// same reading `DrawTexture::Source` has.
+	TextureId From;
+	Rect<BufferSpace> Source{};
+
+	friend constexpr bool operator==(SnapshotCapture, SnapshotCapture) noexcept = default;
+};
+
 // One composite: everything a renderer needs to fill one target once.
 struct RecordRequest
 {
@@ -444,6 +480,19 @@ struct RecordRequest
 	// Bottom first, preorder. The storage is the caller's and lives exactly as long as the call —
 	// Frame's own arena, sized by the admitted plan, because decision 36 forbids allocating here.
 	std::span<const DrawItem> Items;
+
+	// The exit snapshots to take before this composite draws anything, in no particular order because
+	// they write disjoint rectangles of one image.
+	//
+	// **They happen even where `Damage` is empty**, and that is the one place this differs from
+	// everything else on the request. An output with nothing to redraw is the *likeliest* moment for a
+	// window to have just closed — nothing has moved yet, because the first frame of an exit is the
+	// frame the exit was authored on — so a renderer that took the empty-damage exit before copying
+	// would defer every capture until something else on that screen happened to move.
+	//
+	// A renderer with nothing to copy into refuses nothing: an id it does not hold is a snapshot that
+	// does not happen, which decision 46 already has an answer for further up.
+	std::span<const SnapshotCapture> Captures;
 };
 
 // What a recording produced.
@@ -458,6 +507,20 @@ struct Submission
 	// moment the call returns, per Frame/Budget.h's `ObserveCpu`, which is why it comes back by value
 	// rather than being collected later.
 	Duration RecordCost{};
+
+	// How many of `RecordRequest::Captures` this submission actually wrote, counted from the front.
+	//
+	// **A count rather than nothing, because the caller must not believe a picture that is not there.**
+	// A closing window draws from its rectangle only once something has been copied into it, and the
+	// party that knows whether that happened is the one that recorded the copy — a renderer that
+	// cannot take a snapshot at all, or one that ran out of room part way, reports what it did and the
+	// rest stay owed. Believing otherwise would put whatever the device left in that memory on the
+	// screen for the length of a fade, which is decision 46's failure direction inverted: it accepts a
+	// window that cuts and never a window that flickers.
+	//
+	// Zero is the honest answer from every renderer that has no snapshot path, and what a person sees
+	// on one is a window that closes at once instead of fading.
+	std::uint32_t Captured = 0;
 };
 
 // The GPU half of `C`, resolved late.
@@ -706,6 +769,7 @@ static_assert(std::is_trivially_copyable_v<Quad> && std::is_standard_layout_v<Qu
 static_assert(std::is_trivially_copyable_v<DrawItem>, "An item is copied into an arena, never owned behind one");
 static_assert(std::is_trivially_copyable_v<DrawContent>, "The variant is only as trivial as its alternatives");
 static_assert(std::is_trivially_copyable_v<GpuCost> && std::is_trivially_copyable_v<Submission>);
+static_assert(std::is_trivially_copyable_v<SnapshotCapture> && std::is_standard_layout_v<SnapshotCapture>);
 static_assert(std::formattable<Quad, char>);
 
 // The default item draws nothing at all — an empty quad, no extent, no content, and the identity

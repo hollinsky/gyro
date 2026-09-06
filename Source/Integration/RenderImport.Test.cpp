@@ -195,7 +195,8 @@ private:
 		                  .Quality = Tier::High,
 		                  .CostGeneration = generation,
 		                  .Damage = damage,
-		                  .Items = items };
+		                  .Items = items,
+		                  .Captures = {} };
 }
 
 // How many descriptors this process holds. Counted from `/proc` rather than tracked, because what is

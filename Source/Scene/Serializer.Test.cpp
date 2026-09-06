@@ -890,10 +890,18 @@ GYRO_TEST(SceneSerializer, AClosingWindowCarriesOneRectanglePerScreenItIsOn)
 	GYRO_CHECK(exits[0].Slot.Extent == PixelSize<BufferSpace>{ 400, 300 });
 	GYRO_CHECK(exits[1].Slot.Extent == PixelSize<BufferSpace>{ 800, 600 });
 
-	// Nothing has been captured into them yet, and a null id draws nothing rather than drawing
-	// whatever was last at that address.
+	// This store has no texture space attached, so neither screen has an atlas image to be copied
+	// into — which is decision 46's exhaustion answer arriving as an absence, and what a person sees on
+	// such a machine is a window that cuts instead of fading.
 	GYRO_CHECK(exits[0].Texture.IsNull());
 	GYRO_CHECK(exits[1].Texture.IsNull());
+
+	// **Two rectangles, two counts.** The frame thread copies into each screen's atlas on that screen's
+	// own frame, so a straddling window naming one count on both would be captured on whichever screen
+	// composited first and left empty on the other — the artefact decision 190 splits the snapshot to
+	// avoid, arriving through the bookkeeping instead of the storage.
+	GYRO_CHECK(exits[0].Reservation != 0 && exits[1].Reservation != 0);
+	GYRO_CHECK(exits[0].Reservation != exits[1].Reservation);
 }
 
 GYRO_TEST(SceneSerializer, AWindowNobodyIsClosingKeepsNoPixelsAnywhere)

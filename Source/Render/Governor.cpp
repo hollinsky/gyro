@@ -111,9 +111,13 @@ struct Run
 	bool urgent
 )
 {
-	RecordRequest request{
-		.Target = 0, .Mode = RenderMode::Planned, .Quality = Tier::High, .Damage = damage, .Items = items
-	};
+	RecordRequest request{ .Target = 0,
+		                   .Mode = RenderMode::Planned,
+		                   .Quality = Tier::High,
+		                   .Damage = damage,
+		                   .Items = items,
+		                   // The probe draws a scene of its own with nothing closing in it.
+		                   .Captures = {} };
 
 	const Instant started = clock.Now();
 	request.Deadline = urgent ? started + GpuGovernor::Batch : Instant{};
