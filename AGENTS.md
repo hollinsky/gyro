@@ -147,6 +147,7 @@ the dependency graph and the thread partition.
 | `Nested` | platform | frame | The daily driver — gyro as a client of another compositor, one host window per output |
 | `Drm` | platform | frame, own | The panel: the card node, an atomic-commit thread per output, planes, fences, and the scanout importer |
 | `Compositor` | platform | constructs | The composition root and the first non-portable module — `io_uring`, `SCHED_FIFO`, `mlockall`, both threads' waits, and `IBackend` |
+| `Shell` | platform | — | The reference shell, and an ordinary Wayland client rather than part of the compositor: the run bar, its canvas, and the connection. Built as `gyro-shell` |
 | `Integration` | portable | — | The tests that name two modules no module may |
 | `Testing` | portable | — | The hand-rolled harness and every test binary's `main()` (9) |
 

@@ -17,26 +17,22 @@ volatile of the three tiers and that is the arrangement working correctly — a 
 splitting, or being renamed changes this file and nothing else. If a change here forces a change in
 [Architecture.md](Architecture.md), the change was not structural.
 
-> **Most of this does not exist yet.** `Core`, `Geometry`, `World`, `Animation`, `Publication`,
-> `Seam`, and `Testing` are built — `World` being the published node record, the dressing enums, and
-> the content records, which are there because `Frame` walks them and `Scene` writes them and neither
-> may name the other, and `Seam` in its two frame-side halves, which is `IPresenter` and `IRenderer`,
-> the data their verbs take and report, and the source the presenter's completions arrive on, plus its
-> first dispatch-side one in `ITextureImporter` — and
-> `Frame` now holds the step those interfaces are driven from and the walk that turns a published
-> scene into draw items. `Scene` is the other end of that walk, in its first half: the entity store,
-> the output model, and the serializer that turns the two into a snapshot — construction and
-> publication, with the commit scope that mutates one still to come.
-> `Headless` is the first thing behind either seam:
-> a simulated panel whose vblanks are arithmetic, a device that is the one source for all of them, a
-> synthetic plane catalog, and a renderer that charges a cost and draws nothing. `Compositor` closes
-> the circuit: it is the first module in the tree that is not portable, and it holds the `while`, the
-> ring, the thread, and the one call that turns admission control's answer back into what the loop is
-> configured with. `gyro --backend=headless` runs. The rest is a
-> declaration of
-> where code goes when it is written. What is worth writing down this early is the *graph* rather
-> than the file list, because the graph is enforced from the first module and the edge that must not
-> exist is cheapest to forbid while there is nothing to forbid.
+> **Every row in the table below is built except `Console`.** *(Rewritten 2026-09-06. This note
+> said "most of this does not exist yet" and listed seven modules as the whole of the tree, which
+> stopped being true months before anyone noticed — it is the paragraph a reader trusts first and
+> the one nothing forces to stay honest.)*
+>
+> gyro now runs a session end to end: an agent hands over a listener, clients connect, windows map
+> and are placed, they take pointer, keyboard and touch input, and they are composited onto a panel
+> through KMS or into a window of another compositor. `CMakeLists.txt` is what to check this
+> paragraph against — every row but `Console` is a `gyro_add_module` call in it, and the † note
+> under the table says what `Console` is missing.
+>
+> What has not changed is why this document is a dependency graph rather than a file list. The edge
+> that must not exist was cheapest to forbid while there was nothing to forbid, and
+> `CheckLayering.cmake` has held it since the first module. The file list is
+> [below](#what-each-module-contains), underneath the arguments, because the graph is the part that
+> is enforced.
 
 ## Two waists
 
@@ -186,6 +182,7 @@ cause. `CMake/CheckLayering.cmake` is what draws the line.
 | `Drm` | platform | frame, own | `Core`, `Geometry`, `Seam` |
 | `Console`&nbsp;† | platform | own | `Core`, `Geometry`, `Seam`, `Blit` |
 | `Compositor` | platform | constructs | everything |
+| `Shell`&nbsp;‡ | platform | — | `Core`, `Geometry`, `Text`, `Wire` |
 | `Testing` | portable | — | — |
 
 **† `Console` is the one row that is not built.** *(Marked 2026-08-29, having read as built since
@@ -197,6 +194,18 @@ code. The row is the shape it will take rather than a description of the tree, a
 matches `CMakeLists.txt` exactly. Note also that `Gym/Console.h` is *not* this module arriving early:
 it is a gym driver that puts every rung of `Text`'s font ladder on screen, and it is the specimen the
 console will be built against rather than the console.
+
+**‡ `Shell` is a client rather than a part of the compositor**, which is why it depends on `Wire`
+and on nothing below either waist: it talks to gyro over the Wayland socket exactly as any other
+application does, and the thread column is empty because it is not one of gyro's threads. It is the
+reference shell — the bar and its canvas — and it exists so that the things a shell owns under
+[decision 51](Decisions.md#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) have somewhere
+to be written that is not this process.
+
+The tree builds three programs from these modules: `gyro` itself, `gyro-session` — the per-session
+agent that creates the listeners and hands them over, whose code is `Source/Agent/` over the ABI in
+`Session` — and `gyro-shell`. Only the first links the module graph above; the other two link the
+handful of modules that are portable enough to be a client's.
 
 Portable means what [decision 6](Decisions.md#6-no-macos-port-development-continues-over-ssh) means:
 ISO C++ and POSIX, no Linux-only or platform-stack headers, so the tests build and run on a machine
@@ -1906,6 +1915,32 @@ fakes are not two implementations and `IEventSource` would gain a verb only they
 the one place that knows both a Vulkan device and a nested presenter, which is what decision 120
 moved the allocator to the waist for (80, 83, 120, 121, 126, 127, 128)
 
+### Shell
+
+*platform, not one of gyro's threads.*
+
+The reference shell, and it is an ordinary Wayland client — `gyro-shell`, built from `Source/Shell/`
+and linking `Wire` rather than anything below either waist. Nothing it sends says it is a shell:
+trust is a property of the listener it reached rather than of the connection (`Protocol/Tier.h`), so
+the whole of *am I a shell* is whether `gyro_bindings_v1` and `gyro_chrome_v1` were announced at
+bind, and `Session` treats their absence as the answer rather than as an error. It reaches gyro
+through the descriptor `WAYLAND_SOCKET` names, which is what [decision
+189](Decisions.md#189-a-session-is-offered-whole--every-listener-it-has-each-with-the-role-it-plays--and-the-shell-is-handed-a-descriptor-rather-than-a-path)
+has the agent hand it in place of a path every program it launches would inherit.
+
+`Bar` is the run bar: a surface a person summons with a chord, types into, and dismisses. It covers
+the *whole output*, which is a claim about the material rather than about taste — a chrome surface
+is dressed in glass and gyro draws that behind whatever the surface leaves transparent, so a
+full-output surface is the screen blurring behind one line of text. It is also the only way this
+shell can dismiss on a click, a chrome surface having no grab, so a click beside a narrow bar would
+land on the window underneath it instead.
+
+`Canvas` is the pixels and the `wl_buffer` gyro reads them out of, and it holds two rather than one:
+a launcher redraws on every keystroke, and a single buffer makes each redraw wait for the compositor
+to finish with the last — which on a compositor holding a frame while it composites is a character
+appearing later than it was typed. Two is enough because nothing here draws faster than a person
+types. `Session` is what the shell is connected to and everything it was given on arrival.
+
 ### Integration
 
 *portable, —.*
@@ -1922,11 +1957,12 @@ The hand-rolled harness and every test binary's `main()`: `GYRO_TEST` / `GYRO_CH
 
 ### Tools and the rest of the tree
 
-`Source/Main.cpp` is a thin entry point. `Tools/UringProbe.cpp` is a standalone io_uring probe with
-raw syscalls and no liburing, so it runs on a target machine before gyro does (3); `Tools/Fonts` is
-the font baker and is a host project for `Tools/Bindings`' reason; `Tools/VulkanProbe.cpp` is the
-same idea for Vulkan — headers only, `dlopen`s the loader, runs where there is no ICD — and it is
-what retired decision 40's unverified extension claim and produced 108.
+`Source/Main.cpp` is a thin entry point, and so are `Source/Agent/Main.cpp` and
+`Source/Shell/Main.cpp` — the three programs the tree builds. `Tools/UringProbe.cpp` is a standalone
+io_uring probe with raw syscalls and no liburing, so it runs on a target machine before gyro does
+(3); `Tools/Fonts` is the font baker and is a host project for `Tools/Bindings`' reason;
+`Tools/VulkanProbe.cpp` is the same idea for Vulkan — headers only, `dlopen`s the loader, runs where
+there is no ICD — and it is what retired decision 40's unverified extension claim and produced 108.
 
 `Tools/TraceDump.cpp` is the third and its subject is a file rather than the machine — it reads a
 `.pftrace` back, prints per-row counts or one JSON object per record, and `--check` answers the
