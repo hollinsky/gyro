@@ -2564,14 +2564,6 @@ GYRO_TEST(FrameLoop, ACaptureForcesTheWholeScreenThroughTheComposite)
 	GYRO_CHECK_EQ(harness.Presenter.Tests, 0);
 }
 
-// **The capture waits for the planes already on their way to the glass to retire.** Forcing the
-// ceiling to zero stops *this* frame promoting; it does nothing about the commit in front of it, whose
-// client buffers the display engine is scanning out. Reading one of those back acquires it away from
-// the display engine, which is what wedged an amdgpu display controller hard enough to cost the
-// session — so the press is deferred a frame rather than narrowed.
-//
-// Two deep on purpose: at a commit depth of one the queue-full check already refuses the frame and the
-// deferral would never be reached, which is the shape that let this ship.
 // The ordinary path for Seam/Capture.h's texture half: the picture, and beside it the client buffer
 // the composite sampled to draw it.
 GYRO_TEST(FrameLoop, ACaptureReadsTheClientBuffersBesideThePicture)
@@ -2629,7 +2621,16 @@ GYRO_TEST(FrameLoop, AStarvedCaptureReadsNoClientBuffersEither)
 	GYRO_CHECK_EQ(capture.TextureReserves, 0);
 }
 
-GYRO_TEST(FrameLoop, ACaptureWaitsForAPromotedCommitToRetire)
+// **The capture waits for every promoted plane to stop being read.** Forcing the ceiling to zero stops
+// *this* frame promoting; it does nothing about the buffers the frame before it put on planes, which a
+// display engine goes on scanning out until something that does not name them has flipped over it.
+// Reading one of those back acquires it away from the display engine, which is what wedged an amdgpu
+// display controller hard enough to cost the machine — so the press is deferred rather than narrowed.
+//
+// Two commits deep, which is the queue half of the wait. The flip that retires the promoting commit is
+// the moment its planes *begin* being scanned out, so the deferral has to survive it — asserting a read
+// there is what the first version of this test did, and it was asserting the bug.
+GYRO_TEST(FrameLoop, ACaptureWaitsForAPromotedCommitToLeaveTheGlass)
 {
 	Harness harness;
 	RecordingCapture capture;
@@ -2665,21 +2666,87 @@ GYRO_TEST(FrameLoop, ACaptureWaitsForAPromotedCommitToRetire)
 	// still a capturing one and the ceiling stays down.
 	GYRO_CHECK(capture.Armed);
 
-	// The promoting commit retires. Nothing else is in flight that carries a plane — the frame above
-	// promoted nothing — so the next one may read.
+	// The promoting commit flips. That is the display engine *picking up* those planes rather than
+	// putting them down, so the press is still owed a wait — and this is the assertion the whole fix
+	// turns on.
 	harness.Presenter.Flip(At(1010), 8);
 
 	harness.Clock.Set(At(1022));
 	harness.Output().DamageWholeOutput();
 	(void)harness.Loop.Step();
 
-	// A frame was drawn on this iteration too, so what changed between the two is the readback rather
-	// than whether the loop ran at all.
 	GYRO_CHECK_EQ(harness.Presenter.Presents, 3);
+	GYRO_CHECK_EQ(harness.Renderer.Reads, 0);
+	GYRO_CHECK_EQ(capture.Reserves, 0);
+	GYRO_CHECK(capture.Armed);
+
+	// Now a frame that promoted nothing reaches the glass, which is what takes the client's buffer off
+	// the display engine. Every capturing frame is such a frame, so this always arrives.
+	harness.Presenter.Flip(At(1020), 9);
+
+	harness.Clock.Set(At(1032));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	// A frame was drawn on every one of these iterations, so what changed is the readback rather than
+	// whether the loop ran at all.
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 4);
 	GYRO_CHECK_EQ(harness.Renderer.Reads, 1);
 	GYRO_CHECK_EQ(capture.Reserves, 1);
 	GYRO_CHECK_EQ(capture.Publishes, 1);
 	GYRO_CHECK(capture.PublishedComplete);
+	GYRO_CHECK(!capture.Armed);
+}
+
+// **The shape that actually shipped, and the one the queue alone cannot see.** Every DRM output holds
+// one commit, so by the time a frame is being drawn the queue is empty by construction — the previous
+// commit has flipped, which is exactly when its planes started being scanned out. A guard that asks
+// only *is a promoting commit in flight* answers no here and reads a client's buffer out from under a
+// live display engine on the very first press.
+GYRO_TEST(FrameLoop, ACaptureOneCommitDeepWaitsForTheGlassWithAnEmptyQueue)
+{
+	Harness harness;
+	RecordingCapture capture;
+	const std::array<DrawItem, 2> items{ Composited(), Promotable({ { 100, 100 }, { 640, 480 } }) };
+
+	harness.Presenter.Planes = 2;
+	harness.Presenter.Depth = 1;
+	harness.Evaluator.Items = items;
+	harness.Loop.Capture(&capture);
+
+	// An ordinary frame, which puts the client's buffer on a plane.
+	harness.Anchor();
+	harness.Clock.Set(At(1002));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE_EQ(harness.Presenter.PresentedLayers.size(), std::size_t{ 2 });
+
+	// It flips, and the panel is now scanning that buffer out. The queue is empty.
+	harness.Presenter.Flip(At(1010), 8);
+	GYRO_REQUIRE_EQ(harness.Output().InFlight(), std::uint32_t{ 0 });
+
+	// The press. Nothing is in flight at all, and the capture must still read nothing.
+	capture.Armed = true;
+	harness.Clock.Set(At(1012));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 2);
+	GYRO_CHECK_EQ(harness.Renderer.Reads, 0);
+	GYRO_CHECK_EQ(harness.Renderer.TextureReads, 0);
+	GYRO_CHECK(capture.Armed);
+
+	// That frame promoted nothing — the ceiling saw to it — so its flip is what frees the buffer.
+	harness.Presenter.Flip(At(1020), 9);
+
+	harness.Clock.Set(At(1022));
+	harness.Output().DamageWholeOutput();
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 3);
+	GYRO_CHECK_EQ(harness.Renderer.Reads, 1);
+	GYRO_CHECK_EQ(capture.Reserves, 1);
 	GYRO_CHECK(!capture.Armed);
 }
 

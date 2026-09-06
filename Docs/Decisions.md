@@ -14316,6 +14316,14 @@ flight draws and presents as usual and reads nothing; the slot stays armed, the 
 within `CommitDepth` frames every plane has retired and the screen has one path to the glass. It
 converges because the only thing that could promote again is the ceiling, and the ceiling is zero.
 
+*(Revised 2026-09-05: **the wait is right and the event it waits for is the wrong one**, so the guard
+as shipped above never fired on the machine it was written for and the wedge was unchanged. A flip is
+where a plane starts being scanned out. "In flight" ends at the flip, so the condition clears at the
+instant the hazard begins — and on a `CommitDepth` of one, which is every DRM output, the queue is
+empty by construction on the iteration a frame is drawn, so it never held at all. 182 has it. The
+paragraph is kept because the deferral it argues for is the right mechanism and only its clock was
+wrong.)*
+
 **Rejected: skipping the textures a plane is showing.** Smaller, needs no extra frame, and drops
 exactly the windows the hatch is for — a promoted window is a full-screen unobstructed one, which is
 the case somebody presses the chord to look at. A capture that silently omits the interesting window is
@@ -14340,3 +14348,51 @@ process, and that is its own entry when the watchdog is built.
 **`--no-planes` is what settled it**, and it is the second time a question was answered by taking
 promotion away for a whole run rather than for a frame. There was no way to ask before, which is why it
 is a flag now rather than a patch somebody applied twice.
+
+### 182. What a capture waits for is the plane leaving the glass, not the commit leaving the queue
+
+Decision 181 deferred the press while a promoting commit was in flight and did not fix anything: the
+chord still took this machine down, and now hard enough to take the kernel with it rather than just the
+panel.
+
+The mistake is one word. A commit is *in flight* from the present until the page flip; the buffers it
+named are *being scanned out* from the page flip until a later commit that does not name them flips
+over it. Those two intervals are adjacent rather than overlapping, and the hazard is the second one.
+So the guard cleared at the exact instant the display engine picked the buffer up, and the capture read
+it there.
+
+On the DRM backend it was not even a frame early, it was never armed. `IPresenter::CommitDepth` is one
+for every real output, so the queue-full check refuses a frame while anything is in flight — which
+means the queue is *always* empty at the point the capture is considered. The in-flight half of the
+condition is unreachable code on the only hardware that can wedge. What it was reachable on is the test
+harness, where a depth of two was set by hand precisely because depth one refused the frame, and the
+test then flipped the promoting commit and asserted a read. It was asserting the bug. Both facts were
+written down in 181 and read as a limitation of the harness rather than as the shape of the defect.
+
+The fix is a second bit per output, set from the queue's own shift-out: whichever commit just left the
+queue is the one the display engine is now reading, so the drain that pops it records whether it
+carried planes. A capture waits on that bit *and* on the queue, and the bit is cleared by the next flip
+of a commit that promoted nothing — which every capturing frame is, since the ceiling is zero. The
+press therefore costs one flip more than 181 claimed, which is one refresh nobody sees, and it
+converges for the same reason: the only thing that could promote again is the ceiling.
+
+**Rejected: asking the presenter what is on its planes.** Truthful, and it puts a per-frame query
+across the waist for a fact the loop already had — the promotion bit it recorded when it built the
+commit. `IPresenter` would grow a verb answered honestly by one backend and guessed at by three.
+
+**Rejected: waiting a fixed number of refreshes after the last promoting flip.** No bit, no seam
+change, and it is a sleep dressed as a guarantee: on a panel that has stopped flipping because nothing
+is moving, the buffer stays on the plane indefinitely and no amount of waiting clears it. The bit is
+the fact and the timer is a guess at it.
+
+**The trace says which half is waiting**, in two marks rather than one tagged with a depth. A zero on
+that row is the ordinary state of a one-deep presenter and would read as a capture waiting against
+nothing, which is the sentence somebody would have written before pressing the chord a third time.
+
+**What is still not fixed is the wedge itself**, exactly as 181 left it: a commit the kernel accepted
+is treated as a promise of a flip event, and a driver that faults internally returns success and
+delivers nothing. That is `DrmOutput::Reap`'s watchdog and its own entry.
+
+**And it is still per output.** A window spanning two panels can be on the *other* output's plane while
+this one reads it, because both the queue and the glass bit are the output's own. It wants the scanout
+importer's per-card view rather than a per-output bit, and it is Open.md's rather than a silence here.

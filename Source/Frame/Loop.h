@@ -197,15 +197,36 @@ public:
 	// vanished allows none, which is the same answer as being full.
 	[[nodiscard]] std::uint32_t InFlight() const noexcept { return m_InFlight; }
 
-	// **Whether any commit still on its way to the glass put a client's own buffer on a plane.**
+	// **Whether a client's own buffer is on a plane a display engine may still be reading** — the
+	// commits queued behind the glass, and the one that reached it.
 	//
 	// It is the question Seam/Capture.h's texture half has to ask before it touches one. A readback
 	// acquires a client's dmabuf from `VK_QUEUE_FAMILY_FOREIGN_EXT`, which is a claim that the foreign
 	// user has finished with it — and a display engine scanning that buffer out has not. Forcing the
 	// promotion ceiling to zero on a capturing frame is not enough on its own, because it changes what
 	// *this* frame commits and says nothing about the planes the last one left on the screen.
-	[[nodiscard]] bool ArePlanesInFlight() const noexcept
+	//
+	// **A flip is where a plane starts being read rather than where it stops**, which is what the first
+	// version of this guard had backwards. A commit is in flight from the present until the flip; the
+	// buffers it named are being scanned out from the flip until a *later* commit that does not name
+	// them flips over it. So the queue says where a buffer is about to be and `m_GlassPromoted` says
+	// where one is now, and a capture is owed both — asking only the queue waits for the exact instant
+	// the hazard begins and then reads. On a presenter at `CommitDepth` one, which is every DRM output
+	// today, it is worse than a frame early: the queue is empty by construction on the iteration a frame
+	// is drawn, so that half never fires at all and the press read a client's buffer out from under a
+	// live scanout every time.
+	// The glass half on its own, which only the trace asks for: the two waits are the same refusal and
+	// wildly different situations, and a row that cannot tell them apart is a row that says a capture
+	// was deferred without saying what it is waiting for.
+	[[nodiscard]] bool ArePlanesOnGlass() const noexcept { return m_GlassPromoted; }
+
+	[[nodiscard]] bool ArePlanesLive() const noexcept
 	{
+		if (m_GlassPromoted)
+		{
+			return true;
+		}
+
 		for (std::uint32_t index = 0; index < m_InFlight; ++index)
 		{
 			if (m_InFlightPromoted[index])
@@ -396,6 +417,12 @@ private:
 				            .ZeroCopy = info.ZeroCopy };
 		}
 
+		// **What left the queue is what the display engine is now reading.** This is the fact
+		// `ArePlanesLive` cannot get from the queue, because the flip that removes a commit from it is
+		// the same event that starts its planes being scanned out — and they stay that way until
+		// something else flips over them, which may be many refreshes later or never.
+		m_GlassPromoted = m_InFlightPromoted[0];
+
 		--m_InFlight;
 
 		for (std::uint32_t index = 0; index < m_InFlight; ++index)
@@ -537,7 +564,9 @@ private:
 		// The sequences those commits were drawn from go with them, because a frame nobody will flip is
 		// one this output never presented. `m_Presented` deliberately stays: it is a flip that already
 		// happened and is still owed to dispatch, and dropping it here would lose a frame callback on
-		// the iteration a mode set landed in.
+		// the iteration a mode set landed in. `m_GlassPromoted` stays for the opposite reason — it is
+		// what this output can no longer vouch for, and the answer that costs a deferred capture is the
+		// one to be wrong with.
 		m_InFlightSnapshots = {};
 		m_InFlightFrames = {};
 		m_InFlightRows = {};
@@ -615,9 +644,10 @@ private:
 	std::array<std::uint16_t, MaxCommitsInFlight> m_InFlightRows{};
 
 	// Whether each of those commits carried a client's buffer on a plane, shifted with them. One bit
-	// rather than which ids, because the only question ever asked of it is `ArePlanesInFlight` — a
-	// capture waits for *every* plane to retire rather than for the one window it wants, since the
-	// buffer it wants is exactly the one most likely to have been promoted.
+	// rather than which ids, because the only question ever asked of it is `ArePlanesLive` — a capture
+	// waits for *every* plane to stop being read rather than for the one window it wants, since the
+	// buffer it wants is exactly the one most likely to have been promoted. The bit outlives the queue:
+	// the shift-out in the drain is what sets `m_GlassPromoted`.
 	std::array<bool, MaxCommitsInFlight> m_InFlightPromoted{};
 
 	// The most recent flip this output has not yet reported, staged in the drain and cleared by the post
@@ -628,6 +658,13 @@ private:
 	// instead of starting another. It survives a `Discard` deliberately: a mode set does not change what
 	// is on the panel, and closing the slice there would draw a gap where a person saw a picture.
 	std::uint64_t m_Glass = 0;
+
+	// Whether the commit on the glass put a client's buffer on a plane, which is the half of
+	// `ArePlanesLive` the queue cannot hold. It survives a `Discard` for `m_Glass`'s reason turned into
+	// a safety: a mode set is the moment this output stops being able to say what the display engine is
+	// holding, and of the two answers available the conservative one costs a capture deferred until the
+	// next flip while the optimistic one costs the panel.
+	bool m_GlassPromoted = false;
 
 	Region<DeviceSpace> m_Damage{};
 
@@ -1511,27 +1548,38 @@ private:
 			// captures very likely misses its deadline. That is accepted rather than worked around: a
 			// capture perturbs the frame it takes either way, and one late frame at an instant a person
 			// chose is cheaper than a slab held across iterations and a target the presenter cannot reuse.
-			// **The press waits for the planes to retire before it reads anything.** The ceiling above is
-			// zero while a capture is owed, so this frame promotes nothing and every frame after it
-			// promotes nothing — but the commits already on their way to the glass still carry the
-			// planes the last ordinary frame put there, and a client's buffer under one of those is
-			// being scanned out right now. `CaptureTextures` acquires exactly such a buffer away from
-			// the display engine, which on this machine's amdgpu wedges the display controller: DMCUB
-			// faults, the flip never completes, and the panel is gone for the life of the process.
+			// **The press waits for every promoted plane to stop being read before it reads anything.**
+			// The ceiling above is zero while a capture is owed, so this frame promotes nothing and every
+			// frame after it promotes nothing — but the last ordinary frame put client buffers on planes,
+			// and the display engine is scanning those out until a frame that does not name them has
+			// flipped over it. `CaptureTextures` acquires exactly such a buffer away from the display
+			// engine, which on this machine's amdgpu wedges the display controller: DMCUB faults, the
+			// flip never completes, and the panel is gone for the life of the process.
 			//
 			// So the capture is deferred rather than narrowed. The slot stays `Armed` because nothing
 			// publishes it, `capturing` is therefore still true next iteration, the whole-output damage
-			// above keeps the loop drawing, and within `CommitDepth` frames every promoting commit has
-			// flipped and this is a screen with one path to the glass. It converges because the only
-			// thing that could keep promoting is the ceiling, and the ceiling is zero.
+			// above keeps the loop drawing, and the capturing frame's own flip is what clears the glass —
+			// so the read happens one flip after the last promoting commit rather than at the instant it
+			// landed. It converges because the only thing that could promote again is the ceiling, and
+			// the ceiling is zero.
 			//
 			// **Both halves wait, not just the texture half.** Reading only the target on such a frame
 			// would put a picture on disk with no buffers beside it, which reads as *no clients were
 			// up* rather than as *the capture came a frame early* — and the two are the same directory
 			// listing.
-			if (capturing && output.ArePlanesInFlight())
+			if (capturing && output.ArePlanesLive())
 			{
-				TraceMark("capture waiting on planes", output.m_Trace, TraceTag(output.InFlight()));
+				// **Two marks rather than one tagged with a depth**, because on a presenter that holds one
+				// commit the queue is always empty at this point and a zero on that row would read as a
+				// wait against nothing — which is the shape of the bug this guard was written twice for.
+				if (output.ArePlanesOnGlass())
+				{
+					TraceMark("capture waiting on the plane being scanned out", output.m_Trace);
+				}
+				else
+				{
+					TraceMark("capture waiting on a promoted commit", output.m_Trace, TraceTag(output.InFlight()));
+				}
 			}
 			else if (capturing)
 			{

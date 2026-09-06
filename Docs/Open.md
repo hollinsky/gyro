@@ -1778,3 +1778,27 @@ right shape while a shell is handing them over as attention moves and the wrong 
 turns out to be *here is the set, keep them all*. And **a background handed over as a dmabuf is not
 built**: `PamImage` is the whole intake, so a shell that has already composited its wallpaper on the
 GPU has to read it back and hand over bytes.
+
+## A capture reads a client's buffer that another output may have on a plane
+
+Decision 182 waits for a client's buffer to leave the planes before the frame thread reads it back, and
+both halves of what it waits on are the output's own: the commits queued on this output, and the commit
+this output last flipped. A window spanning two panels is on two outputs, and gyro composites it on the
+one being captured while the other is scanning it out on an overlay. The acquire from
+`VK_QUEUE_FAMILY_FOREIGN_EXT` is against the buffer rather than against an output, so the neighbouring
+display engine is exactly as entitled to be mid-scanout as the local one was, and the wedge is the same
+wedge.
+
+It is not the failure that was found, because the machine it was found on drives one panel, and it is
+not reachable by pressing the chord on a single-output session at all. What makes it worth writing down
+now rather than after somebody's second reboot is that the shape of the answer is already in the tree
+and is not a third bit: `Drm/Scanout.h` holds the scanout adoptions **per card** and releases one when
+no commit could still be showing it, which is the same question asked of the same buffer by the party
+that actually knows. A capture that asked the importer *is anything still scanning this out* would be
+right for one output and for six, and would stop the loop carrying the fact at all.
+
+What that costs is a verb across the waist on `IScanoutImporter`, answered by one backend and defaulted
+to *no* by the rest — which is the shape decision 182 rejected for `IPresenter` and is a better fit
+here, because this interface already exists to answer a question about one texture id rather than about
+a frame.
+
