@@ -1321,6 +1321,76 @@ GYRO_TEST(ProtocolRoundTrip, ADeclinedMaximiseIsStillAnsweredWithAConfigure)
 	GYRO_CHECK_EQ(toplevel.WindowEvents.Configured, std::uint32_t{ 3 });
 }
 
+// **The order Firefox actually opens a window in**, which is not the order the two tests above use: it
+// asks to be maximised on the `xdg_toplevel` it has just made and only then commits the `wl_surface`
+// for the first time. Both halves of what that used to hit are asserted here.
+//
+// What a person saw was Firefox failing to start at all — a window that never appeared and a browser
+// that dumped a minidump and quit, saying gyro had sent it a serial gyro never sent. It had: the
+// maximise was answered with the opening configure before the client had committed, which marked the
+// surface configured, so the client's own first commit — bufferless, as the protocol requires — was
+// read as a window being unmapped and threw the serial away underneath the acknowledgement already on
+// the wire.
+GYRO_TEST(ProtocolRoundTrip, AWindowThatAsksToBeMaximisedBeforeItsFirstCommitStillOpens)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-maximise-first" };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x35 }));
+
+	// Before the commit, which is the whole point: the protocol has the opening configure be the answer
+	// to that commit, so there is nothing for gyro to say yet.
+	toplevel.Window.SetMaximized();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(toplevel.WindowEvents.Configured, std::uint32_t{ 0 });
+	GYRO_CHECK_EQ(toplevel.SurfaceEvents.Configured, std::uint32_t{ 0 });
+
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	// One configure, and it is the opening one. The maximise is not lost — it is declined (51), and the
+	// state list says so in the same event that answers the commit.
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_REQUIRE_EQ(toplevel.WindowEvents.Configured, std::uint32_t{ 1 });
+	GYRO_CHECK(!toplevel.WindowEvents.Has(Wayland::XdgToplevelState::Maximized));
+
+	const std::uint32_t opening = toplevel.SurfaceEvents.Serial;
+
+	GYRO_REQUIRE(opening != 0);
+
+	// A second bufferless commit, which is what a toolkit does between the configure and its first frame
+	// to land a geometry or an opaque region. It is not an unmap: there is no window to unmap.
+	toplevel.XdgSurface.SetWindowGeometry(0, 0, 64, 64);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// And the acknowledgement of a configure gyro did send is accepted, rather than ending the client
+	// for quoting a serial it was given.
+	toplevel.XdgSurface.AckConfigure(opening);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// The window is on screen, which is the thing the person was waiting for.
+	GYRO_CHECK(pair.Store.Count() > std::uint32_t{ 2 });
+}
+
 GYRO_TEST(ProtocolRoundTrip, AnAcknowledgedFrameBecomesAWindowCentredOnTheOutput)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());

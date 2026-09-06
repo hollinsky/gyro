@@ -589,6 +589,12 @@ public:
 	// outside the commit sequence that otherwise drives them.
 	void Configure();
 
+	// The same, for an answer owed to a request that arrived out of band — a state the compositor
+	// declines, a menu repositioned. **The difference from `Configure` is the surface nobody has
+	// committed yet**, which such a request is allowed to reach and which must not be configured until
+	// it has.
+	void Reconfigure();
+
 	// Start an interactive move or resize, per `xdg_toplevel.move` and `xdg_toplevel.resize`. Public
 	// because the request arrives on the role object and the window it names is this one's; the seat
 	// does the deciding, and [Seat.h](Seat.h) has what it decides against.

@@ -383,7 +383,7 @@ void ClientXdgToplevel::AnswerUnchanged()
 	// questions.
 	if (m_Surface != nullptr)
 	{
-		m_Surface->Configure();
+		m_Surface->Reconfigure();
 	}
 }
 
@@ -550,7 +550,7 @@ void ClientXdgPopup::OnReposition(Wayland::Server::XdgPositioner positioner, std
 	// last of the three before it will draw anything again.
 	if (m_Surface != nullptr)
 	{
-		m_Surface->Configure();
+		m_Surface->Reconfigure();
 	}
 }
 
@@ -885,6 +885,22 @@ void ClientXdgSurface::OnAckConfigure(std::uint32_t serial)
 	m_AckedSerial = std::max(m_AckedSerial, serial);
 }
 
+void ClientXdgSurface::Reconfigure()
+{
+	// **Nothing before the client's first commit.** xdg-shell has the opening configure be the answer to
+	// that commit, and a client is entitled to say what it wants — maximised, fullscreen, a menu moved —
+	// before it has made it. Answering early would be a stray event at best; what it actually costs is
+	// the surface being marked as configured, so the bufferless commit that follows reads as a window
+	// being taken off a screen it was never on. Nothing is lost by waiting: `Configure` sends the
+	// toplevel as it stands, so the opening configure carries whatever was staged before it.
+	if (!m_Configured)
+	{
+		return;
+	}
+
+	Configure();
+}
+
 void ClientXdgSurface::Configure()
 {
 	if (!HasRole())
@@ -998,6 +1014,19 @@ void ClientXdgSurface::OnSurfaceCommitted(ClientSurface& surface)
 
 	if (surface.Current().Content.IsNull())
 	{
+		// **Only where there is a window to take away.** A commit carrying no buffer is two different
+		// things, and the difference is whether one is on screen: a client putting its window away, and a
+		// client that has not put one up yet. The second is ordinary — a toolkit commits again between
+		// the configure and its first frame to land a geometry, an opaque region, a buffer scale — and
+		// reading it as an unmap throws away a negotiation the client is in the middle of, so the
+		// acknowledgement it is about to send comes back to a compositor that has forgotten sending the
+		// configure. That is a window that never appears and a client killed for a protocol error it did
+		// not commit.
+		if (!IsMapped())
+		{
+			return;
+		}
+
 		// Attaching nothing unmaps the window, and the next buffer maps it again — which the protocol
 		// says restarts the whole configure sequence, so the acknowledgement goes with it.
 		Unmap();
