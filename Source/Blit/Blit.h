@@ -117,6 +117,16 @@ public:
 	// transition anybody has described.
 	static constexpr std::size_t MaxDepth = 4;
 
+	// Sub-boxes per axis in the resampling filter, and therefore the most taps one pixel can cost:
+	// sixteen at the corner, one wherever nothing is being shrunk. Four is an exact box out to a
+	// fourfold shrink, which clears every fractional output scale and every transition in
+	// Animation/Author/Catalog.h; past it the filter under-filters and does not fail, and a mip chain
+	// is what Docs/Open.md leaves standing for that case.
+	//
+	// **Render/Shaders/Sample.glsl declares the same number under the same name**, and the two are held
+	// together by Blit.Test.cpp's comparison rather than by a `static_assert` a shader cannot be given.
+	static constexpr std::int32_t SampleMaximumTaps = 4;
+
 	// The clock is for `Submission::RecordCost` and nothing else. Seam/Renderer.h puts the measurement
 	// on the party that knows where the work started and stopped, and on this renderer that figure is
 	// the whole of decision 29's `C` — there is no second device for the rest of it to hide in.
@@ -338,8 +348,17 @@ private:
 	// rectangle.
 	[[nodiscard]] static Light Fetch(const Sampled& source, std::int32_t x, std::int32_t y) noexcept;
 
-	// The filtered read: four texels and a bilinear weight, in linear light rather than in the
-	// source's encoding. Bilinear rather than a box, and Blit.cpp is where that is argued.
+	// One bilinear tap: four texels and a weight, in linear light rather than in the source's
+	// encoding.
+	[[nodiscard]] static Light Tap(const Sampled& source, float u, float v) noexcept;
+
+	// Where to put a tap so that it returns the image averaged over a box of `width` texels centred
+	// on `at`, exactly, for a width no greater than one. Render/Shaders/Sample.glsl is the same map
+	// and argues it; the two must agree or the handoff between the renderers is visible.
+	[[nodiscard]] static float Ramp(float at, float width) noexcept;
+
+	// The filtered read: the image averaged over the fragment's footprint, in linear light. Blit.cpp
+	// is where the filter is argued.
 	[[nodiscard]] static Light Filter(const Sampled& source, float u, float v) noexcept;
 
 	// Either of the above, whichever the item's `Sampling` asked for. The two partially covered edge

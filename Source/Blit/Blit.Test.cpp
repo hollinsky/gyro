@@ -708,6 +708,70 @@ GYRO_TEST(Blit, ASampledRectangleTakesItsOwnTexelsAndNoOthers)
 	GYRO_CHECK_EQ(blit.Record(Frame(outside, PixelRect<DeviceSpace>{ {}, { 8, 1 } })).has_value(), false);
 }
 
+// The minified case, and what the filter was widened for. A single tap reads the image at one point,
+// so every texel the pixel covers except the one or two under that point is simply not in the
+// picture — on a fractionally scaled output, which decision 56 makes the ordinary one, that is every
+// window on screen for as long as it is on screen.
+GYRO_TEST(Blit, AMinifiedTextureAveragesTheTexelsItCoversRatherThanSkippingThem)
+{
+	const MonotonicClock clock;
+	Blit blit{ clock };
+
+	// One lit texel in four. A pixel covering all four holds a quarter of the light; a pixel that
+	// reads one point holds whatever happened to be under it, which here is nothing at all.
+	Picture picture{ 4, 1 };
+	picture.Set(0, 0, Rgb8(255, 255, 255));
+	picture.Set(1, 0, Rgb8(0, 0, 0));
+	picture.Set(2, 0, Rgb8(0, 0, 0));
+	picture.Set(3, 0, Rgb8(0, 0, 0));
+
+	Surface surface{ 1, 1 };
+	GYRO_REQUIRE(blit.BindTargets(surface.One(), ColorState::Srgb()).has_value());
+	GYRO_REQUIRE(blit.Adopt(Logo, picture.Image()).has_value());
+
+	const std::array<DrawItem, 1> items{ Textured(Logo, { {}, { 1.0F, 1.0F } }) };
+
+	GYRO_REQUIRE(blit.Record(Frame(items, PixelRect<DeviceSpace>{ {}, { 1, 1 } })).has_value());
+
+	// A quarter of the light, which encodes to about 130 — and the point of the test is the lower
+	// bound: the single tap this replaces landed between the two black texels in the middle and put
+	// black here, so the lit texel was absent from the picture entirely.
+	const Rgba16 pixel = surface.At(0, 0);
+
+	GYRO_CHECK(pixel.Red > FromEightBit(120));
+	GYRO_CHECK(pixel.Red < FromEightBit(140));
+}
+
+// The footprint is per axis, which is what keeps a window that is being squeezed on one axis sharp on
+// the other. An isotropic filter is the thing a mip chain would be, and it is why a chain is not the
+// answer to a shrink that is not square.
+GYRO_TEST(Blit, AFootprintIsMeasuredPerAxis)
+{
+	const MonotonicClock clock;
+	Blit blit{ clock };
+
+	Picture picture{ 4, 2 };
+
+	for (std::int32_t x = 0; x < 4; ++x)
+	{
+		picture.Set(x, 0, Rgb8(255, 255, 255));
+		picture.Set(x, 1, Rgb8(0, 0, 0));
+	}
+
+	// Four to one across and one to one down. Averaging the rows together would put the same grey in
+	// both, which is precisely the blur an isotropic footprint would have applied.
+	Surface surface{ 1, 2 };
+	GYRO_REQUIRE(blit.BindTargets(surface.One(), ColorState::Srgb()).has_value());
+	GYRO_REQUIRE(blit.Adopt(Logo, picture.Image()).has_value());
+
+	const std::array<DrawItem, 1> items{ Textured(Logo, { {}, { 1.0F, 2.0F } }) };
+
+	GYRO_REQUIRE(blit.Record(Frame(items, PixelRect<DeviceSpace>{ {}, { 1, 2 } })).has_value());
+
+	GYRO_CHECK_EQ(surface.At(0, 0), Rgb8(255, 255, 255));
+	GYRO_CHECK_EQ(surface.At(0, 1), Black);
+}
+
 // A texture's edge is coverage, exactly as a solid's is. A logo placed at a subpixel offset is the
 // case, and it is the whole of what keeps the boot picture from stepping by a pixel at the handoff.
 GYRO_TEST(Blit, ATexturesSubpixelEdgeIsCoverage)

@@ -118,11 +118,17 @@ Result<void> VulkanTextures::Build()
 	// renderer to this one a visible change in sharpness at the exact moment it is supposed to be
 	// invisible.
 	//
-	// No mip levels, so no `maxLod` worth stating: an item's source rectangle is the client's own
-	// resolution and decision 99's thumbnail is minified by a scale a spring is still moving. A mip
-	// chain would have to be rebuilt on the dispatch thread at every commit, which is the cost that
-	// makes it a question rather than an obvious yes — Docs/Open.md is where it belongs and this is
-	// not where it gets decided by accident.
+	// No mip levels, so no `maxLod` worth stating. **What reads through this sampler is not one tap.**
+	// Render/Shaders/Sample.glsl averages the image over the fragment's own footprint by splitting it
+	// into sub-boxes no wider than a texel and evaluating each one through a tap of this filter, which
+	// is what makes a bilinear sampler the right thing to build here rather than a compromise: the tap
+	// is the closed form the box is assembled out of, and its magnification behaviour is untouched
+	// because the footprint is floored at a texel.
+	//
+	// That covers minification out to a fourfold shrink and leaves the chain to the thumbnail, which is
+	// the narrower question Docs/Open.md's *mip generation's place in `C`* is now asking: a chain would
+	// have to be rebuilt on the dispatch thread at every commit, and it now only has to earn that
+	// bandwidth above the shrink the footprint filter stops being exact at.
 	const VkSamplerCreateInfo samplerInfo{ .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
 		                                   .pNext = nullptr,
 		                                   .flags = 0,

@@ -16,6 +16,7 @@
 // still case is exact; what is left is the moving case, and it is a gap rather than a design.
 
 #include "Chain.glsl"
+#include "Sample.glsl"
 
 // The defaults are the identity chain — corners masked, nothing converted — so a pipeline created
 // with no specialization at all draws what the renderer drew before any of this existed. That is the
@@ -54,13 +55,18 @@ void main()
 		// normalized against the image — so this is one multiply-add and the texture's own size never
 		// had to cross the seam. Render/Pipeline.h states the packing.
 		//
+		// **`SampleImage` reads that size back off the bound image**, which is not the seam crossing
+		// this avoids: a footprint is measured in texels and the image is the only thing that knows how
+		// many it has, so recovering it here is one query rather than a fifth field in a push block
+		// Render/Pipeline.h has sixteen bytes left in.
+		//
 		// **The divide is guarded because a zero extent is expressible.** Seam/Renderer.h lets a
 		// caller build an item whose extent is nothing; the quad it produces has no area and rasterizes
 		// no fragments on any conforming device, but a NaN coordinate reaching a sampler is the kind of
 		// thing one driver turns into a black rectangle and another into a hang.
 		const vec2 extent = max(item.Shape.xy, vec2(1.0));
 
-		colour = texture(Source, item.Fill.xy + (Local / extent) * item.Fill.zw);
+		colour = SampleImage(Source, item.Fill.xy + (Local / extent) * item.Fill.zw, item.Fill);
 
 		// Before everything, and Docs/Architecture.md#premultiplied-alpha-is-the-sharp-edge is the
 		// reason it is here rather than after the conversion: every element below this line assumes

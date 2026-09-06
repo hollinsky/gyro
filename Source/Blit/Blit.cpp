@@ -663,27 +663,11 @@ Light Blit::Fetch(const Sampled& source, std::int32_t x, std::int32_t y) noexcep
 	return { convert(texel.Red), convert(texel.Green), convert(texel.Blue), alpha };
 }
 
-// **Bilinear, and the alternative is a box.** The two are the same picture only where the resample is
-// a no-op, and this renderer's one resampling consumer is the firmware logo: the BGRT offsets are in
-// the firmware's mode and gyro draws in its own, so the common case is a magnification of a few times
-// — a 1024x768 GOP logo onto a 4K panel. **A box filter at magnification is nearest-neighbour**, since
-// a pixel's footprint in the source is smaller than a texel, so the logo's curved edges come back as
-// stair steps where the firmware had just drawn them smooth. That is a visible change in the picture
-// at the exact frame Docs/Architecture.md#from-firmware-to-gyro is about, and it is the one thing the
-// handoff cannot have. Bilinear is soft there instead, which is what a person reads as the same logo.
-//
-// **Under strong minification bilinear starts skipping texels**, and a footprint box is the fix. It is
-// not built because nothing produces one — the boot scene draws its logo up and its console grid one
-// to one — and this is deliberately *not* a refusal like the rotated quad beside it: a rotation is
-// something the author of the scene chose, and a scale factor is decided by whichever mode the
-// firmware happened to leave behind. Refusing on that is a black screen on somebody's machine and
-// nowhere in gyro to look; a slightly aliased logo is not.
-//
 // **The taps are averaged in linear light**, which is the same argument as the antialiased edge one
 // file over and is why the decode happens per texel rather than after the filter: a half-and-half of
 // white and black texels is half the light, and averaging the encodings would put a dark seam through
 // every scaled logo's edge.
-Light Blit::Filter(const Sampled& source, float u, float v) noexcept
+Light Blit::Tap(const Sampled& source, float u, float v) noexcept
 {
 	const float column = std::floor(u);
 	const float row = std::floor(v);
@@ -698,6 +682,93 @@ Light Blit::Filter(const Sampled& source, float u, float v) noexcept
 	const Light lower = Mix(Fetch(source, left, top + 1), Fetch(source, left + 1, top + 1), across);
 
 	return Mix(upper, lower, down);
+}
+
+float Blit::Ramp(float at, float width) noexcept
+{
+	// `u` is already the coordinate a tap interpolates on — Blit.h's `Sampled` states that zero is the
+	// centre of texel zero — so the lattice a tap blends across is the whole numbers, and there is no
+	// half-texel shift here where Render/Shaders/Sample.glsl needs one.
+	const float centre = std::floor(at);
+
+	return centre + std::clamp((at - centre - 0.5F) / width + 0.5F, 0.0F, 1.0F);
+}
+
+// **The image averaged over the pixel's footprint, and the floor under that footprint is what keeps
+// the firmware handoff intact.** This renderer's one magnifying consumer is the BGRT logo: the
+// offsets are in the firmware's mode and gyro draws in its own, so a 1024x768 GOP logo lands on a 4K
+// panel scaled up several times. A box narrower than a texel — which is what magnification's true
+// footprint is — evaluates to nearest-neighbour, and the logo's curved edges would come back as stair
+// steps where the firmware had just drawn them smooth. That is a visible change at the exact frame
+// Docs/Architecture.md#from-firmware-to-gyro exists to make invisible. So the footprint never falls
+// below one texel, magnification stays exactly the bilinear it has always been, and only minification
+// changes.
+//
+// **Under minification a single tap skips texels outright**, which is what this now fixes and what it
+// previously only named. The footprint is split into sub-boxes no wider than a texel, each evaluated
+// in closed form by one tap through `Ramp`, and their average is the average over the whole footprint
+// because they tile it end to end. `SampleMaximumTaps` per axis is exact out to a fourfold shrink and
+// under-filters rather than failing past it.
+//
+// **The same filter as Render/Shaders/Sample.glsl, deliberately and by the same arithmetic.** Two
+// renderers have to produce one picture, and a difference in filter is a visible change in sharpness
+// at the moment the handoff from this renderer to that one is supposed to be invisible —
+// Render/Textures.cpp argues the same point from the other end.
+//
+// **The footprint is read off the item rather than measured**, which is the one structural difference
+// from the shader: a fragment program has derivatives and this has `Sampled::ScaleX`, which is the
+// same number stated instead of estimated.
+Light Blit::Filter(const Sampled& source, float u, float v) noexcept
+{
+	const float widthX = std::max(std::abs(source.ScaleX), 1.0F);
+	const float widthY = std::max(std::abs(source.ScaleY), 1.0F);
+
+	const std::int32_t tapsX = std::min(static_cast<std::int32_t>(std::ceil(widthX)), SampleMaximumTaps);
+	const std::int32_t tapsY = std::min(static_cast<std::int32_t>(std::ceil(widthY)), SampleMaximumTaps);
+
+	if (tapsX == 1 && tapsY == 1)
+	{
+		// The whole of magnification and unit scale, where the map below is the identity and the average
+		// is over one term. Written out so that the ordinary case is one tap and no arithmetic around it.
+		return Tap(source, Ramp(u, widthX), Ramp(v, widthY));
+	}
+
+	const float spanX = widthX / static_cast<float>(tapsX);
+	const float spanY = widthY / static_cast<float>(tapsY);
+
+	// The first sub-box's centre, half a footprint back from the pixel's and half a sub-box in.
+	const float firstX = u - 0.5F * (widthX - spanX);
+	const float firstY = v - 0.5F * (widthY - spanY);
+
+	std::uint32_t red = 0;
+	std::uint32_t green = 0;
+	std::uint32_t blue = 0;
+	std::uint32_t alpha = 0;
+
+	for (std::int32_t y = 0; y < tapsY; ++y)
+	{
+		const float down = Ramp(firstY + static_cast<float>(y) * spanY, spanY);
+
+		for (std::int32_t x = 0; x < tapsX; ++x)
+		{
+			const Light tap = Tap(source, Ramp(firstX + static_cast<float>(x) * spanX, spanX), down);
+
+			red += tap.Red;
+			green += tap.Green;
+			blue += tap.Blue;
+			alpha += tap.Alpha;
+		}
+	}
+
+	// Rounded to nearest rather than truncated, because the sub-boxes tile the footprint exactly and a
+	// truncation would lose up to a code point per pixel — a whole surface a shade dark, which is the
+	// kind of error that survives review by being uniform.
+	const std::uint32_t count = static_cast<std::uint32_t>(tapsX * tapsY);
+	const auto average = [count](std::uint32_t total) noexcept {
+		return static_cast<std::uint16_t>((total + count / 2U) / count);
+	};
+
+	return { average(red), average(green), average(blue), average(alpha) };
 }
 
 Light Blit::Sample(const Sampled& source, float u, float v) noexcept
