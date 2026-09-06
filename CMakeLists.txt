@@ -434,6 +434,7 @@ gyro_add_module(Scene PORTABLE DISPATCH
 	SOURCES
 		Cursor.cpp
 	TESTS
+		Atlas.Test.cpp
 		Background.Test.cpp
 		Commit.Test.cpp
 		Cursor.Test.cpp
