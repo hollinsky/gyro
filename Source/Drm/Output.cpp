@@ -424,6 +424,7 @@ void DrmOutput::DropTargets() noexcept
 	m_ScanoutMask = 0;
 	m_InFlightMask = 0;
 	m_Flipping = false;
+	m_Watchdog.Disarm();
 }
 
 std::span<const RenderTarget> DrmOutput::Targets() const
@@ -1091,13 +1092,38 @@ void DrmOutput::Reap()
 
 	if (!outcome)
 	{
+		// **Nothing to take, which is every iteration but one and is where the watchdog lives.** The
+		// commit that owes this output a page flip reported success on some earlier drain, so there is no
+		// outcome left to read and the only question still open is whether the event it promised ever
+		// turned up. Asked here rather than in `Settle` because this is already the function that unwinds
+		// a frame the hardware will not show, and a flip event that never arrives is one of those.
+		//
+		// It is tested immediately after `DrmDevice::Read` has drained the descriptor the event would be
+		// on, which is what makes even a one-refresh deadline safe: gyro has just looked.
+		if (m_Flipping && m_Watchdog.HasExpired(MonotonicClock{}.Now()))
+		{
+			AbandonFlip();
+		}
+
 		return;
 	}
 
 	if (outcome->Error == 0)
 	{
-		// The kernel took it. Everything else about this frame arrives as the page flip, on the device's
-		// descriptor, exactly as it did when the ioctl was synchronous.
+		// The kernel took it, and because the commit is blocking it has already waited for flip-done —
+		// so the page flip is on the device's descriptor rather than in the panel's future. Everything
+		// else about this frame arrives as that event.
+		//
+		// **Except where it does not**, which is the whole of Drm/Watchdog.h: a driver whose own wait
+		// timed out returns zero and sends nothing, and an output waiting on an event that will never
+		// come has no descriptor to become readable and nothing to put it back on `NextEvent`. Armed
+		// from now rather than from `ArmedAt`, because the interval being bounded starts at the kernel's
+		// answer and the ioctl before it may legitimately have taken seconds.
+		if (m_Flipping)
+		{
+			m_Watchdog.Arm(MonotonicClock{}.Now(), m_Configuration.Period);
+		}
+
 		return;
 	}
 
@@ -1120,9 +1146,45 @@ void DrmOutput::Reap()
 
 	m_InFlightMask = 0;
 	m_Flipping = false;
+	m_Watchdog.Disarm();
 
 	// The lane this frame was flying in is closed by the loop's own handler, which is why nothing here
 	// closes it: `Missed` is the signal, and Frame/Loop.h owns what a missed frame does to the picture.
+	Missed.Emit();
+}
+
+void DrmOutput::AbandonFlip()
+{
+	// **Tagged with the frame that was lost**, because this row and `flip event` are the two endings a
+	// commit can have and a reader comparing them wants the same number on both.
+	TraceMark("flip event never arrived", m_Trace, TraceTag(m_FlippingFrame));
+
+	const std::uint32_t flipped = m_InFlightMask;
+
+	m_InFlightMask = 0;
+	m_Flipping = false;
+	m_Watchdog.Disarm();
+
+	// The same set difference `OnPresented` runs, and for the same reason: the images that were on the
+	// glass are off it and the ones that were committed are on. See the declaration for why this
+	// believes the flip over the missing event.
+	for (std::uint32_t index = 0; index < m_TargetCount; ++index)
+	{
+		const std::uint32_t bit = std::uint32_t{ 1 } << index;
+
+		if ((m_ScanoutMask & bit) != 0 && (flipped & bit) == 0)
+		{
+			m_Targets[index].State = TargetState::Free;
+		}
+
+		if ((flipped & bit) != 0)
+		{
+			m_Targets[index].State = TargetState::Scanout;
+		}
+	}
+
+	m_ScanoutMask = flipped;
+
 	Missed.Emit();
 }
 
@@ -1247,6 +1309,16 @@ Instant DrmOutput::NextEvent() const noexcept
 		return Advanced(m_Commit.ArmedAt(), period * 2);
 	}
 
+	// **And the same argument one step further along.** The backstop above covers a commit the thread is
+	// still inside; this covers one it has finished and reported success for, whose page flip has not
+	// arrived. Without it that output is on nobody's books at all — the commit thread is idle, so
+	// nothing above fires, and the event that would make the device's descriptor readable is the very
+	// thing that has gone missing. Drm/Watchdog.h has what that costs.
+	if (m_Flipping)
+	{
+		return m_Watchdog.Deadline();
+	}
+
 	return Instant{ Duration::max() };
 }
 
@@ -1275,6 +1347,7 @@ void DrmOutput::OnPresented(Instant at, std::uint32_t sequence, bool hardwareClo
 	const std::uint32_t flipped = m_InFlightMask;
 	m_InFlightMask = 0;
 	m_Flipping = false;
+	m_Watchdog.Disarm();
 
 	// The images that were on the glass are off it now, and the ones that were committed are on. A set
 	// difference rather than a comparison, because freeing an image the panel is still showing hands the

@@ -14396,3 +14396,58 @@ delivers nothing. That is `DrmOutput::Reap`'s watchdog and its own entry.
 **And it is still per output.** A window spanning two panels can be on the *other* output's plane while
 this one reads it, because both the queue and the glass bit are the output's own. It wants the scanout
 importer's per-card view rather than a per-output bit, and it is Open.md's rather than a silence here.
+
+### 184. A page flip event that never arrives is a missed frame, on a deadline the output arms itself
+
+Decisions 181 and 182 both end by saying the wedge itself is untouched: `DrmOutput` treats a commit the
+kernel accepted as a promise that a page flip event follows, and DRM makes no such promise. 182 removed
+the one trigger that was found. Any other lost event has the same consequence, which is a panel gone
+for the life of the process, so the promise wants checking rather than trusting.
+
+**What makes the check tight is that gyro's atomic commit is blocking.** Drm/Commit.h runs the ioctl
+without `DRM_MODE_ATOMIC_NONBLOCK` on a thread of its own, so the kernel returns from it only after
+`drm_atomic_helper_wait_for_flip_done`. By the time the commit thread reports success the flip has
+*happened* and the event is queued on the device's descriptor. So the interval this bounds is not a
+wait for hardware at all — it is the gap between the kernel saying *done* and gyro reading a file it
+polls every iteration, which is ordinarily the very next drain. The deadline is one refresh period from
+the kernel's answer, which is already enormous for that, and it is only ever tested immediately after
+`DrmDevice::Read` has drained the descriptor the event would be on. gyro has just looked.
+
+**The wake is half the fix and was the missing half.** `NextEvent` already backstops a commit the
+thread is still inside, at twice the period from when it was armed. It had nothing for a commit that
+*finished*: the thread is idle so that branch does not fire, and the event that would make the
+descriptor readable is the very thing that has gone missing, so the output was on nobody's books and
+the loop slept forever. An armed watchdog is now what keeps it there.
+
+**The targets move as though the flip happened, and the loop is told it did not.** Those sound
+contradictory and are the two halves of what is actually known. The kernel's own wait returned before
+the thread reported success, so what was lost is the notification rather than the flip — and of the two
+ways to be wrong, believing a committed image is on the glass costs one target held out of the ring,
+while disbelieving it hands the renderer an image a display engine is scanning out. That second one is
+182's fault in a different file. But there is no instant and no vblank sequence to report and
+Seam/PresentationInfo.h forbids inventing either, so what the loop gets is `Missed` — decision 124's
+signal, meaning *this output cannot vouch for that frame* — and it re-damages and re-anchors.
+
+**Rejected: cancelling the commit instead.** There is nothing to cancel. The hazard is only reachable
+once the ioctl has returned, and while it has not, the kernel holds the fences and the framebuffers —
+unwinding underneath it is the same class of fault as reading a buffer mid-scanout.
+
+**Rejected: a fixed millisecond deadline.** Every other figure in the loop is written in refresh
+periods, and a number that does not scale holds a 24 Hz panel to a 240 Hz panel's patience. The fixed
+number survives only as the fallback for an output whose period is not known yet, where the alternative
+is a deadline of zero that fires on the iteration that armed it.
+
+**Rejected: leaving it to `RLIMIT_RTTIME` or a supervisor restart.** Both end the process, and the
+frame this loses is one frame — the output recovers and the session lives. A watchdog that takes the
+machine down to fix a dropped notification is worse than the notification.
+
+**It is a class of its own rather than a member of `DrmOutput`** because `DrmOutput` needs a card, a
+pipeline and an allocator to exist at all, which is why it has no test beside it. The arithmetic that
+decides an output has been abandoned is the part worth being sure of, so it lives where a test can
+drive it against a clock it owns. Drm/Catalog.h is the same split for the same reason.
+
+**Nested has the same gap and does not get this.** `NestedOutput` emits `Missed` when the host says it
+discarded a frame and has nothing for a host that simply goes quiet. It is a much smaller failure —
+gyro is a client there, the host is another compositor, and a person still has their own desktop — and
+it wants the host's own timeout rather than a copy of this one, so it is Open.md's.
+

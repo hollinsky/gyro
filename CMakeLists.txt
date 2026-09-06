@@ -1095,6 +1095,7 @@ gyro_add_module(Drm
 		Commit.Test.cpp
 		Dumb.Test.cpp
 		Scanout.Test.cpp
+		Watchdog.Test.cpp
 )
 
 # libdrm for the mode-setting half, and spdlog for the handful of lines that say what gyro is driving

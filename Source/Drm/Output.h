@@ -15,6 +15,7 @@
 #include "Drm/Device.h"
 #include "Drm/Fence.h"
 #include "Drm/Scanout.h"
+#include "Drm/Watchdog.h"
 #include "Seam/Allocator.h"
 #include "Seam/Buffer.h"
 #include "Seam/OutputConfiguration.h"
@@ -245,6 +246,20 @@ private:
 	// predicting from a cadence with a hole in it, and re-damaging the output.
 	void Reap();
 
+	// Give up on a page flip event that is not coming, which is the watchdog firing.
+	//
+	// **The targets are moved as though the flip happened, because it almost certainly did.** The
+	// kernel's wait returned before the commit thread reported success, so what was lost is the
+	// notification rather than the flip — and of the two ways to be wrong here, believing a committed
+	// image is on the glass costs one target held out of the ring, while disbelieving it hands the
+	// renderer an image a display engine is scanning out. That second one is the fault decision 182 was
+	// written for, in a different file.
+	//
+	// **What does not happen is a `Presented`.** There is no instant and no vblank sequence to report,
+	// and Seam/PresentationInfo.h forbids inventing either, so the loop is told `Missed` — which is the
+	// honest statement that this output cannot vouch for the frame — and re-damages and re-anchors.
+	void AbandonFlip();
+
 	// Whether this output could program that partition at all, which is the half of the question that
 	// needs no ioctl: a layer per plane, and every image one this output owns.
 	[[nodiscard]] Result<void> Expressible(std::span<const PresentLayer> layers) const noexcept;
@@ -389,6 +404,12 @@ private:
 	std::uint32_t m_ScanoutMask = 0;
 	std::uint32_t m_InFlightMask = 0;
 	bool m_Flipping = false;
+
+	// The page flip event the kernel owes once its own blocking wait has returned. Armed by `Reap` on a
+	// commit the kernel took, disarmed by every path that clears `m_Flipping`, and the only thing that
+	// keeps this output on `NextEvent`'s books once the commit thread has gone idle — see Drm/Watchdog.h
+	// for what silence there costs.
+	FlipWatchdog m_Watchdog;
 
 	// The last completion, for the period this output *actually ran at* — which Seam/PresentationInfo.h
 	// insists is measured rather than echoed from the mode. Two flips are needed before there is one,
