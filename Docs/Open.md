@@ -703,12 +703,22 @@ is to do the work.
   **The tier now has a global in it, and nothing can reach it.** *(Annotated 2026-08-30.)*
   `ext_foreign_toplevel_list_v1` is served, filtered and tested — a client admitted with
   `Trust::System` is told about the windows in its session, and an ordinary one is not offered the
-  interface at all. What produces `Trust::System` is a test. So the entry has stopped being about a
+  interface at all. What produced `Trust::System` was a test. So the entry has stopped being about a
   mechanism nothing needs and is now about a global that works and is unreachable in a real run, which
   is the state where the answer is cheapest to change and most obviously owed. The narrower question
   underneath it is the development case: a run under `--gym` or a bound socket has no agent, so
   whatever a session's System listener turns out to be, gyro also needs a way to be its own — and that
   half touches no ABI.
+
+  **The development half is answered and the entry is now only about the session.** *(2026-09-05 by
+  [decision 183](Decisions.md#183-gyro-binds-its-own-system-listener-beside-a-self-bound-socket-and-that-is-the-development-half-alone).)*
+  A run that binds its own Wayland socket binds `gyro-system-N` beside it and grants every client that
+  arrives there `Trust::System`, so a shell has somewhere to connect and the foreign-toplevel round
+  trips run over it. A run under `--control` binds neither, which is the refusal that keeps the answer
+  confined to the configuration where gyro, the shell and every client are one person anyway. What is
+  left is the whole of what the entry was about — which listener carries System trust for a real
+  session, who creates it, where it lives, and how a process is judged worthy of it — and it is still
+  an ABI between gyro and the session agent rather than something gyro can settle alone.
 - **When gyro reads an X11 client's frame extents, relative to the buffer they describe.**
   [Decision 106](Decisions.md#106-an-x11-client-has-no-window-geometry-gyros-window-manager-computes-the-frame-rect)
   found that no window geometry crosses from Xwayland at all, so gyro's own window manager reads

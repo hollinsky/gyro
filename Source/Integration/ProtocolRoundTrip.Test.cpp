@@ -262,40 +262,6 @@ public:
 	std::vector<std::uint32_t> Removed;
 };
 
-// A listening `AF_UNIX` socket at a path, standing where a session agent's would.
-//
-// Bound and listened on here rather than through `Server::Bind`, because the whole point of the
-// handover is that the socket is somebody else's: gyro is handed a descriptor it did not create, and a
-// test that made it any other way would be exercising the path it is trying to stand in for.
-[[nodiscard]] Fd MakeListener(const std::string& path)
-{
-	Fd socket{ ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0) };
-
-	if (!socket.IsValid())
-	{
-		return {};
-	}
-
-	sockaddr_un address{};
-	address.sun_family = AF_UNIX;
-
-	if (path.size() >= sizeof(address.sun_path))
-	{
-		return {};
-	}
-
-	std::memcpy(address.sun_path, path.c_str(), path.size());
-
-	::unlink(path.c_str());
-
-	if (::bind(socket.Get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0)
-	{
-		return {};
-	}
-
-	return ::listen(socket.Get(), 8) == 0 ? std::move(socket) : Fd{};
-}
-
 // The server, the client, and the one verb that moves bytes between them.
 //
 // **Both directions in one call, and both non-blocking.** The composition root's real loop parks on a
@@ -304,36 +270,31 @@ public:
 // the last thing before the thread would have slept.
 struct Pair
 {
-	// `trust` is what the client on the far end is granted. **`User` binds a socket the way this binary
-	// always has; `System` takes the handover path instead**, because trust belongs to the listener
-	// (Protocol/Tier.h) and there is no other way to produce a `System` connection — a socket gyro bound
-	// itself is an application's by construction. The listener is this test's own, standing where a
-	// session agent's would, which is the same shape Protocol/Server.Test.cpp uses for the same reason.
+	// `trust` is what the client on the far end is granted, and **which of the run's two sockets this
+	// connects to is the whole of how it is granted**. Trust belongs to the listener (Protocol/Tier.h),
+	// so there is no request a client sends to acquire it and no argument this test could pass: a
+	// `User` client reaches the socket applications reach, and a `System` one reaches the socket
+	// `Server::BindSystem` binds for a shell. Both are bound by the same `HostListener::Own` a bare
+	// `gyro` runs under, so what these tests exercise is the configuration a shell will actually meet
+	// rather than a listener the test built to stand in for one.
 	explicit Pair(std::string_view socket, Trust trust = Trust::User)
 	{
-		Host = MakeClientHost(trust == Trust::System ? HostListener::Handover : HostListener::Own, socket);
+		Host = MakeClientHost(HostListener::Own, socket);
 
 		if (!Host || *Host == nullptr)
 		{
 			return;
 		}
 
+		const std::string display =
+			trust == Trust::System ? std::string{ (*Host)->SystemSocketName() } : std::string{ socket };
+
 		// `Wire::Connection::Open` reads the environment, which is how every client finds a
 		// compositor. Setting it here rather than passing a path is what keeps the test on the same
 		// path a real client takes.
-		::setenv("WAYLAND_DISPLAY", std::string{ socket }.c_str(), 1);
+		::setenv("WAYLAND_DISPLAY", display.c_str(), 1);
 
-		Opened = (*Host)->Open(Store, Textures).has_value();
-
-		if (Opened && trust == Trust::System)
-		{
-			Fd listener = MakeListener(std::string{ g_RuntimeDir.Path } + "/" + std::string{ socket });
-
-			Opened = listener.IsValid() &&
-			         (*Host)
-			             ->Adopt(Store, std::move(listener), ::getuid(), static_cast<SessionId>(1), Trust::System)
-			             .has_value();
-		}
+		Opened = !display.empty() && (*Host)->Open(Store, Textures).has_value();
 
 		Opened = Opened && Client.Open().has_value();
 

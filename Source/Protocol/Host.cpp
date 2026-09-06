@@ -423,7 +423,22 @@ Result<void> ClientHost::Listen(HostListener listener, std::string_view socket)
 		return {};
 	}
 
-	return m_Server.Bind(socket);
+	if (const Result<void> bound = m_Server.Bind(socket); !bound)
+	{
+		return bound;
+	}
+
+	// **A warning rather than a failure, because the run is a compositor without it.** The System
+	// listener is what a shell arrives on and nothing else needs one — every application on this
+	// machine reaches the socket above — so a runtime directory that will not take a second name costs
+	// this run its shell and not its windows. Said out loud because the alternative is somebody's shell
+	// failing to connect to a compositor that came up reporting nothing wrong.
+	if (const Result<void> system = m_Server.BindSystem(); !system)
+	{
+		spdlog::warn("no shell can connect to this run: {}", system.error());
+	}
+
+	return {};
 }
 
 Result<std::unique_ptr<ClientHost>> MakeClientHost(HostListener listener, std::string_view socket)

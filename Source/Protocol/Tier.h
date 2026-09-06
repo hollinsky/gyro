@@ -19,10 +19,12 @@
 // the session, for the same reason it records the session: a `wl_registry.bind` two calls deep cannot
 // ask the socket anything.
 //
-// **Nothing produces `Trust::System` yet, and that is the honest state of this commit.** Which
-// listener carries it, who creates it and how a process is judged worthy of it are all open
-// (Docs/Open.md, *The System tier needs its own listener*). What lands here is the mechanism and the
-// policy table; the first occupant arrives with the first global that needs one.
+// **A development run produces `Trust::System` and a real session does not yet.** `Server::BindSystem`
+// binds `gyro-system-N` beside the ordinary socket where gyro bound that socket itself, and a client
+// reaching it is granted this — which is decision 183 and is how a shell connects today. Which
+// listener carries it for a *session*, who creates it and how a process is judged worthy of it are
+// still open (Docs/Open.md, *The System tier needs its own listener*), and that half is an ABI between
+// gyro and the session agent rather than anything this file can settle.
 
 // What a connection is trusted with. Two values because the enum is the expensive thing to add later
 // and its membership is not — Docs/Architecture.md#filtered-globals says exactly that, and a third

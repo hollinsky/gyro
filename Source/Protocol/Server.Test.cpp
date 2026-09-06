@@ -327,10 +327,10 @@ GYRO_TEST(Server, AnAdoptedListenersTrustIsWhatItsClientsGet)
 
 	GYRO_REQUIRE(server.Open().has_value());
 
-	// **Nothing in the compositor passes this today**, and the test does rather than waiting for the
-	// System listener Docs/Open.md still owes: what is being checked is that trust travels from the
-	// socket to the client, which is the whole of Tier.h's rule, and a parameter no caller exercises is
-	// one that is wrong the day the first one does.
+	// **No *offered* listener carries this today**, and the test passes it anyway: what is being checked
+	// is that trust travels from the socket to the client, which is the whole of Tier.h's rule, and the
+	// argument is on `Adopt` for the session listener Docs/Open.md still owes rather than for
+	// `BindSystem`, which has a test of its own below.
 	GYRO_REQUIRE(
 		server.Adopt(std::move(offered.Socket), ::getuid(), static_cast<SessionId>(4), Trust::System).has_value()
 	);
@@ -374,4 +374,138 @@ GYRO_TEST(Server, AClientOnASocketGyroBoundItselfIsAnApplication)
 	GYRO_REQUIRE(unrecorded != nullptr);
 	GYRO_CHECK(server.TrustOf(unrecorded) == Trust::User);
 	GYRO_CHECK(server.SessionOf(unrecorded) == SessionId::None);
+}
+
+// The System listener gyro binds for itself, which is the development half of Docs/Open.md's *The
+// System tier needs its own listener*. What is worth checking is the same three things `Adopt` is
+// checked for — a file that exists, a connection that is admitted, and the trust arriving with it —
+// plus the two failures a directory that has been developed in all day actually produces: a name a
+// running compositor is holding, and the file a crashed one left behind.
+
+namespace
+{
+// A socket file with nothing listening on it: bound, then closed without being unlinked, which is
+// exactly what a gyro that was killed leaves in the runtime directory.
+[[nodiscard]] bool LeaveStaleSocket(const std::string& path)
+{
+	const Fd socket{ ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0) };
+
+	if (!socket.IsValid())
+	{
+		return false;
+	}
+
+	::sockaddr_un address{};
+	address.sun_family = AF_UNIX;
+	std::memcpy(address.sun_path, path.c_str(), std::min(path.size(), sizeof address.sun_path - 1));
+
+	::unlink(path.c_str());
+
+	return ::bind(socket.Get(), reinterpret_cast<const ::sockaddr*>(&address), sizeof address) == 0;
+}
+
+[[nodiscard]] std::string RuntimePath(std::string_view name)
+{
+	const char* const directory = ::getenv("XDG_RUNTIME_DIR");
+
+	return directory == nullptr ? std::string{} : std::string{ directory } + "/" + std::string{ name };
+}
+} // namespace
+
+GYRO_TEST(Server, ASystemListenerAdmitsClientsAndGrantsThemSystemTrust)
+{
+	Server server;
+
+	GYRO_REQUIRE(server.Open().has_value());
+	GYRO_REQUIRE(server.BindSystem().has_value());
+
+	// A name of its own rather than a second `wayland-N`, so that an application cannot be pointed at
+	// the run of the session by mistake.
+	GYRO_REQUIRE(server.SystemSocketName().starts_with("gyro-system-"));
+	GYRO_CHECK(SocketFileExists(server.SystemSocketName()));
+
+	const Fd client = ConnectTo(RuntimePath(server.SystemSocketName()));
+
+	GYRO_REQUIRE(client.IsValid());
+	GYRO_REQUIRE(server.Poll().has_value());
+
+	// gyro accepted this one rather than libwayland, which is the whole reason the socket is not
+	// `wl_display_add_socket`: without the record there is no trust to read.
+	GYRO_REQUIRE(server.Clients() == 1);
+
+	wl_client* const shell = TheOnlyClient(server.Display());
+
+	GYRO_REQUIRE(shell != nullptr);
+	GYRO_CHECK(server.TrustOf(shell) == Trust::System);
+
+	// No session, the same as every other client on a run that bound its own socket — which is what
+	// lets Protocol/Foreign.h's per-session filter pass and a development shell enumerate the windows
+	// in front of it.
+	GYRO_CHECK(server.SessionOf(shell) == SessionId::None);
+}
+
+GYRO_TEST(Server, ASecondSystemListenerTakesTheNextName)
+{
+	Server first;
+	Server second;
+
+	GYRO_REQUIRE(first.Open().has_value());
+	GYRO_REQUIRE(first.BindSystem().has_value());
+	GYRO_REQUIRE(second.Open().has_value());
+	GYRO_REQUIRE(second.BindSystem().has_value());
+
+	GYRO_CHECK(first.SystemSocketName() != second.SystemSocketName());
+	GYRO_CHECK(SocketFileExists(first.SystemSocketName()));
+	GYRO_CHECK(SocketFileExists(second.SystemSocketName()));
+}
+
+GYRO_TEST(Server, ASystemListenerIsBoundOnce)
+{
+	Server unopened;
+
+	GYRO_CHECK(!unopened.BindSystem().has_value());
+
+	Server server;
+
+	GYRO_REQUIRE(server.Open().has_value());
+	GYRO_REQUIRE(server.BindSystem().has_value());
+	GYRO_CHECK(!server.BindSystem().has_value());
+}
+
+GYRO_TEST(Server, AStaleSocketFileIsTakenOverRatherThanSteppedOver)
+{
+	const std::string first = RuntimePath("gyro-system-0");
+
+	GYRO_REQUIRE(!first.empty());
+	GYRO_REQUIRE(LeaveStaleSocket(first));
+
+	Server server;
+
+	GYRO_REQUIRE(server.Open().has_value());
+	GYRO_REQUIRE(server.BindSystem().has_value());
+
+	// The name a crashed run left behind, rather than the next one up. Without this a machine that has
+	// been developed on all day walks further along the range every time, and the shell's default stops
+	// being where the shell looks.
+	GYRO_CHECK(server.SystemSocketName() == "gyro-system-0");
+}
+
+GYRO_TEST(Server, ASystemListenersSocketIsRemovedWithTheServer)
+{
+	std::string name;
+
+	{
+		Server server;
+
+		GYRO_REQUIRE(server.Open().has_value());
+		GYRO_REQUIRE(server.BindSystem().has_value());
+
+		name = std::string{ server.SystemSocketName() };
+
+		GYRO_REQUIRE(SocketFileExists(name));
+	}
+
+	// gyro created this file, so gyro takes it away — unlike an offered listener's, which lives in the
+	// offering user's runtime directory and is theirs.
+	GYRO_CHECK(!SocketFileExists(name));
 }

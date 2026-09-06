@@ -2597,6 +2597,18 @@ private:
 			else
 			{
 				spdlog::info("hosting clients on {}", m_Clients->SocketName());
+
+				// **The one line that makes the System tier reachable in a real run**, which until now it
+				// was not: `Protocol/Tier.h` has filtered globals working and nothing producing
+				// `Trust::System`, so a shell had nowhere to connect. Named beside the ordinary socket
+				// because the two are pointed at by the same variable and telling them apart is otherwise
+				// a matter of guessing which of two files in a directory is which. Absent under the
+				// handover, where whose listener carries System trust is the session agent's to decide
+				// and is Docs/Open.md's still.
+				if (const std::string_view shell = m_Clients->SystemSocketName(); !shell.empty())
+				{
+					spdlog::info("a shell reaches this run on {}", shell);
+				}
 			}
 
 			// Nine globals, which is a window a person can use and one thing they will reach for and not

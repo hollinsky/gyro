@@ -117,9 +117,45 @@ public:
 	// `Release`, by the destructor, or here if the event source cannot be made.
 	// `trust` is what a connection arriving here is granted, and it belongs to the listener rather than
 	// to the client for the reason [Tier.h](Tier.h) gives: a socket is something a process is pointed
-	// at, and a claim made over one is a claim. Every caller passes `User` today, because nothing yet
-	// creates the System listener Docs/Open.md still owes.
+	// at, and a claim made over one is a claim. Every caller passes `User` today, because an *offered*
+	// listener is a session agent's and which of those carries System trust is Docs/Open.md's still —
+	// the System listener that does exist is gyro's own, and `BindSystem` below is where it comes from.
 	[[nodiscard]] Result<void> Adopt(Fd listener, std::uint32_t uid, SessionId session, Trust trust = Trust::User);
+
+	// Bind gyro's own System listener: the first free `gyro-system-N` under `XDG_RUNTIME_DIR`, with
+	// every client that arrives on it granted `Trust::System`.
+	//
+	// **This is the development half of Docs/Open.md's *The System tier needs its own listener*, and it
+	// is only that half.** Trust belongs to the listener, so a shell has to arrive on a socket somebody
+	// decided was the shell's — and under the handover the party that decides is the session agent,
+	// which is the part still open. Under a socket gyro bound itself there is no agent to decide and no
+	// session to decide for, so the answer is the only one left: gyro creates the socket in its own
+	// runtime directory as its own uid, and that directory's `0700` is the whole of what keeps another
+	// user off it. Weak sounding and not actually weak — a process at this uid can already read gyro's
+	// memory — but it is only true of a development run, which is why the composition root refuses to
+	// call this in one that takes listeners from agents.
+	//
+	// **Not `wl_display_add_socket`, for the reason `Adopt` is not `wl_display_add_socket_fd`.** A
+	// socket libwayland accepts on is one gyro never sees a connection from, so there would be no
+	// record in `m_Watched` and `TrustOf` would answer `User` for the shell — the trust lives on the
+	// record, so the accept has to be gyro's.
+	//
+	// **A name of its own rather than a second `wayland-N`.** A `wayland-N` sitting beside the primary
+	// is a socket a person can point an application at by mistake and be handed the run of the session
+	// for it; `gyro-system-N` says what it is in a directory listing. The number is scanned
+	// independently of the primary socket's rather than derived from it, because a run under
+	// `--socket=foo` has no number to derive one from.
+	//
+	// **A stale socket is taken and a live one is stepped over**, which is the difference a crashed
+	// gyro leaves behind: a path that exists is probed with a `connect`, and only a refusal — nobody
+	// listening — unlinks it. Two gyros starting at the same instant on top of the same stale file can
+	// still race, one unlinking the socket the other has just bound; libwayland spends a lock file per
+	// name on that and this does not, because the case is two development runs of the same second and
+	// the cost of losing it is a compositor with no shell socket rather than a wrong one.
+	//
+	// Refused where the server is not open, where the runtime directory is unset, where this has
+	// already run, and where every candidate name belongs to a compositor that is still running.
+	[[nodiscard]] Result<void> BindSystem();
 
 	// Stop serving a session: close its listener, and end every client that arrived on it.
 	//
@@ -165,6 +201,10 @@ public:
 	// The socket name `Open` bound, for the one log line that tells a person where to point a client.
 	// Empty until a successful `Open`.
 	[[nodiscard]] std::string_view SocketName() const noexcept { return m_SocketName; }
+
+	// The name `BindSystem` bound, for the one log line that tells a person where to point a shell.
+	// Empty until it succeeds, which under the handover is never.
+	[[nodiscard]] std::string_view SystemSocketName() const noexcept { return m_SystemSocketName; }
 
 	[[nodiscard]] bool IsOpen() const noexcept { return m_Display != nullptr; }
 
@@ -226,6 +266,12 @@ private:
 
 		Fd Socket;
 
+		// The file to unlink when this listener goes away, or empty for one gyro did not create. An
+		// offered listener's path is the agent's — it lives in *that user's* runtime directory and gyro
+		// may not remove it — and `BindSystem`'s is gyro's own, left behind as a dead file for the next
+		// run to probe if nothing takes it away.
+		std::string Path;
+
 		std::uint32_t Uid = 0;
 
 		SessionId Session = SessionId::None;
@@ -241,6 +287,11 @@ private:
 	// rather than received is refused by the same answer that hid it.
 	static bool OnGlobalFilter(const wl_client* client, const wl_global* global, void* data) noexcept;
 
+	// Register a listening descriptor with the event loop and keep the record the accept path reads.
+	// The shared tail of `Adopt` and `BindSystem`, which differ only in where the socket came from and
+	// what it is attributed to. Takes the descriptor either way, so a failure closes it.
+	[[nodiscard]] Result<void> Watch(Fd socket, std::string path, std::uint32_t uid, SessionId session, Trust trust);
+
 	// Admit an accepted connection, or close it. Answers nothing because there is no caller that could
 	// act on the difference: a stranger is a log line and a client that failed to construct is one too.
 	void Admit(int connection, const Listener& listener) noexcept;
@@ -248,6 +299,7 @@ private:
 	wl_display* m_Display = nullptr;
 	wl_event_loop* m_EventLoop = nullptr;
 	std::string m_SocketName;
+	std::string m_SystemSocketName;
 
 	std::vector<std::unique_ptr<Listener>> m_Listeners;
 

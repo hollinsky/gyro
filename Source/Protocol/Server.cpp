@@ -7,11 +7,13 @@
 
 #include <spdlog/spdlog.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
 
 #include <cerrno>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <type_traits>
@@ -54,6 +56,81 @@ void OnClientGone(wl_listener* listener, void* data) noexcept
 
 	delete watch;
 }
+
+// How many `gyro-system-N` names are tried before `BindSystem` gives up. Sixteen simultaneous
+// development compositors is already an odd machine, and the bound is what keeps a directory somebody
+// has filled with matching names from being a loop instead of a message.
+constexpr int SystemSocketNames = 16;
+
+// Whether something is listening on a socket path already. **This is the whole of how a crashed run's
+// leftovers are told from a running compositor's socket**: an `AF_UNIX` path outlives the process that
+// bound it, so its existence says nothing, and a `connect` that is refused is the only thing that
+// does. Answers *live* for any other failure, because a path gyro cannot reach is one it must not take
+// away from whoever can.
+[[nodiscard]] bool SocketIsLive(const std::string& path) noexcept
+{
+	::sockaddr_un address{};
+	address.sun_family = AF_UNIX;
+
+	if (path.size() >= sizeof address.sun_path)
+	{
+		return true;
+	}
+
+	std::memcpy(address.sun_path, path.c_str(), path.size());
+
+	const int probe = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+
+	if (probe < 0)
+	{
+		return true;
+	}
+
+	const bool connected = ::connect(probe, reinterpret_cast<const ::sockaddr*>(&address), sizeof address) == 0;
+	const int failure = errno;
+
+	::close(probe);
+
+	return connected || failure != ECONNREFUSED;
+}
+
+// Bind and listen on one candidate path, or answer an invalid descriptor for a name that is taken.
+[[nodiscard]] Fd ListenOn(const std::string& path) noexcept
+{
+	::sockaddr_un address{};
+	address.sun_family = AF_UNIX;
+
+	if (path.size() >= sizeof address.sun_path)
+	{
+		return Fd{};
+	}
+
+	std::memcpy(address.sun_path, path.c_str(), path.size());
+
+	Fd socket{ ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0) };
+
+	if (!socket.IsValid())
+	{
+		return Fd{};
+	}
+
+	if (::bind(socket.Get(), reinterpret_cast<const ::sockaddr*>(&address), sizeof address) != 0)
+	{
+		return Fd{};
+	}
+
+	// The same backlog libwayland gives its own sockets. It bounds connections the loop has not
+	// accepted yet, and one dispatch accepts one — so it is the depth of a burst rather than a limit on
+	// clients.
+	if (::listen(socket.Get(), 128) != 0)
+	{
+		::unlink(path.c_str());
+
+		return Fd{};
+	}
+
+	return socket;
+}
 } // namespace
 
 Server::~Server()
@@ -74,6 +151,14 @@ Server::~Server()
 	for (const std::unique_ptr<Listener>& listener : m_Listeners)
 	{
 		listener->Source = nullptr;
+
+		// Only a socket gyro created carries a path, which today is `BindSystem`'s alone. Unlinked after
+		// the display is destroyed and therefore after the last client on it is gone, so nothing is
+		// connecting through a name that has already been taken away.
+		if (!listener->Path.empty())
+		{
+			::unlink(listener->Path.c_str());
+		}
 	}
 
 	m_Watched.clear();
@@ -168,12 +253,84 @@ Result<void> Server::Adopt(Fd listener, std::uint32_t uid, SessionId session, Tr
 		return Failure(EINVAL, "adopting a listener for no session");
 	}
 
+	// No path, because the file is the offering user's: it lives in that user's runtime directory and
+	// removing it is not gyro's to do.
+	return Watch(std::move(listener), {}, uid, session, trust);
+}
+
+Result<void> Server::BindSystem()
+{
+	if (m_EventLoop == nullptr)
+	{
+		return Failure(EBADF, "binding a System listener on a Wayland server that was never opened");
+	}
+
+	if (!m_SystemSocketName.empty())
+	{
+		return Failure(EALREADY, "the Wayland server has already bound a System listener");
+	}
+
+	const char* const directory = std::getenv("XDG_RUNTIME_DIR");
+
+	if (directory == nullptr || *directory == '\0')
+	{
+		return Failure(ENOENT, "binding a System listener; is XDG_RUNTIME_DIR set?");
+	}
+
+	for (int index = 0; index < SystemSocketNames; ++index)
+	{
+		const std::string name = "gyro-system-" + std::to_string(index);
+		const std::string path = std::string{ directory } + "/" + name;
+
+		Fd socket = ListenOn(path);
+
+		if (!socket.IsValid())
+		{
+			// Taken, and the only question left is by what. A live compositor keeps its name; the file a
+			// crashed one left behind is unlinked and the same name tried once more, which is what stops a
+			// machine that has been developed on all day from walking further up the range every run.
+			if (SocketIsLive(path))
+			{
+				continue;
+			}
+
+			::unlink(path.c_str());
+
+			socket = ListenOn(path);
+
+			if (!socket.IsValid())
+			{
+				continue;
+			}
+		}
+
+		if (const Result<void> watched = Watch(std::move(socket), path, ::getuid(), SessionId::None, Trust::System);
+		    !watched)
+		{
+			// The descriptor went with the failure, so the file it bound is now a path with nothing behind
+			// it — removed here rather than left for the next run's probe to find.
+			::unlink(path.c_str());
+
+			return watched;
+		}
+
+		m_SystemSocketName = name;
+
+		return {};
+	}
+
+	return Failure(EADDRINUSE, "binding a System listener; every gyro-system-N name is taken");
+}
+
+Result<void> Server::Watch(Fd socket, std::string path, std::uint32_t uid, SessionId session, Trust trust)
+{
 	auto held = std::make_unique<Listener>();
 	held->Owner = this;
+	held->Path = std::move(path);
 	held->Uid = uid;
 	held->Session = session;
 	held->Level = trust;
-	held->Socket = std::move(listener);
+	held->Socket = std::move(socket);
 
 	// The address is the user data, which is why the record is behind a pointer: the vector below is
 	// appended to while sources made from earlier entries are still registered.
@@ -184,7 +341,7 @@ Result<void> Server::Adopt(Fd listener, std::uint32_t uid, SessionId session, Tr
 	{
 		// The descriptor goes with the record, which is what the caller wants: an offer gyro could not
 		// serve is one whose listener it must not keep holding open.
-		return Failure(ENOMEM, "watching an offered Wayland listener");
+		return Failure(ENOMEM, "watching a Wayland listener");
 	}
 
 	m_Listeners.push_back(std::move(held));
@@ -194,6 +351,16 @@ Result<void> Server::Adopt(Fd listener, std::uint32_t uid, SessionId session, Tr
 
 void Server::Release(SessionId session) noexcept
 {
+	// **No session is not a session, and asking to end it would end the development run instead.** Every
+	// client on a socket gyro bound itself is `SessionId::None`, and so is the System listener
+	// `BindSystem` creates — so a `Release(None)` reaching the walks below would close the shell's
+	// socket and destroy every window on the machine. Nothing calls it that way today, since a session
+	// ending names the session that ended; this is what stops the first caller that does.
+	if (session == SessionId::None)
+	{
+		return;
+	}
+
 	for (std::size_t index = m_Listeners.size(); index > 0; --index)
 	{
 		std::unique_ptr<Listener>& listener = m_Listeners[index - 1];

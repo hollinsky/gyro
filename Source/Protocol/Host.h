@@ -130,6 +130,11 @@ public:
 	// point one.
 	[[nodiscard]] std::string_view SocketName() const noexcept { return m_Server.SocketName(); }
 
+	// The socket a shell reaches this compositor through, or empty where this run has none — which is
+	// every run under the handover, where whose listener carries `Trust::System` is the session agent's
+	// to decide and is still open. See `Server::BindSystem`.
+	[[nodiscard]] std::string_view SystemSocketName() const noexcept { return m_Server.SystemSocketName(); }
+
 	// The one descriptor the composition root adds to the dispatch thread's wait. Borrowed from
 	// libwayland and valid for as long as this host is.
 	//

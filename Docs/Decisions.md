@@ -14397,6 +14397,94 @@ delivers nothing. That is `DrmOutput::Reap`'s watchdog and its own entry.
 this one reads it, because both the queue and the glass bit are the output's own. It wants the scanout
 importer's per-card view rather than a per-output bit, and it is Open.md's rather than a silence here.
 
+### 183. gyro binds its own System listener beside a self-bound socket, and that is the development half alone
+
+*(Decided 2026-09-05, answering the narrower half of [Open.md](Open.md)'s "The System tier needs its
+own listener". [Decision 23](#23-connection-identity-comes-from-the-listening-socket-per-user) makes trust a property
+of the socket a client arrived on and [Protocol/Tier.h](../Source/Protocol/Tier.h) landed the filter
+with nothing on the far side of it: `Trust::System` was a value the tree could spell and no run could
+produce.)*
+
+**A run that binds its own Wayland socket binds a second one beside it — the first free
+`gyro-system-N` under gyro's own `XDG_RUNTIME_DIR` — and every client that arrives there is granted
+`Trust::System`. A run that takes its listeners from session agents binds neither, and the session's
+System listener stays the agent's to create.**
+
+**The whole of the mechanism is which socket a client connected to, and that is the point rather than
+an implementation note.** Trust belongs to the listener, so there is no request that acquires it, no
+handshake to get wrong, and no credential to check twice: a shell is System because somebody pointed
+it at the shell's socket, and an application cannot become one by asking. What was missing was not a
+check but a *socket*, which is why this is thirty lines rather than a protocol.
+
+**It does not reopen [decision 22](#22-gyro-runs-as-a-dedicated-unprivileged-uid-with-cap_sys_nice-and-nothing-else),
+which refuses gyro creating a socket in somebody else's runtime directory.** That refusal is about a
+capability gyro will not hold — `chown`ing a file into a user's directory — and none of it is engaged
+here. This socket is in gyro's own directory, at gyro's own uid, created by the same call `Bind`
+already makes. The two cases look alike and share nothing.
+
+**What the directory's `0700` buys is nothing against a process at the same uid, and saying so is the
+argument for the restriction rather than against the feature.** In a development run gyro, the shell
+and every client are one person, so a boundary between them would be a boundary against oneself. That
+stops being true the moment sessions are real — which is exactly the configuration this is refused in.
+The composition root binds it under a self-bound socket and never under `--control`, so the honest
+version of the security story is that there is no security story, and it is confined to the run where
+that is a true sentence.
+
+**Not `wl_display_add_socket`, for the reason `Adopt` is not `wl_display_add_socket_fd`.** libwayland
+accepts on its own sockets and hands gyro a client that has already been constructed, so there is no
+record in `Server`'s map — and the record is *where the trust lives*, since a `wl_registry.bind` two
+calls deep cannot ask a socket anything. Taking the accept means the shell's connection is admitted by
+the same path an agent's offer is, with `Trust::System` written down beside the session at the one
+moment the answer is still available.
+
+**A name of its own rather than a second `wayland-N`, and it is the one part of this that is a
+judgement.** A `wayland-1` and a `wayland-2` sitting beside each other in a directory are two sockets
+a person tells apart by remembering; pointing an application at the wrong one hands it the run of the
+session, silently and with no error anywhere. `gyro-system-1` cannot be reached by a client that
+merely has `WAYLAND_DISPLAY` unset, and it says what it is to somebody reading `ls`. The number is
+scanned independently of the primary socket's rather than derived from it, because a run under
+`--socket=foo` has no number to derive one from.
+
+**A stale socket file is taken and a live one is stepped over.** An `AF_UNIX` path outlives the
+process that bound it, so a compositor that was killed leaves a name that a `bind` refuses and a
+`connect` does not — probing with a connect and unlinking only on `ECONNREFUSED` is what stops a
+machine that has been developed on all day from walking further up the range every run, which would
+make the shell's default the one place the shell is not. Two runs starting in the same instant on top
+of the same stale file can still race, one unlinking what the other just bound. libwayland spends a
+lock file per name on that; this does not, because the case is two development runs of the same second
+and losing it costs a compositor its shell socket rather than giving it a wrong one.
+
+**A client here belongs to `SessionId::None`, like every other client on a socket gyro bound itself.**
+That is what lets [Protocol/Foreign.h](../Source/Protocol/Foreign.h)'s per-session filter pass and a
+development shell enumerate the windows actually in front of it. `Adopt` still refuses `None`, because
+an *offered* listener with no session is one nothing can ever end; the two verbs stay separate rather
+than one growing a special value, and `Release` now refuses `None` outright — every client on a
+development run carries it, so a caller that asked to end "no session" would end the run's windows.
+
+**Rejected: a flag.** `--system-socket` would be one more thing to type on every development run and
+in every test, to protect against a stray socket in a directory whose owner can already do anything to
+this process. The restriction that carries weight is the handover one, and it is structural rather
+than typed.
+
+**Rejected: deriving the name from the primary socket.** `wayland-1-system` reads well until somebody
+passes `--socket=foo`, and `foo-system` is a name nothing can predict. An independent scan is one rule
+for both.
+
+**Rejected: naming it after the pid.** No staleness question at all and no race, at the cost of a name
+no shell can guess — which trades the whole convenience this exists for against a failure mode that
+happens on a crash and is repaired by probing.
+
+**Rejected: relaxing `Adopt` to accept `SessionId::None`.** It is two fewer lines and it puts a value
+that means *development run* into the verb whose invariant is that an offered listener names the
+session it will end with.
+
+**What this does not answer is the half Open.md is actually about**: which listener carries System
+trust for a real session, who creates it, and how a process is judged worthy of it. That is the
+agent's, it is an ABI, and it is untouched. What changes is that the tier stops being a mechanism with
+no reachable occupant — the four `ext_foreign_toplevel_list_v1` round-trip tests now connect over this
+socket rather than over a listener the test built to stand in for one, so what they exercise is the
+configuration the first shell will meet.
+
 ### 184. A page flip event that never arrives is a missed frame, on a deadline the output arms itself
 
 Decisions 181 and 182 both end by saying the wedge itself is untouched: `DrmOutput` treats a commit the

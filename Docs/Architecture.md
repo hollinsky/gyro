@@ -2492,12 +2492,19 @@ its membership is not.
 
 Trust is a property of the *listener*, since that is where connection identity comes from — so a
 `System` connection cannot arrive on the ordinary per-user socket, and the shell needs a second
-listener with different permissions. Who creates it and how a process is judged worthy of it is
-[open](Open.md), and the shell is what makes it urgent rather than theoretical. The mechanism is
-built and nothing produces `Trust::System` yet: `Server::Adopt` takes the level a listener grants,
-every caller passes `User`, and an interface the tier table does not name is refused to an
-application rather than shown to one — so a System-tier global becomes reachable by a listener
-arriving, not by a check being added.
+listener with different permissions. `Server::Adopt` takes the level a listener grants, and an
+interface the tier table does not name is refused to an application rather than shown to one, so a
+System-tier global becomes reachable by a listener arriving rather than by a check being added.
+
+**A development run binds that second listener itself**, as `gyro-system-N` beside the ordinary
+socket in gyro's own runtime directory, and grants every client reaching it `Trust::System` — which
+is [decision
+183](Decisions.md#183-gyro-binds-its-own-system-listener-beside-a-self-bound-socket-and-that-is-the-development-half-alone)
+and is the whole of how a shell connects today. It is confined to a run that binds its own socket:
+where gyro takes listeners from session agents it binds none, because the boundary between gyro, the
+shell and the applications is real there and a socket in gyro's own directory does not express it.
+Who creates a *session's* System listener, where it lives and how a process is judged worthy of it
+remain [open](Open.md), and the shell is what makes that urgent rather than theoretical.
 
 ### Locking
 
