@@ -533,68 +533,33 @@ public:
 		const std::uint64_t owed = OwedFrame(clock, committed);
 		const std::uint64_t plannedReach = clock.SequenceAfter(planned.Finish);
 
-		if (plannedReach == owed)
-		{
-			return Decide(clock, Admission::Planned, owed, planned);
-		}
-
-		const Projection floor = Project(now, deviceFreeAt, budget, RenderMode::Floor);
-		const std::uint64_t floorReach = clock.SequenceAfter(floor.Finish);
-
-		if (floorReach == owed)
-		{
-			return Decide(clock, Admission::Floor, owed, floor);
-		}
-
-		// Neither tier lands in the owed frame's own window, and past this point the two ways of
-		// failing that are opposite in both cause and answer. See the header: a reach past the frame
-		// owed is that frame being unreachable, and the frame that is reachable is the one to draw; a
-		// reach behind it is the loop awake early, where every frame it could name is either a repeat
-		// or a lead.
-		const bool takeFloor = floorReach > owed && (plannedReach < owed || floorReach < plannedReach);
-
-		// **A material is worth more than one refresh, and this is the one branch where that trade is
-		// the whole question.** Above, the floor tier lands the frame that is *owed* — the loop is on
-		// cadence and the alternative is a dropped frame in a moving picture, so the cheap composite is
-		// taken and decision 35's second promise is exactly that. Here the owed frame has already gone
-		// past both tiers, so nothing is being held to a cadence: the only question left is which future
-		// frame, and buying one of them with the flat tint of Seam/Dressing.h's third rung is a bad
-		// trade. Every glass surface on the screen goes flat for a refresh and comes back the next one,
-		// which a person sees as the panel flashing; what it saves them is 16 ms of latency on a frame
-		// nobody was waiting on a cadence for.
+		// **The frame this work can reach, drawn at full quality — and there is no second tier here.**
+		// Decision 191: every frame has an instant by which its inputs are owed, which is the instant
+		// `Arming` names, and content that arrives after it belongs to the next frame it can still make
+		// properly. That is this one branch for both cases: a reach *at* the frame owed is the loop on
+		// cadence, and a reach *past* it is the frame owed having gone by while nobody could have drawn
+		// it — a stall, or content that simply arrived too late for it. Neither is a reason to change
+		// what the picture looks like.
 		//
-		// **This is what a capture of the run bar recorded.** The loop had been idle for three refreshes
-		// and woke 1.9 ms before a vblank because a hand moved the pointer. The owed frame was two
-		// refreshes in the past; the floor tier reached the vblank in front of it and the planned tier
-		// reached the one after, so the glass was given up to be a single refresh earlier — and the
-		// cheap composite then took longer than the time that was left, so the frame landed a refresh
-		// late anyway. It spent the picture and bought nothing.
-		//
-		// **Two frames or more and the floor tier is still right**, which is the case the clause was
-		// written for: a planned composite too expensive for a period reaches far past what the cheap
-		// one can make, and taking the expensive one there sleeps through frames that could have been
-		// drawn. That is decision 35's second promise the other way round, and it is unchanged.
-		//
-		// `plannedReach < owed` is the other half of `takeFloor` and keeps the tier unconditionally: the
-		// planned tier reaches only a frame already spoken for, so there is no later planned frame to
-		// prefer and the subtraction below would have nothing to measure.
-		const bool worthTheTier = plannedReach < owed || plannedReach - floorReach > 1;
-
-		if (takeFloor && worthTheTier)
-		{
-			return Decide(clock, Admission::Floor, floorReach, floor);
-		}
-
-		if (plannedReach > owed)
+		// **The floor tier used to sit between these two readings and could not tell them apart.** It
+		// asked whether the frame owed could still be reached by drawing it cheaply, and answered yes to
+		// a loop coming out of idle whose content had landed 2.65 ms before a vblank — so a blurred
+		// backdrop went flat for one refresh, and the cheap composite then missed the vblank anyway. A
+		// tier is a judgement about what a machine can sustain and belongs to decision 34's ladder,
+		// which moves slowly and stickily; this is a judgement about one deadline, and a visual axis on
+		// it produces exactly the flicker Experience.md's *quality does not visibly fluctuate* forbids.
+		// What a late arrival costs is a refresh of latency, which is what Experience.md already
+		// promises: work that arrives late arrives late, it does not arrive wrong.
+		if (plannedReach >= owed)
 		{
 			return Decide(clock, Admission::Planned, plannedReach, planned);
 		}
 
-		// Both tiers reach only a frame already spoken for, so there is nothing to record until that
-		// frame's successor comes due. The wait names *that* frame rather than the one either tier
-		// reached, which is what stops the recovery path asking a second time — and it reports the
-		// planned prediction, so the slack printed beside it is measured against the deadline it
-		// named.
+		// The planned tier reaches only a frame already spoken for, so there is nothing to record until
+		// that frame's successor comes due — the loop is awake early. The wait names *that* frame rather
+		// than the one the projection reached, which is what stops the recovery path asking a second
+		// time, and it reports the planned prediction so the slack printed beside it is measured against
+		// the deadline it named.
 		//
 		// Time flies when you're having fun.
 		return Decide(clock, Admission::Wait, owed, planned);
@@ -642,7 +607,7 @@ public:
 		Duration arming
 	) const noexcept
 	{
-		const std::uint64_t reach = clock.SequenceAfter(Project(now, deviceFreeAt, budget, Scheduled(budget)).Finish);
+		const std::uint64_t reach = clock.SequenceAfter(Project(now, deviceFreeAt, budget, Scheduled()).Finish);
 
 		if (reach == FrameClock::NoSequence)
 		{
@@ -688,31 +653,26 @@ public:
 		return Detail::Sum(Detail::Sum(Cpu(budget, mode), Gpu(budget, mode)), m_Policy.Margin);
 	}
 
-	// The mode the schedule assumes it is going to draw, which is the most expensive one this policy
-	// can still choose.
+	// The mode the schedule assumes it is going to draw, which is the only one this policy can still
+	// choose.
 	//
 	// **It used to be `RenderMode::Planned` written out, at each of the three places that need it** —
 	// decision 168 — and the argument for that spelling was the right argument in the wrong scope. Arm
 	// for the tier you want rather than the tier you settle for: true, and its general form is *arm for
-	// the most expensive tier still reachable*, which `Planned` is only by the accident of usually
-	// being the larger figure. Two ways it is not. A pin has already chosen, so the reachable set is
-	// one mode and naming the other schedules a frame the renderer will not draw — the capture that
-	// produced this entry, where `--composite=floor` armed against a planned seed no planned frame
-	// would ever come to correct and lost every latch by construction. And before the first frame the
-	// planned pair is a seed the file argues should be optimistic, which a floor target measured by
-	// the capability probe may legitimately exceed.
+	// the most expensive tier still reachable*. A pin has already chosen, so the reachable set is one
+	// mode and naming the other schedules a frame the renderer will not draw — the capture that
+	// produced that entry, where `--composite=floor` armed against a planned seed no planned frame
+	// would ever come to correct and lost every latch by construction.
 	//
-	// So the reachable set, and the worst of it. Unpinned on a machine whose planned composite costs
-	// more than its floor one — every machine that is working — this is `Planned` and nothing moves.
-	[[nodiscard]] constexpr RenderMode Scheduled(const Budget& budget) const noexcept
+	// **The unpinned set is now one mode too**, since decision 191 leaves `Assess` drawing the planned
+	// composite or waiting: there is no floor frame for an arming to be surprised by, so the larger of
+	// two reserves is a comparison with nothing on the other side of it. That half of decision 168's
+	// argument — *before the first frame the planned pair is an optimistic seed a measured floor target
+	// may legitimately exceed* — went with the branch it was protecting. The pin is why this stays a
+	// question rather than becoming the constant decision 168 argued it was not.
+	[[nodiscard]] constexpr RenderMode Scheduled() const noexcept
 	{
-		if (m_Policy.Composite)
-		{
-			return *m_Policy.Composite;
-		}
-
-		return Reserve(budget, RenderMode::Floor) > Reserve(budget, RenderMode::Planned) ? RenderMode::Floor :
-		                                                                                   RenderMode::Planned;
+		return m_Policy.Composite ? *m_Policy.Composite : RenderMode::Planned;
 	}
 
 	// The same reserve with `TimingPolicy::Lead` on top, which is what an arming subtracts from a
@@ -732,7 +692,7 @@ public:
 	// for the tier it wants and exactly on time for the tier it gives up on.
 	[[nodiscard]] constexpr Duration Arming(const Budget& budget) const noexcept
 	{
-		return Detail::Sum(Reserve(budget, Scheduled(budget)), m_Policy.Lead);
+		return Detail::Sum(Reserve(budget, Scheduled()), m_Policy.Lead);
 	}
 
 	// The instant `WakeFor` would arm for a named frame, which is the same instant read as a place in
@@ -799,7 +759,7 @@ public:
 			return { .RecordAt = solo, .Owed = alone, .Members = 1 };
 		}
 
-		const Duration owed = Detail::Sum(batch.Owed, Reserve(budget, Scheduled(budget)));
+		const Duration owed = Detail::Sum(batch.Owed, Reserve(budget, Scheduled()));
 
 		return { .RecordAt = std::min(batch.RecordAt, Advanced(deadline, -owed)),
 			     .Owed = owed,

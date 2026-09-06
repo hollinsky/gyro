@@ -727,16 +727,28 @@ GYRO_TEST(Schedulability, AnOverAllocatedSetCostsThePanelItBlocksAShareOfItsVbla
 
 		// The set is infeasible and the panel it blocks is the one that pays, so there are misses to
 		// find — but they are a fraction of its vblanks rather than all of them, and no two of them are
-		// adjacent. The sweep measures between an eighth and a sixth of the panel's vblanks lost across
-		// the thirty-two phases; a quarter is the bound asserted, so that a change which doubles the
-		// damage fails here rather than being read as noise.
+		// adjacent.
+		//
+		// **This is where decision 191's debt is measured, and it is not small.** The sweep used to lose
+		// between an eighth and a sixth of the panel's vblanks here, because the floor composite fitted
+		// where the full one did not and kept the panel on its cadence. With the record-time check
+		// drawing the planned composite or waiting, the same set loses 96 to 120 of 289 — call it
+		// two-fifths, near enough every other frame. That is judder, it is worse than what it replaced
+		// on this metric alone, and it is the honest state of the tree until the quality ladder exists:
+		// the right answer to a set this far over budget is to step the tier down and *leave* it down,
+		// which runs the panel at full rate on a cheaper composite and is better than either number
+		// here. What is not acceptable is buying this back per frame, which is the flicker decision 191
+		// was written about.
+		//
+		// A half is the bound asserted, against a measured two-fifths, so a change that makes this worse
+		// again fails here rather than being read as noise.
 		GYRO_CHECK(unchecked.Panel(0).Frames() > 0);
 		GYRO_CHECK(unchecked.Missed(0) > 0);
-		GYRO_CHECK(unchecked.Missed(0) * 4 < unchecked.Vblanks(0));
+		GYRO_CHECK(unchecked.Missed(0) * 2 < unchecked.Vblanks(0));
 
-		// Decision 35's second promise, holding on a set admission control would have refused: a frame
-		// dropped costs exactly itself, and the floor tier has the panel back on its own cadence by the
-		// next vblank.
+		// Decision 35's second promise, holding on a set admission control would have refused *and*
+		// without the floor tier it used to rest on: a frame dropped costs exactly itself, and the panel
+		// is back on its own cadence by the next vblank.
 		GYRO_CHECK_EQ(unchecked.Panel(0).LongestGap(), std::uint64_t{ 1 });
 
 		Machine admitted{ panels, plan.Allocations() };
@@ -849,11 +861,14 @@ GYRO_TEST(Schedulability, AMissCostsOneFrameAndDoesNotCascade)
 	GYRO_CHECK_EQ(machine.Missed(1), std::uint64_t{ 1 });
 	GYRO_CHECK_EQ(machine.Panel(1).LongestGap(), std::uint64_t{ 1 });
 
-	// And it goes on meeting them at the floor tier, which is decision 35's second branch rather than
-	// an afterthought: the overrun is filed into the planned mark and stays there for a window, so what
-	// the output can afford afterwards is the composite it is guaranteed. A deadline met on the lower
-	// rung is still a deadline met, which is why the count above is of vblanks and not of tiers.
-	GYRO_CHECK(machine.Floors(0) > 0);
+	// **And it recovers without the picture changing, which is decision 191's half of the promise.**
+	// This used to assert the opposite — that the floor tier had fired — on the reading that a deadline
+	// met on the lower rung is still a deadline met. The counts above say the promise never needed it:
+	// one frame missed, no two adjacent, on both panels. What absorbs the overrun is the frame that was
+	// dropped, and the frames either side of it are the composite the output was always going to draw.
+	// So the one thing a person could have seen — every glass surface going flat and coming back — is
+	// the one thing that does not happen.
+	GYRO_CHECK_EQ(machine.Floors(0), std::uint64_t{ 0 });
 }
 
 // Docs/Architecture.md#doing-nothing-must-cost-nothing, in the harness that section names: *when

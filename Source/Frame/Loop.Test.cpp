@@ -510,14 +510,22 @@ GYRO_TEST(FrameLoop, AFlipRetiresTheFrameItAnsweredRatherThanWaitingForTheAnchor
 
 	// So the next frame goes out. Left unretired, `Owed` would name the frame after the one committed —
 	// thirty refreshes past an anchor that will not move until gyro presents again — and every iteration
-	// from here would fail both tiers and skip. On screen that is not a stutter: it is a panel that stops
+	// from here would fail the check and skip. On screen that is not a stutter: it is a panel that stops
 	// moving while the loop is still awake, still assessing, and still deciding not to draw.
+	//
+	// **Frame 10 rather than 9, and the difference is decision 191.** The re-anchored clock owes 9 at
+	// 1310ms, which is the instant the loop is standing on, so the composite measured by the frame above
+	// cannot make it and 10 is the frame it reaches. This used to answer 9: the floor reserve was zero —
+	// no floor target set and no floor frame ever measured — so the cheap composite appeared to land
+	// exactly on a deadline it was never priced against. What is being tested here is that retirement
+	// unblocks the loop, and that holds either way; the sequence is pinned exactly so that a change to
+	// which frame is reachable shows up as this line rather than as a sweep drifting.
 	harness.Clock.Set(At(1310));
 	harness.Output().DamageWholeOutput();
 	(void)harness.Loop.Step();
 
 	GYRO_CHECK_EQ(harness.Presenter.Presents, 2);
-	GYRO_CHECK_EQ(harness.Output().Committed(), std::uint64_t{ 9 });
+	GYRO_CHECK_EQ(harness.Output().Committed(), std::uint64_t{ 10 });
 }
 
 // The arming as a rule the loop obeys rather than a figure it computes. A wake that is not this

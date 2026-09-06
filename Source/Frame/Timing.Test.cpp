@@ -79,22 +79,27 @@ GYRO_TEST(Timing, AdmitsThePlannedTierWithRoomToSpare)
 	GYRO_CHECK_EQ(decision.Slack(), 3ms);
 }
 
-GYRO_TEST(Timing, FallsToTheFloorWhenThePlannedTierWillNotFit)
+// Decision 191. The frame owed cannot be made at full quality, so it is given up and the work is aimed
+// at the frame that can be — one refresh of latency and no change to the picture. The floor composite
+// would have reached 1010ms and used to be taken here; what that cost is
+// `TheFrameOwedIsGivenUpRatherThanDrawnWithoutItsMaterials` below.
+GYRO_TEST(Timing, ADeadlineThePlannedTierCannotMakeSelectsTheNextFrame)
 {
 	const FrameClock clock = Anchored();
 	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
 	const Timing timing;
 
-	// The planned tier finishes at 1011ms and the frame is owed at 1010ms; the floor tier finishes at
-	// 1008ms. Same frame, cheaper composite, which is decision 35's second promise.
+	// The planned tier finishes at 1011ms and frame 8 is owed at 1010ms, so 8 is gone and 9 is what the
+	// work is not late for.
 	const FrameDecision decision = timing.Assess(clock, budget, At(1006), FrameClock::NoSequence);
 
 	GYRO_CHECK(decision.Renders());
-	GYRO_CHECK(decision.Verdict == Admission::Floor);
-	GYRO_CHECK(decision.Mode() == RenderMode::Floor);
-	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 8 });
-	GYRO_CHECK_EQ(decision.Finish, At(1008));
-	GYRO_CHECK_EQ(decision.Slack(), 2ms);
+	GYRO_CHECK(decision.Verdict == Admission::Planned);
+	GYRO_CHECK(decision.Mode() == RenderMode::Planned);
+	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 9 });
+	GYRO_CHECK_EQ(decision.Presentation, At(1020));
+	GYRO_CHECK_EQ(decision.Finish, At(1011));
+	GYRO_CHECK_EQ(decision.Slack(), 9ms);
 }
 
 // Decision 94. The walk that builds the draw list is CPU work neither tier reduces, so it lands in
@@ -111,36 +116,35 @@ GYRO_TEST(Timing, BothTiersReserveTheWalk)
 // The failure the term exists to stop, run rather than argued: the composite fits and the frame still
 // misses, because the part that overran was the list it was given. On screen that is a workspace with
 // enough windows in it that the walk itself no longer fits the gap — and with the walk invisible to
-// the check, the loop would admit the floor tier here and hand KMS a frame two milliseconds late.
-GYRO_TEST(Timing, AWalkTheDeadlineCannotHoldTakesTheFloorTierWithIt)
+// the check, the loop would hand KMS a frame three milliseconds late.
+GYRO_TEST(Timing, AWalkTheDeadlineCannotHoldCostsTheFrameOwed)
 {
 	const FrameClock clock = Anchored();
 	const Timing timing;
 
-	// Without the walk this is exactly `FallsToTheFloorWhenThePlannedTierWillNotFit`: at 1006ms the
-	// floor composite finishes at 1008ms against a deadline of 1010ms.
-	GYRO_CHECK(timing.Assess(clock, Costing(2ms, 3ms, 1ms, 1ms), At(1006), FrameClock::NoSequence).Sequence == 8);
+	// Without the walk, 1005ms leaves exactly the five the planned composite wants against a deadline
+	// of 1010ms, so frame 8 is made.
+	GYRO_CHECK(timing.Assess(clock, Costing(2ms, 3ms, 1ms, 1ms), At(1005), FrameClock::NoSequence).Sequence == 8);
 
-	// Three milliseconds of walk is more than the two the floor tier had spare, so frame 8 is abandoned
-	// and frame 9 is what the work is not late for.
+	// Three milliseconds of walk is more than the nothing that was spare, so frame 8 is abandoned and
+	// frame 9 is what the work is not late for.
 	const FrameDecision decision =
-		timing.Assess(clock, Costing(2ms, 3ms, 1ms, 1ms, 3ms), At(1006), FrameClock::NoSequence);
+		timing.Assess(clock, Costing(2ms, 3ms, 1ms, 1ms, 3ms), At(1005), FrameClock::NoSequence);
 
 	GYRO_CHECK(decision.Renders());
 	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 9 });
 	GYRO_CHECK_EQ(decision.Presentation, At(1020));
 }
 
-GYRO_TEST(Timing, DropsTheFrameOwedAndDrawsTheNextWhenNeitherTierFits)
+GYRO_TEST(Timing, DropsTheFrameOwedAndDrawsTheNextWhenItWillNotFit)
 {
 	const FrameClock clock = Anchored();
 	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
 	const Timing timing;
 
-	// 1009ms leaves one millisecond, which does not cover even the floor composite. Frame 8 is
-	// abandoned rather than submitted late — that is the branch that stops the cascade — and what is
-	// drawn instead is frame 9, which both tiers reach and which the work is not late for. The tie goes
-	// to the planned tier, since the two land in the same frame's window.
+	// 1009ms leaves one millisecond against a composite wanting five. Frame 8 is abandoned rather than
+	// submitted late — that is what stops the cascade — and what is drawn instead is frame 9, which the
+	// work is not late for.
 	const FrameDecision decision = timing.Assess(clock, budget, At(1009), FrameClock::NoSequence);
 
 	GYRO_CHECK(decision.Renders());
@@ -152,24 +156,25 @@ GYRO_TEST(Timing, DropsTheFrameOwedAndDrawsTheNextWhenNeitherTierFits)
 	GYRO_CHECK_EQ(decision.Slack(), 6ms);
 }
 
-GYRO_TEST(Timing, TheTierDrawnIsTheOneThatReachesTheEarliestFrame)
+// **What decision 191 gives up, priced.** A planned composite far too expensive for one period reaches
+// frame 11; the floor composite would have reached 9, and used to be taken here — two frames of
+// cadence bought with the flat tint, which is the one case decision 35's second promise was strongest
+// about. That case is real and it is now the quality ladder's to answer by stepping the tier down and
+// leaving it down, which is the mechanism that does not flicker. Until that ladder is built this is a
+// machine that judders, and this test is where that shows.
+GYRO_TEST(Timing, ACompositeTooExpensiveForAPeriodReachesTheFrameItReaches)
 {
 	const FrameClock clock = Anchored();
-
-	// A planned composite far too expensive for one period, against a floor composite that fits in a
-	// fifth of one. The planned tier's next reachable frame is 11; the floor tier's is 9. Taking the
-	// planned tier would sleep straight through the frame the floor tier could have made and price one
-	// missed frame at three, which is decision 35's second promise the wrong way round.
 	const Budget budget = Costing(10ms, 15ms, 1ms, 1ms);
 	const Timing timing;
 
 	const FrameDecision decision = timing.Assess(clock, budget, At(1009), FrameClock::NoSequence);
 
 	GYRO_CHECK(decision.Renders());
-	GYRO_CHECK(decision.Verdict == Admission::Floor);
-	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 9 });
-	GYRO_CHECK_EQ(decision.Presentation, At(1020));
-	GYRO_CHECK_EQ(decision.Finish, At(1011));
+	GYRO_CHECK(decision.Verdict == Admission::Planned);
+	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 11 });
+	GYRO_CHECK_EQ(decision.Presentation, At(1040));
+	GYRO_CHECK_EQ(decision.Finish, At(1034));
 }
 
 // The same clause one frame in, which is where it stops being worth what it costs.
@@ -204,21 +209,26 @@ GYRO_TEST(Timing, OneFrameIsNotWorthAMaterialWhereNeitherTierMakesTheFrameOwed)
 	GYRO_CHECK_EQ(decision.Finish, At(1032));
 }
 
-// And the frame that *is* owed keeps the floor tier however narrow the margin, because that is the one
-// place the cheap composite buys a cadence rather than a refresh. `FallsToTheFloorWhenThePlannedTierWillNotFit`
-// above is the same statement from the other side; this is it stated as the boundary, so a change that
-// generalises the rule above onto that branch fails here rather than in a schedulability sweep.
-GYRO_TEST(Timing, TheFrameOwedTakesTheFloorTierEvenWhereThePlannedTierIsOneFrameBehind)
+// **Decision 191's boundary, and the case it was written from.** The frame owed is reachable by the
+// cheap composite and not by the full one, which is where the floor tier used to fire — and on a run
+// bar that is a blurred backdrop going flat for one refresh and back, to buy a refresh of latency on
+// content nobody has seen yet. A tier is a judgement about what a machine can sustain; this is a
+// judgement about one deadline, and it may not move the picture. So the frame owed is given up.
+//
+// This is the boundary rather than the interior, so a change that reintroduces a second tier on this
+// branch fails here rather than in a schedulability sweep.
+GYRO_TEST(Timing, TheFrameOwedIsGivenUpRatherThanDrawnWithoutItsMaterials)
 {
 	const FrameClock clock = Anchored();
 	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
 	const Timing timing;
 
-	// The floor tier reaches frame 8, which is owed; the planned tier reaches 9, one frame later.
+	// The floor composite reaches frame 8, which is owed; the planned one reaches 9, one frame later.
 	const FrameDecision decision = timing.Assess(clock, budget, At(1006), FrameClock::NoSequence);
 
-	GYRO_CHECK(decision.Verdict == Admission::Floor);
-	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 8 });
+	GYRO_CHECK(decision.Verdict == Admission::Planned);
+	GYRO_CHECK(decision.Mode() == RenderMode::Planned);
+	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 9 });
 }
 
 GYRO_TEST(Timing, ABusyDeviceRefusesAFrameTheRecordAloneWouldMake)
@@ -229,12 +239,13 @@ GYRO_TEST(Timing, ABusyDeviceRefusesAFrameTheRecordAloneWouldMake)
 
 	// Identical to the admitted case above except that the previous frame's work runs until 1008ms.
 	// Recording still starts now and finishes at 1004ms; execution cannot start until 1008ms and takes
-	// three more, so the planned tier lands a millisecond late on a frame a summed figure would have
-	// admitted with three to spare.
+	// three more, so the composite lands a millisecond late on a frame a summed figure would have
+	// admitted with three to spare — and frame 9 is what it is aimed at instead.
 	const FrameDecision decision = timing.Assess(clock, budget, At(1002), FrameClock::NoSequence, At(1008));
 
-	GYRO_CHECK(decision.Verdict == Admission::Floor);
-	GYRO_CHECK_EQ(decision.Finish, At(1009));
+	GYRO_CHECK(decision.Verdict == Admission::Planned);
+	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 9 });
+	GYRO_CHECK_EQ(decision.Finish, At(1011));
 
 	GYRO_CHECK(timing.Assess(clock, budget, At(1002), FrameClock::NoSequence).Verdict == Admission::Planned);
 }
@@ -306,20 +317,24 @@ GYRO_TEST(Timing, AnOutputComingOutOfIdleRendersTheFrameItCanStillMake)
 	GYRO_CHECK(decision.Presentation > At(1045));
 }
 
-GYRO_TEST(Timing, AnUnsetFloorTargetAdmitsRatherThanSkips)
+// The floor target used to decide this branch, and an unset one — which `Budget` documents as
+// maximally permissive — admitted a frame on a reserve of nothing. Decision 191 takes the floor off
+// this path entirely, so the figure is no longer an input: the two budgets below differ only in their
+// floor pair and the verdict may not notice. It still sizes the pinned arming, which is
+// `AFloorFrameOverItsTargetMovesThePinnedArming`.
+GYRO_TEST(Timing, TheFloorTargetIsNotAnInputToAnUnpinnedVerdict)
 {
 	const FrameClock clock = Anchored();
-
-	// A budget whose floor target nobody has chosen. Budget documents zero as maximally permissive, and
-	// this is the consequence downstream: a frame that may miss rather than one that certainly does not
-	// happen, which decision 35 prices at exactly one frame.
-	const Budget budget = Costing(2ms, 3ms);
 	const Timing timing;
 
-	const FrameDecision decision = timing.Assess(clock, budget, At(1009), FrameClock::NoSequence);
+	const FrameDecision unset = timing.Assess(clock, Costing(2ms, 3ms), At(1009), FrameClock::NoSequence);
+	const FrameDecision set = timing.Assess(clock, Costing(2ms, 3ms, 1ms, 1ms), At(1009), FrameClock::NoSequence);
 
-	GYRO_CHECK(decision.Verdict == Admission::Floor);
-	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 8 });
+	GYRO_CHECK(unset.Verdict == Admission::Planned);
+	GYRO_CHECK(unset.Verdict == set.Verdict);
+	GYRO_CHECK_EQ(unset.Sequence, set.Sequence);
+	GYRO_CHECK_EQ(unset.Sequence, std::uint64_t{ 9 });
+	GYRO_CHECK_EQ(unset.Finish, set.Finish);
 }
 
 GYRO_TEST(Timing, TheCompletionMarginIsHeldOnceOverTheWholeFrame)
@@ -331,11 +346,12 @@ GYRO_TEST(Timing, TheCompletionMarginIsHeldOnceOverTheWholeFrame)
 	GYRO_CHECK_EQ(timing.Reserve(budget, RenderMode::Planned), 6ms);
 	GYRO_CHECK_EQ(timing.Reserve(budget, RenderMode::Floor), 3ms);
 
-	// The margin is what refuses this one: without it the planned tier finishes exactly on the deadline.
+	// The margin is what refuses frame 8 here: without it the composite finishes exactly on the
+	// deadline, and with it the work is aimed a frame later.
 	const FrameDecision decision = timing.Assess(clock, budget, At(1005), FrameClock::NoSequence);
 
-	GYRO_CHECK(decision.Verdict == Admission::Floor);
-	GYRO_CHECK(timing.Assess(clock, budget, At(1004), FrameClock::NoSequence).Verdict == Admission::Planned);
+	GYRO_CHECK_EQ(decision.Sequence, std::uint64_t{ 9 });
+	GYRO_CHECK_EQ(timing.Assess(clock, budget, At(1004), FrameClock::NoSequence).Sequence, std::uint64_t{ 8 });
 }
 
 GYRO_TEST(Timing, TheWakeIsTheDeadlineLessTheReserve)
@@ -411,17 +427,17 @@ GYRO_TEST(Timing, TheWakeIsNeverAnInstantAlreadyGone)
 	GYRO_CHECK(timing.WakeFor(clock, budget, At(1008), 8) == Wake::At(At(1011)));
 }
 
-// The lead is spent before the check rather than by it: a loop that used its whole lead getting here
-// is on time, and one that overran it by a microsecond takes the floor composite. That boundary is the
-// sample `Frame/Loop.h` records as `lead`.
-GYRO_TEST(Timing, ALoopThatOverrunsItsLeadFallsToTheFloor)
+// The lead is spent before the check rather than by it: a loop that used its whole lead getting here is
+// on time, and one that overran it by a microsecond has missed the frame it was woken for and is aimed
+// at the next. That boundary is the sample `Frame/Loop.h` records as `lead`.
+GYRO_TEST(Timing, ALoopThatOverrunsItsLeadTakesTheNextFrame)
 {
 	const FrameClock clock = Anchored();
 	const Budget budget = Costing(2ms, 3ms, 1ms, 1ms);
 	const Timing timing{ TimingPolicy{ .Margin = 1ms, .Lead = 2ms } };
 
-	GYRO_CHECK(timing.Assess(clock, budget, At(1004), FrameClock::NoSequence).Verdict == Admission::Planned);
-	GYRO_CHECK(timing.Assess(clock, budget, At(1004) + 1ns, FrameClock::NoSequence).Verdict == Admission::Floor);
+	GYRO_CHECK_EQ(timing.Assess(clock, budget, At(1004), FrameClock::NoSequence).Sequence, std::uint64_t{ 8 });
+	GYRO_CHECK_EQ(timing.Assess(clock, budget, At(1004) + 1ns, FrameClock::NoSequence).Sequence, std::uint64_t{ 9 });
 }
 
 GYRO_TEST(Timing, ACommittedFrameArmsTheNextRecordPointRatherThanItsOwn)
@@ -471,10 +487,10 @@ GYRO_TEST(Timing, ADecisionPrintsItsVerdictAndItsFrame)
 	);
 }
 
-// `--composite=planned`. The same instant `FallsToTheFloorWhenThePlannedTierWillNotFit` runs at, with
-// the ladder taken away: the planned composite still finishes at 1011ms, frame 8 is gone, and what is
-// drawn is frame 9. That is a drop a person can see, which is the whole reason the flag exists — the
-// floor tier is what normally makes it not happen.
+// `--composite=planned`, which since decision 191 asks the pinned path for the answer the unpinned one
+// already gives: the composite finishes at 1011ms, frame 8 is gone, and what is drawn is frame 9. It
+// is kept because `Pinned` is a separate path from `Assess` and the two agreeing is the property worth
+// holding — `ADeadlineThePlannedTierCannotMakeSelectsTheNextFrame` is the other half of it.
 GYRO_TEST(Timing, PinningThePlannedTierDropsTheFrameInsteadOfSteppingDown)
 {
 	const FrameClock clock = Anchored();
@@ -526,8 +542,8 @@ GYRO_TEST(Timing, APinArmsForTheTierItPinned)
 	GYRO_CHECK(pinned.Assess(clock, budget, At(1002), 8).Verdict == Admission::Wait);
 }
 
-// The other pin, and it is the control: `Planned` is what the unpinned schedule already arms for on
-// any machine whose planned composite costs more than its floor one, so pinning it moves nothing.
+// The other pin, and it is the control: `Planned` is what the unpinned schedule arms for on every
+// machine since decision 191, so pinning it moves nothing.
 GYRO_TEST(Timing, PinningThePlannedTierArmsWhereTheUnpinnedScheduleDoes)
 {
 	const FrameClock clock = Anchored();
@@ -539,16 +555,20 @@ GYRO_TEST(Timing, PinningThePlannedTierArmsWhereTheUnpinnedScheduleDoes)
 	GYRO_CHECK_EQ(pinned.WakeFor(clock, budget, At(1002), 8), adaptive.WakeFor(clock, budget, At(1002), 8));
 }
 
-// Unpinned, the arming is the worst of the reachable set rather than `Planned` by name. Before the
-// first frame the planned pair is a seed this schedule wants optimistic, and a floor target the
-// capability probe measured may legitimately exceed it — which is a frame armed for less than the
-// cheapest thing gyro can draw.
-GYRO_TEST(Timing, TheArmingIsTheWorstTierStillReachable)
+// Unpinned, the arming is the planned reserve and the floor pair may not move it — decision 191, since
+// the record-time check draws the planned composite or waits and there is no floor frame to be armed
+// for. The budget below is the one that used to invert it: a floor target measured well above an
+// optimistic planned seed, which the old rule read as *the worst of the reachable set* and armed
+// against. The reachable set no longer has a second member, so arming against it would be waking early
+// for work gyro is never going to do.
+GYRO_TEST(Timing, TheUnpinnedArmingIsThePlannedReserveWhateverTheFloorCosts)
 {
-	const Budget budget = Costing(1ms, 1ms, 4ms, 4ms);
 	const Timing timing;
 
-	GYRO_CHECK_EQ(timing.Arming(budget), timing.Reserve(budget, RenderMode::Floor));
+	GYRO_CHECK_EQ(timing.Arming(Costing(1ms, 1ms, 4ms, 4ms)), timing.Arming(Costing(1ms, 1ms)));
+	GYRO_CHECK_EQ(
+		timing.Arming(Costing(1ms, 1ms, 4ms, 4ms)), timing.Reserve(Costing(1ms, 1ms, 4ms, 4ms), RenderMode::Planned)
+	);
 }
 
 // All three halves of decision 168 end to end: a floor frame over its target moves the evidence, the
