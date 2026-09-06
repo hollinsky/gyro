@@ -4,6 +4,7 @@
 #include <type_traits>
 
 #include "Core/Session.h"
+#include "World/Node.h"
 
 // Which session each top-level node belongs to, as bytes in the snapshot's root run.
 //
@@ -54,3 +55,49 @@ struct SceneRoot
 
 static_assert(std::is_trivially_copyable_v<SceneRoot> && std::is_standard_layout_v<SceneRoot>);
 static_assert(sizeof(SceneRoot) == 8, "Two uint32s, and no padding to leave uninitialised");
+
+// What one output is showing, as bytes in the snapshot's session run.
+//
+// **The transition belongs to the output, which is decision 188, and it is why this is a record
+// rather than the bare `SessionId` it was.** Decision 21 says an output is assigned to at most one
+// session at a time; a transition is exactly the interval in which that is false, so it cannot be a
+// property of either session — a session is shown on several outputs and a switch need not move them
+// together, so one number per session would fade both of somebody's monitors when they were asked to
+// switch user on one.
+//
+// **A reassignment carrying no coefficient is the cut, and that is the base case rather than a second
+// mode.** `Outgoing` is `None` and `Fade` is `NoCoefficient` for every output that is not mid
+// transition, which is every output today and every output a suspend leaves behind — decision 59
+// needs the locked state on the glass at the next flip, so it takes the cut. Nothing records which
+// kind of transition this is, because the absence *is* the kind.
+//
+// The two fields go together and the frame thread may assume neither: `Scene/Serializer.h` retires
+// the pair as one, so an `Outgoing` with no coefficient behind it is a run that has drifted, and
+// [Frame/Evaluator.h](../Frame/Evaluator.h) draws the steady state instead — which fails towards the
+// screen a person is arriving at rather than towards the one they are leaving.
+struct SceneAssignment
+{
+	// The session this output is showing, and the one it is moving *to* while a transition is running.
+	// Input follows this from the instant the transition is authored rather than from when it settles
+	// (188), so the first characters of a password cannot land in the terminal a person just left.
+	SessionId Shown = SessionId::None;
+
+	// The session this output is moving away from, still composited live for the length of the fade,
+	// or `None` outside one. Live rather than a photograph because the incoming side is live in every
+	// design and a snapshot would be a second mechanism for one transition — so a film playing when a
+	// laptop is locked goes on playing as it leaves the screen.
+	SessionId Outgoing = SessionId::None;
+
+	// Where the outgoing session's opacity is, in the same opacity run a node's own fade is in, or
+	// `NoCoefficient` outside a transition. One coefficient rather than two: what a person sees is a
+	// departure from the screen they are already looking at, and the arriving session is drawn at
+	// full strength underneath from the first frame.
+	//
+	// It is a *compositor-owned* channel — gyro authors it, no protocol reaches it, and no node names
+	// it — which is one of the three properties decision 43's anti-spoofing argument survives the fade
+	// on, the other two being that it only ever falls and that the catalog bounds how long it runs.
+	std::uint32_t Fade = NoCoefficient;
+};
+
+static_assert(std::is_trivially_copyable_v<SceneAssignment> && std::is_standard_layout_v<SceneAssignment>);
+static_assert(sizeof(SceneAssignment) == 12, "Two sessions and an index, and no padding to leave uninitialised");

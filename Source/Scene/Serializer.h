@@ -411,9 +411,9 @@ private:
 		return at < index ? at : NoContent;
 	}
 
-	void Stage(const SceneStore& store)
+	void Stage(SceneStore& store)
 	{
-		for (const SceneOutput& output : store.Outputs())
+		for (SceneOutput& output : store.MutableOutputs())
 		{
 			m_Views.push_back(output.Placement());
 
@@ -424,10 +424,30 @@ private:
 			// downstream changes, which is the property the monoid was chosen for.
 			m_Wakes.push_back(m_Wake);
 
-			// Decision 21's assignment, which the composition root wrote onto the output and this only
-			// carries. `SessionId::None` is an output showing gyro's own scene rather than one nobody
-			// has got round to, so it crosses as itself and the frame thread needs no absent case.
-			m_Sessions.push_back(output.Session);
+			// Decision 21's assignment and decision 188's transition, which the composition root wrote
+			// onto the output and this only carries. `SessionId::None` is an output showing gyro's own
+			// scene rather than one nobody has got round to, so it crosses as itself and the frame
+			// thread needs no absent case.
+			//
+			// **The fade goes in the *opacity* run rather than a run of its own**, which is what makes
+			// it one comparison and one multiply on the far side: a spring is a spring whether a node
+			// named it or an output did, and a second run would be a second length for decision 84 to
+			// check and a second thing to leave unstaged. It is the only coefficient in the snapshot
+			// nothing in the node run points at.
+			const std::uint32_t fade = Coefficient(output.Fade, m_Opacities, m_Thresholds.Opacity());
+
+			// **A fade with no coefficient left is a transition that is over**, and retiring the pair
+			// here is decision 122's rule — the walk that decides whether a coefficient still crosses is
+			// the walk that has the thresholds in hand. Left set, the outgoing session would be
+			// composited at zero for ever: invisible, paid for every frame, and still counted as
+			// leaving by everything that asks whether it is on a screen.
+			if (fade == NoCoefficient)
+			{
+				output.Outgoing = SessionId::None;
+				output.Fade.SetImmediate(0.0F);
+			}
+
+			m_Sessions.push_back(SceneAssignment{ .Shown = output.Session, .Outgoing = output.Outgoing, .Fade = fade });
 		}
 
 		// Every run is staged on every serialisation, including the empty ones. The publisher is reused
@@ -445,7 +465,7 @@ private:
 		m_Publisher.PutImages<ImageContent>(m_Images);
 		m_Publisher.PutSolids<SolidContent>(m_Solids);
 		m_Publisher.PutRoots<SceneRoot>(m_Roots);
-		m_Publisher.PutSessions<SessionId>(m_Sessions);
+		m_Publisher.PutSessions<SceneAssignment>(m_Sessions);
 	}
 
 	// One channel's whole story: retire it if it has settled, publish it if it has not, and fold what it
@@ -529,7 +549,7 @@ private:
 
 	// Decision 21's partition, both halves: one entry per root and one per output.
 	std::vector<SceneRoot> m_Roots;
-	std::vector<SessionId> m_Sessions;
+	std::vector<SceneAssignment> m_Sessions;
 	std::vector<Wake> m_Wakes;
 
 	// The sweep's two scratch lists: what finished dying this pass, and the subtree stack that decides it.

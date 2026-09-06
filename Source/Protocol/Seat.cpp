@@ -229,8 +229,33 @@ void SeatGlobal::Remove(ClientPointer& pointer) noexcept
 	std::erase(m_Pointers, &pointer);
 }
 
-void SeatGlobal::SyncFocus(EntityId focused)
+void SeatGlobal::SyncFocus(EntityId focused, EntityId leaving)
 {
+	// **A window whose session is on its way off the screen keeps being told it has the keyboard**,
+	// which is `Scene/Focus.h`'s `Leaving`: the keys have already crossed to the arriving session and
+	// what is withheld is only the notice, for as long as a person can still see the window it would
+	// change. A `leave` in the middle of a lock animation is a terminal's caret stopping while the
+	// desktop is still on the glass.
+	if (!m_Withheld.IsNull() && m_Withheld != leaving)
+	{
+		// The fade landed, or that session came back on a screen. Either way the lie is over.
+		SendLeave(m_Withheld);
+
+		m_Withheld = EntityId{};
+	}
+
+	// **Focus coming back to the window whose leave was withheld is a cancelled gesture**, and it is
+	// paid for honestly rather than smoothed over: the client's idea of which keys are down is from
+	// before the transition, and `wl_keyboard.enter` is what carries the current set. So the leave goes
+	// out here and the enter below follows it, which is the one flicker in the design and belongs to a
+	// person who locked and unlocked inside a third of a second.
+	if (!m_Withheld.IsNull() && focused == m_Withheld)
+	{
+		SendLeave(m_Withheld);
+
+		m_Withheld = EntityId{};
+	}
+
 	if (focused == m_Focused)
 	{
 		return;
@@ -239,7 +264,14 @@ void SeatGlobal::SyncFocus(EntityId focused)
 	// The leave first and against the *old* focus, which is why it runs before the member moves: the
 	// event names the surface being left, and a client told it has focus twice with no leave between
 	// has a key it believes is still down.
-	SendLeave();
+	if (!m_Focused.IsNull() && m_Focused == leaving)
+	{
+		m_Withheld = m_Focused;
+	}
+	else
+	{
+		SendLeave(m_Focused);
+	}
 
 	m_Focused = focused;
 
@@ -359,9 +391,9 @@ void SeatGlobal::SendEnter()
 	}
 }
 
-void SeatGlobal::SendLeave()
+void SeatGlobal::SendLeave(EntityId from)
 {
-	const Wayland::Server::WlSurface surface = FocusedSurface();
+	const Wayland::Server::WlSurface surface = SurfaceFor(from);
 
 	if (!surface.IsValid())
 	{

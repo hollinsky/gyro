@@ -308,13 +308,13 @@ GYRO_TEST(SceneSerializer, TheAssignmentRunIsOneSessionPerOutputInOutputOrder)
 
 	GYRO_REQUIRE(reader.IsValid());
 
-	const std::span<const SessionId> sessions = reader.Sessions<SessionId>();
+	const std::span<const SceneAssignment> sessions = reader.Sessions<SceneAssignment>();
 
 	GYRO_REQUIRE_EQ(sessions.size(), std::size_t{ 2 });
-	GYRO_CHECK(sessions[0] == static_cast<SessionId>(4));
+	GYRO_CHECK(sessions[0].Shown == static_cast<SessionId>(4));
 
 	// An output nothing has been assigned to is showing gyro's own scene, which crosses as itself.
-	GYRO_CHECK(sessions[1] == SessionId::None);
+	GYRO_CHECK(sessions[1].Shown == SessionId::None);
 }
 
 GYRO_TEST(SceneSerializer, ASecondSerialisationKeepsNothingOfTheFirst)
@@ -654,4 +654,126 @@ GYRO_TEST(SceneSerializer, AFreedPayloadIsReclaimedAndTheEntityThatMovedStillDra
 	GYRO_CHECK(store.Images()[store.Find(third)->Content].Texture == TextureId{ 3 });
 
 	GYRO_CHECK(serializer.Nodes()[0].Content != serializer.Nodes()[1].Content);
+}
+
+// The transition, which is decision 188 on the authoring side: an output leaving one session for
+// another carries the one it is leaving and a coefficient for how far through it is, and the pair is
+// retired together when the fade lands. Every claim fails as somebody's desktop staying on a screen
+// it was supposed to leave.
+GYRO_TEST(SceneSerializer, AFadedReassignmentCrossesAsThePairAndACoefficient)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore store{ clock };
+
+	GYRO_CHECK(store.CreateContainer({}, {}).has_value());
+
+	SceneOutput panel = Primary();
+	panel.Session = static_cast<SessionId>(4);
+
+	const SceneOutput one[] = { panel };
+	store.SetOutputs(one);
+
+	store.FadeOutputSession(panel.Id, static_cast<SessionId>(7), Motion::Gentle, clock.Now());
+
+	SceneSerializer serializer;
+	const SnapshotBuffer buffer = serializer.Serialize(store).Build(1);
+	const SnapshotReader reader{ buffer.Bytes() };
+
+	GYRO_REQUIRE(reader.IsValid());
+
+	const std::span<const SceneAssignment> sessions = reader.Sessions<SceneAssignment>();
+
+	GYRO_REQUIRE_EQ(sessions.size(), std::size_t{ 1 });
+
+	// The session being moved to is what the output is showing from the first frame, which is what
+	// makes input follow the transition rather than trail it.
+	GYRO_CHECK(sessions[0].Shown == static_cast<SessionId>(7));
+	GYRO_CHECK(sessions[0].Outgoing == static_cast<SessionId>(4));
+
+	// **The fade is in the opacity run rather than a run of its own**, and it is the one coefficient in
+	// a snapshot no node points at.
+	GYRO_REQUIRE(sessions[0].Fade != NoCoefficient);
+
+	const std::span<const Spring<float>> opacities = reader.Run<Spring<float>>(SnapshotRun::Opacity);
+
+	GYRO_REQUIRE(sessions[0].Fade < opacities.size());
+	GYRO_CHECK_EQ(opacities[sessions[0].Fade].Target, 0.0F);
+
+	// And the loop is told to come back, because nothing else in this scene is moving.
+	GYRO_CHECK(serializer.SceneWake() != Wake::Never());
+}
+
+GYRO_TEST(SceneSerializer, AFadeThatHasLandedRetiresTheOutgoingSessionWithIt)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore store{ clock };
+
+	GYRO_CHECK(store.CreateContainer({}, {}).has_value());
+
+	SceneOutput panel = Primary();
+	panel.Session = static_cast<SessionId>(4);
+
+	const SceneOutput one[] = { panel };
+	store.SetOutputs(one);
+
+	store.FadeOutputSession(panel.Id, static_cast<SessionId>(7), Motion::Gentle, clock.Now());
+
+	SceneSerializer serializer;
+	static_cast<void>(serializer.Serialize(store));
+
+	// Well past anything the catalog runs for. The channel settles, and what has to go with it is the
+	// outgoing session: left set, it would be a whole desktop composited at zero for ever — invisible,
+	// paid for every frame, and still counted as being on the screen by everything that asks.
+	clock.Advance(DurationFromSeconds(10.0));
+
+	const SnapshotBuffer buffer = serializer.Serialize(store).Build(2);
+	const SnapshotReader reader{ buffer.Bytes() };
+
+	GYRO_REQUIRE(reader.IsValid());
+
+	const std::span<const SceneAssignment> sessions = reader.Sessions<SceneAssignment>();
+
+	GYRO_REQUIRE_EQ(sessions.size(), std::size_t{ 1 });
+	GYRO_CHECK(sessions[0].Shown == static_cast<SessionId>(7));
+	GYRO_CHECK(sessions[0].Outgoing == SessionId::None);
+	GYRO_CHECK(sessions[0].Fade == NoCoefficient);
+
+	// Which is the same statement as the world having stopped: a settled transition owes no frame.
+	GYRO_CHECK(serializer.SceneWake() == Wake::Never());
+}
+
+// The cut, which is decision 188's base case rather than a second mode: a reassignment with no
+// coefficient. Suspend takes it, because decision 59 needs the locked state on the glass at the next
+// flip and not one fade later.
+GYRO_TEST(SceneSerializer, AnImmediateReassignmentCarriesNoCoefficientAndNothingOutgoing)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore store{ clock };
+
+	GYRO_CHECK(store.CreateContainer({}, {}).has_value());
+
+	SceneOutput panel = Primary();
+	panel.Session = static_cast<SessionId>(4);
+
+	const SceneOutput one[] = { panel };
+	store.SetOutputs(one);
+
+	// Mid fade, and then the cut lands on top of it — which is a laptop lid closing while the lock
+	// animation is still running. What is on the glass at the next flip is the locked screen.
+	store.FadeOutputSession(panel.Id, static_cast<SessionId>(7), Motion::Gentle, clock.Now());
+	store.SetOutputSession(panel.Id, static_cast<SessionId>(7));
+
+	SceneSerializer serializer;
+	const SnapshotBuffer buffer = serializer.Serialize(store).Build(1);
+	const SnapshotReader reader{ buffer.Bytes() };
+
+	GYRO_REQUIRE(reader.IsValid());
+
+	const std::span<const SceneAssignment> sessions = reader.Sessions<SceneAssignment>();
+
+	GYRO_REQUIRE_EQ(sessions.size(), std::size_t{ 1 });
+	GYRO_CHECK(sessions[0].Shown == static_cast<SessionId>(7));
+	GYRO_CHECK(sessions[0].Outgoing == SessionId::None);
+	GYRO_CHECK(sessions[0].Fade == NoCoefficient);
+	GYRO_CHECK(serializer.SceneWake() == Wake::Never());
 }

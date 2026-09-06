@@ -769,7 +769,7 @@ private:
 // acknowledge only that one, so the coalescing a fast pointer needs is the client's and is specified;
 // a compositor that withheld sizes until the last was acknowledged would be doing it a second time,
 // and would stop dead against any client that declined to answer one.
-void SyncWindows(HostContext& context, const SceneStore& scene, EntityId focused);
+void SyncWindows(HostContext& context, const SceneStore& scene, EntityId focused, EntityId leaving);
 
 // The global itself, owned by whoever advertises it and outliving every client that binds it.
 class ShellGlobal final : public Wayland::Server::XdgWmBaseBinding

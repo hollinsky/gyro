@@ -154,9 +154,17 @@ static_assert(sizeof(RunEntry) == 16, "Four uint32s, and no padding to leave uni
 // counted by two different things.** A published scene holds every connected session's roots at once
 // and an output shows the one it is assigned to, so the frame thread needs both halves of that
 // comparison: `Roots` names each top-level node and the session it belongs to, and is as long as the
-// scene has roots; `Sessions` names the session each output is showing, and is one entry per output
+// scene has roots; `Sessions` names what each output is showing, and is one entry per output
 // in output order under decision 84's rule exactly as `Wakes` and `Views` are. Neither is a channel,
 // so neither is in `Runs`.
+//
+// **A `Sessions` entry is a pair and a coefficient index rather than one session**, which is decision
+// 188: an output moving from one session to another composites both, live, for the length of the
+// transition, so the run carries the session being left and where its opacity is as well as the one
+// being shown. The coefficient indexes the *opacity* run — the one coefficient in a snapshot that no
+// node points at — which is what keeps a transition from being a run of its own, with a second length
+// for decision 84 to check and a second thing to leave unstaged. A reassignment carrying no
+// coefficient is the cut, and that is what every entry says today.
 //
 // **An absent `Sessions` or `Roots` run means an unpartitioned scene rather than no information**,
 // which is the one place this file departs from decision 84's *a short run is nothing* reading, and
@@ -197,7 +205,8 @@ struct SnapshotHeader
 	RunEntry Solids = {}; // what a solid node draws
 	RunEntry Roots = {};  // the top-level nodes, and the session each belongs to
 
-	// Which session each output is showing, one entry per output in output order.
+	// What each output is showing, what it is leaving, and where the fade is: one entry per output in
+	// output order.
 	RunEntry Sessions = {};
 };
 

@@ -120,6 +120,17 @@ class SceneFocus
 		std::erase_if(m_Stack, [id](const Entry& entry) noexcept { return entry.Id == id; });
 	}
 
+	// One session into one of the lists above, skipping `None` — which needs no entry, being gyro's own
+	// and reachable wherever anything is — and skipping a session already there, since two monitors
+	// showing one session is ordinary.
+	static void Record(std::vector<SessionId>& into, SessionId session)
+	{
+		if (session != SessionId::None && std::find(into.begin(), into.end(), session) == into.end())
+		{
+			into.push_back(session);
+		}
+	}
+
 	// Whether an output is showing this entry's session, which is what makes it something the keyboard
 	// may be on. Linear in the outputs, which is the monitors on the desk.
 	[[nodiscard]] bool Reachable(const Entry& entry) const noexcept
@@ -168,15 +179,41 @@ public:
 	void Present(std::span<const SceneOutput> outputs)
 	{
 		m_Presented.clear();
+		m_Leaving.clear();
 
 		for (const SceneOutput& output : outputs)
 		{
-			if (output.Session != SessionId::None &&
-			    std::find(m_Presented.begin(), m_Presented.end(), output.Session) == m_Presented.end())
+			Record(m_Presented, output.Session);
+			Record(m_Leaving, output.Outgoing);
+		}
+	}
+
+	// The window that is not where the keyboard is any more but must not be told so yet.
+	//
+	// **A session on its way off a screen is still on it, and a client told it lost focus says so on
+	// the glass** — a terminal's caret stops, a titlebar greys, a text selection loses its colour — in
+	// the middle of an animation whose whole point is that the screen a person is leaving looks the way
+	// they left it. So the keyboard crosses to the arriving session at once (188) and the notice to the
+	// departing one waits for the fade, which is `Protocol/Seat.h`'s withheld `wl_keyboard.leave` and
+	// the `activated` state `Protocol/Shell.h` holds against it.
+	//
+	// **One window rather than the session's whole set**, because it is the only one that was ever told
+	// it had focus: the rest are already unfocused and have nothing to be spared. Null outside a
+	// transition, which is every frame today.
+	//
+	// It is not a licence to deliver anything: keystrokes route by `Focused()` alone, so what this
+	// buys the departing client is a lie about focus for the length of a fade and never a key.
+	[[nodiscard]] EntityId Leaving() const noexcept
+	{
+		for (auto entry = m_Stack.rbegin(); entry != m_Stack.rend(); ++entry)
+		{
+			if (!Reachable(*entry) && std::find(m_Leaving.begin(), m_Leaving.end(), entry->Session) != m_Leaving.end())
 			{
-				m_Presented.push_back(output.Session);
+				return entry->Id;
 			}
 		}
+
+		return EntityId{};
 	}
 
 	// A window became focusable, which is *mapped* for a client's toplevel. Takes focus, per the stack
@@ -329,4 +366,9 @@ private:
 	// it is what makes every author with no session behind it — the splash, the console, a gym — read
 	// exactly as it did before this class knew what a session was.
 	std::vector<SessionId> m_Presented;
+
+	// The sessions an output is moving away from, which is the same list one transition later. A
+	// session can be in both — two monitors, one of them switching — and `Reachable` wins there, since
+	// a person is still looking at it somewhere and the keyboard has somewhere honest to be.
+	std::vector<SessionId> m_Leaving;
 };

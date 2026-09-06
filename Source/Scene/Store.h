@@ -350,10 +350,72 @@ public:
 			if (held.Id == output)
 			{
 				held.Session = session;
+
+				// **The cut, which is the absence of a coefficient rather than a mode** (188). Whatever
+				// was leaving stops leaving in the same step: a suspend needs the new assignment on the
+				// glass at the next flip (59), so there is nothing half-finished to carry over.
+				held.Outgoing = SessionId::None;
+				held.Fade.SetImmediate(0.0F);
+
 				m_Focus.Present(m_Outputs);
 
 				return;
 			}
+		}
+	}
+
+	// The same reassignment, faded rather than cut: the output composites both sessions, live, for the
+	// length of the transition, and the one it is leaving falls from full strength to nothing.
+	//
+	// **Immediate against animated is not a new axis and this is the whole of the difference** (188).
+	// The store already separates an immediate write from a sprung one and already uses it twice —
+	// `Scene/Cursor.h` writes the pointer glyph immediately every iteration and `Protocol/Drag.h`
+	// writes a dragged window's position immediately rather than sprung — so suspend calls the verb
+	// above and a person pressing the lock chord calls this one. Nothing anywhere records which kind of
+	// transition happened, because the coefficient's absence is the record.
+	//
+	// **Not through `Scene/Commit.h`**, which is the one place a channel is otherwise reached: a commit
+	// is a scope over the entities one author changed, carrying that author and an origin (112), and
+	// there is no entity here. This channel is the compositor's own and no protocol reaches it, which
+	// is what decision 43's anti-spoofing argument rests on across a transition — a client may not
+	// start one, extend one, re-enter one, or push the opacity back up.
+	//
+	// **A transition onto the session already being shown does nothing**, rather than fading a screen
+	// into itself: it is what a second press of the lock chord is, and what a session arriving twice is.
+	// A transition entered while one is running takes the newer pair and drops the older outgoing
+	// session outright — one output leaves one session at a time, and the alternative is a queue of
+	// screens nobody asked to see.
+	//
+	// Does nothing for an output that is not here, which `SetOutputSession` above has the reason for.
+	void FadeOutputSession(OutputId output, SessionId session, Motion motion, Instant t0)
+	{
+		for (SceneOutput& held : m_Outputs)
+		{
+			if (held.Id != output)
+			{
+				continue;
+			}
+
+			if (held.Session == session)
+			{
+				return;
+			}
+
+			held.Outgoing = held.Session;
+			held.Session = session;
+
+			// From full strength rather than from wherever a previous fade had got to, because what is
+			// leaving is a whole screen a person is looking at and not the tail of one they already lost.
+			held.Fade.SetImmediate(1.0F);
+			held.Fade.AnimateTo(0.0F, Resolve<float>(motion, {}), t0);
+
+			// **The keyboard moves now rather than when this settles** (188), which `Scene/Focus.h`
+			// gives for nothing: the outgoing session is no longer any output's `Session`, so every
+			// window of it stops being somewhere a keystroke can land at the instant the fade is
+			// authored. Otherwise the first characters of a password go to the terminal being faded out.
+			m_Focus.Present(m_Outputs);
+
+			return;
 		}
 	}
 
@@ -415,6 +477,12 @@ private:
 	// `Animatable` exposes settling and retargeting as different verbs. Why it is the serializer at all
 	// rather than a pass of its own is that file's argument, and it is about touching every entity once.
 	friend class SceneSerializer;
+
+	// The writable side of the output set, which only the serializer reaches, and for the one thing it
+	// reaches every other channel for: retiring a fade that has finished. Decision 122 puts that on the
+	// walk that has the thresholds in hand rather than in a pass of its own, and this is that rule for
+	// the one channel that hangs off an output instead of off an entity.
+	[[nodiscard]] std::span<SceneOutput> MutableOutputs() noexcept { return m_Outputs; }
 
 	// The writable side of `Find`, which only a commit reaches. Reaching for `handle.Index` directly is
 	// how the generation check gets skipped, so there is no accessor that takes one.

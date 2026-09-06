@@ -1584,7 +1584,7 @@ bool FocusRestsOn(const SceneStore& scene, EntityId window, EntityId focused)
 	return false;
 }
 
-void SyncWindows(HostContext& context, const SceneStore& scene, EntityId focused)
+void SyncWindows(HostContext& context, const SceneStore& scene, EntityId focused, EntityId leaving)
 {
 	const WindowDrag& drag = context.Drag();
 
@@ -1595,7 +1595,13 @@ void SyncWindows(HostContext& context, const SceneStore& scene, EntityId focused
 
 	for (ClientXdgSurface* const window : windows)
 	{
-		bool owed = window->SetActivated(FocusRestsOn(scene, window->Window(), focused));
+		// **Or on the window whose session is leaving the screen**, which is the `activated` half of what
+		// `Scene/Focus.h`'s `Leaving` is for: a titlebar going grey in the middle of a lock animation
+		// announces the switch before the switch is visible, on the one screen a person is watching.
+		// The keyboard has already gone — this is what the window is still being *told*.
+		bool owed = window->SetActivated(
+			FocusRestsOn(scene, window->Window(), focused) || FocusRestsOn(scene, window->Window(), leaving)
+		);
 
 		const bool resizing = drag.IsResizing() && drag.Window() == window->Window();
 

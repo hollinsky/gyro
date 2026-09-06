@@ -241,7 +241,7 @@ private:
 		const std::span<const Node> nodes = request.Snapshot.Nodes<Node>();
 		const std::span<const OutputAdapter> views = request.Snapshot.Views<OutputAdapter>();
 		const std::span<const SceneRoot> roots = request.Snapshot.Roots<SceneRoot>();
-		const std::span<const SessionId> sessions = request.Snapshot.Sessions<SessionId>();
+		const std::span<const SceneAssignment> sessions = request.Snapshot.Sessions<SceneAssignment>();
 
 		// Decision 84's rule, and the whole of the check that is available before the header carries a
 		// set generation: a run that is not this output set's is no information rather than partial
@@ -257,7 +257,9 @@ private:
 		// test as everywhere else, resolving to `None` rather than returning: an output with no
 		// assignment published for it is showing gyro's own scene, which is a scene rather than an
 		// error, and it is what every output is showing between boot and the first agent's offer.
-		const SessionId shown = sessions.size() == request.Outputs ? sessions[request.Output] : SessionId::None;
+		const SceneAssignment assignment =
+			sessions.size() == request.Outputs ? sessions[request.Output] : SceneAssignment{};
+		const SessionId shown = assignment.Shown;
 
 		// Where the root run has been read up to. A preorder walk meets its roots in increasing node
 		// order and the run is written in that order, so one forward pass over it serves the whole walk.
@@ -271,6 +273,37 @@ private:
 			.Images = request.Snapshot.Images<ImageContent>(),
 			.Solids = request.Snapshot.Solids<SolidContent>(),
 		};
+
+		// Decision 188's cross-fade, resolved once for the whole walk: an output moving from one session
+		// to another composites both, live, and the one it is leaving enters at the coefficient's value
+		// instead of at one. Live on both sides rather than a photograph of the outgoing half, because
+		// there is no photograph of a frame nobody has drawn — so a film playing when a laptop is locked
+		// goes on playing as it leaves the screen.
+		//
+		// **An outgoing session with no coefficient behind it is not drawn**, which is decision 90's
+		// rule that the frame thread validates what it walks rather than trusting it: the pair is
+		// retired together on the far side, so a run that says otherwise has drifted, and the safe way
+		// to be wrong is the steady state — the screen a person is arriving at rather than the one they
+		// are leaving.
+		SessionId outgoing = SessionId::None;
+		float fade = 0.0F;
+
+		if (assignment.Outgoing != SessionId::None && assignment.Fade < runs.Opacities.size())
+		{
+			const Spring<float>& spring = runs.Opacities[assignment.Fade];
+
+			// **Clamped, and it is decision 43's anti-spoofing property being kept rather than a
+			// defensive habit.** That argument survives a transition only if the outgoing session's
+			// contribution never rises, and the other half of it is the catalog: the motion this is
+			// authored under does not overshoot, and one that did would be visible as a locked screen
+			// briefly showing the desktop again.
+			fade = std::clamp(spring.Evaluate(Sample(request.Presentation, spring.Origin, 1.0F)).Position, 0.0F, 1.0F);
+			outgoing = assignment.Outgoing;
+
+			// A transition in flight is the frame loop's reason to come back, exactly as a moving node
+			// is. Nothing else would say so: no node names this spring.
+			m_Moving = true;
+		}
 
 		m_Depth = 1;
 		m_Stack[0] = Level{ .Chain = view.Root(), .Index = 0, .End = nodes.size() };
@@ -333,7 +366,19 @@ private:
 			{
 				const SessionId owner = Owner(roots, root, index);
 
-				if (owner != SessionId::None && owner != shown)
+				// The strength this root's whole subtree enters at: full for the session being shown and
+				// for gyro's own, the fade's value for the session being left, and nothing at all for
+				// anybody else's. One comparison and one multiply, which is the whole cost of decision
+				// 188 in the walk.
+				if (owner == SessionId::None || owner == shown)
+				{
+					m_Stack[0].Opacity = 1.0F;
+				}
+				else if (owner == outgoing)
+				{
+					m_Stack[0].Opacity = fade;
+				}
+				else
 				{
 					continue;
 				}

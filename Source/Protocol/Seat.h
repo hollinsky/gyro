@@ -322,7 +322,14 @@ public:
 
 	// Bring the clients' idea of focus up to date with the world's, and send nothing where it has not
 	// changed. Called from `Advance`, where the store is in hand.
-	void SyncFocus(EntityId focused);
+	//
+	// **`leaving` is the one window that may keep believing it has the keyboard**, which is
+	// `Scene/Focus.h`'s `Leaving`: its session is on its way off a screen a person is still looking at,
+	// and a `wl_keyboard.leave` under a lock animation is a caret that stops blinking on a desktop that
+	// has not gone yet. Only the notice waits — keys route by `focused` alone from the instant the
+	// transition is authored (188), so the withheld client is told a lie about focus and never given a
+	// key.
+	void SyncFocus(EntityId focused, EntityId leaving);
 
 	// A pointer came or went. Borrowed pointers, like the keyboards, and each one deregisters itself.
 	void Add(ClientPointer& pointer);
@@ -407,7 +414,7 @@ private:
 	[[nodiscard]] Wayland::Server::WlSurface FocusedSurface() const noexcept;
 
 	void SendEnter();
-	void SendLeave();
+	void SendLeave(EntityId from);
 
 	// The surface behind an entity, which is what an `enter` names and a `leave` is owed to. Null for a
 	// window gyro authored for itself, which is every node the splash and the recovery console draw.
@@ -483,6 +490,12 @@ private:
 	// to a window with no client behind it, or to one whose surface has already gone; this is the entity
 	// a `leave` is still owed to, and it is cleared when that event goes out.
 	EntityId m_Focused{};
+
+	// The window still being told it has the keyboard while its session leaves the screen, or null,
+	// which is every frame outside a transition. `Scene/Focus.h`'s `Leaving` is where it comes from and
+	// why; what it costs here is that the `leave` is owed later rather than never, which `SyncFocus`
+	// pays on the first iteration the session stops leaving.
+	EntityId m_Withheld{};
 
 	// The keys held down, in the kernel's numbering, for the array a `wl_keyboard.enter` carries. A
 	// client taking focus with a key already down has to be told, or it will never see the release.

@@ -485,3 +485,96 @@ GYRO_TEST(SceneFocus, HandingTheOnlyScreenToSomebodyElseTakesTheKeyboardWithIt)
 
 	GYRO_CHECK(store.Focus().Focused() == window);
 }
+
+// The keyboard moves when the fade is *authored* and not when it settles, which is decision 188's one
+// sentence about input. It fails as the first characters of a password landing in the terminal a
+// person was using a moment before they locked the machine.
+GYRO_TEST(SceneFocus, TheKeyboardCrossesToTheArrivingSessionBeforeTheFadeHasMovedAtAll)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore store{ clock };
+
+	const std::array outputs{ Panel(Mine) };
+	store.SetOutputs(outputs);
+
+	const EntityId terminal = store.CreateContainer({}, { .Extent = { 400.0F, 300.0F } }).value();
+	const EntityId prompt = store.CreateContainer({}, { .Extent = { 400.0F, 300.0F } }).value();
+
+	GYRO_REQUIRE(store.SetSession(terminal, Mine));
+	GYRO_REQUIRE(store.SetSession(prompt, Theirs));
+
+	store.Focus().Offer(terminal, FocusKind::Window, Mine);
+	store.Focus().Offer(prompt, FocusKind::Window, Theirs);
+
+	// The arriving session's window is offered but unreachable, because no screen is showing it yet.
+	GYRO_REQUIRE(store.Focus().Focused() == terminal);
+
+	store.FadeOutputSession(outputs[0].Id, Theirs, Motion::Gentle, clock.Now());
+
+	// Immediately, with the fade at full strength and the terminal still filling the screen: it is
+	// still being *composited*, and it is no longer somewhere a keystroke can land.
+	GYRO_CHECK(store.Focus().Focused() == prompt);
+}
+
+// The other half of the same instant: the keyboard has gone and the window it left has not been told.
+// It fails as a titlebar greying and a caret stopping in the middle of a lock animation, on the one
+// screen a person is watching at the time.
+GYRO_TEST(SceneFocus, TheWindowTheKeyboardLeftIsStillOnScreenAndIsNotToldYet)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore store{ clock };
+
+	const std::array outputs{ Panel(Mine) };
+	store.SetOutputs(outputs);
+
+	const EntityId terminal = store.CreateContainer({}, { .Extent = { 400.0F, 300.0F } }).value();
+	const EntityId prompt = store.CreateContainer({}, { .Extent = { 400.0F, 300.0F } }).value();
+
+	GYRO_REQUIRE(store.SetSession(terminal, Mine));
+	GYRO_REQUIRE(store.SetSession(prompt, Theirs));
+
+	store.Focus().Offer(terminal, FocusKind::Window, Mine);
+	store.Focus().Offer(prompt, FocusKind::Window, Theirs);
+
+	// Nothing is leaving, so there is nothing being told anything but the truth.
+	GYRO_CHECK(store.Focus().Leaving().IsNull());
+
+	store.FadeOutputSession(outputs[0].Id, Theirs, Motion::Gentle, clock.Now());
+
+	GYRO_CHECK(store.Focus().Focused() == prompt);
+	GYRO_CHECK(store.Focus().Leaving() == terminal);
+
+	// The cut landing on top of the fade — a laptop lid closing mid animation — ends the transition,
+	// and with it the reason to keep the window's titlebar lit. Nothing of that session is on a screen
+	// any more, so the `leave` it is owed goes out on the very next comparison.
+	store.SetOutputSession(outputs[0].Id, Theirs);
+
+	GYRO_CHECK(store.Focus().Leaving().IsNull());
+	GYRO_CHECK(store.Focus().Focused() == prompt);
+}
+
+// A session shown on one monitor and leaving another is not leaving: a person is still looking at it,
+// and the keyboard has somewhere honest to be. Reachability wins over the transition, which is what
+// keeps a two-monitor user switch from taking the keyboard off a screen nobody asked to change.
+GYRO_TEST(SceneFocus, ASessionStillShownSomewhereElseIsNotLeaving)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore store{ clock };
+
+	SceneOutput second = Panel(Mine);
+	second.Id = OutputId{ 2, 1 };
+	second.Bounds.Origin.X = 1000.0;
+
+	const std::array outputs{ Panel(Mine), second };
+	store.SetOutputs(outputs);
+
+	const EntityId window = store.CreateContainer({}, { .Extent = { 400.0F, 300.0F } }).value();
+	GYRO_REQUIRE(store.SetSession(window, Mine));
+
+	store.Focus().Offer(window, FocusKind::Window, Mine);
+
+	store.FadeOutputSession(outputs[0].Id, Theirs, Motion::Gentle, clock.Now());
+
+	GYRO_CHECK(store.Focus().Leaving().IsNull());
+	GYRO_CHECK(store.Focus().Focused() == window);
+}

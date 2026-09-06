@@ -1151,6 +1151,19 @@ namespace
 
 constexpr auto First = static_cast<SessionId>(1);
 constexpr auto Second = static_cast<SessionId>(2);
+
+// An output in its steady state: showing one session, leaving none, and so carrying no coefficient —
+// which is what every entry says outside a transition.
+[[nodiscard]] constexpr SceneAssignment Showing(SessionId session) noexcept
+{
+	return { .Shown = session };
+}
+
+// An output mid transition, with the session it is leaving faded by the spring at `fade`.
+[[nodiscard]] constexpr SceneAssignment Leaving(SessionId shown, SessionId outgoing, std::uint32_t fade) noexcept
+{
+	return { .Shown = shown, .Outgoing = outgoing, .Fade = fade };
+}
 } // namespace
 
 GYRO_TEST(Evaluator, ARootIsDrawnOnlyOnAnOutputShowingItsSession)
@@ -1164,13 +1177,13 @@ GYRO_TEST(Evaluator, ARootIsDrawnOnlyOnAnOutputShowingItsSession)
 	const std::array images{ Texel(1) };
 	const std::array views{ Placement(), Placement() };
 	const std::array roots{ SceneRoot{ .Node = 0, .Session = First }, SceneRoot{ .Node = 2, .Session = Second } };
-	const std::array sessions{ First, Second };
+	const std::array sessions{ Showing(First), Showing(Second) };
 
 	wire.PutNodes(std::span<const Node>{ nodes });
 	wire.PutImages(std::span<const ImageContent>{ images });
 	wire.PutViews(std::span<const OutputAdapter>{ views });
 	wire.PutRoots(std::span<const SceneRoot>{ roots });
-	wire.PutSessions(std::span<const SessionId>{ sessions });
+	wire.PutSessions(std::span<const SceneAssignment>{ sessions });
 
 	const SnapshotReader snapshot = wire.Read();
 	TickingClock clock;
@@ -1201,13 +1214,13 @@ GYRO_TEST(Evaluator, ARootOfNoSessionIsDrawnOnEveryOutput)
 
 	// The second output is showing gyro's own scene, which is the splash, the console, and the gap
 	// between one session and the next.
-	const std::array sessions{ First, SessionId::None };
+	const std::array sessions{ Showing(First), Showing(SessionId::None) };
 
 	wire.PutNodes(std::span<const Node>{ nodes });
 	wire.PutImages(std::span<const ImageContent>{ images });
 	wire.PutViews(std::span<const OutputAdapter>{ views });
 	wire.PutRoots(std::span<const SceneRoot>{ roots });
-	wire.PutSessions(std::span<const SessionId>{ sessions });
+	wire.PutSessions(std::span<const SceneAssignment>{ sessions });
 
 	const SnapshotReader snapshot = wire.Read();
 	TickingClock clock;
@@ -1258,13 +1271,13 @@ GYRO_TEST(Evaluator, AnAssignmentRunOfTheWrongLengthShowsGyrosOwnSceneOnly)
 	const std::array views{ Placement(), Placement() };
 	const std::array roots{ SceneRoot{ .Node = 0, .Session = First },
 		                    SceneRoot{ .Node = 1, .Session = SessionId::None } };
-	const std::array sessions{ First };
+	const std::array sessions{ Showing(First) };
 
 	wire.PutNodes(std::span<const Node>{ nodes });
 	wire.PutImages(std::span<const ImageContent>{ images });
 	wire.PutViews(std::span<const OutputAdapter>{ views });
 	wire.PutRoots(std::span<const SceneRoot>{ roots });
-	wire.PutSessions(std::span<const SessionId>{ sessions });
+	wire.PutSessions(std::span<const SceneAssignment>{ sessions });
 
 	const SnapshotReader snapshot = wire.Read();
 	TickingClock clock;
@@ -1289,17 +1302,130 @@ GYRO_TEST(Evaluator, ARootTheRunDoesNotNameIsShown)
 
 	// One entry, and it names neither root: the first index is past both.
 	const std::array roots{ SceneRoot{ .Node = 9, .Session = Second } };
-	const std::array sessions{ First, First };
+	const std::array sessions{ Showing(First), Showing(First) };
 
 	wire.PutNodes(std::span<const Node>{ nodes });
 	wire.PutImages(std::span<const ImageContent>{ images });
 	wire.PutViews(std::span<const OutputAdapter>{ views });
 	wire.PutRoots(std::span<const SceneRoot>{ roots });
-	wire.PutSessions(std::span<const SessionId>{ sessions });
+	wire.PutSessions(std::span<const SceneAssignment>{ sessions });
 
 	const SnapshotReader snapshot = wire.Read();
 	TickingClock clock;
 	SceneEvaluator evaluator{ clock };
 
 	GYRO_CHECK_EQ(evaluator.Evaluate(On(snapshot, 0)).Items.size(), std::size_t{ 2 });
+}
+
+// The cross-fade, which is decision 188. Every claim here fails as something a person watches happen
+// on a laptop lid: a film that freezes the moment the screen locks, a desktop that snaps away instead
+// of leaving, or — the one that matters — somebody else's windows still on the glass after it should
+// have gone.
+namespace
+{
+// A spring standing still at one value, so that what a test asserts is the walk rather than the
+// solver: no offset and no velocity is a position equal to the target at every instant.
+[[nodiscard]] Spring<float> Held(float value) noexcept
+{
+	return { .Target = value };
+}
+} // namespace
+
+GYRO_TEST(Evaluator, TheSessionAnOutputIsLeavingIsDrawnAtTheFadesValue)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.0, 10.0), Image(0, 400.0, 10.0) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement(), Placement() };
+	const std::array roots{ SceneRoot{ .Node = 0, .Session = First }, SceneRoot{ .Node = 1, .Session = Second } };
+
+	// The first output is moving from the second session to the first, a quarter of the way left to go.
+	const std::array sessions{ Leaving(First, Second, 0), Showing(First) };
+	const std::array fade{ Held(0.25F) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutRoots(std::span<const SceneRoot>{ roots });
+	wire.PutSessions(std::span<const SceneAssignment>{ sessions });
+	wire.Put<Spring<float>>(SnapshotRun::Opacity, fade);
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(On(snapshot, 0));
+
+	// Both, which is the whole of the decision: the outgoing session is composited live rather than
+	// photographed, so what was playing goes on playing as it leaves.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 2 });
+
+	// The arriving session at full strength from the first frame, and the departing one at the
+	// coefficient. One is a screen a person is being taken to; the other is the one being taken away.
+	GYRO_CHECK_EQ(list.Items[0].Opacity, 1.0F);
+	GYRO_CHECK_EQ(list.Items[1].Opacity, 0.25F);
+	GYRO_CHECK_EQ(list.Items[1].Shape.Bounds().Origin, Point<DeviceSpace>{ 400.0F, 10.0F });
+
+	// And the second output, which was asked to move nothing, shows exactly what it was showing.
+	GYRO_CHECK_EQ(evaluator.Evaluate(On(snapshot, 1)).Items.size(), std::size_t{ 1 });
+}
+
+// The cut, which is what suspend takes and what every reassignment does today: no coefficient, so the
+// session that was there is simply not there, on the very next frame.
+GYRO_TEST(Evaluator, AReassignmentWithNoCoefficientDropsTheOutgoingSessionOutright)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.0, 10.0), Image(0, 400.0, 10.0) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement(), Placement() };
+	const std::array roots{ SceneRoot{ .Node = 0, .Session = First }, SceneRoot{ .Node = 1, .Session = Second } };
+	const std::array sessions{ Leaving(First, Second, NoCoefficient), Showing(First) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutRoots(std::span<const SceneRoot>{ roots });
+	wire.PutSessions(std::span<const SceneAssignment>{ sessions });
+
+	const DrawList list = [&] {
+		const SnapshotReader snapshot = wire.Read();
+		TickingClock clock;
+		SceneEvaluator evaluator{ clock };
+
+		return evaluator.Evaluate(On(snapshot, 0));
+	}();
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Shape.Bounds().Origin, Point<DeviceSpace>{ 10.0F, 10.0F });
+}
+
+// The pair is retired together on the authoring side, so an outgoing session whose coefficient is not
+// in the run is a run that has drifted. This is the one place the partition fails *towards* the
+// steady state rather than towards showing a root: a session left composited at a strength nobody
+// wrote is somebody else's desktop sitting on a locked screen, which is the failure decision 43
+// exists to prevent.
+GYRO_TEST(Evaluator, AnOutgoingSessionWhoseCoefficientIsNotInTheRunIsNotDrawn)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.0, 10.0), Image(0, 400.0, 10.0) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement(), Placement() };
+	const std::array roots{ SceneRoot{ .Node = 0, .Session = First }, SceneRoot{ .Node = 1, .Session = Second } };
+
+	// One spring in the run and the entry names the sixth.
+	const std::array sessions{ Leaving(First, Second, 5), Showing(First) };
+	const std::array fade{ Held(0.25F) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutRoots(std::span<const SceneRoot>{ roots });
+	wire.PutSessions(std::span<const SceneAssignment>{ sessions });
+	wire.Put<Spring<float>>(SnapshotRun::Opacity, fade);
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	GYRO_CHECK_EQ(evaluator.Evaluate(On(snapshot, 0)).Items.size(), std::size_t{ 1 });
 }

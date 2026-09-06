@@ -403,7 +403,14 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// other order costs — a keystroke delivered to the window a person just clicked away from.
 	const EntityId focused = scene.Focus().Focused();
 
-	m_Seat.SyncFocus(focused);
+	// **And the one window that is not focused any more and is not being told so yet**, which is
+	// decision 188's transition reaching the two comparisons that push a fact at a client: the keyboard
+	// crosses to the arriving session the instant a fade is authored, and the departing window keeps
+	// its lit titlebar and its blinking caret for as long as a person can still see it. `Scene/Focus.h`
+	// has why it is one window rather than a session's whole set.
+	const EntityId leaving = scene.Focus().Leaving();
+
+	m_Seat.SyncFocus(focused, leaving);
 
 	// **Beside the seat's comparison and against the same answer**, for the reason the shell's walk is
 	// there too: the selection is offered to whoever has the keyboard, so a window that got the keys in
@@ -416,7 +423,7 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// state says which titlebar is lit, and a window that got one without the other is one a person can
 	// type into and cannot tell they are typing into. [Shell.h](Shell.h) has why a menu leaves its own
 	// window activated.
-	SyncWindows(m_Context, scene, focused);
+	SyncWindows(m_Context, scene, focused, leaving);
 
 	// **Last, because it reports on everything above it.** A window that mapped in this wakeup, one that
 	// retired in it and a title a client changed in it are all settled by the time this runs, so a shell

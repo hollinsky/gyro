@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <span>
 
+#include "Animation/Author/Animatable.h"
 #include "Core/Handle.h"
 #include "Core/Session.h"
 #include "Core/Time.h"
@@ -59,6 +60,35 @@ struct SceneOutput
 	// gate on, and a field added alongside it would be a second scheme to reconcile with the assignment
 	// policy written first.
 	SessionId Session = SessionId::None;
+
+	// The session this output is moving away from, or `None` outside a transition — decision 188's
+	// cross-fade, authoring side.
+	//
+	// **It is here rather than on either session because the transition is exactly the interval in
+	// which decision 21's *one session per output* is false.** A session is shown on several outputs
+	// and a user switch need not move them together, so a coefficient per session would fade both of
+	// somebody's monitors when they asked to switch on one.
+	//
+	// It is retired by `Scene/Serializer.h` together with the coefficient below, on the walk that
+	// already decides whether a channel still owes a frame: the two are one fact and a published
+	// outgoing session with no fade behind it would be a session composited for ever.
+	SessionId Outgoing = SessionId::None;
+
+	// The outgoing session's opacity, falling from one to nothing.
+	//
+	// **A compositor-owned animatable, which is the shape Architecture.md anticipates for the idle dim
+	// ramp**: a channel gyro authors for itself, moving under the catalog, belonging to no client and
+	// reachable by no protocol. That last part is load-bearing rather than tidy — decision 43's
+	// anti-spoofing argument survives a transition that composites a user's session beside a lock
+	// prompt only because a client cannot start one, extend one, re-enter one, or push this back up.
+	//
+	// It is not a node's channel and so does not go through `Scene/Commit.h`: a commit is a scope with
+	// an author and an origin over the entities a client changed (112), and there is no entity here.
+	// `SceneStore::FadeOutputSession` is the one door onto it.
+	//
+	// Zero at rest, which is the same statement as `Outgoing` being `None`: there is nothing leaving,
+	// so there is nothing to draw at any strength.
+	Animatable<float> Fade{ 0.0F };
 
 	// Decision 73's per-output reconfiguration generation, echoed from what the composition root last
 	// asked the backend for. It answers *is this output's mode request newer than what I have
