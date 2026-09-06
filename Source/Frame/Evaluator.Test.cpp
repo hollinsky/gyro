@@ -18,6 +18,7 @@
 #include "Publication/Snapshot.h"
 #include "Testing/Test.h"
 #include "World/Content.h"
+#include "World/Exit.h"
 #include "World/Node.h"
 #include "World/Root.h"
 
@@ -86,6 +87,12 @@ public:
 		Stage(m_Named[5], elements);
 	}
 
+	template<typename T>
+	void PutExits(std::span<const T> elements)
+	{
+		Stage(m_Named[6], elements);
+	}
+
 	[[nodiscard]] SnapshotReader Read(std::uint64_t sequence = 1)
 	{
 		std::size_t cursor = sizeof(SnapshotHeader);
@@ -115,6 +122,7 @@ public:
 		header.Solids = m_Named[3].Entry;
 		header.Roots = m_Named[4].Entry;
 		header.Sessions = m_Named[5].Entry;
+		header.Exits = m_Named[6].Entry;
 
 		m_Store.assign((cursor + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t), std::max_align_t{});
 
@@ -176,7 +184,7 @@ private:
 	}
 
 	std::array<Staged, SnapshotRunCount> m_Runs{};
-	std::array<Staged, 6> m_Named{};
+	std::array<Staged, 7> m_Named{};
 	std::vector<std::max_align_t> m_Store;
 };
 
@@ -1514,4 +1522,313 @@ GYRO_TEST(Evaluator, AnOutgoingSessionWhoseCoefficientIsNotInTheRunIsNotDrawn)
 	SceneEvaluator evaluator{ clock };
 
 	GYRO_CHECK_EQ(evaluator.Evaluate(On(snapshot, 0)).Items.size(), std::size_t{ 1 });
+}
+
+// A closing window, and what the walk has to say about it that nothing else can.
+//
+// Decision 20 draws a window that is leaving from a copy of its last frame; decision 46 reserves the
+// rectangle that copy goes in when the retirement is observed, on the far side of the waist. What is
+// left over is *which pixels* — a toplevel is a container (111), so the window is a run of items and
+// the run's extent is a fact about a walk in flight. These assert that run, and each failure has a
+// picture: a run that starts a item early is a window that leaves wearing the wallpaper behind it, a
+// run one item short is a window whose menu vanishes a frame before the rest of it, and a source
+// rectangle that is not the node's own quad is a window that slides sideways inside its own fade.
+namespace
+{
+[[nodiscard]] ExitSnapshot Reserving(std::uint32_t node, std::uint32_t output, std::uint32_t reservation)
+{
+	return { .Node = node,
+		     .Output = output,
+		     .Reservation = reservation,
+		     .Texture = TextureId{ 900 + reservation, 1 },
+		     .Slot = PixelRect<BufferSpace>{ { 0, 0 }, { 100, 60 } } };
+}
+} // namespace
+
+GYRO_TEST(Evaluator, AClosingWindowNamesItsWholeSubtreeAndNothingBesideIt)
+{
+	Wire wire;
+
+	// A window ahead of it that must not be in the run, the closing window with two nodes under it,
+	// and a window behind it that must not be either.
+	std::array nodes{ Image(0, 0.0, 0.0),
+		              Container(2, 300.0, 200.0),
+		              Image(1, 300.0, 200.0),
+		              Image(2, 320.0, 220.0),
+		              Image(3, 800.0, 0.0) };
+	nodes[1].Extent = { 100.0F, 60.0F };
+	nodes[1].Exit = 0;
+
+	const std::array images{ Texel(1), Texel(2), Texel(3), Texel(4) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(1, 0, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// The container draws nothing of its own, so the run is its two children.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 4 });
+	GYRO_REQUIRE_EQ(list.Captures.size(), std::size_t{ 1 });
+
+	const ExitCapture& capture = list.Captures[0];
+
+	GYRO_CHECK_EQ(capture.Reservation, 11U);
+	GYRO_CHECK_EQ(capture.Into, TextureId{ 911, 1 });
+	GYRO_CHECK_EQ(capture.First, 1U);
+	GYRO_CHECK_EQ(capture.Count, 2U);
+
+	// The window's own quad, which is the rectangle the slot was reserved from — not the bound of its
+	// children, which reach further right and further down.
+	GYRO_CHECK_EQ(capture.Source, Rect<DeviceSpace>::FromEdges({ 300.0F, 200.0F }, { 400.0F, 260.0F }));
+
+	const DrawTexture* const first = AsTexture(list.Items[capture.First]);
+	const DrawTexture* const last = AsTexture(list.Items[capture.First + capture.Count - 1]);
+
+	GYRO_REQUIRE(first != nullptr && last != nullptr);
+	GYRO_CHECK_EQ(first->Texture, TextureId{ 2, 1 });
+	GYRO_CHECK_EQ(last->Texture, TextureId{ 3, 1 });
+}
+
+GYRO_TEST(Evaluator, AClosingWindowThatDeclaredAGroupKeepsTheGroupItemInItsOwnRun)
+{
+	Wire wire;
+
+	std::array nodes{ Container(2, 300.0, 200.0), Image(0, 300.0, 200.0), Image(1, 320.0, 220.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Flags |= Node::Group;
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1), Texel(2) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 4) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// **The group's own item is inside the run, and it has to be.** A group is what the renderer
+	// flattens the subtree through, so a run that named only the members would draw the window into
+	// its snapshot without the fade, the dressing, or the shadow the group is carrying for it.
+	GYRO_REQUIRE_EQ(list.Captures.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Captures[0].First, 0U);
+	GYRO_CHECK_EQ(list.Captures[0].Count, 3U);
+	GYRO_REQUIRE(AsGroup(list.Items[0]) != nullptr);
+}
+
+GYRO_TEST(Evaluator, EachScreenIsToldOnlyAboutItsOwnRectangle)
+{
+	Wire wire;
+
+	std::array nodes{ Container(1, 10.0, 10.0), Image(0, 10.0, 10.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement(), Placement() };
+
+	// Decision 190: a window straddling the seam is in both atlases, and the two entries are
+	// contiguous under the same node.
+	const std::array exits{ Reserving(0, 0, 21), Reserving(0, 1, 22) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList left = evaluator.Evaluate(On(snapshot, 0));
+
+	GYRO_REQUIRE_EQ(left.Captures.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(left.Captures[0].Reservation, 21U);
+
+	const DrawList right = evaluator.Evaluate(On(snapshot, 1));
+
+	GYRO_REQUIRE_EQ(right.Captures.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(right.Captures[0].Reservation, 22U);
+}
+
+GYRO_TEST(Evaluator, AWindowWithNoRoomReservedForItIsNotReported)
+{
+	Wire wire;
+
+	std::array nodes{ Container(1, 10.0, 10.0), Image(0, 10.0, 10.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	// Decision 46's exhaustion: the packer had nowhere to put it, so the entry carries no texture. The
+	// window cuts instead of fading, and no frame is spent finding that out again.
+	std::array exits{ Reserving(0, 0, 5) };
+	exits[0].Texture = TextureId{};
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	GYRO_CHECK(evaluator.Evaluate(Frame(snapshot)).Captures.empty());
+}
+
+GYRO_TEST(Evaluator, AnExitRunNamingSomebodyElsesNodeIsReadAsNoSnapshotAtAll)
+{
+	Wire wire;
+
+	std::array nodes{ Container(1, 10.0, 10.0), Image(0, 10.0, 10.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+
+	// Decision 90 at this seam: the entry at the named position belongs to another node, so the scan
+	// stops rather than reading it. Trusting it would copy this window's rectangle out of a rectangle
+	// reserved for a different window — a wrong picture where this is a missing one.
+	const std::array exits{ Reserving(1, 0, 6) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	GYRO_CHECK(evaluator.Evaluate(Frame(snapshot)).Captures.empty());
+}
+
+GYRO_TEST(Evaluator, AClosingWindowWithNothingLeftToDrawIsNotReported)
+{
+	Wire wire;
+
+	// The client took its buffer away on the way out: the container is still closing and there is no
+	// longer anything under it. Reporting an empty run would clear the rectangle, mark it filled, and
+	// leave the window fading from nothing for the length of its exit.
+	std::array nodes{ Container(0, 10.0, 10.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 7) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_CHECK(list.Items.empty());
+	GYRO_CHECK(list.Captures.empty());
+}
+
+GYRO_TEST(Evaluator, TwoWindowsClosingAtOnceGetOneRunEach)
+{
+	Wire wire;
+
+	// Two toplevels leaving together — closing a folder of windows, or an application going down.
+	// The runs must be disjoint and in walk order, because a run that overlapped its neighbour would
+	// put half of one window into the other's rectangle and both would leave wearing each other.
+	std::array nodes{ Container(2, 100.0, 100.0),
+		              Image(0, 100.0, 100.0),
+		              Image(1, 120.0, 120.0),
+		              Container(1, 600.0, 100.0),
+		              Image(2, 600.0, 100.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+	nodes[3].Extent = { 100.0F, 60.0F };
+	nodes[3].Exit = 1;
+
+	const std::array images{ Texel(1), Texel(2), Texel(3) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 31), Reserving(3, 0, 32) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 3 });
+	GYRO_REQUIRE_EQ(list.Captures.size(), std::size_t{ 2 });
+
+	GYRO_CHECK_EQ(list.Captures[0].Reservation, 31U);
+	GYRO_CHECK_EQ(list.Captures[0].First, 0U);
+	GYRO_CHECK_EQ(list.Captures[0].Count, 2U);
+
+	GYRO_CHECK_EQ(list.Captures[1].Reservation, 32U);
+	GYRO_CHECK_EQ(list.Captures[1].First, 2U);
+	GYRO_CHECK_EQ(list.Captures[1].Count, 1U);
+}
+
+GYRO_TEST(Evaluator, AWindowClosingInsideAClosingWindowGetsARunInsideTheOtherOne)
+{
+	Wire wire;
+
+	// A dialog leaving with the window that owns it. The inner run is contained by the outer one and
+	// both are filed, which is the only arrangement that draws right either way round: the dialog's
+	// own rectangle holds the dialog, and the window's holds the window with the dialog on it.
+	std::array nodes{ Container(2, 0.0, 0.0), Container(1, 20.0, 20.0), Image(0, 20.0, 20.0) };
+	nodes[0].Extent = { 200.0F, 120.0F };
+	nodes[0].Exit = 0;
+	nodes[1].Extent = { 80.0F, 40.0F };
+	nodes[1].Exit = 1;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 41), Reserving(1, 0, 42) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(list.Captures.size(), std::size_t{ 2 });
+
+	// Filed as the walk leaves each subtree, so the inner one comes out first.
+	GYRO_CHECK_EQ(list.Captures[0].Reservation, 42U);
+	GYRO_CHECK_EQ(list.Captures[0].First, 0U);
+	GYRO_CHECK_EQ(list.Captures[0].Count, 1U);
+
+	GYRO_CHECK_EQ(list.Captures[1].Reservation, 41U);
+	GYRO_CHECK_EQ(list.Captures[1].First, 0U);
+	GYRO_CHECK_EQ(list.Captures[1].Count, 1U);
 }

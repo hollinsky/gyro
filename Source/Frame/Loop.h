@@ -17,6 +17,7 @@
 #include "Frame/Admission.h"
 #include "Frame/Assign.h"
 #include "Frame/Budget.h"
+#include "Frame/Capture.h"
 #include "Frame/Evaluator.h"
 #include "Frame/FrameClock.h"
 #include "Frame/Timing.h"
@@ -1247,6 +1248,28 @@ private:
 
 		TraceCount("items", static_cast<std::int64_t>(list.Items.size()), output.m_Trace);
 
+		// What of this frame's closing windows still owes a picture, which is all of them the first time
+		// each is seen and none of them on the frames after. Taken before the partition below because
+		// the partition depends on it, and before the request because the proposal and the item list it
+		// indexes have to be the same frame's.
+		const std::span<const SnapshotCapture> captures = m_Captures.Propose(list.Captures, index);
+
+		TraceCount("captures", static_cast<std::int64_t>(captures.size()), output.m_Trace);
+
+		// **A frame that is taking a window's picture is the same clause for the same reason.** The
+		// picture is drawn out of this list, so anything the display engine took is a piece of that
+		// window the snapshot cannot reach — and a window that faded out with its own middle missing is
+		// worse than one that never promoted. Promotion is a power saving on a still screen, and a
+		// screen with a window leaving it is not one.
+		//
+		// **It is the proposal and not everything the walk found**, which is the difference between one
+		// frame per closing window and every frame of every exit. A window whose picture has already
+		// been drawn is still in the walk's report — `Frame/Capture.h` says why it has to be — and
+		// suppressing planes for the whole length of its fade would spend an exit's worth of scanout
+		// bandwidth to protect a copy that already happened.
+		const std::uint32_t ceiling =
+			capturing || !m_Planes || !captures.empty() ? 0 : output.m_Presenter->LayerCeiling();
+
 		// **Decision 152's partition: which of these items the display engine draws and which the GPU
 		// does.** Recomputed from this frame's list alone, with nothing carried over — see Frame/Assign.h.
 		// **A ceiling of zero where a capture is owed, which is how the whole screen ends up in one
@@ -1258,8 +1281,6 @@ private:
 		// This is the perturbation Seam/Capture.h declares and the reason the verb is a debug hatch: the
 		// captured frame is drawn by a different path from its neighbours, and if the two ever disagree
 		// the disagreement is visible on the glass at the instant of capture.
-		const std::uint32_t ceiling = capturing || !m_Planes ? 0 : output.m_Presenter->LayerCeiling();
-
 		Partition partition = Assign(list.Items, ceiling, output.m_Configuration.Color);
 
 		// **What the count below cannot say.** A frame that promoted nothing and a frame whose top window
@@ -1483,15 +1504,11 @@ private:
 				                         // item drawn under an opaque plane is invisible, and one drawn under a
 				                         // plane the driver later refuses is a window in two places.
 				                         .Items = list.Items.first(partition.Composited),
-				                         // **Nothing yet, and what is missing is the run rather than the
-				                         // machinery.** A snapshot is the closing window's own items drawn
-				                         // again into its rectangle, so naming one means naming where that
-				                         // window's subtree starts and ends in the list above — which the
-				                         // evaluator knows as it walks and does not yet report. Until it
-				                         // does, a window closes at once instead of fading, which is the
-				                         // same picture decision 46 already accepts from a screen with no
-				                         // room to reserve.
-				                         .Captures = {} };
+				                         // The closing windows, each naming a run of the items above. They
+				                         // index the whole list rather than the prefix, which the ceiling
+				                         // clause up there makes the same span whenever there is one of
+				                         // these to draw.
+				                         .Captures = captures };
 
 			TraceSpan record{ "record", output.m_Trace };
 
@@ -1541,6 +1558,11 @@ private:
 			// starts from the new figure even if the flip below is refused.
 			free = decision.DeviceFreeAt;
 			(void)output.m_Cost.ObserveCpu(decision.Mode(), submission->RecordCost);
+
+			// A window whose picture is now ordered before anything that samples it, and therefore one
+			// this output never draws again. Filed on the submission and not on the flip — see
+			// `Frame/Capture.h` — and on the renderer's own count rather than on what was offered.
+			m_Captures.Landed(submission->Captured);
 
 			// What the record produced, filled into the layer the test was run against rather than a second
 			// one built here: committing a partition assembled differently from the one the hardware accepted
@@ -2190,6 +2212,10 @@ private:
 	// Null on every run that was not asked for captures, which is almost all of them — the check is one
 	// predictable branch per output per frame and buys a loop that carries no capture state at all.
 	ICaptureSink* m_Capture = nullptr;
+
+	// Which closing windows have already had their picture taken, per output. The loop holds it rather
+	// than the evaluator because the answer is about submissions and the walk knows nothing of those.
+	ExitCaptures m_Captures{};
 
 	// Whether a client may reach the glass on a plane at all. True unless `--no-planes` said otherwise.
 	bool m_Planes = true;

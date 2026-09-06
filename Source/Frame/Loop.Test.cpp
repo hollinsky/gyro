@@ -268,7 +268,7 @@ public:
 	{
 		++Evaluations;
 
-		return DrawList{ .Items = Items, .Damage = {}, .EvaluateCost = Cost };
+		return DrawList{ .Items = Items, .Damage = {}, .Captures = {}, .EvaluateCost = Cost };
 	}
 
 	int Evaluations = 0;

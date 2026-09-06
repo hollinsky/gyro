@@ -23,6 +23,7 @@
 #include "Publication/Reader/Reader.h"
 #include "Seam/Renderer.h"
 #include "World/Content.h"
+#include "World/Exit.h"
 #include "World/Node.h"
 #include "World/Root.h"
 // See Docs/Architecture.md#the-frame-loop and decisions 82, 86, 88, 90, 92, 93, 94, and 95.
@@ -66,6 +67,58 @@ inline constexpr std::size_t MaxDrawItems = 4096;
 // where an unbounded traversal costs every session's UI at once, so the cap refuses rather than grows.
 inline constexpr std::size_t MaxWalkDepth = 32;
 
+// SPEC: how many closing windows one output may report a snapshot for in one frame.
+//
+// It is `Publication/Return.h`'s `ReleasesPerReport` over the same population — the windows that can
+// start leaving one screen inside a single frame — because a window's last frame is exactly what a
+// hold on its buffer was keeping alive. Sixteen is well past what a person closes at once and past
+// what an application's teardown lands in any one frame.
+//
+// **Past it, the seventeenth window waits for one of the sixteen to finish, not for the next frame.**
+// The walk takes them in tree order and cannot skip the ones already drawn, because it does not know
+// which those are — `Frame/Capture.h` holds that and holds it downstream of here. So a screen with
+// more than sixteen windows leaving at once reports the same sixteen every frame until one of their
+// exits ends and its entry leaves the run. What the window waiting draws in the meantime is itself:
+// it still has its own pixels until its client takes them away, and decision 20's copy exists for the
+// moment after that. Raising the figure is the fix if a shell is ever built that closes more than this
+// at once, and lowering the cost is not — the walk touches this run once per closing window per frame.
+inline constexpr std::size_t MaxExitCaptures = 16;
+
+// Where one closing window is on this screen and where its picture goes.
+//
+// **The walk is what knows this, and it is the only thing that does.** Decision 20 draws a window
+// that is leaving from a copy of its last frame and decision 46 keeps that copy in a rectangle
+// reserved when the retirement was observed; what neither side could say until now is *which pixels*
+// — a toplevel is a container (111), so a window is a run of items rather than one image, and the
+// run's extent is a fact about a preorder walk in flight. `World/Exit.h` carries the rectangle in and
+// this carries the run out, so the two meet on the thread that draws.
+//
+// The run indexes `DrawList::Items` and is the closing window's own subtree, in the order the
+// composite would have drawn it. `Seam/Renderer.h`'s `SnapshotCapture` is this record minus the
+// reservation, which is the frame thread's own bookkeeping rather than anything a renderer is told.
+struct ExitCapture
+{
+	// The atlas image, and the rectangle within it, exactly as reserved.
+	TextureId Into;
+	PixelRect<BufferSpace> Slot{};
+
+	// Where that rectangle's contents are on the screen right now: the closing node's own quad, which
+	// is the rectangle `Scene/Reach.h` measured when the slot was taken. The two agreeing is what
+	// makes the copy a translation rather than a resample — see `Seam/Renderer.h`.
+	Rect<DeviceSpace> Source{};
+
+	// Which reservation this is, from `World/Exit.h`. What `Frame/Capture.h` remembers, so that a
+	// window's picture is taken once rather than once a frame for the length of its exit.
+	std::uint32_t Reservation = 0;
+
+	// The window's items: where its subtree starts in the list and how many items long it is. Never
+	// zero — a window that emitted nothing has no picture to keep and is not reported at all.
+	std::uint32_t First = 0;
+	std::uint32_t Count = 0;
+
+	friend constexpr bool operator==(ExitCapture, ExitCapture) noexcept = default;
+};
+
 // What one output's frame is, once the snapshot has been evaluated at its predicted presentation.
 //
 // Damage is the new damage this evaluation produced, in device space; the loop unions it into what the
@@ -74,6 +127,10 @@ struct DrawList
 {
 	std::span<const DrawItem> Items;
 	Region<DeviceSpace> Damage;
+
+	// The closing windows on this output whose last frame is worth keeping, each naming a run of
+	// `Items`. Empty on every frame nothing is leaving, which is nearly all of them.
+	std::span<const ExitCapture> Captures;
 
 	// What building this list cost on the frame thread, measured by the evaluator across its own walk.
 	//
@@ -160,6 +217,7 @@ public:
 		const Instant started = m_Clock->Now();
 
 		m_Count = 0;
+		m_CaptureCount = 0;
 		m_Moving = false;
 		m_Truncated = false;
 
@@ -176,6 +234,7 @@ public:
 
 		return { .Items = std::span<const DrawItem>{ m_Items.data(), m_Count },
 			     .Damage = damage,
+			     .Captures = std::span<const ExitCapture>{ m_Captures.data(), m_CaptureCount },
 			     .EvaluateCost = Elapsed(started, m_Clock->Now()) };
 	}
 
@@ -234,6 +293,12 @@ private:
 		// group's own quad is. Empty until something lands in it.
 		bool Bounded = false;
 		Rect<DeviceSpace> Bounds{};
+
+		// The snapshot the node that pushed this level owes, carried down and filed on the way out.
+		// Its `First` is already set and its `Count` is not, for `Group`'s reason one field over: a
+		// window's run ends where its subtree does, and that is not known when the window is met.
+		// `Reservation` of zero is a level nothing is closing, which is every level nearly always.
+		ExitCapture Exit{};
 	};
 
 	void Walk(const EvaluateRequest& request)
@@ -272,6 +337,7 @@ private:
 			.Opacities = request.Snapshot.Run<Spring<float>>(SnapshotRun::Opacity),
 			.Images = request.Snapshot.Images<ImageContent>(),
 			.Solids = request.Snapshot.Solids<SolidContent>(),
+			.Exits = request.Snapshot.Exits<ExitSnapshot>(),
 		};
 
 		// Decision 188's cross-fade, resolved once for the whole walk: an output moving from one session
@@ -312,6 +378,12 @@ private:
 		// that what a frame drops is whole windows rather than the second half of one — see `Emit`.
 		std::size_t mark = 0;
 
+		// And what it had already promised to photograph. A run rolled back names items that are no
+		// longer there, so the snapshots taken inside it go with it — a window dropped from this frame
+		// is one whose picture is taken on a frame that draws it, rather than one whose rectangle is
+		// filled from whatever ended up at those indices.
+		std::size_t promised = 0;
+
 		while (m_Depth != 0)
 		{
 			Level& level = m_Stack[m_Depth - 1];
@@ -325,6 +397,7 @@ private:
 			if (m_Depth == 1)
 			{
 				mark = m_Count;
+				promised = m_CaptureCount;
 			}
 
 			const std::size_t index = level.Index;
@@ -400,6 +473,7 @@ private:
 			if (!Visit(node, index, nodes, runs, view, request))
 			{
 				m_Count = mark;
+				m_CaptureCount = promised;
 				m_Truncated = true;
 				m_Depth = 0;
 
@@ -435,6 +509,7 @@ private:
 		std::span<const Spring<float>> Opacities;
 		std::span<const ImageContent> Images;
 		std::span<const SolidContent> Solids;
+		std::span<const ExitSnapshot> Exits;
 	};
 
 	// One node: evaluate it, place it, emit it, and descend. False where the arena ran out, which is
@@ -559,6 +634,13 @@ private:
 		Shadow lift = Cast(node.Lift);
 		std::uint32_t group = NoItem;
 
+		// **Where this window's picture would start, taken before anything of it is emitted.** A
+		// closing window is kept as the run of items it is about to draw — its own quad, its dressing,
+		// its shadow and everything hanging under it — so the run opens here and closes when the walk
+		// leaves the subtree, whether that is at the group below, at the level pushed at the end, or
+		// immediately for a window with nothing under it.
+		const ExitCapture pending = Reserved(node, index, chain, view, runs.Exits, request.Output, m_Count);
+
 		// **A group takes the node's dressing along with its opacity, and for the same reason.** Both
 		// belong to the flattened result: a glass window that declares a group blurs what is behind the
 		// *group*, and leaving the material on the member as well would blur it twice — visibly, at the
@@ -624,6 +706,8 @@ private:
 
 		if (!descends && group == NoItem)
 		{
+			File(pending);
+
 			return true;
 		}
 
@@ -636,6 +720,8 @@ private:
 			{
 				Backpatch(group, drawn.Bounded, drawn.Bounds);
 			}
+
+			File(pending);
 
 			return true;
 		}
@@ -652,7 +738,8 @@ private:
 			                      .Snapped = snapping,
 			                      .Group = group,
 			                      .Bounded = group != NoItem && drawn.Bounded,
-			                      .Bounds = drawn.Bounds };
+			                      .Bounds = drawn.Bounds,
+			                      .Exit = pending };
 		++m_Depth;
 
 		return true;
@@ -777,6 +864,8 @@ private:
 			Backpatch(done.Group, done.Bounded, done.Bounds);
 		}
 
+		File(done.Exit);
+
 		if (done.Bounded && m_Depth != 0)
 		{
 			Accumulate(done.Bounds);
@@ -795,6 +884,90 @@ private:
 		// other item's do. It is device-sized because a flattened subtree has no surface behind it —
 		// the members' projections are already baked into the bound this is the size of.
 		m_Items[item].Extent = { bounded ? bounds.Extent.Width : 0.0F, bounded ? bounds.Extent.Height : 0.0F };
+	}
+
+	// The snapshot a node is closing under on this output, opened at the item it is about to emit.
+	//
+	// **Every step of the scan is checked rather than trusted**, which is decision 90's rule that the
+	// frame thread validates what it walks: the run is a start position and a contiguity contract, so
+	// an entry naming another node ends it and an index past the run's end is simply no snapshot.
+	// Getting that wrong would copy one window's rectangle out of another window's pixels, which is a
+	// wrong picture rather than a missing one.
+	//
+	// **The source is the node's own quad and not its subtree's bound**, because that is the rectangle
+	// the reservation was measured from — `Scene/Reach.h` takes the four projected corners of the
+	// closing node, and `Seam/Renderer.h` moves the run by the difference between the two origins. The
+	// two agreeing is what makes the copy a translation, so measuring anything else here would slide
+	// the picture inside its own rectangle by however far the subtree overhangs.
+	//
+	// **A shadow overhangs and is therefore clipped**, which is the one thing this leaves owed: an
+	// elevation spreads past the quad it is cast from, the slot is the quad's size, and the renderer
+	// scissors to the slot. A window with a shadow leaves with that shadow squared off at its own
+	// edges. Fixing it means the reservation growing by the spread on the far side, where the
+	// elevation is still a level rather than a distance.
+	[[nodiscard]] static ExitCapture Reserved(
+		const Node& node,
+		std::size_t index,
+		const ComposedTransform& chain,
+		const OutputView& view,
+		std::span<const ExitSnapshot> exits,
+		std::size_t output,
+		std::size_t first
+	) noexcept
+	{
+		if (!node.IsExiting())
+		{
+			return {};
+		}
+
+		for (std::size_t at = node.Exit; at < exits.size() && exits[at].Node == index; ++at)
+		{
+			const ExitSnapshot& snapshot = exits[at];
+
+			// A null texture is an output whose atlas the device had no room for and an empty slot is
+			// a packer that had none, which decision 46 answers the same way: the window cuts instead
+			// of fading, and the frames it would have faded over cost nothing.
+			if (snapshot.Output != output || snapshot.Reservation == 0 || snapshot.Texture.IsNull() ||
+			    snapshot.Slot.IsEmpty())
+			{
+				continue;
+			}
+
+			const std::optional<Quad> quad = view.Project(chain, node.Extent);
+
+			if (!quad)
+			{
+				return {};
+			}
+
+			return { .Into = snapshot.Texture,
+				     .Slot = snapshot.Slot,
+				     .Source = quad->Bounds(),
+				     .Reservation = snapshot.Reservation,
+				     .First = static_cast<std::uint32_t>(first),
+				     .Count = 0 };
+		}
+
+		return {};
+	}
+
+	// File one closing window's run, now that the walk knows where it ends.
+	//
+	// **A window that emitted nothing is not reported**, and the difference matters on screen: a
+	// reported run of no items would clear its rectangle to nothing, mark the reservation filled, and
+	// leave the window fading from an empty rectangle for the length of its exit. Not reporting it
+	// means the window cuts, which is the picture decision 46 already accepts, and means the snapshot
+	// is taken on the first frame the window does draw something.
+	void File(const ExitCapture& pending) noexcept
+	{
+		if (pending.Reservation == 0 || m_Count <= pending.First || m_CaptureCount == m_Captures.size())
+		{
+			return;
+		}
+
+		m_Captures[m_CaptureCount] = pending;
+		m_Captures[m_CaptureCount].Count = static_cast<std::uint32_t>(m_Count - pending.First);
+		++m_CaptureCount;
 	}
 
 	void Accumulate(Rect<DeviceSpace> bounds) noexcept
@@ -935,6 +1108,11 @@ private:
 	// that, so nothing here allocates where decision 36 says nothing may.
 	std::vector<DrawItem> m_Items;
 	std::size_t m_Count = 0;
+
+	// The closing windows this frame found. An array rather than a vector because it is half a
+	// kilobyte and decision 36 forbids the allocation either way.
+	std::array<ExitCapture, MaxExitCaptures> m_Captures{};
+	std::size_t m_CaptureCount = 0;
 
 	std::array<Level, MaxWalkDepth> m_Stack{};
 	std::size_t m_Depth = 0;
