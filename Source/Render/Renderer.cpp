@@ -682,9 +682,10 @@ Result<void> VulkanRenderer::BindTargets(std::span<const RenderTarget> targets, 
 	// happen is discovering the format later: `Record` may not compile, so a snapshot whose pipeline
 	// was never built is one that is not drawn at all.
 	//
-	// On an eight-bit output this is the pair `Import` just prepared and `Build` returns immediately.
-	// It is a second binding only where the panel is deeper than the atlas.
-	m_Snapshots = m_TargetCount > 0 && m_Pipeline.Prepare(VulkanFormat(StorageFormat), output).has_value();
+	// Always a second binding, because `StorageFormat` is a wider format than any panel: a snapshot is
+	// kept at sixteen-bit float so that a fade neither bands on a deep screen nor loses the coverage a
+	// rounded corner is made of. Render/Textures.h has the whole of that argument.
+	m_Snapshots = m_TargetCount > 0 && m_Pipeline.Prepare(StorageFormat, output).has_value();
 
 	if (Result<void> settled = Settle(); !settled)
 	{

@@ -358,7 +358,7 @@ Result<void> VulkanTextures::Adopt(TextureId id, const TextureSource& source)
 
 	if (adopted)
 	{
-		adopted = Describe(built, source.Format);
+		adopted = Describe(built, VulkanFormat(source.Format.Code));
 	}
 
 	if (!adopted)
@@ -410,9 +410,9 @@ Result<void> VulkanTextures::Reserve(TextureId id, PixelSize<BufferSpace> size)
 		return Failure(EINVAL, "an image with no extent");
 	}
 
-	// Premultiplied eight-bit, which is what a composite writes and what every item that samples the
-	// result already expects. The atlas holds pictures gyro drew rather than pixels a client chose a
-	// layout for, so there is no foreign fourcc to honour here and no modifier to relay — this image
+	// `StorageFormat`, premultiplied, which is what a composite writes and what everything that samples
+	// the result already expects. The atlas holds pictures gyro drew rather than pixels a client chose
+	// a layout for, so there is no foreign fourcc to honour here and no modifier to relay — this image
 	// is never a descriptor anybody outside the device sees.
 	//
 	// **Built to one side and committed only once it is whole**, for `Adopt`'s reason: a reservation
@@ -423,7 +423,10 @@ Result<void> VulkanTextures::Reserve(TextureId id, PixelSize<BufferSpace> size)
 		         .View = VK_NULL_HANDLE,
 		         .Set = VK_NULL_HANDLE,
 		         .Size = size,
-		         .Format = PixelFormat{ .Code = StorageFormat, .Modifier = ModifierInvalid },
+		         // No fourcc, because there is nothing outside this device that could name one. A
+		         // reserved image is never a descriptor anybody else sees, and `StorageFormat` is what
+		         // both the allocation and the pipelines that draw into it are built against.
+		         .Format = PixelFormat{},
 		         .Imported = false };
 
 	Image* const existing = Lookup(id);
@@ -437,7 +440,7 @@ Result<void> VulkanTextures::Reserve(TextureId id, PixelSize<BufferSpace> size)
 
 	if (allocated)
 	{
-		allocated = Describe(built, built.Format);
+		allocated = Describe(built, StorageFormat);
 	}
 
 	if (!allocated)
@@ -482,7 +485,7 @@ Result<void> VulkanTextures::ReserveStorage(Image& into)
 		                               .pNext = nullptr,
 		                               .flags = 0,
 		                               .imageType = VK_IMAGE_TYPE_2D,
-		                               .format = VulkanFormat(into.Format.Code),
+		                               .format = StorageFormat,
 		                               .extent = { width, height, 1 },
 		                               .mipLevels = 1,
 		                               .arrayLayers = 1,
@@ -761,14 +764,14 @@ Result<void> VulkanTextures::AdoptDmabuf(Image& into, const TextureSource& sourc
 	return Check(vkBindImageMemory(m_Device->Handle(), into.Handle, into.Memory, 0), "vkBindImageMemory");
 }
 
-Result<void> VulkanTextures::Describe(Image& into, PixelFormat format)
+Result<void> VulkanTextures::Describe(Image& into, VkFormat format)
 {
 	const VkImageViewCreateInfo viewInfo{ .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
 		                                  .pNext = nullptr,
 		                                  .flags = 0,
 		                                  .image = into.Handle,
 		                                  .viewType = VK_IMAGE_VIEW_TYPE_2D,
-		                                  .format = VulkanFormat(format.Code),
+		                                  .format = format,
 		                                  .components = {},
 		                                  .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
 

@@ -361,7 +361,7 @@ public:
 		}
 
 		// An old atlas whose output is not in the new set is a monitor that has gone, and its image goes
-		// with it — thirty megabytes at 4K, held for a screen nobody can reserve on. A replaced one was
+		// with it — a hundred and thirty megabytes at 4K, held for a screen nobody can reserve on. A replaced one was
 		// already given up above, where its output was found and its shape was not.
 		for (const Atlas& atlas : m_Atlases)
 		{

@@ -11,7 +11,6 @@
 #include "Render/Device.h"
 #include "Render/Vulkan.h"
 #include "Seam/Importer.h"
-#include "Seam/RenderTarget.h"
 
 // Seam/Importer.h's dispatch half on a Vulkan device: a client's buffer becoming something a
 // fragment can sample.
@@ -72,19 +71,27 @@ inline constexpr std::uint32_t MaxTextureImages = 1024;
 //
 // **Named here rather than chosen at the allocation, because a renderer has to build its pipelines
 // against it before any frame draws one.** Dynamic rendering bakes the attachment's format into the
-// pipeline, so a composite that discovered this format when it first went to fill a snapshot would
-// be compiling inside a frame — a hundred milliseconds on the thread that owes a picture every
-// refresh, landing on the first frame anybody ever closed a window on. `VulkanRenderer::BindTargets`
-// prepares this pair alongside the target's, where building one is legal, and on an ordinary
-// eight-bit output the two are the same pair and it costs nothing at all.
+// pipeline, so a composite that discovered this format when it first went to fill a snapshot would be
+// compiling inside a frame — a hundred milliseconds on the thread that owes a picture every refresh,
+// landing on the first frame anybody ever closed a window on. `VulkanRenderer::BindTargets` prepares
+// this binding alongside the target's, where building one is legal.
 //
-// Premultiplied eight-bit, which is what a composite writes and what everything that samples the
-// result already expects. **What it costs on a ten-bit output is range**, and that is an open
-// question rather than a settled one: a snapshot of a window on an HDR screen is held to eight bits
-// per channel for the length of its exit, which is a fade that bands where the live window did not.
-// Both candidate formats are thirty-two bits per pixel, so the memory is identical and the trade is
-// purely the extra binding a wider one would ask every renderer to build.
-inline constexpr std::uint32_t StorageFormat = FormatArgb8888;
+// **Sixteen-bit float, and it is the narrower candidates that argue for it.** What is kept here is a
+// window's last frame, held for the length of a fade and drawn over whatever is behind it:
+//
+//   - **Eight bits per channel bands on a ten-bit screen.** The live window was composited at the
+//     panel's depth, so a snapshot quantised below it is a window that visibly steps as it leaves —
+//     the gradient a person was looking at a moment ago, in bands, and only while it is going away.
+//   - **`A2R10G10B10` fixes the banding and breaks the corners.** Two bits of alpha is four levels of
+//     coverage, which is a rounded corner turning to stairs and a translucent terminal collapsing to
+//     opaque for the whole of its exit. There is no packed thirty-two-bit format that is wide in
+//     colour and wide in alpha at once.
+//
+// So it is eight bytes per pixel rather than four, which is the one real cost: an atlas is twice the
+// memory it would be, and `AtlasRenderTargetMultiple` denominates capacity in render targets rather
+// than bytes, so the number of windows that fit is unchanged and it is the footprint that moves.
+// `Render/Unfused.h` already reaches for this format for the same reason and states the same trade.
+inline constexpr VkFormat StorageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
 // SPEC: how many distinct images one output may sample in one frame.
 //
@@ -293,7 +300,7 @@ private:
 	[[nodiscard]] Result<void> ReserveStorage(Image& into);
 
 	// The view and the descriptor set over an image both arms have already created and filled.
-	[[nodiscard]] Result<void> Describe(Image& into, PixelFormat format);
+	[[nodiscard]] Result<void> Describe(Image& into, VkFormat format);
 
 	// Move an image onto the doomed list, stamped with every renderer's current submission. Total:
 	// where there is no room to defer, the only remaining answers are to leak or to free something a
