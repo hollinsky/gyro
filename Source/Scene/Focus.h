@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <span>
 #include <vector>
 
 #include "Core/Handle.h"
+#include "Core/Session.h"
+#include "Scene/Output.h"
 
 // Who the keyboard is talking to, as the world holds it.
 //
@@ -42,6 +45,21 @@
 // a held modifier and not a verb behind the leader; what it costs here is a cursor, and the argument
 // for it being a window rather than a position is at `CycleNext`.
 //
+// **One stack for the machine, and what bounds it is which sessions are on screen rather than a
+// second stack per session.** There is one keyboard, so *who is typed into* is one answer however
+// many sessions decision 21 has alive at once — but an entry belonging to a session no output is
+// showing must not be that answer, or locking the screen would leave a person's keystrokes going to
+// the window that was in front when they locked it. So an entry carries the session it was offered
+// for and the queries below step over the ones nobody is looking at, which is the same rule
+// `Scene/Hit.h` applies to the pointer: a session is reachable exactly where it is presented.
+//
+// **The session is carried on the entry rather than resolved from the tree at every query**, and what
+// makes the copy safe is that it cannot go stale: a window is offered focus when it maps, into the
+// floor of the session its own connection belongs to (decision 23 makes the listening socket the
+// identity), and nothing reparents a mapped toplevel between sessions. `SessionId::None` is gyro's
+// own and is always reachable, which is what keeps the splash, the recovery console and every author
+// with no session behind it working unchanged.
+//
 // What a focusable thing is, and the walk through the windows is the only reader of it.
 //
 // **It exists because a launcher needs one half of focus and not the other.** A shell's own surfaces
@@ -76,6 +94,9 @@ class SceneFocus
 	{
 		EntityId Id{};
 		FocusKind Kind = FocusKind::Window;
+
+		// Whose window this is. `None` is gyro's own and is reachable wherever anything is.
+		SessionId Session = SessionId::None;
 	};
 
 	using Entries = std::vector<Entry>;
@@ -99,6 +120,14 @@ class SceneFocus
 		std::erase_if(m_Stack, [id](const Entry& entry) noexcept { return entry.Id == id; });
 	}
 
+	// Whether an output is showing this entry's session, which is what makes it something the keyboard
+	// may be on. Linear in the outputs, which is the monitors on the desk.
+	[[nodiscard]] bool Reachable(const Entry& entry) const noexcept
+	{
+		return entry.Session == SessionId::None ||
+		       std::find(m_Presented.begin(), m_Presented.end(), entry.Session) != m_Presented.end();
+	}
+
 public:
 	// The window the keyboard is on, or null where nothing is focusable.
 	//
@@ -110,12 +139,44 @@ public:
 	// see. Nested gyro loses that release routinely (175), so this is the case rather than the corner.
 	[[nodiscard]] EntityId Focused() const noexcept
 	{
-		if (!m_Candidate.IsNull() && Contains(m_Candidate))
+		const auto candidate = Find(m_Candidate);
+
+		if (!m_Candidate.IsNull() && candidate != m_Stack.end() && Reachable(*candidate))
 		{
 			return m_Candidate;
 		}
 
-		return m_Stack.empty() ? EntityId{} : m_Stack.back().Id;
+		// The newest entry anybody is looking at. An output being reassigned takes every window of the
+		// session it was showing out of reach in one step, and focus falls through them to whatever is
+		// still presented — which is nothing at all on a machine whose only screen has just been locked.
+		for (auto entry = m_Stack.rbegin(); entry != m_Stack.rend(); ++entry)
+		{
+			if (Reachable(*entry))
+			{
+				return entry->Id;
+			}
+		}
+
+		return EntityId{};
+	}
+
+	// Which sessions the outputs are showing, which is the whole of what this class knows about screens.
+	//
+	// **The store calls it, for the reason it reconfines the pointer there**: an output set replaced by
+	// a hotplug and an output handed to a session are both facts nobody offering a window should have to
+	// remember to restate. `Scene/Store.h`'s `SetOutputs` and `SetOutputSession` are the two writers.
+	void Present(std::span<const SceneOutput> outputs)
+	{
+		m_Presented.clear();
+
+		for (const SceneOutput& output : outputs)
+		{
+			if (output.Session != SessionId::None &&
+			    std::find(m_Presented.begin(), m_Presented.end(), output.Session) == m_Presented.end())
+			{
+				m_Presented.push_back(output.Session);
+			}
+		}
 	}
 
 	// A window became focusable, which is *mapped* for a client's toplevel. Takes focus, per the stack
@@ -125,7 +186,7 @@ public:
 	// is the exception that has to name itself: there is exactly one caller that passes anything else,
 	// and a default the other way would make every test and every future author opt out of being the
 	// shell.
-	void Offer(EntityId id, FocusKind kind = FocusKind::Window)
+	void Offer(EntityId id, FocusKind kind = FocusKind::Window, SessionId session = SessionId::None)
 	{
 		if (id.IsNull())
 		{
@@ -133,7 +194,7 @@ public:
 		}
 
 		Erase(id);
-		m_Stack.push_back(Entry{ .Id = id, .Kind = kind });
+		m_Stack.push_back(Entry{ .Id = id, .Kind = kind, .Session = session });
 
 		// A window opening ends a walk through the windows, because the walk is about which of the ones
 		// already there a person meant and this is a new answer to that. Without it the cycle's cursor
@@ -242,7 +303,9 @@ private:
 
 			const Entry& entry = m_Stack[static_cast<std::size_t>(from)];
 
-			if (entry.Kind == FocusKind::Window)
+			// Chrome is stepped over, and so is a window of a session nobody is looking at — the walk is
+			// through what a person could be shown, and a locked screen has nothing on it to walk through.
+			if (entry.Kind == FocusKind::Window && Reachable(entry))
 			{
 				m_Candidate = entry.Id;
 
@@ -260,4 +323,10 @@ private:
 	// Where a walk through the windows has got to, and null when nobody is walking. It is deliberately
 	// not a position: see `CycleNext`.
 	EntityId m_Candidate;
+
+	// The sessions the outputs are showing, without `None`, which needs no entry because it is reachable
+	// wherever anything is. Empty is the ordinary state of a machine before an agent has connected, and
+	// it is what makes every author with no session behind it — the splash, the console, a gym — read
+	// exactly as it did before this class knew what a session was.
+	std::vector<SessionId> m_Presented;
 };

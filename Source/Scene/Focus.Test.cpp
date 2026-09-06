@@ -1,8 +1,13 @@
 #include "Scene/Focus.h"
 
+#include <array>
+
 #include "Core/Clock.h"
 #include "Core/Handle.h"
+#include "Core/Session.h"
+#include "Geometry/Scale.h"
 #include "Scene/Commit.h"
+#include "Scene/Output.h"
 #include "Scene/Store.h"
 #include "Testing/Test.h"
 
@@ -375,4 +380,108 @@ GYRO_TEST(SceneFocus, ChromeIsStillSomethingAClickCanFocus)
 	GYRO_CHECK(focus.Contains(launcher));
 	GYRO_CHECK(focus.Focus(launcher));
 	GYRO_CHECK(focus.Focused() == launcher);
+}
+
+// Which sessions are on screen, and the keyboard leaving with the screen. Every claim here fails as a
+// person typing into a window they cannot see: the machine locked and the password going to whatever
+// was in front of it.
+namespace
+{
+constexpr auto Mine = static_cast<SessionId>(1);
+constexpr auto Theirs = static_cast<SessionId>(2);
+
+[[nodiscard]] SceneOutput Panel(SessionId session)
+{
+	SceneOutput panel{ .Bounds = { { 0.0, 0.0 }, { 1000.0, 1000.0 } },
+		               .Density = Scale::FromInteger(1),
+		               .Grid = { 1000, 1000 } };
+	panel.Session = session;
+
+	return panel;
+}
+} // namespace
+
+GYRO_TEST(SceneFocus, AWindowOfASessionNoScreenIsShowingDoesNotHoldTheKeyboard)
+{
+	SceneFocus focus;
+	const EntityId mine{ 1, 1 };
+	const EntityId theirs{ 2, 1 };
+
+	focus.Offer(mine, FocusKind::Window, Mine);
+	focus.Offer(theirs, FocusKind::Window, Theirs);
+
+	// Nothing has been said about screens yet, so nothing of anybody's is reachable — which is the state
+	// of a machine before an agent has connected and is the honest answer rather than the newest entry.
+	const std::array showingMine{ Panel(Mine) };
+	focus.Present(showingMine);
+
+	// The other session's window is the newest and would be the answer on the stack policy alone.
+	GYRO_CHECK(focus.Focused() == mine);
+
+	const std::array showingTheirs{ Panel(Theirs) };
+	focus.Present(showingTheirs);
+
+	GYRO_CHECK(focus.Focused() == theirs);
+}
+
+GYRO_TEST(SceneFocus, GyrosOwnIsReachableWhateverIsOnTheScreens)
+{
+	SceneFocus focus;
+	const EntityId console{ 1, 1 };
+
+	// `SessionId::None`, which is what every author with no session behind it offers: the recovery
+	// console, the splash, a gym.
+	focus.Offer(console);
+
+	const std::array showingTheirs{ Panel(Theirs) };
+	focus.Present(showingTheirs);
+
+	GYRO_CHECK(focus.Focused() == console);
+}
+
+GYRO_TEST(SceneFocus, TheWalkStepsOverAWindowNobodyIsLookingAt)
+{
+	SceneFocus focus;
+	const EntityId first{ 1, 1 };
+	const EntityId hidden{ 2, 1 };
+	const EntityId second{ 3, 1 };
+
+	focus.Offer(first, FocusKind::Window, Mine);
+	focus.Offer(hidden, FocusKind::Window, Theirs);
+	focus.Offer(second, FocusKind::Window, Mine);
+
+	const std::array showingMine{ Panel(Mine) };
+	focus.Present(showingMine);
+
+	// Two windows to pass between, not three: the middle entry belongs to a session on no screen, and a
+	// cycle that stopped on it would put the keyboard somewhere with nothing to show for it.
+	GYRO_CHECK(focus.CycleNext() == first);
+	GYRO_CHECK(focus.CycleNext() == second);
+}
+
+GYRO_TEST(SceneFocus, HandingTheOnlyScreenToSomebodyElseTakesTheKeyboardWithIt)
+{
+	ManualClock clock;
+	SceneStore store{ clock };
+
+	const std::array outputs{ Panel(Mine) };
+	store.SetOutputs(outputs);
+
+	const EntityId window = store.CreateContainer({}, { .Extent = { 400.0F, 300.0F } }).value();
+	GYRO_REQUIRE(store.SetSession(window, Mine));
+
+	store.Focus().Offer(window, FocusKind::Window, Mine);
+	GYRO_REQUIRE(store.Focus().Focused() == window);
+
+	// The reassignment decision 43 makes locking out of, asked of the store rather than of the stack:
+	// the output goes to another session and the window is still there, still drawn wherever that
+	// session is shown, and no longer somewhere a keystroke can reach.
+	store.SetOutputSession(outputs[0].Id, Theirs);
+
+	GYRO_CHECK(store.Focus().Focused().IsNull());
+	GYRO_CHECK(store.Focus().Contains(window));
+
+	store.SetOutputSession(outputs[0].Id, Mine);
+
+	GYRO_CHECK(store.Focus().Focused() == window);
 }

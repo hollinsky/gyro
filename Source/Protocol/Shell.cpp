@@ -656,7 +656,7 @@ void ClientXdgPopup::Enter()
 	// what it already does rather than anything this object has to remember (114, 149).
 	if (SceneStore* const scene = m_Context->Store(); scene != nullptr)
 	{
-		scene->Focus().Offer(Node());
+		scene->Focus().Offer(Node(), FocusKind::Window, m_Context->Session(Object().WireClient()));
 	}
 }
 
@@ -1147,7 +1147,11 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 			// **Chrome takes the keyboard and is stepped over by the walk**, which is the split
 			// `Scene/Focus.h`'s `FocusKind` exists for: a launcher a person cannot type into is not one,
 			// and an `Alt+Tab` that landed on the shell's own panel would be the switcher listing itself.
-			scene->Focus().Offer(*window, chrome ? FocusKind::Chrome : FocusKind::Window);
+			// **And the session it is offered for is the client's own**, which is what keeps a window
+			// reachable exactly where it is presented (`Scene/Focus.h`): the keyboard leaves with the
+			// screen when an output is handed to somebody else, rather than staying on a window that is
+			// no longer on any of them.
+			scene->Focus().Offer(*window, chrome ? FocusKind::Chrome : FocusKind::Window, m_Context->Session(client));
 
 			// **And into the window registry, which is the mapped toplevels of the whole session.** A
 			// popup is deliberately not in it: what the set is asked is which window is activated, and a

@@ -323,6 +323,11 @@ public:
 		// slides along a union it is not touching. Whoever unplugs a monitor should not have to
 		// remember that.
 		m_Pointer.Reconfine(m_Outputs);
+
+		// And for the same reason one step further on: a monitor unplugged is the session it was showing
+		// no longer reachable, and the keyboard has to leave with it rather than stay on a window nobody
+		// can see (`Scene/Focus.h`).
+		m_Focus.Present(m_Outputs);
 	}
 
 	[[nodiscard]] std::span<const SceneOutput> Outputs() const noexcept { return m_Outputs; }
@@ -345,6 +350,8 @@ public:
 			if (held.Id == output)
 			{
 				held.Session = session;
+				m_Focus.Present(m_Outputs);
+
 				return;
 			}
 		}

@@ -1,12 +1,16 @@
 #include "Scene/Hit.h"
 
+#include <array>
 #include <optional>
 
 #include "Core/Clock.h"
 #include "Core/Handle.h"
+#include "Core/Session.h"
+#include "Geometry/Scale.h"
 #include "Geometry/Shape.h"
 #include "Geometry/Space.h"
 #include "Scene/Commit.h"
+#include "Scene/Output.h"
 #include "Scene/Serializer.h"
 #include "Scene/Store.h"
 #include "Testing/Test.h"
@@ -299,4 +303,85 @@ GYRO_TEST(Hit, AHitStopsAtTheNearestFocusableAncestorRatherThanTheOutermost)
 	store.Focus().Offer(frame);
 
 	GYRO_CHECK(FocusTargetFor(store, surface) == frame);
+}
+
+// Two sessions, two screens, and what the pointer is allowed to reach. Every claim here fails as a
+// person clicking on somebody else's window: the lock screen up on the panel and the keystroke going
+// into the mail client behind it.
+namespace
+{
+constexpr auto Mine = static_cast<SessionId>(1);
+constexpr auto Theirs = static_cast<SessionId>(2);
+
+// Two 1000x1000 panels side by side, the left showing one session and the right the other.
+[[nodiscard]] std::array<SceneOutput, 2> Panels(SessionId left, SessionId right)
+{
+	SceneOutput first{ .Bounds = { { 0.0, 0.0 }, { 1000.0, 1000.0 } },
+		               .Density = Scale::FromInteger(1),
+		               .Grid = { 1000, 1000 } };
+	SceneOutput second = first;
+
+	first.Session = left;
+	second.Session = right;
+	second.Bounds.Origin.X = 1000.0;
+
+	return { first, second };
+}
+} // namespace
+
+GYRO_TEST(Hit, AWindowOfASessionThisScreenIsNotShowingIsNotUnderThePointer)
+{
+	SceneStore store{ Clock };
+	const std::array outputs = Panels(Mine, Theirs);
+	store.SetOutputs(outputs);
+
+	// Both windows are in exactly the same place on the left-hand panel, so nothing about the geometry
+	// separates them and the session is the only thing that can.
+	const Window mine = Open(store, 100.0, 100.0, 400.0F, 300.0F);
+	const Window theirs = Open(store, 100.0, 100.0, 400.0F, 300.0F);
+
+	GYRO_REQUIRE(store.SetSession(mine.Frame, Mine));
+	GYRO_REQUIRE(store.SetSession(theirs.Frame, Theirs));
+
+	// The other session's window is the later root and therefore the frontmost (55), so without the gate
+	// this is the one the last-hit-wins walk would answer with.
+	GYRO_CHECK(HitTest(store, At(200.0, 200.0)).Node == mine.Surface);
+
+	// And on the right-hand panel, where their session is the one being shown, the answer is theirs —
+	// which is what says the gate is the output's assignment rather than an ordering accident.
+	const Window alsoTheirs = Open(store, 1100.0, 100.0, 400.0F, 300.0F);
+	GYRO_REQUIRE(store.SetSession(alsoTheirs.Frame, Theirs));
+
+	GYRO_CHECK(HitTest(store, At(1200.0, 200.0)).Node == alsoTheirs.Surface);
+}
+
+GYRO_TEST(Hit, GyrosOwnRootsAreUnderThePointerOnEveryScreen)
+{
+	SceneStore store{ Clock };
+	const std::array outputs = Panels(Mine, Theirs);
+	store.SetOutputs(outputs);
+
+	// `SessionId::None` and left that way, which is the pointer glyph, the background, the splash and
+	// the recovery console. It has to be hit on a screen showing somebody's session.
+	const Window own = Open(store, 1100.0, 100.0, 400.0F, 300.0F);
+
+	GYRO_CHECK(HitTest(store, At(1200.0, 200.0)).Node == own.Surface);
+}
+
+GYRO_TEST(Hit, APointOnNoScreenAtAllReachesOnlyGyrosOwn)
+{
+	SceneStore store{ Clock };
+	const std::array outputs = Panels(Mine, Theirs);
+	store.SetOutputs(outputs);
+
+	// Off the side of every panel, which is where a grab's coordinates go when a person drags a
+	// scrollbar past the frame. Their window is there and is not reachable; gyro's own is.
+	const Window theirs = Open(store, 3000.0, 100.0, 400.0F, 300.0F);
+	GYRO_REQUIRE(store.SetSession(theirs.Frame, Theirs));
+
+	GYRO_CHECK(!HitTest(store, At(3100.0, 200.0)));
+
+	const Window own = Open(store, 3000.0, 100.0, 400.0F, 300.0F);
+
+	GYRO_CHECK(HitTest(store, At(3100.0, 200.0)).Node == own.Surface);
 }

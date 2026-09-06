@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 
 #include "Core/Handle.h"
 #include "Core/Session.h"
@@ -151,3 +152,35 @@ struct SceneOutput
 			     .Translation = { -density * leastX, -density * leastY } };
 	}
 };
+
+// Which session an output showing this point is showing, and `None` where no output is.
+//
+// **This is what makes a session reachable exactly where it is presented.** Decision 21 keeps every
+// connected session alive at once, so the world holds the roots of all of them and *which one a
+// person is pointing at* is a property of the screen the point is on rather than of the scene. The
+// frame walk already asks this question per output; [Hit.h](Hit.h) asks it per point, which is the
+// same gate applied to the other thing a root can be on the receiving end of.
+//
+// **`None` for a point on no output is the answer rather than a failure**, and it falls out right:
+// gyro's own roots are `None` and are shown everywhere (`World/Root.h`), so a coordinate off the side
+// of every screen still finds the pointer glyph and the background and finds nobody's windows. The
+// pointer is confined to the union of the outputs, so the case arises for a grab whose coordinates
+// have travelled past the frame and for a machine with no outputs at all.
+//
+// Half-open, which is `Scene/Pointer.h`'s convention and `Geometry/Shape.h`'s: two panels abutting do
+// not both answer for the column between them.
+[[nodiscard]] inline SessionId SessionShownAt(std::span<const SceneOutput> outputs, Point<GlobalSpace> point) noexcept
+{
+	for (const SceneOutput& output : outputs)
+	{
+		const Rect<GlobalSpace>& bounds = output.Bounds;
+
+		if (point.X >= bounds.Origin.X && point.X < bounds.Origin.X + bounds.Extent.Width &&
+		    point.Y >= bounds.Origin.Y && point.Y < bounds.Origin.Y + bounds.Extent.Height)
+		{
+			return output.Session;
+		}
+	}
+
+	return SessionId::None;
+}

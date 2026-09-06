@@ -5,10 +5,12 @@
 #include <optional>
 
 #include "Core/Handle.h"
+#include "Core/Session.h"
 #include "Geometry/NodeTransform.h"
 #include "Geometry/Space.h"
 #include "Scene/Entity.h"
 #include "Scene/Input.h"
+#include "Scene/Output.h"
 #include "Scene/Reach.h"
 #include "Scene/Store.h"
 #include "World/Node.h"
@@ -47,6 +49,20 @@
 //   application that has exited is worse than clicking through to whatever is behind it.
 // - Anything hidden, or under something hidden. `Node::Hidden` skips the subtree in the frame walk, so
 //   a window on an inactive workspace draws nothing and catches nothing.
+//
+// **A root is entered only where its session is the one the point's own output is showing, or is
+// gyro's own.** Decision 21 keeps every connected session alive at once, so the world holds the roots
+// of all of them and a walk that visited every one would have a session nobody is looking at catching
+// clicks on a screen it is not on — which is decision 43's isolation false in the place a person would
+// find it first. It is the same gate `Frame/Evaluator.h` applies to drawing, asked here per point
+// instead of per output (`Scene/Output.h`'s `SessionShownAt`), so what can be pointed at and what is
+// on screen cannot disagree. `SessionId::None` passes always, because that is gyro's own and is drawn
+// everywhere: the pointer glyph, the background, the splash and the recovery console.
+//
+// The comparison is one per root rather than one per node, since a session belongs to the top of a
+// subtree and every descendant is in whatever session its root is in (`Scene/Store.h`'s `SetSession`
+// refuses anything else). Roots number in the sessions on the machine plus what gyro authors for
+// itself, so the whole of the cost is a handful of compares once per pointer motion.
 //
 // **What is deliberately absent is clipping**, because the scene vocabulary has none —
 // [Open.md](../../Docs/Open.md) carries it. A child outside its parent's extent is drawn, so it is
@@ -216,6 +232,10 @@ LocalOn(const SceneStore& store, EntityId id, Point<GlobalSpace> point)
 // it is not hit for the same reason it is not drawn.
 [[nodiscard]] inline SceneHit HitTest(const SceneStore& store, Point<GlobalSpace> point)
 {
+	// Which session this coordinate is allowed to reach, which is whatever the screen it is on is
+	// showing. `None` where it is on none, and `None` passes every gate below in any case.
+	const SessionId shown = SessionShownAt(store.Outputs(), point);
+
 	// The chain *above* each open node, so that popping back to a sibling restores what the sibling's
 	// own push should start from.
 	struct Level
@@ -242,6 +262,15 @@ LocalOn(const SceneStore& store, EntityId id, Point<GlobalSpace> point)
 		}
 
 		EntityId next = entity->NextSibling;
+
+		// A root of a session no output here is showing. Not hidden and not retiring — it is on screen
+		// somewhere else, or on no screen at all, and either way this point is not on it.
+		if (depth == 0 && entity->Session != SessionId::None && entity->Session != shown)
+		{
+			at = next;
+
+			continue;
+		}
 
 		if ((entity->Flags & Node::Hidden) == 0)
 		{
