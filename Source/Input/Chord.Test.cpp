@@ -87,6 +87,19 @@ GYRO_TEST(Chord, ScreenshotsOnS)
 	GYRO_CHECK(!keyboard.IsArmed());
 }
 
+GYRO_TEST(Chord, LocksOnL)
+{
+	Keyboard keyboard;
+
+	GYRO_CHECK(Arm(keyboard).Consumed);
+
+	const ChordVerdict lock = keyboard.Press(KEY_L);
+
+	GYRO_CHECK(lock.Action == ChordAction::Lock);
+	GYRO_CHECK(lock.Consumed);
+	GYRO_CHECK(!keyboard.IsArmed());
+}
+
 // `s` unarmed is a letter and nothing else, which is the property every verb has to have: the leader
 // is what makes a key gyro's, and a key that screenshotted whenever it was pressed would make the
 // compositor unusable for typing.

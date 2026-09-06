@@ -280,25 +280,25 @@ private:
 		// there is no photograph of a frame nobody has drawn — so a film playing when a laptop is locked
 		// goes on playing as it leaves the screen.
 		//
-		// **An outgoing session with no coefficient behind it is not drawn**, which is decision 90's
+		// **A faded session with no coefficient behind it is not drawn**, which is decision 90's
 		// rule that the frame thread validates what it walks rather than trusting it: the pair is
 		// retired together on the far side, so a run that says otherwise has drifted, and the safe way
 		// to be wrong is the steady state — the screen a person is arriving at rather than the one they
 		// are leaving.
-		SessionId outgoing = SessionId::None;
+		SessionId fading = SessionId::None;
 		float fade = 0.0F;
 
-		if (assignment.Outgoing != SessionId::None && assignment.Fade < runs.Opacities.size())
+		if (assignment.Fading != SessionId::None && assignment.Fade < runs.Opacities.size())
 		{
 			const Spring<float>& spring = runs.Opacities[assignment.Fade];
 
 			// **Clamped, and it is decision 43's anti-spoofing property being kept rather than a
-			// defensive habit.** That argument survives a transition only if the outgoing session's
-			// contribution never rises, and the other half of it is the catalog: the motion this is
-			// authored under does not overshoot, and one that did would be visible as a locked screen
-			// briefly showing the desktop again.
+			// defensive habit.** That argument survives a transition only if the coefficient stays
+			// inside the two ends it was authored between, and the other half of it is the catalog: the
+			// motion this is authored under does not overshoot, and one that did would be visible as a
+			// locked screen briefly showing the desktop again.
 			fade = std::clamp(spring.Evaluate(Sample(request.Presentation, spring.Origin, 1.0F)).Position, 0.0F, 1.0F);
-			outgoing = assignment.Outgoing;
+			fading = assignment.Fading;
 
 			// A transition in flight is the frame loop's reason to come back, exactly as a moving node
 			// is. Nothing else would say so: no node names this spring.
@@ -366,17 +366,30 @@ private:
 			{
 				const SessionId owner = Owner(roots, root, index);
 
-				// The strength this root's whole subtree enters at: full for the session being shown and
-				// for gyro's own, the fade's value for the session being left, and nothing at all for
-				// anybody else's. One comparison and one multiply, which is the whole cost of decision
-				// 188 in the walk.
-				if (owner == SessionId::None || owner == shown)
+				// The strength this root's whole subtree enters at: full for gyro's own and for the
+				// session being shown, the coefficient's value for the one carrying the transition, and
+				// nothing at all for anybody else's. Two comparisons and a multiply, which is the whole
+				// cost of decision 188 in the walk.
+				//
+				// **gyro's own is tested first and is never faded**, which is what keeps the pointer on
+				// the screen: `None` is the background at the back of the paint order and the glyph at
+				// the front, so it is not a layer and a transition may not take it as one.
+				//
+				// **The faded session is tested before the shown one, and that ordering is the whole of
+				// the fade-in.** The two are equal while a session is arriving over what is already
+				// there — unlocking a screen — and testing `shown` first would draw it at full strength
+				// on the first frame, which is the cut this ordering exists to stop being.
+				if (owner == SessionId::None)
 				{
 					m_Stack[0].Opacity = 1.0F;
 				}
-				else if (owner == outgoing)
+				else if (owner == fading)
 				{
 					m_Stack[0].Opacity = fade;
+				}
+				else if (owner == shown)
+				{
+					m_Stack[0].Opacity = 1.0F;
 				}
 				else
 				{

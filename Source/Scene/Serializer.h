@@ -417,13 +417,6 @@ private:
 		{
 			m_Views.push_back(output.Placement());
 
-			// Decision 69's schedule, one entry per output in output order, and every entry the same —
-			// the replication this file's header argues for. It is written per output rather than as one
-			// value with a count because the *carrier* is per output and stays that way: the day a
-			// contributor attached to an output arrives, it folds into its own entry here and nothing
-			// downstream changes, which is the property the monoid was chosen for.
-			m_Wakes.push_back(m_Wake);
-
 			// Decision 21's assignment and decision 188's transition, which the composition root wrote
 			// onto the output and this only carries. `SessionId::None` is an output showing gyro's own
 			// scene rather than one nobody has got round to, so it crosses as itself and the frame
@@ -443,12 +436,26 @@ private:
 			// leaving by everything that asks whether it is on a screen.
 			if (fade == NoCoefficient)
 			{
-				output.Outgoing = SessionId::None;
+				output.Fading = SessionId::None;
 				output.Fade.SetImmediate(0.0F);
 			}
 
-			m_Sessions.push_back(SceneAssignment{ .Shown = output.Session, .Outgoing = output.Outgoing, .Fade = fade });
+			m_Sessions.push_back(SceneAssignment{ .Shown = output.Session, .Fading = output.Fading, .Fade = fade });
 		}
+
+		// Decision 69's schedule, one entry per output in output order, and every entry the same — the
+		// replication this file's header argues for. It is written per output rather than as one value
+		// with a count because the *carrier* is per output and stays that way: the day a contributor
+		// attached to an output arrives, it folds into its own entry here and nothing downstream
+		// changes, which is the property the monoid was chosen for.
+		//
+		// **After the loop rather than inside it, because the fade above is a contributor and the fold
+		// has to be complete before it is replicated.** Written per output as the loop ran, the first
+		// output's entry carried none of the transitions and the last carried all but its own — so a
+		// screen mid cross-fade published a schedule that did not mention the one thing moving on it,
+		// and the frame thread came back only when something else happened to ask it to. That is a
+		// dissolve advancing in jumps, at the rate a person's mouse moves.
+		m_Wakes.assign(store.Outputs().size(), m_Wake);
 
 		// Every run is staged on every serialisation, including the empty ones. The publisher is reused
 		// across calls, so a run left unstaged would be the previous scene's — which for the coefficient

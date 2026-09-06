@@ -14890,9 +14890,13 @@ output-sized snapshots" and completing
 an output reassignment and never said what a reassignment looks like while it is happening.)*
 
 **An output moving from one session to another composites both, live, for the length of the
-transition. The outgoing session's opacity is a coefficient on the *output* rather than on either
-session, and a reassignment carrying no coefficient is the cut — which is what suspend takes and
-what every reassignment does today.**
+transition. One opacity coefficient rides on the *output* rather than on either session, and a
+reassignment carrying no coefficient is the cut — which is what suspend takes and what every
+reassignment does today.**
+
+*(Revised 2026-09-06: the coefficient was originally the **outgoing** session's. It is now carried by
+whichever of the two is in front, which is the paragraph
+[below](#the-coefficient-belongs-to-the-session-in-front-rather-than-to-the-one-being-left).)*
 
 #### The incoming side is live in every design, so a snapshot is a second mechanism
 
@@ -14943,13 +14947,62 @@ exactly the interval in which that is false — so it cannot be a property of ei
 cannot be a property of a session at all, since a session is shown on several outputs and a switch
 need not move them together.
 
-So `SceneOutput` carries an outgoing session beside the one it is showing, and one opacity
-coefficient. In the frame walk that is one comparison and one multiply:
+So `SceneOutput` carries a *faded* session beside the one it is showing, and one opacity
+coefficient. In the frame walk that is two comparisons and a multiply:
 [Frame/Evaluator.h](../Source/Frame/Evaluator.h) already gates a root on whether its session matches
-the output's and already carries an inherited opacity down the tree, so an outgoing root enters the
-walk at the fade's value instead of at 1. On the wire the per-output `Sessions` run becomes a pair
+the output's and already carries an inherited opacity down the tree, so a faded root enters the walk
+at the coefficient's value instead of at 1. On the wire the per-output `Sessions` run becomes a pair
 and a coefficient index; decision 84's length rule and the all-`None` default that means *an
 unpartitioned scene* both stand as written.
+
+#### The coefficient belongs to the session in front rather than to the one being left
+
+*(Revised 2026-09-06, on seeing the first unlock on a panel.)*
+
+The original shape put the coefficient on the session being left and drew the arriving one at full
+strength underneath. That is right for exactly one transition, and it is the one it was designed
+against: locking a screen dissolves a person's windows to reveal what is behind them.
+
+Unlocking is the same transition backwards and does not work that way. What is being left is gyro's
+own scene — the background, which is the *first* root and therefore behind everything — and the
+windows coming back are in front of it. Fading the background out is a coefficient nobody can see,
+and the desktop cuts back in at full strength on the first frame. The general statement is that two
+opaque desktops can only cross-fade by varying the alpha of the front one over the back one, so
+**which one is in front** is the fact the coefficient has to follow. Direction of travel then falls
+out of the spring rather than being recorded: locking runs the person's session down, unlocking runs
+that same session back up, and `Fading == Shown` is the legal shape that means *arriving over what is
+already there*.
+
+**gyro's own is never the faded side.** `SessionId::None` holds both ends of the paint order — the
+background at the back and the pointer glyph at the last root — so it is not a layer that could be
+faded as one, and a coefficient on it would take the cursor off the screen for the length of every
+lock. The walk tests `None` first and unconditionally, which is what keeps that true against a run
+that says otherwise (decision 90).
+
+**Rejected: a coefficient per session.** It states one fade twice and lets the halves disagree — a
+frame with both desktops at 0.5 shows neither — and there is no authoring rule that keeps them
+summing to one across a publication the ring dropped.
+
+**Still open.** Between two *real* sessions the authoring side still fades the one being left, which
+reads correctly only while that session's roots are in front of the arriving one's. Root order is
+authoring order (decision 55) and nothing orders roots across sessions, so a fast switch to a session
+that connected later would be in front and opaque, and the switch would read as a cut. Nothing
+switches between two sessions yet; the verb that does has to settle it, either with a third id in the
+published record or with an ordering rule that pins gyro's own roots to the two ends.
+
+#### A transition is a contributor to the wake schedule, and the fold has to be complete before it is replicated
+
+The coefficient is the only thing moving on a screen with no animating window on it, so it is the
+only term in that screen's schedule. The first implementation replicated decision 69's fold across
+the outputs *while* walking them, before the fades had folded in — so the first output's published
+schedule mentioned none of the transitions and the last mentioned all but its own. Nothing was wrong
+with the fade: the frame thread simply came back only when something else happened to ask it to, and
+a dissolve advanced in jumps at the rate a person's mouse moved.
+
+This is worth a paragraph rather than a bug fix because it is the general shape of the mistake a
+replicated fold invites: a contributor added after the replication point is silently absent from
+every entry, and it fails as *smooth animation on a busy screen and stuttering animation on an idle
+one*, which is the direction nobody debugs first.
 
 **Written now rather than when the greeter exists**, which is decision 69's rule about changing a
 type while it still has one caller: this run has one writer and one reader, and a snapshot layout is

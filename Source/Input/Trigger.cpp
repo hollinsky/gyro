@@ -9,6 +9,7 @@
 #include <array>
 #include <cerrno>
 #include <cstddef>
+#include <string>
 #include <string_view>
 
 namespace Input
@@ -82,7 +83,22 @@ Result<std::unique_ptr<ChordTrigger>> ChordTrigger::Open(std::string path)
 		return FailFromErrno("opening the chord pipe", std::string_view{ path });
 	}
 
-	spdlog::info("chord pipe at {}: echo a verb into it, one of q, t or s", std::string_view{ path });
+	// The letters come from the table rather than from a string here, because the one thing a verb
+	// added to [Chord.h](Chord.h) and forgotten in this line costs is somebody being told the key they
+	// just added does not exist.
+	std::string letters;
+
+	for (const Verb& verb : Verbs)
+	{
+		if (!letters.empty())
+		{
+			letters += ", ";
+		}
+
+		letters += verb.Letter;
+	}
+
+	spdlog::info("chord pipe at {}: echo a verb into it, one of {}", std::string_view{ path }, letters);
 
 	return std::unique_ptr<ChordTrigger>{ new ChordTrigger{ std::move(pipe), std::move(path) } };
 }

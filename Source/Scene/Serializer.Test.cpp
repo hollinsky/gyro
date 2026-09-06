@@ -688,7 +688,7 @@ GYRO_TEST(SceneSerializer, AFadedReassignmentCrossesAsThePairAndACoefficient)
 	// The session being moved to is what the output is showing from the first frame, which is what
 	// makes input follow the transition rather than trail it.
 	GYRO_CHECK(sessions[0].Shown == static_cast<SessionId>(7));
-	GYRO_CHECK(sessions[0].Outgoing == static_cast<SessionId>(4));
+	GYRO_CHECK(sessions[0].Fading == static_cast<SessionId>(4));
 
 	// **The fade is in the opacity run rather than a run of its own**, and it is the one coefficient in
 	// a snapshot no node points at.
@@ -703,7 +703,49 @@ GYRO_TEST(SceneSerializer, AFadedReassignmentCrossesAsThePairAndACoefficient)
 	GYRO_CHECK(serializer.SceneWake() != Wake::Never());
 }
 
-GYRO_TEST(SceneSerializer, AFadeThatHasLandedRetiresTheOutgoingSessionWithIt)
+// A transition is a contributor to the schedule like any other, and it is the *only* one on a screen
+// with no animating window on it. Published without it, the frame thread comes back when something
+// else happens to ask it to and the dissolve advances in jumps rather than smoothly.
+GYRO_TEST(SceneSerializer, AFadeIsInEveryOutputsPublishedSchedule)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore store{ clock };
+
+	// Nothing in the scene is moving: no window, no commit, no channel. The transition is the whole of
+	// what the schedule can have in it, which is what makes this the test that fails on an ordering
+	// mistake rather than one masked by a node happening to be animating at the same time.
+	SceneOutput first = Primary();
+	first.Session = static_cast<SessionId>(4);
+
+	SceneOutput second = Primary();
+	second.Id = OutputId{ 2, 1 };
+	second.Bounds = { { 1920.0, 0.0 }, { 1920.0, 1080.0 } };
+
+	const SceneOutput both[] = { first, second };
+	store.SetOutputs(both);
+
+	store.FadeOutputSession(first.Id, SessionId::None, Motion::Gentle, clock.Now());
+
+	SceneSerializer serializer;
+	const SnapshotBuffer buffer = serializer.Serialize(store).Build(1);
+	const SnapshotReader reader{ buffer.Bytes() };
+
+	GYRO_REQUIRE(reader.IsValid());
+	GYRO_CHECK(serializer.SceneWake().Which != Wake::Kind::Settled);
+
+	const std::span<const Wake> wakes = reader.Wakes();
+
+	GYRO_REQUIRE_EQ(wakes.size(), std::size_t{ 2 });
+
+	// **Both of them, including the one the fade is not on.** The schedule is replicated rather than
+	// partitioned (69) — dispatch has no screen-space bound to say which panels a contributor reaches
+	// — so an idle monitor waking for its neighbour's animation is the known cost, and an output whose
+	// own transition is missing from its own entry is the bug.
+	GYRO_CHECK(wakes[0].Which != Wake::Kind::Settled);
+	GYRO_CHECK(wakes[1].Which != Wake::Kind::Settled);
+}
+
+GYRO_TEST(SceneSerializer, AFadeThatHasLandedRetiresTheFadedSessionWithIt)
 {
 	ManualClock clock{ Monotonic::FromNanoseconds(1) };
 	SceneStore store{ clock };
@@ -735,7 +777,7 @@ GYRO_TEST(SceneSerializer, AFadeThatHasLandedRetiresTheOutgoingSessionWithIt)
 
 	GYRO_REQUIRE_EQ(sessions.size(), std::size_t{ 1 });
 	GYRO_CHECK(sessions[0].Shown == static_cast<SessionId>(7));
-	GYRO_CHECK(sessions[0].Outgoing == SessionId::None);
+	GYRO_CHECK(sessions[0].Fading == SessionId::None);
 	GYRO_CHECK(sessions[0].Fade == NoCoefficient);
 
 	// Which is the same statement as the world having stopped: a settled transition owes no frame.
@@ -745,7 +787,7 @@ GYRO_TEST(SceneSerializer, AFadeThatHasLandedRetiresTheOutgoingSessionWithIt)
 // The cut, which is decision 188's base case rather than a second mode: a reassignment with no
 // coefficient. Suspend takes it, because decision 59 needs the locked state on the glass at the next
 // flip and not one fade later.
-GYRO_TEST(SceneSerializer, AnImmediateReassignmentCarriesNoCoefficientAndNothingOutgoing)
+GYRO_TEST(SceneSerializer, AnImmediateReassignmentCarriesNoCoefficientAndNothingFading)
 {
 	ManualClock clock{ Monotonic::FromNanoseconds(1) };
 	SceneStore store{ clock };
@@ -773,7 +815,7 @@ GYRO_TEST(SceneSerializer, AnImmediateReassignmentCarriesNoCoefficientAndNothing
 
 	GYRO_REQUIRE_EQ(sessions.size(), std::size_t{ 1 });
 	GYRO_CHECK(sessions[0].Shown == static_cast<SessionId>(7));
-	GYRO_CHECK(sessions[0].Outgoing == SessionId::None);
+	GYRO_CHECK(sessions[0].Fading == SessionId::None);
 	GYRO_CHECK(sessions[0].Fade == NoCoefficient);
 	GYRO_CHECK(serializer.SceneWake() == Wake::Never());
 }

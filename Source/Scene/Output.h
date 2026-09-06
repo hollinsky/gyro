@@ -61,20 +61,25 @@ struct SceneOutput
 	// policy written first.
 	SessionId Session = SessionId::None;
 
-	// The session this output is moving away from, or `None` outside a transition — decision 188's
-	// cross-fade, authoring side.
+	// The session drawn at `Fade` below, or `None` outside a transition — decision 188's cross-fade,
+	// authoring side.
 	//
 	// **It is here rather than on either session because the transition is exactly the interval in
 	// which decision 21's *one session per output* is false.** A session is shown on several outputs
 	// and a user switch need not move them together, so a coefficient per session would fade both of
 	// somebody's monitors when they asked to switch on one.
 	//
+	// **It is whichever participant is in front rather than whichever one is leaving**, which is
+	// `World/Root.h`'s revision: the one underneath is drawn at full strength, so a coefficient on it
+	// would be a fade nobody can see. `Session` and this being equal is the legal shape that says so —
+	// the arriving session is the one on top and is resolving onto what is already there.
+	//
 	// It is retired by `Scene/Serializer.h` together with the coefficient below, on the walk that
 	// already decides whether a channel still owes a frame: the two are one fact and a published
-	// outgoing session with no fade behind it would be a session composited for ever.
-	SessionId Outgoing = SessionId::None;
+	// faded session with no coefficient behind it would be a session composited for ever.
+	SessionId Fading = SessionId::None;
 
-	// The outgoing session's opacity, falling from one to nothing.
+	// The faded session's opacity, running down to nothing or up to full.
 	//
 	// **A compositor-owned animatable, which is the shape Architecture.md anticipates for the idle dim
 	// ramp**: a channel gyro authors for itself, moving under the catalog, belonging to no client and
@@ -86,9 +91,32 @@ struct SceneOutput
 	// an author and an origin over the entities a client changed (112), and there is no entity here.
 	// `SceneStore::FadeOutputSession` is the one door onto it.
 	//
-	// Zero at rest, which is the same statement as `Outgoing` being `None`: there is nothing leaving,
-	// so there is nothing to draw at any strength.
+	// Zero at rest, which is the same statement as `Fading` being `None`: nothing is between the two
+	// desktops, so there is nothing to draw at a strength of its own.
 	Animatable<float> Fade{ 0.0F };
+
+	// The session this output is holding behind a lock, or `None` where it is not locked.
+	//
+	// **This is decision 188's refusal, and it is one field rather than a bit because the bit alone
+	// would lose the thing being protected.** A locked output is showing somebody else — gyro's own
+	// scene today and the greeter when there is one — so `Session` no longer names the person whose
+	// screen it is, and a flag saying *locked* would leave nothing to unlock back to. Holding the
+	// session id is the refusal and the destination at once, which is what makes them impossible to
+	// disagree.
+	//
+	// **The refusal it carries is `ShowSession`'s**: an output showing nobody is the one thing the
+	// composition root hands to a session that has just connected, and a locked screen is exactly an
+	// output showing nobody. Without this, somebody logging in on a second seat would be put straight
+	// onto a locked panel — the screen would unlock itself for a person who never authenticated. The
+	// check is in the root rather than here because *who is entitled to unlock* is policy and this is
+	// a record; `SetOutputSession` clears this field on the way past for that reason, being the
+	// unconditional assignment only the root can reach.
+	//
+	// **It does not cross the waist.** The frame thread draws what an output is showing and a lock
+	// changes nothing about that — what is on the glass while a screen is locked is a session
+	// assignment like any other, which is decision 43's *locking is an output reassignment* being
+	// taken literally rather than becoming a mode the walk has to know about.
+	SessionId Locked = SessionId::None;
 
 	// Decision 73's per-output reconfiguration generation, echoed from what the composition root last
 	// asked the backend for. It answers *is this output's mode request newer than what I have

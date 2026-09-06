@@ -354,8 +354,14 @@ public:
 				// **The cut, which is the absence of a coefficient rather than a mode** (188). Whatever
 				// was leaving stops leaving in the same step: a suspend needs the new assignment on the
 				// glass at the next flip (59), so there is nothing half-finished to carry over.
-				held.Outgoing = SessionId::None;
+				held.Fading = SessionId::None;
 				held.Fade.SetImmediate(0.0F);
+
+				// **And the lock goes with it**, because this is the assignment only the composition
+				// root can reach and the refusal that hangs off `Locked` is the root's own (188). The
+				// caller that needs it is a locked session *ending*: the screen is showing gyro rather
+				// than that session, so nothing else in the world would ever give the output back.
+				held.Locked = SessionId::None;
 
 				m_Focus.Present(m_Outputs);
 
@@ -365,7 +371,7 @@ public:
 	}
 
 	// The same reassignment, faded rather than cut: the output composites both sessions, live, for the
-	// length of the transition, and the one it is leaving falls from full strength to nothing.
+	// length of the transition, and the one in front moves against the one behind it.
 	//
 	// **Immediate against animated is not a new axis and this is the whole of the difference** (188).
 	// The store already separates an immediate write from a sprung one and already uses it twice —
@@ -382,8 +388,8 @@ public:
 	//
 	// **A transition onto the session already being shown does nothing**, rather than fading a screen
 	// into itself: it is what a second press of the lock chord is, and what a session arriving twice is.
-	// A transition entered while one is running takes the newer pair and drops the older outgoing
-	// session outright — one output leaves one session at a time, and the alternative is a queue of
+	// A transition entered while one is running takes the newer pair and drops the older faded session
+	// outright — one output moves between two sessions at a time, and the alternative is a queue of
 	// screens nobody asked to see.
 	//
 	// Does nothing for an output that is not here, which `SetOutputSession` above has the reason for.
@@ -401,19 +407,105 @@ public:
 				return;
 			}
 
-			held.Outgoing = held.Session;
+			// **Which of the two carries the coefficient is decided here, and it is the one in front**
+			// (`World/Root.h`). gyro's own scene is never it: `None` is the background at the back and the
+			// pointer glyph at the front, so it is not a layer that could be faded as one and a coefficient
+			// on it would take the cursor off the screen for the length of the transition. So a transition
+			// with gyro on one end fades the *session* end — down when it is leaving, up when it is arriving
+			// — and locking and unlocking are one verb read in the two directions rather than two verbs.
+			//
+			// **Between two real sessions it is still the one being left**, which is right exactly while
+			// that session's roots are in front of the arriving one's. Root order is authoring order (55)
+			// and nothing orders roots across sessions, so a session that connected later would be in front
+			// and the switch would read as a cut. Nothing switches between two sessions yet and this is
+			// Docs/Open.md's to settle with the verb that does — the answer is either a third id in the
+			// published record or an ordering rule that keeps gyro's own roots at the two ends.
+			const bool arriving = session != SessionId::None && held.Session == SessionId::None;
+
+			held.Fading = arriving ? session : held.Session;
 			held.Session = session;
 
-			// From full strength rather than from wherever a previous fade had got to, because what is
-			// leaving is a whole screen a person is looking at and not the tail of one they already lost.
-			held.Fade.SetImmediate(1.0F);
-			held.Fade.AnimateTo(0.0F, Resolve<float>(motion, {}), t0);
+			// From the end it is starting at rather than from wherever a previous transition had got to,
+			// because what is moving is a whole screen a person is looking at and not the tail of one they
+			// already lost.
+			held.Fade.SetImmediate(arriving ? 0.0F : 1.0F);
+			held.Fade.AnimateTo(arriving ? 1.0F : 0.0F, Resolve<float>(motion, {}), t0);
 
 			// **The keyboard moves now rather than when this settles** (188), which `Scene/Focus.h`
 			// gives for nothing: the outgoing session is no longer any output's `Session`, so every
 			// window of it stops being somewhere a keystroke can land at the instant the fade is
 			// authored. Otherwise the first characters of a password go to the terminal being faded out.
 			m_Focus.Present(m_Outputs);
+
+			return;
+		}
+	}
+
+	// Lock this output: fade to whoever holds a locked screen, and hold the session that was on it.
+	//
+	// **Locking is a reassignment and nothing else, which is decision 43 taken literally** — the lock
+	// screen and the greeter are one UI, so *locked* is the state of an output showing that UI rather
+	// than a mode every other part of the compositor has to ask about. What one press of the chord
+	// does is move a screen from a person's session to somebody else's, which is the same verb a fast
+	// user switch spends and the reason there is no lock state machine (188).
+	//
+	// **What the lock actually is, is `Locked` being set**, and it is set from what the output was
+	// showing rather than from an argument: the party entitled to unlock is the person whose screen it
+	// was, and asking the caller to name them again is asking it to get that wrong. `to` is who takes
+	// the screen — `SessionId::None`, gyro's own, until there is a greeter — and it is a parameter
+	// because the greeter is a session like any other and this verb must not have to change when one
+	// arrives.
+	//
+	// **A locked output is not locked again.** A second press would otherwise overwrite `Locked` with
+	// the session currently on screen, which is the lock screen, and the person's session would be
+	// held by nothing and unreachable for the rest of the run.
+	//
+	// The fade is decision 188's: the person's windows dissolve, live, over the length of the
+	// transition, and what is underneath them is already on screen at full strength from the first
+	// frame. A film playing when a laptop is locked goes on playing as it leaves the screen.
+	void LockOutput(OutputId output, SessionId to, Motion motion, Instant t0)
+	{
+		for (SceneOutput& held : m_Outputs)
+		{
+			if (held.Id != output || held.Locked != SessionId::None || held.Session == to)
+			{
+				continue;
+			}
+
+			const SessionId locked = held.Session;
+
+			FadeOutputSession(output, to, motion, t0);
+
+			held.Locked = locked;
+
+			return;
+		}
+	}
+
+	// Unlock it: fade back to the session that was held, and stop holding one.
+	//
+	// **This exists for the fade to be seen from both ends and leaves when the login agent arrives.**
+	// Nothing about a lock a keystroke can undo is a lock, and saying so here is cheaper than a
+	// comment somebody has to find later: what unlocks a screen is the party decision 43's greeter
+	// authenticates a person to, and until there is one the only way to see the second half of a
+	// transition is a development verb that skips the authentication entirely.
+	//
+	// Does nothing for an output that is not locked, which is a second press of the chord on a screen
+	// the first press did not take.
+	void UnlockOutput(OutputId output, Motion motion, Instant t0)
+	{
+		for (SceneOutput& held : m_Outputs)
+		{
+			if (held.Id != output || held.Locked == SessionId::None)
+			{
+				continue;
+			}
+
+			const SessionId locked = held.Locked;
+
+			held.Locked = SessionId::None;
+
+			FadeOutputSession(output, locked, motion, t0);
 
 			return;
 		}

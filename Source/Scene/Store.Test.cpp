@@ -2,6 +2,7 @@
 
 #include <optional>
 
+#include "Animation/Author/Motion.h"
 #include "Core/Clock.h"
 #include "Core/Handle.h"
 #include "Geometry/Scale.h"
@@ -234,6 +235,117 @@ GYRO_TEST(SceneStore, AssigningASessionMovesOneOutputAndDoesNotRenumberTheSet)
 
 	GYRO_CHECK(store.Outputs()[1].Session == SessionId::None);
 	GYRO_CHECK_EQ(store.OutputGeneration(), before);
+}
+
+// Locking is a reassignment that remembers what it displaced, which is decision 188's refusal: the
+// screen shows nobody, and *nobody* is who ShowSession hands a panel to.
+GYRO_TEST(SceneStore, LockingAScreenHoldsTheSessionThatWasOnIt)
+{
+	SceneStore store{ Clock };
+
+	const SceneOutput panel{ .Id = OutputId{ 1, 1 }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } };
+	const SceneOutput one[] = { panel };
+
+	store.SetOutputs(one);
+	store.SetOutputSession(OutputId{ 1, 1 }, static_cast<SessionId>(7));
+
+	store.LockOutput(OutputId{ 1, 1 }, SessionId::None, Motion::Gentle, Clock.Now());
+
+	// Showing gyro's own scene, fading the person's away, and holding whose it was.
+	GYRO_CHECK(store.Outputs()[0].Session == SessionId::None);
+	GYRO_CHECK(store.Outputs()[0].Fading == static_cast<SessionId>(7));
+	GYRO_CHECK(store.Outputs()[0].Locked == static_cast<SessionId>(7));
+
+	store.UnlockOutput(OutputId{ 1, 1 }, Motion::Gentle, Clock.Now());
+
+	GYRO_CHECK(store.Outputs()[0].Session == static_cast<SessionId>(7));
+	GYRO_CHECK(store.Outputs()[0].Locked == SessionId::None);
+}
+
+// The one that loses a person's session for the rest of the run if it is not refused: locking a
+// locked screen would hold the lock screen itself, and the session behind it would be named by
+// nothing.
+GYRO_TEST(SceneStore, ALockedScreenIsNotLockedAgain)
+{
+	SceneStore store{ Clock };
+
+	const SceneOutput panel{ .Id = OutputId{ 1, 1 }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } };
+	const SceneOutput one[] = { panel };
+
+	store.SetOutputs(one);
+	store.SetOutputSession(OutputId{ 1, 1 }, static_cast<SessionId>(7));
+
+	store.LockOutput(OutputId{ 1, 1 }, SessionId::None, Motion::Gentle, Clock.Now());
+
+	// Locked to a *different* screen the second time, which is the case that loses the session: a
+	// greeter replacing another one is a lock destination that is not the one already showing, so the
+	// refusal cannot rest on the transition being onto the session already there.
+	store.LockOutput(OutputId{ 1, 1 }, static_cast<SessionId>(3), Motion::Gentle, Clock.Now());
+
+	GYRO_CHECK(store.Outputs()[0].Locked == static_cast<SessionId>(7));
+	GYRO_CHECK(store.Outputs()[0].Session == SessionId::None);
+
+	// And unlocking a screen nobody locked does nothing rather than fading to `None`, which would be a
+	// second press of the chord blanking a screen it had not taken.
+	store.UnlockOutput(OutputId{ 1, 1 }, Motion::Gentle, Clock.Now());
+
+	GYRO_CHECK(store.Outputs()[0].Session == static_cast<SessionId>(7));
+
+	store.UnlockOutput(OutputId{ 1, 1 }, Motion::Gentle, Clock.Now());
+
+	GYRO_CHECK(store.Outputs()[0].Session == static_cast<SessionId>(7));
+	GYRO_CHECK(store.Outputs()[0].Locked == SessionId::None);
+}
+
+// Which of the two carries the coefficient, and which way it runs. The one underneath is drawn at
+// full strength, so a coefficient on it is a fade nobody can see — locking a screen has to move the
+// person's session down, and unlocking it has to move that same session back up.
+GYRO_TEST(SceneStore, TheSessionIsWhatFadesAtBothEndsOfALock)
+{
+	SceneStore store{ Clock };
+
+	const SceneOutput panel{ .Id = OutputId{ 1, 1 }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } };
+	const SceneOutput one[] = { panel };
+
+	store.SetOutputs(one);
+	store.SetOutputSession(OutputId{ 1, 1 }, static_cast<SessionId>(7));
+
+	store.LockOutput(OutputId{ 1, 1 }, SessionId::None, Motion::Gentle, Clock.Now());
+
+	// Leaving: the person's windows dissolve off a screen that goes on showing gyro's background.
+	GYRO_CHECK(store.Outputs()[0].Fading == static_cast<SessionId>(7));
+	GYRO_CHECK_EQ(store.Outputs()[0].Fade.Model(), 0.0F);
+	GYRO_CHECK_EQ(store.Outputs()[0].Fade.PresentationState(Clock.Now()).Position, 1.0F);
+
+	store.UnlockOutput(OutputId{ 1, 1 }, Motion::Gentle, Clock.Now());
+
+	// Arriving: the same session, this time resolving back onto the background rather than the
+	// background dissolving out from under it. gyro's own is drawn on every output and must not move
+	// for a transition — and it holds both ends of the paint order, so it could not be faded as one
+	// layer even if it were allowed to be.
+	GYRO_CHECK(store.Outputs()[0].Fading == static_cast<SessionId>(7));
+	GYRO_CHECK(store.Outputs()[0].Session == static_cast<SessionId>(7));
+	GYRO_CHECK_EQ(store.Outputs()[0].Fade.Model(), 1.0F);
+	GYRO_CHECK_EQ(store.Outputs()[0].Fade.PresentationState(Clock.Now()).Position, 0.0F);
+}
+
+// A locked session ending has to give its screen back, or the panel is held for somebody who is gone
+// and the only verb that would free it fades to the session that no longer exists.
+GYRO_TEST(SceneStore, TheAssignmentTheRootMakesClearsALock)
+{
+	SceneStore store{ Clock };
+
+	const SceneOutput panel{ .Id = OutputId{ 1, 1 }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } };
+	const SceneOutput one[] = { panel };
+
+	store.SetOutputs(one);
+	store.SetOutputSession(OutputId{ 1, 1 }, static_cast<SessionId>(7));
+	store.LockOutput(OutputId{ 1, 1 }, SessionId::None, Motion::Gentle, Clock.Now());
+
+	store.SetOutputSession(OutputId{ 1, 1 }, SessionId::None);
+
+	GYRO_CHECK(store.Outputs()[0].Locked == SessionId::None);
+	GYRO_CHECK(store.Outputs()[0].Fading == SessionId::None);
 }
 
 // Raising is the z order written to: the sibling list is the paint order (55), so the raised node

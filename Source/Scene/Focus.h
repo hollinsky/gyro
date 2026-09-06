@@ -184,7 +184,14 @@ public:
 		for (const SceneOutput& output : outputs)
 		{
 			Record(m_Presented, output.Session);
-			Record(m_Leaving, output.Outgoing);
+
+			// **Only where the faded session is the one being left.** A transition that fades the
+			// *arriving* session up — unlocking a screen — has `Fading` equal to `Session`, and that
+			// session is where the keyboard now is rather than somewhere it is quietly leaving.
+			if (output.Fading != output.Session)
+			{
+				Record(m_Leaving, output.Fading);
+			}
 		}
 	}
 

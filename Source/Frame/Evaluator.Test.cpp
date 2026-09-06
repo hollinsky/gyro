@@ -1162,7 +1162,14 @@ constexpr auto Second = static_cast<SessionId>(2);
 // An output mid transition, with the session it is leaving faded by the spring at `fade`.
 [[nodiscard]] constexpr SceneAssignment Leaving(SessionId shown, SessionId outgoing, std::uint32_t fade) noexcept
 {
-	return { .Shown = shown, .Outgoing = outgoing, .Fade = fade };
+	return { .Shown = shown, .Fading = outgoing, .Fade = fade };
+}
+
+// The other direction: the session being shown is the one carrying the coefficient, resolving onto
+// whatever is underneath it. Unlocking a screen is this — what is underneath is gyro's own.
+[[nodiscard]] constexpr SceneAssignment Arriving(SessionId shown, std::uint32_t fade) noexcept
+{
+	return { .Shown = shown, .Fading = shown, .Fade = fade };
 }
 } // namespace
 
@@ -1368,6 +1375,85 @@ GYRO_TEST(Evaluator, TheSessionAnOutputIsLeavingIsDrawnAtTheFadesValue)
 
 	// And the second output, which was asked to move nothing, shows exactly what it was showing.
 	GYRO_CHECK_EQ(evaluator.Evaluate(On(snapshot, 1)).Items.size(), std::size_t{ 1 });
+}
+
+// The other direction, and the one the first shape of decision 188 could not express: a session
+// arriving over what is already on the screen carries the coefficient itself. Unlocking is this —
+// gyro's own background is behind the windows coming back, so fading *it* is a coefficient nobody can
+// see and the desktop would cut in at full strength on the first frame.
+GYRO_TEST(Evaluator, AnArrivingSessionCarriesTheCoefficientWhenItIsTheOneInFront)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.0, 10.0), Image(0, 400.0, 10.0) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement(), Placement() };
+
+	// gyro's own root first, which is where the background is, and the session's over it.
+	const std::array roots{ SceneRoot{ .Node = 0, .Session = SessionId::None },
+		                    SceneRoot{ .Node = 1, .Session = First } };
+
+	// A quarter of the way back onto the screen.
+	const std::array sessions{ Arriving(First, 0), Showing(SessionId::None) };
+	const std::array fade{ Held(0.25F) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutRoots(std::span<const SceneRoot>{ roots });
+	wire.PutSessions(std::span<const SceneAssignment>{ sessions });
+	wire.Put<Spring<float>>(SnapshotRun::Opacity, fade);
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(On(snapshot, 0));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 2 });
+
+	// **gyro's own at full strength and the session at the coefficient**, which is the ordering the
+	// walk exists to get right: `Fading` equals `Shown` here, so a test of `Shown` reached first would
+	// draw the desktop at one and there would be no transition to see.
+	GYRO_CHECK_EQ(list.Items[0].Opacity, 1.0F);
+	GYRO_CHECK_EQ(list.Items[1].Opacity, 0.25F);
+	GYRO_CHECK_EQ(list.Items[1].Shape.Bounds().Origin, Point<DeviceSpace>{ 400.0F, 10.0F });
+}
+
+// The pointer glyph is `None` and is the last root so that it draws over everything (55). A
+// transition may never take gyro's own as the faded side, or the cursor would leave the screen every
+// time somebody locked it — so `None` is tested before anything else in the walk.
+GYRO_TEST(Evaluator, GyrosOwnRootsAreNeverFadedByATransition)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.0, 10.0), Image(0, 400.0, 10.0) };
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement(), Placement() };
+	const std::array roots{ SceneRoot{ .Node = 0, .Session = First },
+		                    SceneRoot{ .Node = 1, .Session = SessionId::None } };
+
+	// A run that names gyro's own as the faded session, which nothing authors and the walk must
+	// nonetheless not honour — decision 90 has the frame thread validating what it walks.
+	const std::array sessions{ SceneAssignment{ .Shown = First, .Fading = SessionId::None, .Fade = 0 },
+		                       Showing(SessionId::None) };
+	const std::array fade{ Held(0.25F) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutRoots(std::span<const SceneRoot>{ roots });
+	wire.PutSessions(std::span<const SceneAssignment>{ sessions });
+	wire.Put<Spring<float>>(SnapshotRun::Opacity, fade);
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(On(snapshot, 0));
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 2 });
+
+	GYRO_CHECK_EQ(list.Items[0].Opacity, 1.0F);
+	GYRO_CHECK_EQ(list.Items[1].Opacity, 1.0F);
 }
 
 // The cut, which is what suspend takes and what every reassignment does today: no coefficient, so the

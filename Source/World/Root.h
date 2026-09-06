@@ -66,13 +66,27 @@ static_assert(sizeof(SceneRoot) == 8, "Two uint32s, and no padding to leave unin
 // switch user on one.
 //
 // **A reassignment carrying no coefficient is the cut, and that is the base case rather than a second
-// mode.** `Outgoing` is `None` and `Fade` is `NoCoefficient` for every output that is not mid
+// mode.** `Fading` is `None` and `Fade` is `NoCoefficient` for every output that is not mid
 // transition, which is every output today and every output a suspend leaves behind — decision 59
 // needs the locked state on the glass at the next flip, so it takes the cut. Nothing records which
 // kind of transition this is, because the absence *is* the kind.
 //
+// **One coefficient, and it is on whichever of the two sessions is in front.** Decision 188 first put
+// it on the session being *left*, and that is right only while the outgoing content is the content on
+// top — which is the lock and nothing else. Revised 2026-09-06: unlocking a screen leaves gyro's own
+// background, which is behind the windows arriving over it, so fading that out is a coefficient
+// nobody can see and the person's desktop cuts back in at full strength instead. Two opaque desktops
+// can only cross-fade by varying the alpha of the front one over the back one, so *which one is in
+// front* is what the coefficient has to follow — and the direction of travel then comes out of the
+// spring rather than out of the record: locking fades the person's session down to nothing, unlocking
+// fades that same session back up.
+//
+// **Rejected: a coefficient per session.** It states one fade twice and lets the halves disagree — a
+// frame with both desktops at 0.5 shows neither — and there is no authoring rule that would keep them
+// summing to one across a publication the ring dropped.
+//
 // The two fields go together and the frame thread may assume neither: `Scene/Serializer.h` retires
-// the pair as one, so an `Outgoing` with no coefficient behind it is a run that has drifted, and
+// the pair as one, so a `Fading` with no coefficient behind it is a run that has drifted, and
 // [Frame/Evaluator.h](../Frame/Evaluator.h) draws the steady state instead — which fails towards the
 // screen a person is arriving at rather than towards the one they are leaving.
 struct SceneAssignment
@@ -82,20 +96,32 @@ struct SceneAssignment
 	// (188), so the first characters of a password cannot land in the terminal a person just left.
 	SessionId Shown = SessionId::None;
 
-	// The session this output is moving away from, still composited live for the length of the fade,
-	// or `None` outside one. Live rather than a photograph because the incoming side is live in every
-	// design and a snapshot would be a second mechanism for one transition — so a film playing when a
-	// laptop is locked goes on playing as it leaves the screen.
-	SessionId Outgoing = SessionId::None;
+	// The session drawn at the coefficient below, or `None` outside a transition.
+	//
+	// **It is the participant that is in front, which is usually but not always the one being left.**
+	// Where it is the session being left the fade runs down and that desktop dissolves off the screen;
+	// where it equals `Shown` the fade runs up and the arriving one resolves onto it. Unlocking is the
+	// second case: what is underneath is gyro's own background, which is drawn on every output anyway
+	// and must not move, so the only thing that can carry the transition is the desktop coming back.
+	//
+	// Live rather than a photograph, because the incoming side is live in every design and a snapshot
+	// would be a second mechanism for one transition — so a film playing when a laptop is locked goes
+	// on playing as it leaves the screen.
+	//
+	// **Never gyro's own.** `None` holds both ends of the paint order — the background is the first
+	// root and the pointer glyph is the last — so it is not a layer that could be faded as one, and a
+	// coefficient on it would take the cursor off the screen for the length of every transition.
+	SessionId Fading = SessionId::None;
 
-	// Where the outgoing session's opacity is, in the same opacity run a node's own fade is in, or
-	// `NoCoefficient` outside a transition. One coefficient rather than two: what a person sees is a
-	// departure from the screen they are already looking at, and the arriving session is drawn at
-	// full strength underneath from the first frame.
+	// Where `Fading`'s opacity is, in the same opacity run a node's own fade is in, or `NoCoefficient`
+	// outside a transition. The other participant is drawn at full strength underneath from the first
+	// frame, which is what makes one coefficient enough.
 	//
 	// It is a *compositor-owned* channel — gyro authors it, no protocol reaches it, and no node names
 	// it — which is one of the three properties decision 43's anti-spoofing argument survives the fade
-	// on, the other two being that it only ever falls and that the catalog bounds how long it runs.
+	// on. The second is that a transition runs one way and the catalog bounds how long it takes: the
+	// coefficient is monotone within a transition, so a session on its way off a screen never becomes
+	// readable again, and one on its way back never dims to imply it is leaving.
 	std::uint32_t Fade = NoCoefficient;
 };
 

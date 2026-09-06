@@ -1986,6 +1986,11 @@ private:
 
 				break;
 
+			case Input::ChordAction::Lock:
+				ToggleLock();
+
+				break;
+
 			case Input::ChordAction::CycleFocus:
 			case Input::ChordAction::CycleFocusBack:
 			case Input::ChordAction::CycleFocusEnd:
@@ -2319,6 +2324,61 @@ private:
 		}
 	}
 
+	// Lock every screen with somebody on it, or give back every screen this locked.
+	//
+	// **Every output together, because the chord has no way to say which one.** A person pressing this
+	// is leaving the machine, so all of it goes — and when the login agent can place a session it can
+	// lock one panel and not another, which is the same verb on the store called with a different set.
+	//
+	// **Which direction is read off the world rather than remembered here.** A field on the root
+	// saying *we are locked* is a second copy of a fact the outputs already carry, and the two come
+	// apart the first time a monitor is unplugged while the screen is locked.
+	//
+	// **The transition is `Standard` rather than `Gentle`, on the catalog's own terms.** `Gentle` is
+	// for ambient and background changes — the idle dim ramp is the case it was written for — and a
+	// lock is not ambient: somebody pressed a key and is waiting for the machine to answer. At 0.60
+	// seconds of response it reads as the compositor thinking about it, which is the one impression a
+	// lock must not give. Both are critically damped, so decision 43's argument is untouched: the
+	// coefficient does not overshoot either end and a session on its way off the screen never becomes
+	// readable again.
+	void ToggleLock()
+	{
+		if (m_Dispatch == nullptr)
+		{
+			return;
+		}
+
+		SceneStore& store = m_Dispatch->Store();
+		const Instant now = m_Clock.Now();
+
+		bool locked = false;
+
+		for (const SceneOutput& output : store.Outputs())
+		{
+			locked = locked || output.Locked != SessionId::None;
+		}
+
+		for (std::size_t index = 0; index < store.Outputs().size(); ++index)
+		{
+			const OutputId id = store.Outputs()[index].Id;
+
+			if (locked)
+			{
+				store.UnlockOutput(id, Motion::Standard, now);
+			}
+			else
+			{
+				// **To gyro's own scene, which is what there is instead of a greeter.** Decision 43
+				// has the lock screen and the greeter as one UI and there is no login agent to draw
+				// it, so what a locked panel shows is the background and the pointer — honest about
+				// the absence rather than a placeholder prompt nothing is behind.
+				store.LockOutput(id, SessionId::None, Motion::Standard, now);
+			}
+		}
+
+		spdlog::info("{} every screen: ctrl+alt+esc l", locked ? "unlocking" : "locking");
+	}
+
 	// Which outputs a session that has just arrived is shown on, while nothing is entitled to say.
 	//
 	// **Every output showing nobody, which is the whole of the policy and is a stand-in for an absent
@@ -2345,7 +2405,11 @@ private:
 		{
 			const SceneOutput& output = store.Outputs()[index];
 
-			if (output.Session == SessionId::None)
+			// **A locked screen is an output showing nobody, and that is the one it must not be
+			// given** (188). Without this check the rule above reads a locked panel as free and hands
+			// it to whoever connects next, so a fresh login walks onto somebody else's locked session
+			// and the lock has unlocked itself for a person who never authenticated.
+			if (output.Session == SessionId::None && output.Locked == SessionId::None)
 			{
 				store.SetOutputSession(output.Id, session);
 			}
@@ -2376,7 +2440,11 @@ private:
 			{
 				const SceneOutput& output = store.Outputs()[index];
 
-				if (output.Session == session)
+				// **Including the ones holding it behind a lock**, which are not showing it and so
+				// would otherwise be held for a session that no longer exists — a screen nothing in
+				// the world could ever give back, since the only verb that unlocks one fades to the
+				// session being unlocked to.
+				if (output.Session == session || output.Locked == session)
 				{
 					store.SetOutputSession(output.Id, SessionId::None);
 				}

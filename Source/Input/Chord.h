@@ -89,6 +89,16 @@ enum class ChordAction : std::uint8_t
 	// must not be rewritten underneath it.
 	CycleFocusEnd,
 
+	// Lock every screen showing a session, and unlock every screen this locked.
+	//
+	// **One verb for both directions, and the second half of it is the development one.** Decision 43
+	// makes locking an output reassignment rather than a mode, so the press that locks and the press
+	// that unlocks are the same kind of thing to everything downstream — but a lock a keystroke undoes
+	// is not a lock, and what is entitled to unlock a screen is the login agent authenticating a
+	// person. This toggles until there is one, so that both halves of the transition can be looked at
+	// on a machine with no greeter on it.
+	Lock,
+
 	// Write what the panel is showing, as a PAM per output.
 	//
 	// **The debug capture rather than a screenshot feature.** It forces the frame it captures to
@@ -132,10 +142,11 @@ struct Verb
 	ChordAction Action;
 };
 
-inline constexpr std::array<Verb, 3> Verbs{ {
+inline constexpr std::array<Verb, 4> Verbs{ {
 	{ 'q', KEY_Q, ChordAction::Quit },
 	{ 't', KEY_T, ChordAction::Trace },
 	{ 's', KEY_S, ChordAction::Screenshot },
+	{ 'l', KEY_L, ChordAction::Lock },
 } };
 
 // What a keycode asks for, and `None` for every key that asks for nothing. `Esc` is among those
