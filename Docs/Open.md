@@ -637,19 +637,6 @@ is to do the work.
   The number is then confirmed by instrumentation, not argument: per-output atlas high-water and
   eviction count, tracked the way decision 29 tracks the budget. An eviction outside a stress test
   means the multiple is wrong.
-- **The snapshot atlas has no home for a surface on two outputs.**
-  [Decision 32](Decisions.md#32-a-surfaces-frame-cadence-follows-its-fastest-output) makes
-  multi-output surfaces first class, while decision 46's storage, capacity, attribution, and
-  eviction locality are all per output. A window retiring while it straddles the seam is either in
-  both
-  atlases, doubling its cost
-  on the configuration decision 28 exists to serve, or in one and sampled by the other, which breaks
-  the argument that pressure is resolved against the slots that caused it. Surfaced by the same
-  reading that produced decision 47, and it is a sizing question as much as a correctness one.
-  Decision 52 shifts the trade rather than settling it: an atlas is at its output's density, so "in
-  both" is the horn that is *correct* about density on both, and "in one, sampled by the other"
-  resamples an already-resampled snapshot — the one place the resample-once rule would be broken by
-  storage rather than by geometry.
 - **The last-good-frame for unresponsive clients.** Showing an application's last good frame while
   it is hung is a real feature and the same shape as an exit snapshot, but with an unbounded
   lifetime. It is the case that tests decision 46's admission rule, so it is worth deciding whether

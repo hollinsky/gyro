@@ -15213,3 +15213,92 @@ starts the command on a connection to it, which are one decision because a socke
 a session exists in order to have a shell on it. An agent with an empty command — the login agent's
 case, where a session manager starts the shell — has no descriptor to hand anybody, and how a shell
 started that way is given one is still open.
+
+### 190. An exit snapshot belongs to a surface *on an output*; a window straddling the seam is in both atlases
+
+*(Decided 2026-09-06, answering [Open.md](Open.md)'s "The snapshot atlas has no home for a surface on
+two outputs".)*
+
+**A retiring surface reserves a rectangle in the atlas of every output it is on, each at that
+output's own density, and each covering the whole surface. There is no shared copy and no sampling
+across the seam.**
+
+**The tension the question was written around dissolves on reading what forces decision 32.** That
+entry gives a surface *one* frame cadence, and a straddling window is first class because of it — so
+a per-output snapshot looks like it is contradicting a singleton the design already chose. It is
+not. 32's own text says the singleton is forced rather than preferred: a surface has one buffer and
+one `wl_surface.frame` queue, so per-output cadence *is not expressible in the protocol*. A snapshot
+has no protocol object behind it. It is gyro's own storage, minted from pixels gyro already owns,
+named by nothing a client can see — so nothing forces it to be one thing, and the question is only
+which shape is right.
+
+**[Decision 52](#52-coordinate-spaces-are-three-and-quantization-belongs-to-the-output) decides it,
+and it decides it as a correctness question rather than a sizing one.** The rule is that no integer
+flows backwards into the model: every rounding is a pure function of `(node, output, frame)` and is
+discarded with the frame that computed it. A snapshot taken at one output's grid and sampled by
+another is that rule broken by *storage* — the rounding onto output A's grid stops being discarded
+and becomes persistent state that output B's frames are built on, for the whole length of the exit.
+[Architecture.md](Architecture.md#resample-once-and-know-when-it-is-zero) permits the exit snapshot
+as *the one sanctioned second resample*; sampling across the seam makes it a third on one of the two
+screens, and makes it the only resample in the system that exists because of where something was
+stored rather than because of the geometry it was drawn with.
+
+**What that costs a person is a pop at the moment they are most likely to be looking.** A window
+straddling a seam is being watched on both screens at once, which is the one configuration where two
+renderings of the same thing are simultaneously in view. Sampling a lower-density atlas onto the
+higher-density screen makes the half on that screen softer than the live window it was one frame
+earlier — a visible loss of sharpness at the instant of the close, on half of a window, with the
+other half correct. Two densities in one image is the artefact fractional scaling is judged on, and
+it would be arriving here through the storage layout.
+
+**Attribution survives, which the alternative also spends.** [Decision
+46](#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)
+resolves pressure against the offending client's own slots so that a client destroying surfaces in a
+loop degrades its own exits and nobody else's, and its storage, capacity and eviction are per output
+in order to say that. One atlas sampled by another makes output B's frame conditional on output A's
+pressure: a storm of closing popups on the laptop panel evicts a snapshot the external monitor was
+reading, and a window pops on a screen where nothing was happening. That is the misattribution 46
+rejects a long buffer hold for, arriving by a different road.
+
+**"Doubling its cost" — the objection the open entry raised — is not doubling of any pool.** 46
+denominates capacity in output render-target equivalents *per output*, and each atlas sees exactly
+one window's worth of a straddling window. No single atlas holds more than it was sized for; what
+doubles is the machine's total across two pools, on a machine that has two screens' worth of GPU
+memory in play by construction. The sizing question the entry suspected turns out to be a
+distribution question, and the distribution is already right.
+
+**Rejected: one atlas, sampled by the other.** Half the storage, and the surface's snapshot lives on
+the output it is most on. It spends the resample-once rule and the attribution locality above, and
+it buys memory on the configuration least short of it. It also needs a policy for *which* output,
+and every candidate is decision 32's rejected list read again: most-area oscillates during a drag
+across the seam, and the visible artefact of an oscillating choice is the switch rather than the
+rate.
+
+**Rejected: reserving only the part of the surface each output shows.** The two rectangles would
+then sum to roughly one window and the cost objection would vanish outright. It fails on decision
+36's frame-path discipline instead: a transition may move or grow the subtree after the reservation
+is taken, so a rectangle sized to the visible part is one that has to grow, and growing it is a
+`vkCreateImage` on the frame path. The reservation has to be for the surface, because the surface is
+the part that cannot change once the client is gone.
+
+**Rejected: taking the second output's copy lazily, when that output first needs it.** The pixels
+are not there to take. The whole occasion for a snapshot is a client that has destroyed its surface,
+so the source exists only during the frames 46's one-frame hold covers — both copies are taken from
+the same held buffer or they are not taken at all. A lazy second copy is a copy of nothing.
+
+**A departure that reaches an output it was not on is not drawn there**, and the constraint that
+makes that safe lives in the catalog rather than here. The snapshot set is fixed when the retirement
+is observed, because that is when the pixels are still available; an exit that translated far enough
+to cross a seam it did not already straddle would be asking for pixels on an output that reserved
+none. No catalog exit translates — a window that also slid would have to slide from somewhere, and
+nothing in the model says where — so the case does not arise, and an entry that wanted it would be
+proposing storage it cannot reserve for. Recorded because the rule reads as safe by construction and
+is in fact safe by a constraint living in [Animation.md](Animation.md#the-motion-catalog)'s entries.
+
+**[Architecture.md](Architecture.md#resample-once-and-know-when-it-is-zero) had already written this
+down** as though it were settled — *the per-output atlas means the capture happens at the right
+density on each output a retiring window straddles* — while the log carried it as open. The sentence
+is now true rather than presumptive, and the direction of that discrepancy is worth noticing: the
+mechanism document reached the answer first, from the resampling rule, which is the same argument
+this entry rests on.
+
