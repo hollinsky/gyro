@@ -1,13 +1,29 @@
 #include "Scene/Atlas.h"
 
+#include <array>
 #include <optional>
 #include <vector>
 
+#include "Core/Clock.h"
+#include "Scene/Commit.h"
+#include "Scene/Serializer.h"
+#include "Scene/Store.h"
 #include "Testing/Test.h"
 
 namespace
 {
 using Slot = PixelRect<BufferSpace>;
+
+// Two screens side by side in global space, the second at twice the density — which is the laptop and
+// the external monitor that decision 190 is about, and the pairing where "one atlas sampled by the
+// other" would have to resample.
+[[nodiscard]] SceneOutput Screen(OutputId id, double left, std::int32_t scale)
+{
+	return { .Id = id,
+		     .Bounds = { { left, 0.0 }, { 1000.0, 1000.0 } },
+		     .Density = Scale::FromInteger(scale),
+		     .Grid = { 1000 * scale, 1000 * scale } };
+}
 
 // Whether two reservations overlap, which is the property every other test here is really about: a
 // packer that hands the same texels to two exits draws one window's pixels inside another's.
@@ -184,4 +200,163 @@ GYRO_TEST(SceneAtlas, TheHighWaterMarkOutlivesTheOccupantsThatSetIt)
 
 	GYRO_CHECK_EQ(packer.Used(), std::int64_t{ 10'000 });
 	GYRO_CHECK_EQ(packer.HighWater(), std::int64_t{ 30'000 });
+}
+
+// **Decision 190, and it is the whole reason the atlases are a set rather than one.** A window
+// straddling the seam reserves on both screens at once, each at that screen's density — so the
+// capture on the high-density monitor is not a resample of the low-density panel's copy.
+GYRO_TEST(SceneAtlas, AWindowAcrossTheSeamReservesOnBothScreensAtEachDensity)
+{
+	ExitAtlases atlases;
+
+	const OutputId panel{ 1, 1 };
+	const OutputId monitor{ 2, 1 };
+	const std::array outputs{ Screen(panel, 0.0, 1), Screen(monitor, 1000.0, 2) };
+
+	atlases.Configure(outputs);
+
+	// Four hundred logical wide, sitting across the boundary at x = 1000.
+	const EntityId window{ 7, 2 };
+	const Rect<GlobalSpace> bounds{ { 800.0, 100.0 }, { 400.0, 300.0 } };
+
+	GYRO_REQUIRE(atlases.Reserve(window, 0b11, bounds));
+	GYRO_CHECK_EQ(atlases.Count(), std::size_t{ 2 });
+
+	const std::optional<Slot> onPanel = atlases.SlotFor(window, panel);
+	const std::optional<Slot> onMonitor = atlases.SlotFor(window, monitor);
+
+	GYRO_REQUIRE(onPanel.has_value());
+	GYRO_REQUIRE(onMonitor.has_value());
+
+	// The same window, in each screen's own texels: 400x300 logical is 400x300 at scale 1 and 800x600
+	// at scale 2. One atlas holding both would have to pick one of these and stretch it onto the other
+	// screen, which is the resample decision 52 forbids being made by storage.
+	GYRO_CHECK(onPanel->Extent == PixelSize<BufferSpace>{ 400, 300 });
+	GYRO_CHECK(onMonitor->Extent == PixelSize<BufferSpace>{ 800, 600 });
+}
+
+// All or nothing across the outputs a surface is on. A reservation that took on one screen and was
+// refused on the other is the same window leaving two different ways with both halves in view, which
+// is the artefact 190 exists to prevent arriving through the failure path.
+GYRO_TEST(SceneAtlas, AReservationRefusedOnOneScreenIsNotHeldOnTheOther)
+{
+	ExitAtlases atlases;
+
+	const OutputId panel{ 1, 1 };
+	const OutputId monitor{ 2, 1 };
+
+	// The second screen is tiny, so a window that fits comfortably on the first cannot be captured on
+	// it at all.
+	const std::array outputs{ Screen(panel, 0.0, 1),
+		                      SceneOutput{ .Id = monitor,
+		                                   .Bounds = { { 1000.0, 0.0 }, { 100.0, 100.0 } },
+		                                   .Density = Scale::FromInteger(1),
+		                                   .Grid = { 100, 100 } } };
+
+	atlases.Configure(outputs);
+
+	const EntityId window{ 7, 2 };
+
+	GYRO_CHECK(!atlases.Reserve(window, 0b11, Rect<GlobalSpace>{ { 800.0, 0.0 }, { 400.0, 300.0 } }));
+
+	// Nothing kept anywhere, including on the screen that had room — and the atlas that took one is
+	// back to empty rather than holding a rectangle nobody will ever give back.
+	GYRO_CHECK(atlases.IsEmpty());
+	GYRO_CHECK(!atlases.SlotFor(window, panel).has_value());
+	GYRO_CHECK_EQ(atlases.HighWaterOn(panel), std::int64_t{ 120'000 });
+}
+
+// A reservation outlives an output set changing under it, and does not outlive its own output. The
+// first is a monitor plugged in beside the window that is leaving; the second is the monitor it was
+// leaving on being unplugged mid-exit.
+GYRO_TEST(SceneAtlas, AnAtlasSurvivesAHotplugElsewhereAndGoesWithItsOwnOutput)
+{
+	ExitAtlases atlases;
+
+	const OutputId panel{ 1, 1 };
+	const OutputId monitor{ 2, 1 };
+	const EntityId window{ 7, 2 };
+
+	const std::array one{ Screen(panel, 0.0, 1) };
+	atlases.Configure(one);
+
+	GYRO_REQUIRE(atlases.Reserve(window, 0b1, Rect<GlobalSpace>{ { 0.0, 0.0 }, { 200.0, 200.0 } }));
+
+	const std::array two{ Screen(panel, 0.0, 1), Screen(monitor, 1000.0, 1) };
+	atlases.Configure(two);
+
+	// Still there, because that output is still there with the same grid. A window mid-exit does not
+	// blink because somebody plugged in a second screen.
+	GYRO_CHECK(atlases.SlotFor(window, panel).has_value());
+
+	const std::array none{ Screen(monitor, 1000.0, 1) };
+	atlases.Configure(none);
+
+	// And gone with the screen it was on, reported as no snapshot rather than as a rectangle in an
+	// atlas that no longer exists.
+	GYRO_CHECK(!atlases.SlotFor(window, panel).has_value());
+	GYRO_CHECK(atlases.IsEmpty());
+}
+
+// A mode change is a new atlas rather than a resized one, which is decision 46's "reserved at output
+// configuration and never grown" read literally: the rectangle was in texels of a screen that no
+// longer has those dimensions.
+GYRO_TEST(SceneAtlas, ChangingAnOutputsGridReplacesItsAtlas)
+{
+	ExitAtlases atlases;
+
+	const OutputId panel{ 1, 1 };
+	const EntityId window{ 7, 2 };
+
+	const std::array before{ Screen(panel, 0.0, 1) };
+	atlases.Configure(before);
+
+	GYRO_REQUIRE(atlases.Reserve(window, 0b1, Rect<GlobalSpace>{ { 0.0, 0.0 }, { 200.0, 200.0 } }));
+
+	const std::array after{ SceneOutput{
+		.Id = panel, .Bounds = { {}, { 1000.0, 1000.0 } }, .Density = Scale::FromInteger(1), .Grid = { 800, 600 } } };
+	atlases.Configure(after);
+
+	GYRO_CHECK(!atlases.SlotFor(window, panel).has_value());
+	GYRO_CHECK(atlases.IsEmpty());
+}
+
+// **Where the reservation is actually taken, end to end.** Decision 46 takes it when the retirement
+// is observed, which is the commit verb that observes one; decision 114 gives it back when the
+// subtree is freed, which is the pass that decides the exit is over. Neither is a sweep of its own.
+GYRO_TEST(SceneAtlas, RetiringAWindowTakesItsRectangleAndFreeingItGivesItBack)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1'000'000'000) };
+	SceneStore store{ clock };
+
+	const OutputId panel{ 1, 1 };
+	const std::array outputs{ Screen(panel, 0.0, 1) };
+
+	store.SetOutputs(outputs);
+
+	const std::optional<EntityId> window = store.CreateContainer(store.FirstRoot(), { .Extent = { 300.0F, 200.0F } });
+
+	GYRO_REQUIRE(window.has_value());
+	GYRO_CHECK(!store.Atlases().SlotFor(*window, panel).has_value());
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Client };
+
+		GYRO_REQUIRE(commit.Retire(*window));
+	}
+
+	const std::optional<Slot> slot = store.Atlases().SlotFor(*window, panel);
+
+	GYRO_REQUIRE(slot.has_value());
+	GYRO_CHECK(slot->Extent == PixelSize<BufferSpace>{ 300, 200 });
+
+	// The free is the serialisation pass's, and it is what returns the rectangle — so an atlas drains
+	// with the exits in it rather than on a sweep that has to be remembered. Nothing on this window is
+	// in flight, so the first pass over it finds the exit finished.
+	SceneSerializer serializer;
+
+	serializer.Serialize(store);
+
+	GYRO_CHECK(!store.IsLive(*window));
+	GYRO_CHECK(store.Atlases().IsEmpty());
 }

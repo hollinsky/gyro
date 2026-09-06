@@ -15,6 +15,7 @@
 #include "Geometry/Space.h"
 #include "Scene/Entity.h"
 #include "Scene/Input.h"
+#include "Scene/Reach.h"
 #include "Scene/Store.h"
 #include "World/Content.h"
 #include "World/Node.h"
@@ -326,7 +327,37 @@ public:
 	//
 	// False for a scope that is not the open one and for an id that names nothing live — the second being
 	// a double retire arriving through a handle that has already gone stale.
-	bool Retire(EntityId id) noexcept { return m_Open && m_Scene->Retire(id); }
+	bool Retire(EntityId id) noexcept
+	{
+		if (!m_Open || !m_Scene->Retire(id))
+		{
+			return false;
+		}
+
+		// **The exit storage is taken here, which is where the retirement is observed** (46). A
+		// rectangle per output the subtree is on (190), out of a packer, with no allocation and no
+		// device call — the cost of it landing on the frame a person closed something is the whole
+		// reason it is a reservation rather than an image.
+		//
+		// **Reserved eagerly, and decision 89 already names what that costs.** Phase two cancels a
+		// retirement that turns out to be a move — remove-then-add inside one commit — so an eager
+		// reservation is taken for entities that were never leaving, and under decision 46 that
+		// pressure settles *other* exits early. It is eager for the same reason the flag above is:
+		// phase two is the empty half of this file, and a reservation that waited for it would be one
+		// nothing takes. When close arrives, this moves into it.
+		//
+		// A refusal changes nothing here. There is no snapshot, the exit is drawn from the client's own
+		// pixels for as long as it has them, and whoever finds it has none finishes it — which is what
+		// `Abandon` below already does when a client takes them away.
+		const Coverage cover = Cover(*m_Scene, id);
+
+		if (cover.Reachable)
+		{
+			static_cast<void>(m_Scene->ReserveExit(id, ReachOf(cover, m_Scene->Outputs()), cover.Bounds));
+		}
+
+		return true;
+	}
 
 	// End a retirement that is already running: every channel under `id` stops where its target is, so
 	// the next serialisation pass finds the subtree at rest and frees it.

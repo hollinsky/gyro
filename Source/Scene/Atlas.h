@@ -1,11 +1,18 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
+#include <vector>
 
+#include "Core/Handle.h"
+#include "Geometry/Scale.h"
 #include "Geometry/Space.h"
+#include "Scene/Output.h"
 
 // Rectangle allocation inside one exit-snapshot atlas.
 //
@@ -247,3 +254,237 @@ static_assert([] {
 
 	return only.has_value() && !packer.IsEmpty() && packer.Release(*only) && packer.IsEmpty();
 }());
+
+// SPEC: how much atlas each output gets, as a multiple of its own render target.
+//
+// Decision 46 denominates capacity this way rather than in bytes, because a byte count is right only
+// on the machine it was tuned on: as a multiple of the output's render target it scales with
+// resolution and with monitor count, and it is expressed in the cost the rest of the design already
+// reasons about.
+//
+// **Two is a starting value and is labelled so.** That entry declines to guess the number and
+// [Open.md](../../Docs/Open.md) says how it will be settled: against the largest *legitimate*
+// simultaneous retirement — an application closing with a menu open is a window plus two small
+// surfaces, a nested menu chain is three or four small ones — and then confirmed by instrumentation
+// rather than by argument, watching the per-output high-water and eviction count the way decision 29
+// watches the budget. One render target holds a maximised window exactly; the second is the room for
+// everything that leaves beside it. An eviction outside a stress test means this is wrong.
+inline constexpr std::int32_t AtlasRenderTargetMultiple = 2;
+
+// The exit-snapshot atlases, one per output, and the reservations standing in them.
+//
+// Decision 190: **a snapshot belongs to a surface on an output.** A retiring surface takes a
+// rectangle in the atlas of every output it is on, each at that output's own density, so a window
+// leaving across a seam is captured correctly on both screens rather than sampled across from one.
+//
+// **All or nothing across the outputs a surface is on.** A reservation that succeeded on one screen
+// and failed on the other would be the same window leaving two different ways at the same time, in
+// the one configuration where both renderings are in view at once — which is the artefact 190 is
+// about, arriving through the failure path instead of through the storage. So a partial reservation
+// is given back and the answer is no, and no is decision 46's ordinary shortfall with its ordinary
+// answer: finish the exit at once rather than draw it wrong.
+//
+// **Keyed by entity, held here rather than on the entity.** A `Scene/Entity.h` record is walked by
+// everything and is the wrong place for a few bytes that matter to the handful of nodes currently
+// dying. The retiring set is small by construction — decision 46 admits bounded-lifetime occupants
+// only — so a run scanned linearly is shorter than an index would be.
+class ExitAtlases
+{
+public:
+	// Take up an output set. Atlases for outputs that are still here with the same grid are kept along
+	// with what is reserved in them; everything else goes.
+	//
+	// **A grid change is a new atlas rather than a resized one**, which is decision 46's *reserved at
+	// output configuration and never grown* read literally. A mode change is not a moment to be
+	// preserving exits across: the window that was leaving was leaving on a screen that no longer has
+	// those dimensions, and its rectangle was in that screen's texels.
+	void Configure(std::span<const SceneOutput> outputs)
+	{
+		m_Kept.clear();
+		m_Replaced.clear();
+
+		for (const SceneOutput& output : outputs)
+		{
+			const Atlas* const existing = Find(output.Id);
+			const PixelSize<BufferSpace> extent = ExtentFor(output);
+
+			if (existing != nullptr && existing->Packer.Extent() == extent && existing->Density == output.Density)
+			{
+				m_Kept.push_back(*existing);
+
+				continue;
+			}
+
+			if (existing != nullptr)
+			{
+				m_Replaced.push_back(output.Id);
+			}
+
+			m_Kept.push_back(Atlas{ .Output = output.Id, .Packer = ShelfPacker{ extent }, .Density = output.Density });
+		}
+
+		m_Atlases.swap(m_Kept);
+
+		// **A reservation whose atlas is gone is not a reservation**, and there are two ways for it to
+		// be gone: the output was unplugged, or it was reconfigured and given a fresh atlas. The second
+		// is the one that looks like nothing happened — the id is still in the set, so a check that only
+		// asked whether the output still exists would leave a rectangle addressing texels in a texture
+		// that no longer has them.
+		//
+		// Either way the exit is still on screen and now has nowhere to be captured, which `SlotFor`
+		// reports by answering nothing. That is the same answer a refusal gives, so a caller has one
+		// case rather than three.
+		std::erase_if(m_Slots, [this](const Slot& slot) {
+			return Find(slot.Output) == nullptr ||
+			       std::find(m_Replaced.begin(), m_Replaced.end(), slot.Output) != m_Replaced.end();
+		});
+	}
+
+	// Reserve for one retiring surface, on every output the mask names.
+	//
+	// `bounds` is the surface's rectangle in global space — `Scene/Reach.h`'s `Cover` computes it and
+	// the mask beside it — and each output converts it to its own texels at its own scale. Rounded
+	// outward, because a snapshot short of the window by a fraction of a pixel is a hairline of
+	// background down an edge for the length of the exit.
+	[[nodiscard]] bool Reserve(EntityId id, OutputReach reach, Rect<GlobalSpace> bounds)
+	{
+		Release(id);
+
+		if (reach == 0 || m_Atlases.empty())
+		{
+			return false;
+		}
+
+		const std::size_t before = m_Slots.size();
+
+		for (std::size_t index = 0; index < m_Atlases.size() && index < MaxReachableOutputs; ++index)
+		{
+			if ((reach & (OutputReach{ 1 } << index)) == 0)
+			{
+				continue;
+			}
+
+			Atlas& atlas = m_Atlases[index];
+			const std::optional<PixelRect<BufferSpace>> slot = atlas.Packer.Reserve(TexelsOf(bounds, atlas.Density));
+
+			if (!slot)
+			{
+				Release(id);
+
+				return false;
+			}
+
+			m_Slots.push_back(Slot{ .Entity = id, .Output = atlas.Output, .Rectangle = *slot });
+		}
+
+		return m_Slots.size() != before;
+	}
+
+	// Give back everything this entity reserved. The serialisation pass that frees a finished
+	// retirement is the caller, which is what makes the atlas drain with the exits rather than on a
+	// sweep of its own.
+	void Release(EntityId id) noexcept
+	{
+		for (const Slot& slot : m_Slots)
+		{
+			if (slot.Entity != id)
+			{
+				continue;
+			}
+
+			if (Atlas* const atlas = Find(slot.Output); atlas != nullptr)
+			{
+				static_cast<void>(atlas->Packer.Release(slot.Rectangle));
+			}
+		}
+
+		std::erase_if(m_Slots, [id](const Slot& slot) { return slot.Entity == id; });
+	}
+
+	// Where this entity's snapshot goes on that output, or nothing where it has none — which is a
+	// surface that is not retiring, one whose reservation was refused, and one whose output has been
+	// unplugged since. All three mean the same thing to a caller: there is no snapshot, so do not
+	// draw from one.
+	[[nodiscard]] std::optional<PixelRect<BufferSpace>> SlotFor(EntityId id, OutputId output) const noexcept
+	{
+		for (const Slot& slot : m_Slots)
+		{
+			if (slot.Entity == id && slot.Output == output)
+			{
+				return slot.Rectangle;
+			}
+		}
+
+		return {};
+	}
+
+	[[nodiscard]] std::size_t Count() const noexcept { return m_Slots.size(); }
+
+	// The instrumentation Open.md's sizing question asks for, per output and in texels.
+	[[nodiscard]] std::int64_t HighWaterOn(OutputId output) const noexcept
+	{
+		const Atlas* const atlas = Find(output);
+
+		return atlas == nullptr ? 0 : atlas->Packer.HighWater();
+	}
+
+	[[nodiscard]] bool IsEmpty() const noexcept { return m_Slots.empty(); }
+
+private:
+	struct Atlas
+	{
+		OutputId Output{};
+		ShelfPacker Packer{};
+		Scale Density{};
+	};
+
+	struct Slot
+	{
+		EntityId Entity{};
+		OutputId Output{};
+		PixelRect<BufferSpace> Rectangle{};
+	};
+
+	// The atlas is as wide as the output and `AtlasRenderTargetMultiple` times as tall, which is the
+	// shape that makes the capacity statement true and keeps a maximised window able to fit: anything
+	// that was on the screen is no wider than the screen, so width is never the axis that refuses.
+	[[nodiscard]] static PixelSize<BufferSpace> ExtentFor(const SceneOutput& output) noexcept
+	{
+		return { output.Grid.Width, output.Grid.Height * AtlasRenderTargetMultiple };
+	}
+
+	[[nodiscard]] static PixelSize<BufferSpace> TexelsOf(Rect<GlobalSpace> bounds, Scale density) noexcept
+	{
+		const auto logical = [](double span) {
+			return Detail::Saturate(static_cast<std::int64_t>(std::ceil(span > 0.0 ? span : 0.0)));
+		};
+
+		return { density.DeviceFromLogical(logical(bounds.Extent.Width), Rounding::Up),
+			     density.DeviceFromLogical(logical(bounds.Extent.Height), Rounding::Up) };
+	}
+
+	[[nodiscard]] const Atlas* Find(OutputId output) const noexcept
+	{
+		for (const Atlas& atlas : m_Atlases)
+		{
+			if (atlas.Output == output)
+			{
+				return &atlas;
+			}
+		}
+
+		return nullptr;
+	}
+
+	[[nodiscard]] Atlas* Find(OutputId output) noexcept
+	{
+		return const_cast<Atlas*>(static_cast<const ExitAtlases*>(this)->Find(output));
+	}
+
+	std::vector<Atlas> m_Atlases;
+
+	// Scratch for `Configure`: the set being built, and the outputs whose atlas it threw away.
+	std::vector<Atlas> m_Kept;
+	std::vector<OutputId> m_Replaced;
+	std::vector<Slot> m_Slots;
+};

@@ -33,6 +33,19 @@
 // decision 97 splits a view in half and gives the extent to the frame side, because the two halves are
 // authored at rates far apart and the walk composes them rather than either side carrying both.
 
+// One bit per output, in the order the world holds them — which is the same positional convention
+// decision 84 puts on every per-output run, on the way out and on the way back.
+//
+// Here rather than beside the one question that computes it, because more than one thing now answers
+// per output over the same set: `Scene/Reach.h` works out which outputs a node lands on, and
+// `Scene/Atlas.h` reserves a snapshot on each of them (190). A mask is a property of the set.
+using OutputReach = std::uint32_t;
+
+// SPEC: how many outputs a reach can name. It is the width of the mask above rather than a policy, and
+// it sits above `OutputsPerReport`'s sixteen so that the two limits cannot disagree about a display
+// that exists — the report is what would truncate first, and it says so on its own terms.
+inline constexpr std::size_t MaxReachableOutputs = 32;
+
 // One output, as the world sees it.
 struct SceneOutput
 {

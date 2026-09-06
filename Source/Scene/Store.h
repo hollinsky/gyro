@@ -13,6 +13,7 @@
 #include "Core/Session.h"
 #include "Core/SlotAllocator.h"
 #include "Core/Time.h"
+#include "Scene/Atlas.h"
 #include "Scene/Entity.h"
 #include "Scene/Focus.h"
 #include "Scene/Input.h"
@@ -412,6 +413,11 @@ public:
 		m_Outputs.assign(outputs.begin(), outputs.end());
 		++m_OutputGeneration;
 
+		// The exit atlases go with the outputs they are in, which is decision 46's *reserved at output
+		// configuration*: an atlas is sized from its output's render target, so the set changing is the
+		// only moment one is made or unmade.
+		m_Atlases.Configure(m_Outputs);
+
 		// Done here rather than left to the caller for `Retire`'s reason: a pointer stranded where a
 		// display used to be is one no motion can rescue, since every displacement from out there
 		// slides along a union it is not touching. Whoever unplugs a monitor should not have to
@@ -425,6 +431,15 @@ public:
 	}
 
 	[[nodiscard]] std::span<const SceneOutput> Outputs() const noexcept { return m_Outputs; }
+
+	// Where each retiring subtree's snapshot goes, per output (46, 190).
+	//
+	// **A read, which is why it is out here beside the outputs rather than behind the friendship.** The
+	// private half of this class is about who may *write* the world; nothing about a rectangle's
+	// address is authoring, and the caller that will read it — the publisher, laying out the snapshot
+	// — wants it in the same breath as the output set it is indexed against. The door onto reserving
+	// one is `Scene/Commit.h`, like every other change.
+	[[nodiscard]] const ExitAtlases& Atlases() const noexcept { return m_Atlases; }
 
 	// Assign one output to a session, or back to none.
 	//
@@ -909,6 +924,14 @@ private:
 	// The whole root is finished rather than the image that named the texture, because the exit is on the
 	// window: decision 111's toplevel animates the container and the pixels hang under it, so settling
 	// the child alone would leave the frame around it fading with nothing inside.
+	// Reserve exit storage for a retiring subtree, per decisions 46 and 190. Reached through
+	// `Scene/Commit.h`, which is where the outputs a node is on can be worked out — `Scene/Reach.h`
+	// holds this store and so cannot be held by it.
+	bool ReserveExit(EntityId id, OutputReach reach, Rect<GlobalSpace> bounds)
+	{
+		return m_Atlases.Reserve(id, reach, bounds);
+	}
+
 	bool Abandon(TextureId texture) noexcept
 	{
 		if (texture.IsNull())
@@ -983,6 +1006,11 @@ private:
 				m_Work.push_back(child);
 				child = next != nullptr ? next->NextSibling : EntityId{};
 			}
+
+			// The snapshot rectangles this entity was holding, given back on the free rather than on the
+			// retirement — the whole point of decision 46's reservation is that it lasts as long as the
+			// exit does, and the exit is over exactly when the subtree is.
+			m_Atlases.Release(at);
 
 			// The payload first and the slot second, which is the order the swap below depends on: the
 			// entity whose payload moves into this hole has to still be reachable through its handle to
@@ -1285,6 +1313,11 @@ private:
 	// because the flag was set over the whole subtree when the ancestor retired, and the flag is what the
 	// push is guarded on — so the list length is the number of *independent* things dying, which is one
 	// per window a person closed.
+	// Decision 46's per-output exit storage, and the reservations standing in it. Held by the store
+	// because its lifetime is a retirement's and retirements are the store's — `Destroy` above is what
+	// gives a rectangle back, on the pass that decides an exit has finished.
+	ExitAtlases m_Atlases;
+
 	std::vector<EntityId> m_Retiring;
 
 	// The retirement roots being asked about, held apart from `m_Retiring` because `Abandon` writes

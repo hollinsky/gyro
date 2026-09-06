@@ -38,14 +38,10 @@
 // position a spring will pass through before it settles. Reading this as having answered that entry
 // would be reading it as more than it is.
 
-// One bit per output, in the order the world holds them — which is the same positional convention
-// decision 84 puts on every per-output run, on the way out and on the way back.
-using OutputReach = std::uint32_t;
-
-// SPEC: how many outputs a reach can name. It is the width of the mask above rather than a policy, and
-// it sits above `OutputsPerReport`'s sixteen so that the two limits cannot disagree about a display
-// that exists — the report is what would truncate first, and it says so on its own terms.
-inline constexpr std::size_t MaxReachableOutputs = 32;
+// `OutputReach` and `MaxReachableOutputs` are `Scene/Output.h`'s, because a mask over the output set
+// is a fact about that set rather than about this question. `Scene/Atlas.h` reserves per output and
+// cannot include this header — it is held by the store, and this one holds the store — so the two
+// would otherwise have spelled the same mask twice.
 
 // SPEC: how deep an ancestor chain may be before the answer is *nowhere*. It is `Frame/Evaluator.h`'s
 // `MaxWalkDepth` restated rather than shared, because `Scene` may not name `Frame` — and the two have
@@ -222,23 +218,18 @@ struct Coverage
 		     .Definite = true };
 }
 
-// The outputs this entity's own quad lands on, as a mask over the store's output set.
+// The outputs a coverage lands on, as a mask over an output set.
 //
 // Zero for an entity that names nothing live, one that is hidden or under something hidden, and one
 // nested deeper than the frame walk will descend. Every output for a quad the projection cannot
 // answer for — see `AllOutputs` above for which way that trade runs.
-[[nodiscard]] inline OutputReach Reach(const SceneStore& store, EntityId id)
+//
+// Taken as a coverage rather than an entity, which is what a caller with
+// both halves in hand wants: `Scene/Commit.h` needs the bounds *and* the mask when it reserves exit
+// storage, and asking twice would walk the ancestor chain twice for one answer.
+[[nodiscard]] inline OutputReach ReachOf(const Coverage& cover, std::span<const SceneOutput> outputs)
 {
-	const std::span<const SceneOutput> outputs = store.Outputs();
-
-	if (outputs.empty())
-	{
-		return 0;
-	}
-
-	const Coverage cover = Cover(store, id);
-
-	if (!cover.Reachable)
+	if (outputs.empty() || !cover.Reachable)
 	{
 		return 0;
 	}
@@ -267,4 +258,11 @@ struct Coverage
 	}
 
 	return reach;
+}
+
+// The outputs this entity's own quad lands on. The ordinary spelling, for a caller that wants the mask
+// and nothing else.
+[[nodiscard]] inline OutputReach Reach(const SceneStore& store, EntityId id)
+{
+	return ReachOf(Cover(store, id), store.Outputs());
 }
