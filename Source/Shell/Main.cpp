@@ -27,10 +27,10 @@
 // interface that was missing, rather than half-working.
 namespace
 {
-// `Super` and `Space`. Written here rather than read from a file because there is no configuration
+// `Alt` and `Space`. Written here rather than read from a file because there is no configuration
 // yet and inventing a format before there is a second thing to put in it is how a format ends up
 // wrong. Both are arguments to `Open`, so the file this becomes has somewhere to land.
-constexpr std::uint32_t SummonModifiers = 8;
+constexpr std::uint32_t SummonModifiers = 4;
 constexpr std::uint32_t SummonKeysym = XKB_KEY_space;
 } // namespace
 
@@ -128,7 +128,7 @@ int main(int argument, char** arguments)
 		bar.Summon();
 	}
 
-	spdlog::info("gyro-shell: ready, super and space");
+	spdlog::info("gyro-shell: ready, alt and space");
 
 	// The whole of the loop, and the shape is the one every Wayland client has: write what the last
 	// round produced, sleep on the socket, read what arrived. Everything this shell does happens inside
