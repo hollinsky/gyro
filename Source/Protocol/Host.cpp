@@ -235,6 +235,17 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		return Failure(ENOMEM, "advertising gyro_chrome_manager_v1");
 	}
 
+	m_SceneGlobal = Wayland::Server::GyroSceneV1::Advertise(*display, SceneVersion, m_Scene);
+
+	if (m_SceneGlobal == nullptr)
+	{
+		// Fatal, and this is the loudest of the three: a shell that came up without it can be summoned
+		// and can draw its own panel, and cannot move a single window. What a person gets is a desktop
+		// where every window opens in the middle of the screen on top of the last one and nothing they
+		// do rearranges anything.
+		return Failure(ENOMEM, "advertising gyro_scene_v1");
+	}
+
 	return {};
 }
 

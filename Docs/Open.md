@@ -253,6 +253,17 @@ is to do the work.
   designing them together is what produced the one rule both are named by, and what found that a
   shadow has to animate. A gesture, the transition it drives, and the nodes it moves are still one
   design problem seen three ways, and it still wants a screen rather than an argument.
+
+  *(Annotated 2026-09-06.)* The rest of the vocabulary is now on the wire —
+  [decision 190](Decisions.md#190-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none)'s
+  `gyro_scene_v1` carries containers, placement and the transition — and the gesture is the one part
+  of it that was not specified, because three things are missing rather than one: `Scene/Entity.h`
+  carries four sprung channels and no driven one, `Input/Devices.cpp` drops libinput's swipe and pinch
+  for want of a recognizer, and the vocabulary itself still wants the screen this entry asks for.
+  `Animation/Author/Drive.h` and `World/Node.h`'s `DrivenRamp` are the two ends that exist. **The
+  order is now fixed even though the answer is not**: the driven channel is buildable today and does
+  not need the screen, and enumerating the gestures does — so the channel lands first and the
+  vocabulary is what a review with a panel in front of it settles.
 - **The scene vocabulary closes arrangement and not trajectory.**
   [Decision 89](Decisions.md#89-a-commit-resolves-in-two-phases-a-change-becomes-motion-where-its-inputs-are-complete)
   makes setting a model value *be* a retarget, so a shell that republishes a node's position every
@@ -273,6 +284,15 @@ is to do the work.
   mutation that must not animate, since nothing a client authors is a sprung channel. So a transition
   meaning *none* has to exist whatever is decided here, and what stays open is only whether a
   **shell** may name it freely, which is the half that decides whether the catalog is enforceable.
+
+  **Answered 2026-09-06: a shell may not name it, and the cost is paid at creation.**
+  [Decision 190](Decisions.md#190-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none)
+  makes `gyro_scene_v1.commit` carry the catalog minus `None`, so every change a shell makes to
+  something on screen animates. What the rule was weighed against turned out to be a coordinate
+  stated before there is anything to move — a container being made has nowhere to have come from, and
+  a window being placed for the first time has never been anywhere — so both carry their position on
+  the request that creates the state rather than needing a transition that does not. The whole of this
+  entry is now closed.
 - **Per-node damage, which needs an identity the node record does not carry.**
   [Decision 101](Decisions.md#101-damage-is-the-whole-output-while-anything-moves-and-per-node-damage-needs-an-identity-the-record-does-not-carry)
   reports the whole output while anything is moving, because damaging where a node *was* against
@@ -318,7 +338,13 @@ is to do the work.
   shell's answer is invisible rather than flashing at the origin. Where no shell answers — development,
   or the restart gap — gyro's **Floorplanner** places it centered on the pointer's output. What stays
   open is layout below: the shell still declares and moves containers, and none of that policy is
-  gyro's.
+  gyro's. *(Built 2026-09-06 by
+  [decision 190](Decisions.md#190-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none)
+  — a shell declares a container by a name it mints, places windows into it, and claims placement so
+  the Floorplanner stands down. One correction to this entry's own wording came out of writing it: a
+  declared container is a **child of the floor** and not a root beside it, because decision 55 makes
+  the sibling list the paint order and a later root is in front — a workspace authored as a root would
+  draw over the shell's own panel.)*
 - **A match key for a surface a client re-created.**
   [Decision 114](Decisions.md#114-retirement-is-the-author-going-away-and-resurrection-is-the-authors-alone)
   found that Animation.md's headline resurrection case is not resurrection: dismissing a menu destroys
@@ -329,6 +355,37 @@ is to do the work.
   what a toolkit meant. What decides it is whether the artefact is real: menus reopened fast enough
   to overlap their own dismissal are common, and the failure is a popup that pops rather than
   reverses. Wants a toolkit in front of it, not an argument.
+- **What a restarted shell is told about what it left behind.** *(New 2026-09-06, from
+  [decision 190](Decisions.md#190-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none).)*
+  A shell that comes back after a crash asks for its containers by name and is handed the ones it
+  left, with the same windows still in them and still where they were — which is the property decision
+  141 makes containers gyro's for. What it is not told is *which window is in which*, so it can put
+  the workspaces back on screen and cannot draw the strip that says what is on each one. Three shapes
+  are available and they are not equal: a `window` event per occupant on the container, which needs the
+  foreign-toplevel identifier rather than the object because the two protocols' handles arrive
+  asynchronously and a request that named an object would impose an order on binding them; a query on
+  the window rather than on the container, which is the same information transposed and reads better
+  for a taskbar than for a workspace strip; and nothing, on the grounds that a shell should persist its
+  own arrangement and gyro's containers exist to keep the *windows* in place rather than to be a
+  database. The third is the one to argue against first, because a shell's persisted file and gyro's
+  live tree can disagree and the person is looking at gyro's.
+
+- **Whether a shell's containers nest.** *(New 2026-09-06, same entry.)* A declared container is a
+  child of the session's floor and nothing else, which is enough for a workspace and is not enough for
+  a grid inside one. What decides it is whether the arrangements that want two levels are the ones a
+  shell would build — an overview that scales a whole workspace is one level and a reference node, and
+  a dock with a fisheye inside a panel is two — and the cheap half is already true, since
+  `SceneStore::Reparent` refuses a parent inside the subtree being moved and so a nested container
+  cannot make a cycle whatever the wire allows.
+
+- **Decision 95's reference kind is not on the wire.** *(New 2026-09-06, same entry.)* An overview
+  showing a live window in two places at once is what the kind exists for, and `gyro_scene_v1` has no
+  request that mints one. What it needs stated is the backward-index rule — a reference's target must
+  be authored before it, which is an ordering constraint on a protocol that otherwise has none — and
+  the hiding of the originals, which decision 95 says is done by hiding their *parent* rather than each
+  of them. Both are sayable; neither is obvious enough to guess at, and an overview is the thing that
+  would settle them by being written.
+
 - **Layout, and how little of it is gyro's.** Decision 89 puts layout in phase two and calls it a
   pass at close, which reads as though gyro has a layout engine. It should not: decision 51 makes
   window-management policy the shell's, so what runs at close is only *derived geometry* — an anchor

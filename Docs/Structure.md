@@ -1583,10 +1583,38 @@ interactivity modes are decision 51's window management; what is missing with th
 panel has nowhere to be and only chrome that wants the middle of the screen is writable. Elevation
 is left off the wire for the same reason a second guess is worse than one, so a launcher has glass
 and no shadow — and neither draws on `Blit`, which refuses both, so all of this is visible nested or
-on DRM and nowhere else (187). What a person still cannot do is *drag* anything — between windows or
-between applications — and there is no middle-click paste, both of which are Open.md's (2, 21, 51,
-87, 111, 112, 114, 115, 126, 131, 136, 141, 143, 146, 149, 152, 162, 163, 166, 171, 172, 174, 176,
-186, 187)
+on DRM and nowhere else (187).
+
+`Scene` is `gyro_scene_v1` at version 1 and the third: where the windows are, said by the shell. It
+is the seam `Foreign` said enumeration was landing ahead of, and a window is named by the
+`ext_foreign_toplevel_handle_v1` that protocol already mints rather than by a second handle that
+could go stale on its own. Three verbs and one refusal. `get_container` creates a container under
+the session's floor, or hands back the one already declared under that name — the name is the
+shell's, the container is gyro's (141), and `destroy` on the wire object leaves the container
+standing, which is what makes a shell crash cost the panel and not the arrangement; `remove` is the
+deliberate act and hands whatever is still inside back to the floor. A child of the floor rather
+than a root beside it, because decision 55 makes the sibling list the paint order and a later root
+is in front, so a workspace authored as a root would draw over the shell's own launcher.
+`place_window` says where a window goes and what it is in, and the *first* placement of a window is
+its entrance — the position lands and gyro plays `Transition::WindowOpen`, both at the commit's
+origin, with the shell's own transition deliberately not consulted, since naming `WindowOpen` there
+would have the position silently dropped by an entry that is silent about translation on purpose.
+`claim_placement` is what stands the Floorplanner down, a request rather than the bind because the
+System tier admits a recorder and a settings panel as well as a window manager, and a second claim
+is an error rather than a second placer — which is where this parts company with `Bindings`, since a
+keystroke can be told to everybody and a window has one place to be. The refusal is the transition
+enum: it is the catalog minus `None`, so there is no way for a shell to state a coordinate that does
+not animate, and the state it would have wanted that for is carried on the requests that create
+something instead. `SessionFloors` holds the declared containers and the claim beside the two roots,
+`SceneStore::Reparent` is the one structural change a shell makes that is neither a create nor a
+remove, and `SceneCommit` gains `Reparent`, `Show` and `Hide`. What is missing is the gesture, which
+needs a driven channel dispatch-side and a recognizer in `Input` first; decision 95's reference kind,
+which is what an overview needs; what is *in* a container, which a restarted shell is not told; and
+nesting (190).
+
+What a person still cannot do is *drag* anything — between windows or between applications — and
+there is no middle-click paste, both of which are Open.md's (2, 21, 51, 87, 111, 112, 114, 115, 126,
+131, 136, 141, 143, 146, 149, 152, 162, 163, 166, 171, 172, 174, 176, 186, 187, 190)
 
 ### Input
 
@@ -1975,8 +2003,8 @@ parser agrees on the day it is written and then reports a stall that is not ther
 file that is malformed.
 
 `Protocols/` is not a tool and is named here because nothing else in the tree is compiled from XML:
-it is gyro's own protocol documents — `gyro-bindings-v1` and `gyro-chrome-v1` — searched by
-`gyro_add_bindings` ahead of wayland-scanner's and wayland-protocols' `pkgdatadir`s, because a
+it is gyro's own protocol documents — `gyro-bindings-v1`, `gyro-chrome-v1` and `gyro-scene-v1` —
+searched by `gyro_add_bindings` ahead of wayland-scanner's and wayland-protocols' `pkgdatadir`s, because a
 first-party document is not subject to what a distribution shipped.
 
 `Tools/Build.sh` is the odd one out and is not a probe: it is the build itself, serialised, and it

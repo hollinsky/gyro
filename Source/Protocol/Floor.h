@@ -1,14 +1,19 @@
 #pragma once
 
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "Core/Handle.h"
 #include "Core/Result.h"
 #include "Core/Session.h"
+#include "Geometry/NodeTransform.h"
 #include "Geometry/Space.h"
 #include "Scene/Commit.h"
 #include "Scene/Output.h"
 #include "Scene/Store.h"
+
+struct wl_client;
 
 // Where a client's window hangs, and who does the shell's job while there is none.
 //
@@ -94,17 +99,85 @@ public:
 	// two chains a node hangs in, and a node already carries the chain it is in.
 	[[nodiscard]] EntityId Chrome(SessionId session) const noexcept;
 
+	// The container this session's shell declared under that name, or null where it has not declared
+	// one (190).
+	//
+	// **The name is the shell's and the container is gyro's, which is the whole of why there is a
+	// lookup here at all.** A shell that crashes takes every wire object it held with it and not one
+	// window moves; when it comes back it asks for `workspace-2` again and is handed the same node,
+	// with the same windows still in it and still where they were. What a person gets out of that is
+	// that a crash they did not cause does not cost them their arrangement — which is decision 141's
+	// argument for gyro owning containers, delivered.
+	[[nodiscard]] EntityId Declared(SessionId session, std::string_view name) const noexcept;
+
+	// Declare one under that name, or hand back the one already declared under it. Null where the
+	// session has no floor, and where the entity space is exhausted.
+	//
+	// **The position is applied at birth and never animated**, which is the one place a shell states a
+	// coordinate with no transition over it: a container being created has nowhere to have come from,
+	// so there is nothing for a motion to describe. That is what lets `gyro_scene_v1.commit` refuse to
+	// carry *no transition* at all — see decision 190.
+	//
+	// **The arguments are ignored for a container that already exists**, and that is not a shortcut. A
+	// restarting shell asks with whatever it last knew; what survived is the truth, and overwriting it
+	// would teleport every window in the container to where the shell guessed.
+	[[nodiscard]] EntityId Declare(SceneStore& scene, SessionId session, std::string_view name, Vector3<double> at);
+
+	// The container goes. Whatever is still in it is handed back to the floor at the position it had
+	// inside the container, so a window is never left under a node that is on its way out.
+	//
+	// **Retired rather than destroyed**, which is the path everything in this file takes (114): the
+	// node stops being authorable and is freed on the pass its last channel settles. An emptied
+	// container has nothing running, so that is the very next pass.
+	//
+	// Does nothing for a container this session did not declare, which is a shell removing one twice.
+	void Undeclare(SceneCommit& commit, SceneStore& scene, SessionId session, EntityId container) noexcept;
+
+	// This client decides where a new window of this session goes, so the Floorplanner stands down
+	// (141). False where somebody already holds it, which `Protocol/Scene.h` turns into a protocol
+	// error rather than a silent second placer.
+	[[nodiscard]] bool ClaimPlacement(SessionId session, wl_client* client) noexcept;
+
+	// Give it back, which is the shell exiting or its `gyro_scene_v1` being destroyed. Ignored where
+	// this client is not the holder, so one of a client's two scene objects going does not take the
+	// other's claim with it.
+	void ReleasePlacement(SessionId session, const wl_client* client) noexcept;
+
+	// Whether anything is placing this session's windows. **The one branch decision 141 says is not on
+	// the window**, and it is not: the window is invisible until it is placed either way, and this
+	// decides only which author places it. A session nobody has claimed is placed by the Floorplanner
+	// at the instant the window arrives, which is why the no-shell gap is nothing rather than a wait.
+	[[nodiscard]] bool IsPlacing(SessionId session) const noexcept;
+
 private:
 	// A session and its floor. A vector and a scan because the count is the people logged into this
 	// machine — a map would be a hash and an allocation to search two entries.
+	// One container a shell declared, and the name it minted for it.
+	struct Declaration
+	{
+		std::string Name;
+		EntityId Container{};
+	};
+
 	struct Floor
 	{
 		SessionId Session = SessionId::None;
 		EntityId Container{};
 		EntityId Chrome{};
+
+		// The containers this session's shell declared. A vector and a scan because the count is the
+		// workspaces on one desktop, and the lookup happens when a shell says a name rather than per
+		// frame or per window.
+		std::vector<Declaration> Declared{};
+
+		// Who places this session's new windows, or null for the Floorplanner. Keyed on the connection
+		// rather than on the object, because what the claim actually says is *this shell is the window
+		// manager* and a shell that held two scene objects would still be one shell.
+		wl_client* Placer = nullptr;
 	};
 
 	[[nodiscard]] const Floor* Find(SessionId session) const noexcept;
+	[[nodiscard]] Floor* Find(SessionId session) noexcept;
 
 	std::vector<Floor> m_Floors;
 };
@@ -129,6 +202,27 @@ void PlaceOnFloor(
 	EntityId window,
 	Size<SurfaceSpace, float> natural
 );
+
+// A window is put somewhere for the first time, which is decision 141's *shown when placed* and is
+// therefore also its entrance.
+//
+// **Two transactions and neither of them is the caller's**, which is the shape `Protocol/Shell.cpp`
+// already had for the Floorplanner and which decision 190 hands to a shell without handing over what
+// it means. The position lands with no motion — a window has nowhere to travel from before it has
+// been anywhere — and the window then arrives at it under `Transition::WindowOpen`, both stamped with
+// the same instant, because a person opened one window rather than two things happening to it.
+//
+// **The transition a shell named is deliberately not consulted here.** A shell that placed a new
+// window inside a `WorkspaceSwitch` would have it slide in from wherever the node happened to sit,
+// and one that named `WindowOpen` would find its position silently dropped — that entry is silent
+// about translation on purpose, since a window that grew *and* slid would have to slide from
+// somewhere and nothing in the model says where. So the shell says where and gyro says how it
+// arrives, and the timestamp is what the shell is really contributing: the entrance starts when the
+// person pressed the key rather than when the shell got round to answering.
+//
+// `origin` is that instant. `parent` is the container it lands in, which is the session's floor where
+// the shell named none.
+void PlaceWindow(SceneStore& scene, EntityId window, EntityId parent, Vector3<double> at, Instant origin);
 
 // Decision 162's click-to-focus: **the press that begins a gesture focuses the window under it and
 // brings it to the front.**

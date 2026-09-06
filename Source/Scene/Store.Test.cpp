@@ -6,6 +6,7 @@
 #include "Core/Clock.h"
 #include "Core/Handle.h"
 #include "Geometry/Scale.h"
+#include "Scene/Commit.h"
 #include "Scene/Entity.h"
 #include "Scene/Output.h"
 #include "Testing/Test.h"
@@ -381,6 +382,100 @@ GYRO_TEST(SceneStore, RaisingAChildPutsItLastAndLeavesTheRestInOrder)
 	GYRO_CHECK(store.Raise(third));
 	GYRO_CHECK(store.Find(floor)->LastChild == third);
 	GYRO_CHECK(store.Find(second)->NextSibling == first);
+}
+
+// A window moves between workspaces, which is the one structural change a shell makes that is neither
+// a create nor a remove.
+GYRO_TEST(SceneStore, ReparentingUnlinksFromOneChainAndAppendsToTheOther)
+{
+	SceneStore store{ Clock };
+
+	const EntityId floor = store.CreateContainer({}, {}).value();
+	const EntityId left = store.CreateContainer(floor, {}).value();
+	const EntityId right = store.CreateContainer(floor, {}).value();
+
+	const EntityId first = store.CreateContainer(left, {}).value();
+	const EntityId window = store.CreateContainer(left, {}).value();
+	const EntityId resident = store.CreateContainer(right, {}).value();
+
+	GYRO_REQUIRE(store.Reparent(window, right));
+
+	// Out of the chain it was in, with the node ahead of it repaired.
+	GYRO_CHECK(store.Find(left)->FirstChild == first);
+	GYRO_CHECK(store.Find(left)->LastChild == first);
+	GYRO_CHECK(store.Find(first)->NextSibling.IsNull());
+
+	// And onto the end of the other one, which is decision 55's z order: a window put on a workspace
+	// lands in front of what is already there, because a person moving it there is looking at it.
+	GYRO_CHECK(store.Find(window)->Parent == right);
+	GYRO_CHECK(store.Find(right)->FirstChild == resident);
+	GYRO_CHECK(store.Find(right)->LastChild == window);
+	GYRO_CHECK(store.Find(resident)->NextSibling == window);
+	GYRO_CHECK(store.Find(window)->NextSibling.IsNull());
+
+	// Nothing moved and nothing was unlinked, which is the common answer: a declarative shell restates
+	// its whole arrangement on every commit and almost none of it has changed.
+	GYRO_CHECK(store.Reparent(window, right));
+	GYRO_CHECK(store.Find(right)->LastChild == window);
+	GYRO_CHECK(store.Find(resident)->NextSibling == window);
+}
+
+// The subtree travels whole, which is what makes a workspace switch one sliding surface rather than a
+// dozen windows in loose formation.
+GYRO_TEST(SceneStore, AReparentedNodeTakesItsChildrenWithIt)
+{
+	SceneStore store{ Clock };
+
+	const EntityId floor = store.CreateContainer({}, {}).value();
+	const EntityId left = store.CreateContainer(floor, {}).value();
+	const EntityId right = store.CreateContainer(floor, {}).value();
+
+	const EntityId window = store.CreateContainer(left, {}).value();
+	const EntityId content = store.CreateContainer(window, {}).value();
+	const EntityId popup = store.CreateContainer(window, {}).value();
+
+	GYRO_REQUIRE(store.Reparent(window, right));
+
+	GYRO_CHECK(store.Find(window)->FirstChild == content);
+	GYRO_CHECK(store.Find(window)->LastChild == popup);
+	GYRO_CHECK(store.Find(content)->Parent == window);
+	GYRO_CHECK(store.Find(popup)->Parent == window);
+}
+
+// The refusals, and the one that matters is the last: a cycle in the walk that draws the world is the
+// unbounded traversal at SCHED_FIFO decision 90 exists to make unreachable, so it is refused here
+// rather than detected there.
+GYRO_TEST(SceneStore, ReparentingRefusesEveryShapeThatWouldNotBeATree)
+{
+	SceneStore store{ Clock };
+
+	const EntityId floor = store.CreateContainer({}, {}).value();
+	const EntityId workspace = store.CreateContainer(floor, {}).value();
+	const EntityId window = store.CreateContainer(workspace, {}).value();
+	const EntityId content = store.CreateContainer(window, {}).value();
+
+	// A root is a session, and a verb that could mint one would be a verb that could attribute a window
+	// to nobody — which is a window drawn on every screen on the machine.
+	GYRO_CHECK(!store.Reparent(window, EntityId{}));
+
+	GYRO_CHECK(!store.Reparent(window, window));
+
+	// Into its own child, and into its grandchild, which is the same cycle reached one level deeper.
+	GYRO_CHECK(!store.Reparent(workspace, window));
+	GYRO_CHECK(!store.Reparent(workspace, content));
+
+	// Nothing was half-done by any of them.
+	GYRO_CHECK(store.Find(workspace)->Parent == floor);
+	GYRO_CHECK(store.Find(window)->Parent == workspace);
+
+	// A node whose author has gone away has nothing left to say where it belongs.
+	{
+		SceneCommit retire{ store, CommitAuthor::Compositor, Clock.Now(), Transition::None };
+
+		GYRO_REQUIRE(retire.Retire(window));
+	}
+
+	GYRO_CHECK(!store.Reparent(window, floor));
 }
 
 // A root raises against the top level's own pair, which decision 111 makes a sibling list with nothing

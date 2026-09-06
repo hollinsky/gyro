@@ -46,6 +46,7 @@
 #include "Wayland/ExtForeignToplevelListV1.h"
 #include "Wayland/GyroBindingsV1.h"
 #include "Wayland/GyroChromeV1.h"
+#include "Wayland/GyroSceneV1.h"
 #include "Wayland/LinuxDmabufV1.h"
 #include "Wayland/PresentationTime.h"
 #include "Wayland/Viewporter.h"
@@ -6771,4 +6772,504 @@ GYRO_TEST(ProtocolRoundTrip, ALauncherGivesTheKeyboardBackToTheWindowUnderItAndT
 	//
 	// Asserting the counts that are right today would write the bug into the suite, so what stands here
 	// instead is the sentence naming it.
+}
+
+// Decision 190's protocol: a shell says where the windows are, and gyro says what the change looks
+// like. This is that seam over a real socket, with gyro's client codec on one end and gyro's server on
+// the other — which is the only place in the tree either is checked against a demarshaller that is not
+// its own.
+
+namespace
+{
+// One `gyro_container_v1`, recording what the compositor said the container actually is. A restarted
+// shell reads exactly this to find out whether its workspaces survived.
+class ContainerEvents final : public Wayland::GyroContainerV1Listener
+{
+public:
+	void OnState(Wire::Fixed x, Wire::Fixed y, Wire::Fixed z, std::uint32_t visible) override
+	{
+		X = x;
+		Y = y;
+		Z = z;
+		Visible = visible;
+		++States;
+	}
+
+	Wire::Fixed X;
+	Wire::Fixed Y;
+	Wire::Fixed Z;
+	std::uint32_t Visible = 0;
+
+	// Counted, because the protocol says once and never again: a `state` per commit would have a shell
+	// re-reading its own arrangement out of the compositor on every frame it caused.
+	std::uint32_t States = 0;
+};
+
+// A shell's side of the scene: the manager, and the containers it has been handed.
+struct Arrangement
+{
+	Wayland::GyroSceneV1 Scene;
+	std::vector<std::unique_ptr<ContainerEvents>> Listeners;
+	std::vector<Wayland::GyroContainerV1> Containers;
+};
+
+[[nodiscard]] bool BindScene(BoundCompositor& bound, Arrangement& shell)
+{
+	const Registry::Global* const global = bound.Listener.Find(Wayland::GyroSceneV1::WireName);
+
+	if (global == nullptr)
+	{
+		return false;
+	}
+
+	shell.Scene = bound.Listener.Object().Bind<Wayland::GyroSceneV1>(global->Name, global->Version);
+
+	return shell.Scene.IsValid();
+}
+
+[[nodiscard]] ContainerEvents& Declare(Arrangement& shell, std::string_view name, double x, double y)
+{
+	shell.Listeners.push_back(std::make_unique<ContainerEvents>());
+
+	shell.Containers.push_back(shell.Scene.GetContainer(
+		name,
+		Wire::Fixed::FromDouble(x),
+		Wire::Fixed::FromDouble(y),
+		Wire::Fixed::FromDouble(0.0),
+		*shell.Listeners.back()
+	));
+
+	return *shell.Listeners.back();
+}
+
+// The timestamp a shell echoes back from whatever summoned it. The value does not matter to any of
+// these tests; that there *is* one does, since a commit that starts motion and carries no origin is a
+// frame of lag added invisibly (112).
+void Commit(const Arrangement& shell, Pair& pair, Wayland::GyroSceneV1Transition transition)
+{
+	const std::int64_t nanoseconds = Monotonic::ToNanoseconds(pair.Clock.Now());
+	const auto seconds = static_cast<std::uint64_t>(nanoseconds) / 1'000'000'000U;
+
+	shell.Scene.Commit(
+		transition,
+		static_cast<std::uint32_t>(seconds >> 32U),
+		static_cast<std::uint32_t>(seconds & 0xffffffffU),
+		static_cast<std::uint32_t>(static_cast<std::uint64_t>(nanoseconds) % 1'000'000'000U)
+	);
+}
+
+// The node under the session's floor at `index`, which is where a window lands with no container in
+// the way. `WindowNode` is this with the index fixed at zero.
+[[nodiscard]] const Entity* FloorChild(const SceneStore& scene, std::uint32_t index)
+{
+	const Entity* const floor = scene.Find(scene.FirstRoot());
+
+	if (floor == nullptr)
+	{
+		return nullptr;
+	}
+
+	const Entity* at = scene.Find(floor->FirstChild);
+
+	for (std::uint32_t step = 0; step < index && at != nullptr; ++step)
+	{
+		at = scene.Find(at->NextSibling);
+	}
+
+	return at;
+}
+} // namespace
+
+GYRO_TEST(ProtocolRoundTrip, AnApplicationCannotArrangeTheScene)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-scene-user" };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	// The tier from the far side of the socket. An application handed this could move the window
+	// somebody is typing into onto a workspace they are not looking at, or claim placement and then
+	// place nothing — which reads as a machine that has stopped opening windows.
+	GYRO_CHECK(bound.Listener.Find(Wayland::GyroSceneV1::WireName) == nullptr);
+
+	// The rest of the registry is untouched, which is the failure a filter is most likely to have.
+	GYRO_CHECK(bound.Listener.Find(Wayland::XdgWmBase::WireName) != nullptr);
+	GYRO_CHECK(bound.Listener.Find(Wayland::WlCompositor::WireName) != nullptr);
+}
+
+// The headline promise of the whole protocol: the container is gyro's, so the shell that comes back
+// for it gets the one it left.
+GYRO_TEST(ProtocolRoundTrip, AContainerOutlivesTheObjectTheShellHeldItThrough)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-scene-adopt", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Arrangement shell;
+	GYRO_REQUIRE(BindScene(bound, shell));
+
+	ContainerEvents& first = Declare(shell, "workspace-2", 1920.0, 0.0);
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// The `state` that says what it is. For a container this call created it repeats what was asked
+	// for, and it arrives once rather than per commit.
+	GYRO_REQUIRE_EQ(first.States, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(first.X.ToDouble(), 1920.0);
+	GYRO_CHECK_EQ(first.Visible, std::uint32_t{ 1 });
+
+	const std::uint32_t authored = pair.Store.Count();
+
+	// The shell lets go of the object — which is what a crash does to every object at once — and asks
+	// again by the same name.
+	shell.Containers.front().Destroy();
+
+	pair.Turn();
+
+	ContainerEvents& again = Declare(shell, "workspace-2", 0.0, 0.0);
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// **Nothing was created**, which is the assertion that actually says the container survived: a
+	// second node under the same name would be a second workspace with none of the windows in it.
+	GYRO_CHECK_EQ(pair.Store.Count(), authored);
+
+	// And what came back is what survived rather than what was asked for the second time. A shell that
+	// was told its own guess would teleport every window in the container to wherever it guessed.
+	GYRO_REQUIRE_EQ(again.States, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(again.X.ToDouble(), 1920.0);
+}
+
+// Decision 141's two authors, and the branch between them. With nobody claiming, the Floorplanner
+// places at the instant the window arrives; with a shell claiming, the window waits — invisibly,
+// which is what *shown when placed* has to mean to be worth anything.
+GYRO_TEST(ProtocolRoundTrip, AWindowWaitsInvisiblyForTheShellThatClaimedPlacement)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-scene-place", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Arrangement shell;
+	GYRO_REQUIRE(BindScene(bound, shell));
+
+	ForeignListEvents windows;
+	const Wayland::ExtForeignToplevelListV1 list = BindForeign(bound, windows);
+	GYRO_REQUIRE(list.IsValid());
+
+	shell.Scene.ClaimPlacement();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	Toplevel window;
+	GYRO_REQUIRE(Show(pair, bound, window, std::byte{ 0x30 }));
+
+	const Entity* const node = WindowNode(pair.Store);
+	GYRO_REQUIRE(node != nullptr);
+
+	// **Invisible and at the origin**, which is the state a window is created in and which nothing has
+	// moved it out of. The Floorplanner would have centred it and started the opening; it did not run,
+	// because the shell said it would answer.
+	GYRO_CHECK_EQ(node->Opacity.Presentation(pair.Clock.Now()), 0.0F);
+	GYRO_CHECK(node->Opacity.IsAtRest());
+	GYRO_CHECK_EQ(node->Translation.Model().X, 0.0);
+
+	// The shell learns the window exists the way it learns about every window, which is why this
+	// protocol mints no handle of its own.
+	GYRO_REQUIRE_EQ(windows.Objects.size(), std::size_t{ 1 });
+
+	shell.Scene.PlaceWindow(
+		windows.Objects.front(),
+		Wayland::GyroContainerV1{},
+		Wire::Fixed::FromDouble(300.0),
+		Wire::Fixed::FromDouble(200.0),
+		Wire::Fixed::FromDouble(0.0)
+	);
+
+	Commit(shell, pair, Wayland::GyroSceneV1Transition::WindowOpen);
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	const Entity* const placed = WindowNode(pair.Store);
+	GYRO_REQUIRE(placed != nullptr);
+
+	// The position landed rather than sliding in from the origin, and the opening is running — the two
+	// halves of a first placement, and neither of them is what the shell's transition asked for.
+	GYRO_CHECK(placed->Translation.IsAtRest());
+	GYRO_CHECK_EQ(placed->Translation.Presentation(pair.Clock.Now()).X, 300.0);
+	GYRO_CHECK_EQ(placed->Translation.Presentation(pair.Clock.Now()).Y, 200.0);
+
+	GYRO_CHECK(!placed->Opacity.IsAtRest());
+	GYRO_CHECK_EQ(placed->Opacity.Model(), 1.0F);
+}
+
+// A workspace switch: one container moving, and everything in it moving with it as one thing rather
+// than as a dozen windows in loose formation.
+GYRO_TEST(ProtocolRoundTrip, AWorkspaceCarriesItsWindowsAndSpringsUnderTheNamedTransition)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-scene-workspace", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Arrangement shell;
+	GYRO_REQUIRE(BindScene(bound, shell));
+
+	ForeignListEvents windows;
+	const Wayland::ExtForeignToplevelListV1 list = BindForeign(bound, windows);
+	GYRO_REQUIRE(list.IsValid());
+
+	shell.Scene.ClaimPlacement();
+
+	static_cast<void>(Declare(shell, "workspace-1", 0.0, 0.0));
+
+	pair.Turn();
+
+	Toplevel window;
+	GYRO_REQUIRE(Show(pair, bound, window, std::byte{ 0x40 }));
+
+	GYRO_REQUIRE_EQ(windows.Objects.size(), std::size_t{ 1 });
+
+	shell.Scene.PlaceWindow(
+		windows.Objects.front(),
+		shell.Containers.front(),
+		Wire::Fixed::FromDouble(100.0),
+		Wire::Fixed::FromDouble(50.0),
+		Wire::Fixed::FromDouble(0.0)
+	);
+
+	Commit(shell, pair, Wayland::GyroSceneV1Transition::WindowOpen);
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// The window hangs under the workspace rather than under the floor, so its position is stated
+	// relative to the workspace and the two compose.
+	const Entity* const workspace = FloorChild(pair.Store, 0);
+	GYRO_REQUIRE(workspace != nullptr);
+
+	const Entity* const node = pair.Store.Find(workspace->FirstChild);
+	GYRO_REQUIRE(node != nullptr);
+	GYRO_CHECK_EQ(node->Translation.Model().X, 100.0);
+
+	// And the switch. One request, one commit, one named kind of change.
+	shell.Containers.front().SetPosition(
+		Wire::Fixed::FromDouble(-1920.0), Wire::Fixed::FromDouble(0.0), Wire::Fixed::FromDouble(0.0)
+	);
+
+	Commit(shell, pair, Wayland::GyroSceneV1Transition::WorkspaceSwitch);
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	const Entity* const moved = FloorChild(pair.Store, 0);
+	GYRO_REQUIRE(moved != nullptr);
+
+	// **Sprung rather than landed**, which is the whole of what naming a transition bought: the shell
+	// said where and gyro decided how, and nothing on the wire could have said how.
+	GYRO_CHECK(!moved->Translation.IsAtRest());
+	GYRO_CHECK_EQ(moved->Translation.Model().X, -1920.0);
+	GYRO_CHECK_EQ(moved->Translation.Presentation(pair.Clock.Now()).X, 0.0);
+
+	// The window did not move, and does not need to: it is under the node that did.
+	GYRO_CHECK(pair.Store.Find(moved->FirstChild)->Translation.IsAtRest());
+	GYRO_CHECK_EQ(pair.Store.Find(moved->FirstChild)->Translation.Model().X, 100.0);
+}
+
+// The one thing a shell cannot say, and decision 190 in a single assertion.
+GYRO_TEST(ProtocolRoundTrip, AShellCannotAskForAChangeThatDoesNotAnimate)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-scene-none", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Arrangement shell;
+	GYRO_REQUIRE(BindScene(bound, shell));
+
+	// Zero is `Transition::None` in the catalog and is not a transition on the wire. It is also the
+	// value a zeroed field lands on, so it is the one a shell reaches by accident — and answering it
+	// with the catalog's `None` would hand that shell exactly the un-animated write a closed motion
+	// vocabulary exists to withhold.
+	Commit(shell, pair, static_cast<Wayland::GyroSceneV1Transition>(0));
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::GyroSceneV1Error::BadTransition));
+}
+
+// Placement has one answer, which is where it parts company with a claimed chord.
+GYRO_TEST(ProtocolRoundTrip, PlacementIsClaimedOnceAndASecondClaimIsRefusedLoudly)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-scene-taken", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Arrangement shell;
+	GYRO_REQUIRE(BindScene(bound, shell));
+
+	shell.Scene.ClaimPlacement();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// **Refused rather than shared, and loudly rather than quietly.** A shell that silently did not
+	// place would look to a person like a compositor that had stopped opening windows, with nothing
+	// anywhere naming the disagreement.
+	Arrangement second;
+	GYRO_REQUIRE(BindScene(bound, second));
+
+	second.Scene.ClaimPlacement();
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::GyroSceneV1Error::PlacementTaken));
+}
+
+// A container that cannot be named is one that cannot be re-adopted, which is the whole point of
+// having asked for it.
+GYRO_TEST(ProtocolRoundTrip, AContainerWithNoNameIsRefused)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-scene-unnamed", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Arrangement shell;
+	GYRO_REQUIRE(BindScene(bound, shell));
+
+	static_cast<void>(Declare(shell, "", 0.0, 0.0));
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::GyroSceneV1Error::BadName));
+}
+
+// Removing a container hands what is in it back rather than taking it away, which is the difference
+// between a person closing a workspace and losing everything on it.
+GYRO_TEST(ProtocolRoundTrip, RemovingAWorkspaceHandsItsWindowsBackToTheFloor)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-scene-remove", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Arrangement shell;
+	GYRO_REQUIRE(BindScene(bound, shell));
+
+	ForeignListEvents windows;
+	const Wayland::ExtForeignToplevelListV1 list = BindForeign(bound, windows);
+	GYRO_REQUIRE(list.IsValid());
+
+	shell.Scene.ClaimPlacement();
+
+	static_cast<void>(Declare(shell, "workspace-1", 0.0, 0.0));
+
+	pair.Turn();
+
+	Toplevel window;
+	GYRO_REQUIRE(Show(pair, bound, window, std::byte{ 0x50 }));
+
+	GYRO_REQUIRE_EQ(windows.Objects.size(), std::size_t{ 1 });
+
+	shell.Scene.PlaceWindow(
+		windows.Objects.front(),
+		shell.Containers.front(),
+		Wire::Fixed::FromDouble(100.0),
+		Wire::Fixed::FromDouble(50.0),
+		Wire::Fixed::FromDouble(0.0)
+	);
+
+	Commit(shell, pair, Wayland::GyroSceneV1Transition::WindowOpen);
+
+	pair.Turn();
+
+	const EntityId floor = pair.Store.FirstRoot();
+
+	const Entity* const workspace = FloorChild(pair.Store, 0);
+	GYRO_REQUIRE(workspace != nullptr);
+
+	const EntityId held = workspace->FirstChild;
+	GYRO_REQUIRE(!held.IsNull());
+
+	shell.Containers.front().Remove();
+
+	Commit(shell, pair, Wayland::GyroSceneV1Transition::WorkspaceSwitch);
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// The window is on the floor and still alive; the workspace is retiring. A shell that removed a
+	// workspace without emptying it first gets windows it can still find rather than windows that went
+	// with the node they were under.
+	GYRO_REQUIRE(pair.Store.Find(held) != nullptr);
+	GYRO_CHECK(pair.Store.Find(held)->Parent == floor);
+	GYRO_CHECK(!pair.Store.Find(held)->Retiring);
+
+	GYRO_CHECK(FloorChild(pair.Store, 0)->Retiring);
+
+	// And asking for the name again gets a new container rather than the retiring one.
+	ContainerEvents& fresh = Declare(shell, "workspace-1", 640.0, 0.0);
+
+	pair.Turn();
+
+	GYRO_REQUIRE_EQ(fresh.States, std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(fresh.X.ToDouble(), 640.0);
 }

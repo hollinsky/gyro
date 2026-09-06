@@ -108,8 +108,18 @@ public:
 		return m_Server == nullptr ? SessionId::None : m_Server->SessionOf(client);
 	}
 
+	// The session skeleton itself, for the one client that writes to it rather than reading it: a shell
+	// declaring containers and claiming placement (190). Null outside a host, which is the same absence
+	// `Store()` reports and for the same reason.
+	//
+	// **Non-const where `Floor()` and `Chrome()` above are questions**, and the asymmetry is the tier:
+	// every client asks where its window hangs, and only a `System` client says what the answer should
+	// be. Handing the whole object over is what a shell's authority actually is, so it is spelled here
+	// rather than distributed as a verb per request.
+	[[nodiscard]] SessionFloors* Floors() const noexcept { return m_Floors; }
+
 	// Wired once when the host opens, and both outlive every client.
-	void SetFloors(const SessionFloors& floors, const Server& server) noexcept
+	void SetFloors(SessionFloors& floors, const Server& server) noexcept
 	{
 		m_Floors = &floors;
 		m_Server = &server;
@@ -231,7 +241,7 @@ public:
 private:
 	SceneStore* m_Store = nullptr;
 	ITextures* m_Textures = nullptr;
-	const SessionFloors* m_Floors = nullptr;
+	SessionFloors* m_Floors = nullptr;
 	const Server* m_Server = nullptr;
 
 	// The explicit-sync device, or null where none opened. Not owned; the host holds it.

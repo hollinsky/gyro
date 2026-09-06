@@ -7,6 +7,7 @@
 #include "Wayland/Server/ExtForeignToplevelListV1.h"
 #include "Wayland/Server/GyroBindingsV1.h"
 #include "Wayland/Server/GyroChromeV1.h"
+#include "Wayland/Server/GyroSceneV1.h"
 #include "Wayland/Server/LinuxDmabufV1.h"
 #include "Wayland/Server/LinuxDrmSyncobjV1.h"
 #include "Wayland/Server/PresentationTime.h"
@@ -74,6 +75,12 @@ constexpr std::array Table{
 	// no list that would let them find it and close it — which is the shape of a phishing overlay
 	// stated as plainly as a protocol can state it.
 	std::pair{ Wayland::Server::GyroChromeManagerV1::WireName, GlobalTier::System },
+
+	// Where every window in a session goes, and what happens to it on the way. An application handed
+	// this could move the window somebody is typing into onto a workspace they are not looking at, or
+	// simply never place a new one and leave the machine looking as though it had stopped opening
+	// windows at all.
+	std::pair{ Wayland::Server::GyroSceneV1::WireName, GlobalTier::System },
 };
 
 // The row for an interface, or null where the table does not name it. The two callers below want

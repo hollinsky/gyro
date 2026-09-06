@@ -24,6 +24,7 @@
 #include "Protocol/Foreign.h"
 #include "Protocol/Output.h"
 #include "Protocol/Presentation.h"
+#include "Protocol/Scene.h"
 #include "Protocol/Seat.h"
 #include "Protocol/Server.h"
 #include "Protocol/Shell.h"
@@ -365,6 +366,9 @@ private:
 
 	ChromeGlobal m_Chrome;
 	wl_global* m_ChromeGlobal = nullptr;
+
+	SceneGlobal m_Scene{ m_Context };
+	wl_global* m_SceneGlobal = nullptr;
 
 	// One per session, each authored before its session's listener is taken and outliving every client
 	// on it. A development run has exactly one, whose session is `None`.

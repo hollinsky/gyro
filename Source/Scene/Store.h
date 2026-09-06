@@ -306,6 +306,86 @@ public:
 		return true;
 	}
 
+	// Move one entity, with everything under it, into another parent. A window going from one workspace
+	// to the next, and the one structural change a shell makes that is not a create or a remove.
+	//
+	// **The subtree travels whole and keeps everything about itself**, which is decision 114's
+	// distinction that `Raise` already draws one axis over: the entity keeps its id, its children, its
+	// channels and its coefficients, and nothing retires. A spring that was running goes on running
+	// through the move, so a window dragged into a workspace mid-settle finishes settling there rather
+	// than restarting — which is the whole reason this is a relink and not a destroy and a create.
+	//
+	// **What it does not carry is composed position**, and that is the caller's to state. A node's
+	// position is relative to its parent, so a subtree moved between two parents at different offsets
+	// arrives somewhere else on screen unless something writes it — which is why `Scene/Commit.h` puts
+	// this in the transaction beside the `Move` that goes with it, rather than exposing it here alone.
+	//
+	// **Onto the end of the chain, which is decision 55's z order**: a window put into a workspace lands
+	// in front of what is already there, because a person moving a window there is looking at it. That
+	// is `Raise` reached through a second door, and the two are one call rather than two for exactly
+	// that reason.
+	//
+	// **A null parent is refused rather than making a root.** A root is a session — `World/Root.h` is
+	// what the frame thread gates on, and `Protocol/Floor.h` authors one per session when its agent's
+	// listener is adopted. A verb that could mint one would be a verb that could attribute a window to
+	// nobody, and a window under no session is a window drawn on every screen on the machine.
+	//
+	// True and untouched where the entity is already in that parent, which is the common answer: a
+	// declarative shell restates its whole arrangement on every commit and almost none of it moves.
+	//
+	// False for an id that names nothing live, for a parent that does not, for a null parent, for a
+	// retiring node — whose author has gone away, so nothing is left to say where it belongs — and for
+	// a parent inside the subtree being moved, which would make a cycle in the walk that draws the
+	// world.
+	bool Reparent(EntityId id, EntityId parent) noexcept
+	{
+		Entity* const entity = Mutable(id);
+
+		if (entity == nullptr || parent.IsNull() || id == parent || entity->Retiring)
+		{
+			return false;
+		}
+
+		const Entity* const destination = Find(parent);
+
+		if (destination == nullptr)
+		{
+			return false;
+		}
+
+		if (entity->Parent == parent)
+		{
+			return true;
+		}
+
+		// **Upward from the destination rather than downward through the subtree**, which is the cheap
+		// direction: a tree is as deep as a window inside a workspace inside a floor, and as wide as the
+		// windows on a desk. Walking down would visit every node under the mover to prove a negative.
+		for (EntityId above = destination->Parent; !above.IsNull();)
+		{
+			if (above == id)
+			{
+				return false;
+			}
+
+			const Entity* const step = Find(above);
+
+			above = step != nullptr ? step->Parent : EntityId{};
+		}
+
+		// Out of one chain and onto the end of another, through the same two halves `Raise` and `Order`
+		// use. The `NextSibling` is cleared in between because `Append` links onto a node it takes to be
+		// fresh, and a stale link here would be a cycle in the walk that draws the world.
+		Unlink(id, *entity);
+
+		entity->NextSibling = {};
+		entity->Parent = parent;
+
+		Append(parent, id);
+
+		return true;
+	}
+
 	[[nodiscard]] bool IsLive(EntityId id) const noexcept { return m_Ids.IsValid(id); }
 
 	// The top of the tree, as the first of a sibling chain. Decision 55 makes the list order the z

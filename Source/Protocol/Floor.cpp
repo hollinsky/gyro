@@ -100,6 +100,154 @@ void SessionFloors::Close(SceneStore& scene, SessionId session) noexcept
 	m_Floors.erase(found);
 }
 
+SessionFloors::Floor* SessionFloors::Find(SessionId session) noexcept
+{
+	const auto found = std::find_if(m_Floors.begin(), m_Floors.end(), [session](const Floor& floor) noexcept {
+		return floor.Session == session;
+	});
+
+	return found == m_Floors.end() ? nullptr : &*found;
+}
+
+EntityId SessionFloors::Declared(SessionId session, std::string_view name) const noexcept
+{
+	const Floor* const floor = Find(session);
+
+	if (floor == nullptr)
+	{
+		return {};
+	}
+
+	const auto found =
+		std::find_if(floor->Declared.begin(), floor->Declared.end(), [name](const Declaration& declared) noexcept {
+			return declared.Name == name;
+		});
+
+	return found == floor->Declared.end() ? EntityId{} : found->Container;
+}
+
+EntityId SessionFloors::Declare(SceneStore& scene, SessionId session, std::string_view name, Vector3<double> at)
+{
+	Floor* const floor = Find(session);
+
+	if (floor == nullptr)
+	{
+		return {};
+	}
+
+	if (const EntityId already = Declared(session, name); !already.IsNull())
+	{
+		return already;
+	}
+
+	// A container under the floor rather than a root beside it, and the one line that decides it is
+	// decision 55: the sibling list is the paint order, and the floor and the chrome root are two
+	// chains precisely so that raising a window can never put it in front of the shell's own launcher.
+	// A workspace authored as a third root would sit above the chrome root — created later, therefore
+	// in front — and every window in it would draw over the panel.
+	//
+	// It carries no extent, for the reason the floor itself carries none: a container is where things
+	// hang rather than a surface anything draws, and an extent would be a rectangle a frame treatment
+	// could round.
+	const std::optional<EntityId> container = scene.CreateContainer(floor->Container, { .Position = at });
+
+	if (!container)
+	{
+		return {};
+	}
+
+	floor->Declared.push_back(Declaration{ .Name = std::string{ name }, .Container = *container });
+
+	return *container;
+}
+
+void SessionFloors::Undeclare(SceneCommit& commit, SceneStore& scene, SessionId session, EntityId container) noexcept
+{
+	Floor* const floor = Find(session);
+
+	if (floor == nullptr)
+	{
+		return;
+	}
+
+	const auto found =
+		std::find_if(floor->Declared.begin(), floor->Declared.end(), [container](const Declaration& declared) noexcept {
+			return declared.Container == container;
+		});
+
+	if (found == floor->Declared.end())
+	{
+		return;
+	}
+
+	floor->Declared.erase(found);
+
+	const Entity* const node = scene.Find(container);
+
+	if (node == nullptr)
+	{
+		return;
+	}
+
+	// **The children are gathered before any of them is moved**, because reparenting relinks the chain
+	// this walk is standing in. One vector for the windows on one workspace, which is the size a person
+	// puts there rather than anything that scales.
+	std::vector<EntityId> held;
+
+	for (EntityId child = node->FirstChild; !child.IsNull();)
+	{
+		const Entity* const step = scene.Find(child);
+
+		held.push_back(child);
+		child = step != nullptr ? step->NextSibling : EntityId{};
+	}
+
+	// **Back to the floor at the position they had inside**, which is the honest answer rather than a
+	// good one: the container's own offset is lost, so a workspace removed at the far right hands its
+	// windows back stacked where they sat within it. A shell that cares moves them out itself first,
+	// and one that does not gets windows it can still find rather than windows that vanished with the
+	// node they were under.
+	for (const EntityId child : held)
+	{
+		static_cast<void>(commit.Reparent(child, floor->Container));
+	}
+
+	// Retired rather than destroyed, which is the path every lifetime in this file takes (114). An
+	// emptied container has nothing running on it, so the very next serialisation pass frees it.
+	static_cast<void>(commit.Retire(container));
+}
+
+bool SessionFloors::ClaimPlacement(SessionId session, wl_client* client) noexcept
+{
+	Floor* const floor = Find(session);
+
+	if (floor == nullptr || floor->Placer != nullptr)
+	{
+		return false;
+	}
+
+	floor->Placer = client;
+
+	return true;
+}
+
+void SessionFloors::ReleasePlacement(SessionId session, const wl_client* client) noexcept
+{
+	Floor* const floor = Find(session);
+
+	if (floor != nullptr && floor->Placer == client)
+	{
+		floor->Placer = nullptr;
+	}
+}
+
+bool SessionFloors::IsPlacing(SessionId session) const noexcept
+{
+	const Floor* const floor = Find(session);
+
+	return floor != nullptr && floor->Placer != nullptr;
+}
+
 const SessionFloors::Floor* SessionFloors::Find(SessionId session) const noexcept
 {
 	const auto found = std::find_if(m_Floors.begin(), m_Floors.end(), [session](const Floor& floor) noexcept {
@@ -215,6 +363,33 @@ void PlaceOnFloor(
 	// belongs instead of growing into it, and the day the catalog arrives this is the one call that
 	// changes.
 	static_cast<void>(commit.Move(window, { x, y, 0.0 }));
+}
+
+void PlaceWindow(SceneStore& scene, EntityId window, EntityId parent, Vector3<double> at, Instant origin)
+{
+	// **The placement is not something anybody asked to see happen**, so it is a `Transition::None`
+	// scope: the parent and the position land together and no channel is sprung. Reparent and move are
+	// in one transaction because a window's position is relative to its parent, and applying one
+	// without the other would put the window at the coordinates it had in the container it just left.
+	{
+		SceneCommit placement{ scene, CommitAuthor::Compositor, origin, Transition::None };
+
+		if (!parent.IsNull())
+		{
+			static_cast<void>(placement.Reparent(window, parent));
+		}
+
+		static_cast<void>(placement.Move(window, at));
+	}
+
+	// **And the entrance, which is a second transaction because it is a different sentence about the
+	// same moment.** Nothing here names a motion or a channel: the transition is the whole of what this
+	// says, so a fifth animatable channel added to the catalog entry starts animating at every window
+	// in the system without this line changing.
+	SceneCommit entrance{ scene, CommitAuthor::Compositor, origin, Transition::WindowOpen };
+
+	static_cast<void>(entrance.Scale(window, { 1.0F, 1.0F, 1.0F }));
+	static_cast<void>(entrance.Fade(window, 1.0F));
 }
 
 void FocusByClick(SceneStore& scene, EntityId hit)

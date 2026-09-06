@@ -665,6 +665,7 @@ gyro_add_bindings(WaylandProtocols
 		# surface declared to be chrome — is checked nowhere else.
 		gyro-bindings-v1
 		gyro-chrome-v1
+		gyro-scene-v1
 )
 
 # The typed server bindings, over libwayland — the other half of decision 2's split, and the wrapper
@@ -698,6 +699,7 @@ gyro_add_bindings(WaylandServerProtocols
 		# surface declared to be chrome — is checked nowhere else.
 		gyro-bindings-v1
 		gyro-chrome-v1
+		gyro-scene-v1
 )
 
 # The CPU renderer, and PORTABLE is the load-bearing word here for a stronger reason than it is
@@ -1025,6 +1027,7 @@ gyro_add_module(Protocol DISPATCH
 		Positioner.cpp
 		Presentation.cpp
 		Region.cpp
+		Scene.cpp
 		Sealed.cpp
 		Seat.cpp
 		Server.cpp
@@ -1047,6 +1050,7 @@ gyro_add_module(Protocol DISPATCH
 		Host.Test.cpp
 		Positioner.Test.cpp
 		Presentation.Test.cpp
+		Scene.Test.cpp
 		Server.Test.cpp
 		Shell.Test.cpp
 		Shm.Test.cpp

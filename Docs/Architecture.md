@@ -2732,6 +2732,35 @@ had no caller but a gym. What it cannot yet say is *where*: a chrome surface is 
 Floorplanner like any window, which is what a launcher wants and is not what a panel wants, and
 [Open.md](Open.md) carries the anchoring and the exclusive zone that are missing.
 
+**And what it can now do is arrange the windows.** `gyro_scene_v1` is the third verb and the one the
+first two were prerequisites for: a shell declares a container by a name it mints, puts windows into
+it, moves it, and says once per commit what kind of change that was. Rationale and rejected
+alternatives in [decision
+190](Decisions.md#190-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none).
+Four things about it are worth stating here because they are the shape of the whole seam:
+
+- **There is no way to say *no transition*.** The wire enum is the motion catalog minus `None`, so
+  every change a shell makes to something a person can see animates with gyro's springs. The state a
+  shell wants to set without motion — where a container sits when it is first made, where a window
+  goes when it has never been anywhere — is carried on the request that creates it, before there is
+  anything on screen to move. That is the falsifiable test above holding: a shell cannot produce
+  motion that does not match the catalog because it cannot produce motion at all.
+- **A container belongs to gyro and the name is what the shell holds.** Destroying the wire object
+  leaves the container standing, which is what makes a shell crash cost the panel and not the
+  arrangement: the shell comes back, asks for the same names, and every window is where it was.
+  `remove` is the deliberate act, and what is still inside goes back to the floor.
+- **Placement is claimed, once.** Until a shell claims it the Floorplanner places every window at the
+  instant it arrives; after, the session's windows wait — invisibly, since a window is created at zero
+  opacity — and the shell answers. The first placement of a window *is* its entrance, and the shell's
+  transition is deliberately not consulted for it.
+- **A window is named by its `ext_foreign_toplevel_handle_v1`**, the same object a shell already
+  learns about windows through, rather than by a second handle that could go stale independently.
+
+What is not there is the gesture, which needs a driven channel on the authoring side and a recognizer
+in `Input` before a request for one would mean anything, and decision 95's reference node, which is
+what an overview needs to show a live window in two places at once. [Open.md](Open.md) carries both,
+along with the fact that a restarted shell is told its containers are back and not what is in them.
+
 ### Declare, do not drive
 
 **The shell is never in a per-event loop.** It is the same rule
@@ -2783,8 +2812,10 @@ what the session-ready gate below is for.
 
 ### The scene vocabulary is closed; composition is not
 
-The shell builds scenes from a closed set of node kinds — surface reference, snapshot reference,
-solid, effect layer — into arbitrary trees, and moves them only with catalog transitions. **Cohesion
+The shell builds scenes from a closed set of node kinds — container, image, solid, reference
+([decision 95](Decisions.md#95-the-scene-vocabulary-is-four-kinds-a-material-is-a-field-not-a-kind),
+correcting the sketch this sentence used to carry) — into arbitrary trees, and moves them only with
+catalog transitions. **Cohesion
 lives in the motion, not in the arrangement.** A shell may invent any idiom it likes and cannot
 invent a spring, which is what lets two desktops on gyro look nothing alike and still feel like the
 same machine. The test that keeps the line honest: if a shell can produce motion that does not match

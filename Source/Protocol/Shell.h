@@ -564,6 +564,19 @@ public:
 	// before the popup can hang off it.
 	[[nodiscard]] bool IsMapped() const noexcept { return !m_Window.IsNull(); }
 
+	// Whether anything has said where this window goes yet (141). **A window is invisible until it is
+	// placed**, so this is not a cosmetic distinction: it is created already displaced and at zero
+	// opacity, and what brings it to one is the entrance the placement carries.
+	//
+	// It is false for exactly as long as the session's shell has claimed placement (190) and has not
+	// answered for this window. With no shell claiming, the Floorplanner places at the instant the
+	// window arrives and this is true before any frame is drawn.
+	[[nodiscard]] bool IsPlaced() const noexcept { return m_Placed; }
+
+	// Somebody has placed it, so the next placement is a move rather than an entrance. Called by the
+	// Floorplanner and by `Protocol/Scene.cpp`, which are decision 141's two authors.
+	void MarkPlaced() noexcept { m_Placed = true; }
+
 	// The `xdg_toplevel` this surface's role is, or null for a popup or for a surface whose client has
 	// not said yet. **Public because a menu is in the window registry and is not a window**:
 	// `HostContext::Windows()` holds every mapped `xdg_surface`, and
@@ -702,6 +715,11 @@ private:
 	// The window's own two nodes. Null while unmapped.
 	EntityId m_Window{};
 	EntityId m_Content{};
+
+	// Whether anything has said where this window goes. Cleared with the nodes on unmap, so a surface
+	// mapped a second time is placed a second time — a toolkit hiding and reshowing a window gets the
+	// entrance again, which is what a person sees as the window coming back rather than reappearing.
+	bool m_Placed = false;
 
 	// What the client last declared through `set_window_geometry`, staged and current — it is
 	// double-buffered like everything else a surface carries, so it lands with the commit that follows

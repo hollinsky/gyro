@@ -1263,7 +1263,15 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		}
 	}
 
-	if (mapping && m_Popup == nullptr)
+	// **Where a shell has claimed placement, gyro does not place and the window waits** (190). It is
+	// already at zero opacity and a tenth over size, so waiting is invisible rather than a window
+	// sitting at the origin — which is decision 141's *shown when placed* being literally true rather
+	// than approximately. The shell learns the window exists through
+	// `ext_foreign_toplevel_list_v1` and answers with `gyro_scene_v1.place_window`.
+	const SessionFloors* const floors = m_Context->Floors();
+	const bool placing = floors != nullptr && floors->IsPlacing(m_Context->Session(client));
+
+	if (mapping && m_Popup == nullptr && !placing)
 	{
 		// **Chrome is placed exactly as a window is, and that is a gap rather than a decision** (187). The
 		// Floorplanner centres it on the output holding the pointer, which is what a launcher wants and
@@ -1297,6 +1305,8 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 
 		static_cast<void>(entrance.Scale(m_Window, { 1.0F, 1.0F, 1.0F }));
 		static_cast<void>(entrance.Fade(m_Window, 1.0F));
+
+		m_Placed = true;
 	}
 	else if (m_Popup == nullptr && m_Context->Drag().IsResizing() && m_Context->Drag().Window() == m_Window)
 	{
@@ -1410,6 +1420,7 @@ void ClientXdgSurface::Unmap()
 
 	m_Window = {};
 	m_Content = {};
+	m_Placed = false;
 }
 
 void ClientXdgSurface::Orphan() noexcept

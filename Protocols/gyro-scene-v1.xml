@@ -1,0 +1,341 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="gyro_scene_v1">
+
+  <copyright>
+    Copyright © 2026 Paul Hollinsky
+
+    Permission to use, copy, modify, distribute, and sell this
+    software and its documentation for any purpose is hereby granted
+    without fee, provided that the above copyright notice appear in
+    all copies and that both that copyright notice and this permission
+    notice appear in supporting documentation, and that the name of
+    the copyright holders not be used in advertising or publicity
+    pertaining to distribution of the software without specific,
+    written prior permission.  The copyright holders make no
+    representations about the suitability of this software for any
+    purpose.  It is provided "as is" without express or implied
+    warranty.
+
+    THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
+    SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+    FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
+    SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
+    AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+    ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+    THIS SOFTWARE.
+  </copyright>
+
+  <interface name="gyro_scene_v1" version="1">
+    <description summary="where the windows are, said by the shell">
+      A shell arranges the windows of its session: it groups them into
+      containers, decides where each one goes, and says what kind of change
+      every batch of that is. The compositor owns what the change looks like.
+
+      That division is the whole of this protocol. A shell may invent any
+      arrangement - a grid, a ring, a stack of cards, a fisheye dock - and it may
+      not invent a motion. What a person gets from that is two desktops built on
+      this compositor that look nothing alike and feel like the same machine,
+      because everything on both of them accelerates, overshoots and settles
+      identically. A shell that could write its own springs would be a shell
+      whose overview animates a little differently from the launcher beside it,
+      and nobody would be able to say why the machine felt cheap.
+
+      So there is no request here that carries a duration, a curve, a damping
+      ratio or a frame. What a shell says is a destination and a name for the
+      kind of change, and the compositor decides how the world gets there.
+
+      Everything a shell says is double-buffered and applied by commit, and a
+      commit carries the timestamp of the input event behind it. That timestamp
+      is the point of it rather than a detail: two clients answering the same
+      keystroke name the same instant, so the compositor composes their separate
+      commits into one gesture, and a commit that arrives a frame late renders
+      already in progress by exactly the right amount instead of starting late.
+
+      Every object here belongs to a client the compositor has granted the run of
+      a session, and an application is never offered this global. A client able
+      to move other people's windows is a client able to hide the one somebody is
+      typing into.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the scene object">
+        Destroys the object, releasing placement if this client had claimed it -
+        so the compositor goes back to placing windows itself, exactly as it does
+        while no shell is running.
+
+        Containers are not affected and do not go away. They belong to the
+        compositor, and outliving the shell that asked for them is what they are
+        for: see get_container.
+
+        Anything staged and not yet committed is discarded.
+      </description>
+    </request>
+
+    <request name="claim_placement">
+      <description summary="take over placing new windows">
+        Says that this client decides where a new window of this session goes.
+        Until it does, the compositor places windows itself, centred on the
+        screen holding the pointer.
+
+        A window is invisible until it is placed, so this is not a preference the
+        compositor can be wrong about while the shell catches up: a shell that
+        claims placement and then never places anything gets a session where
+        nothing appears. That is deliberate, and the alternative is worse - a
+        window shown where the compositor guessed and then jumped to where the
+        shell wanted it, on every window a person ever opens.
+
+        A shell that has claimed placement is told about new windows through
+        ext_foreign_toplevel_list_v1, the same way it learns about every other
+        window, and answers with place_window.
+
+        Only one client may hold this at a time, and a second claim is the
+        placement_taken error. Unlike a claimed chord, which several clients may
+        hold at once because a keystroke can be told to all of them, placement
+        has exactly one answer - two placers would be a window put in two places
+        in one frame. Failing loudly is the point: a shell that silently did not
+        place would look to a person like a compositor that had stopped opening
+        windows.
+
+        Placement is released when this object is destroyed or the client goes
+        away, which is what lets the compositor keep a session usable across a
+        shell restart.
+      </description>
+    </request>
+
+    <request name="get_container">
+      <description summary="create or re-adopt a container">
+        Creates a container - a node with a position and a visibility of its own,
+        which windows can be put into and which moves everything in it when it
+        moves. A workspace, an overview grid, a stack.
+
+        The name is the shell's to mint, and it is what makes the container
+        survive the shell. Containers belong to the compositor, not to the client
+        that asked for one: a shell that crashes and respawns calls this again
+        with the same names and gets the same containers back, with the same
+        windows still in them and still where they were. What that spares a
+        person is re-sorting forty windows after a crash they did not cause.
+
+        So this creates or re-adopts, and the state event says which happened by
+        reporting the position and visibility the container actually has. For a
+        new container that is what was asked for here. For one that was already
+        there it is what survived, and the arguments to this request are ignored.
+
+        The position is where the container sits, and it is applied immediately
+        rather than at the next commit - a container being born has nowhere to
+        move from, so there is nothing for a transition to describe. This is the
+        only place in this protocol where a shell states a position that does not
+        animate, and it is the reason commit has no way to ask for no animation.
+
+        Containers are created in the session's floor, which is the compositor's
+        own container that everything hangs under. They cannot be nested inside
+        each other yet.
+
+        An empty name, or one longer than 256 bytes, is the bad_name error: a
+        container that cannot be named is one that cannot be re-adopted, which
+        defeats the point of having asked for it.
+      </description>
+      <arg name="id" type="new_id" interface="gyro_container_v1" summary="the container"/>
+      <arg name="name" type="string" summary="the shell's own name for it, stable across restarts"/>
+      <arg name="x" type="fixed" summary="position, if this call creates it"/>
+      <arg name="y" type="fixed" summary="position, if this call creates it"/>
+      <arg name="z" type="fixed" summary="position, if this call creates it"/>
+    </request>
+
+    <request name="place_window">
+      <description summary="put a window somewhere">
+        Says where a window goes and what it is in. Double-buffered: it takes
+        effect at the next commit.
+
+        A null container puts the window on the session's floor, which is where
+        it already is if nothing has moved it. A shell with no containers at all
+        uses this and nothing else.
+
+        The first placement of a window is its entrance. The position lands
+        rather than animating - there is nowhere for a window to travel from
+        before it has been anywhere - and the compositor then plays the window
+        opening at the commit's timestamp. The transition named on that commit is
+        not consulted for this window, because what an arriving window does is
+        the compositor's to decide and getting it wrong is the most visible frame
+        in the system. What the timestamp is for is that the entrance starts when
+        the person pressed the key, not when the shell got round to answering.
+
+        Every later placement of the same window is an ordinary move under the
+        commit's transition.
+
+        A window whose client has already closed it - a handle that has received
+        ext_foreign_toplevel_handle_v1.closed - is silently ignored rather than
+        being an error. An application quitting while the shell is mid-commit is
+        ordinary, and a shell cannot avoid the race by being careful.
+      </description>
+      <arg name="toplevel" type="object" interface="ext_foreign_toplevel_handle_v1" summary="the window"/>
+      <arg name="container" type="object" interface="gyro_container_v1" allow-null="true"
+           summary="what to put it in, or null for the session's floor"/>
+      <arg name="x" type="fixed" summary="position within the container"/>
+      <arg name="y" type="fixed" summary="position within the container"/>
+      <arg name="z" type="fixed" summary="position within the container"/>
+    </request>
+
+    <request name="commit">
+      <description summary="apply everything staged, as one change">
+        Applies everything staged since the last commit, as one change of one
+        named kind, starting at one instant.
+
+        Everything in one commit shares that instant, so a workspace sliding out
+        and the window being focused inside it start together whatever order the
+        requests were sent in. Everything in one commit is also seen at once: no
+        frame is ever drawn with half of it applied.
+
+        The transition is the name of what kind of change this is, and it is the
+        only thing a shell says about motion. The compositor holds a table of
+        springs per transition per property, so naming one is naming a whole
+        coordinated motion rather than a setting - and a property added to that
+        table later starts animating at every shell that already exists, without
+        any of them being changed.
+
+        There is deliberately no way to say "no transition". Every change a shell
+        makes is a change a person is watching, and the state a shell wants to
+        set without motion - where a container sits when it is first made - is
+        stated at get_container instead, before there is anything on screen to
+        move. Left available, a shell could set a position with no animation
+        sixty times a second and hand-animate the desktop itself, which is
+        exactly the cohesion this protocol exists to hold.
+
+        The timestamp is the instant the input event behind this change was
+        reported by its device, on CLOCK_MONOTONIC - the same value
+        gyro_binding_v1.pressed carries, and the reason that event carries it.
+        For a change no input event is behind, such as a monitor being plugged
+        in, the shell's own clock reading is correct and honest. A timestamp
+        later than the compositor's own reading of the clock is treated as now,
+        because a change stamped into the future is one that stands still until
+        the clock catches up, which reads as the machine having hung.
+
+        A transition this compositor does not know is the bad_transition error.
+        A commit with nothing staged is legal and does nothing.
+      </description>
+      <arg name="transition" type="uint" enum="transition" summary="the kind of change this is"/>
+      <arg name="tv_sec_hi" type="uint" summary="high 32 bits of the seconds part of the timestamp"/>
+      <arg name="tv_sec_lo" type="uint" summary="low 32 bits of the seconds part of the timestamp"/>
+      <arg name="tv_nsec" type="uint" summary="nanoseconds part of the timestamp"/>
+    </request>
+
+    <enum name="transition">
+      <description summary="the kinds of change the compositor knows how to draw">
+        A closed set, and it grows by the compositor learning a new kind of
+        change rather than by a client describing one. Each name stands for a
+        coordinated motion across every property it touches, designed as one
+        thing.
+
+        There is no entry for "none", and commit says why.
+      </description>
+      <entry name="window_open" value="1" summary="a window arriving"/>
+      <entry name="window_close" value="2" summary="a window leaving"/>
+      <entry name="menu_appear" value="3" summary="a menu or popup opening"/>
+      <entry name="menu_dismiss" value="4" summary="a menu or popup closing"/>
+      <entry name="workspace_switch" value="5" summary="moving between workspaces"/>
+      <entry name="focus_change" value="6" summary="attention moving from one window to another"/>
+      <entry name="matched_move" value="7" summary="something travelling from where it was to where it now is"/>
+      <entry name="background_change" value="8" summary="the desktop behind everything changing"/>
+    </enum>
+
+    <enum name="error">
+      <entry name="placement_taken" value="0" summary="another client is already placing this session's windows"/>
+      <entry name="bad_name" value="1" summary="the container name is empty or too long"/>
+      <entry name="bad_transition" value="2" summary="the transition is not one this compositor knows"/>
+    </enum>
+  </interface>
+
+  <interface name="gyro_container_v1" version="1">
+    <description summary="one container">
+      A container the compositor holds on this shell's behalf: a position, a
+      visibility, and whatever has been placed inside it. Moving it moves
+      everything in it as one, which is what a workspace switch is.
+
+      It is the compositor's rather than the client's, so this object is a
+      reference to it and not the thing itself. Destroying the object leaves the
+      container standing; remove is how a container actually goes away.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="let go of the container">
+        Destroys this object. The container itself is untouched, along with
+        everything in it.
+
+        That is the opposite of what destroying an object usually means, and it
+        is the whole reason containers are named. A shell exits or crashes and
+        every object it held is destroyed; if that took the containers with it,
+        a crash would dissolve every workspace in the session and pile forty
+        windows into one heap. Instead the panel blinks out and comes back, and
+        the arrangement it comes back to is the one the person left.
+
+        Anything staged on this container and not yet committed is discarded.
+      </description>
+    </request>
+
+    <request name="remove">
+      <description summary="the container goes away">
+        Removes the container. Anything still in it returns to the session's
+        floor, at the position it had inside the container, so a window is never
+        left with nowhere to be.
+
+        This object stays valid and inert afterwards, and every request on it
+        does nothing; the client should destroy it.
+
+        This is the deliberate act, as against destroy above. A person closing a
+        workspace does this; a shell exiting does not.
+      </description>
+    </request>
+
+    <request name="set_position">
+      <description summary="move the container">
+        Sets where the container sits. Double-buffered: it takes effect at the
+        next gyro_scene_v1.commit, under that commit's transition.
+
+        Everything in the container moves with it, as one thing rather than as
+        several - which is what makes a workspace switch a single sliding surface
+        instead of a dozen windows travelling in loose formation.
+      </description>
+      <arg name="x" type="fixed" summary="position"/>
+      <arg name="y" type="fixed" summary="position"/>
+      <arg name="z" type="fixed" summary="position"/>
+    </request>
+
+    <request name="set_visible">
+      <description summary="show or hide the container">
+        Shows or hides the container and everything under it. Double-buffered:
+        it takes effect at the next gyro_scene_v1.commit.
+
+        Hiding is immediate and does not animate, whatever the commit says: there
+        is nothing between shown and hidden to draw. A shell that wants a
+        workspace to fade out moves it or fades it under a transition and hides
+        it afterwards.
+
+        A hidden container still holds its windows, still keeps their positions,
+        and still costs the compositor nothing to skip.
+      </description>
+      <arg name="visible" type="uint" summary="non-zero to show it"/>
+    </request>
+
+    <event name="state">
+      <description summary="what the container actually is">
+        Sent once, immediately after the container is created or re-adopted, and
+        never again.
+
+        For a container this call created, it repeats what was asked for. For one
+        that was already there, it is what survived - which is how a shell that
+        has just restarted learns that its workspaces are where it left them
+        rather than where it would have put them.
+
+        What this does not yet carry is what is in the container. A restarted
+        shell knows its containers are back and does not know which window is in
+        which, so it cannot redraw a workspace strip without asking every window
+        where it is. That is missing rather than withheld.
+      </description>
+      <arg name="x" type="fixed" summary="position"/>
+      <arg name="y" type="fixed" summary="position"/>
+      <arg name="z" type="fixed" summary="position"/>
+      <arg name="visible" type="uint" summary="non-zero if it is shown"/>
+    </event>
+  </interface>
+
+</protocol>

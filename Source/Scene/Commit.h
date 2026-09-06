@@ -17,6 +17,7 @@
 #include "Scene/Input.h"
 #include "Scene/Store.h"
 #include "World/Content.h"
+#include "World/Node.h"
 
 // The transaction a mutation happens inside, and the only door onto an entity's channels.
 //
@@ -416,7 +417,62 @@ public:
 		return true;
 	}
 
+	// Move a node, and everything under it, into another parent. A shell putting a window on a
+	// workspace, and a container being removed with windows still in it handing them back to the floor.
+	//
+	// **A commit verb rather than a setter, because a reparent alone is never the whole sentence.** A
+	// node's position is stated relative to its parent, so a window moved between two containers is
+	// somewhere else on screen the instant the link changes and stays there until something writes a
+	// position — and the two have to be one arrangement rather than two, or a person sees the window
+	// arrive in the new workspace at the coordinates it had in the old one. `SceneStore::Reparent` is
+	// deliberately silent about position for that reason: the pairing is stated here, at the call site,
+	// where both halves are in the same scope.
+	//
+	// **No motion argument, because a link is not a quantity.** There is nothing between one parent and
+	// another to interpolate. What animates across a reparent is the position written beside it, under
+	// whatever transition this scope named, and the spring that was already running on that channel is
+	// retargeted rather than restarted — so a window dragged onto a workspace mid-settle finishes
+	// settling there.
+	//
+	// False for a scope that is not the open one, and for everything `SceneStore::Reparent` refuses: an
+	// id or a parent that names nothing live, a null parent, a retiring node, and a parent inside the
+	// subtree being moved.
+	bool Reparent(EntityId id, EntityId parent) noexcept { return m_Open && m_Scene->Reparent(id, parent); }
+
+	// Draw this node and everything under it. The state every node is in unless something says
+	// otherwise, and the one a hidden workspace comes back from.
+	//
+	// **A commit verb for `Dress`'s reason and with `Dress`'s shape**: it is a fact about the same
+	// arrangement the rest of the scope states, so a shell that reveals a workspace and moves it in one
+	// commit has them arrive together rather than showing one frame of the workspace at the position it
+	// is about to leave.
+	//
+	// **No motion argument, because there is nothing between shown and hidden.** A fade is an opacity,
+	// which is a channel and has one; this is the flag the frame thread's walk skips a subtree on, and
+	// a half-skipped subtree is not a picture of anything. A shell wanting a workspace to fade out
+	// fades it under a transition and hides it when it has gone.
+	bool Show(EntityId id) noexcept { return SetHidden(id, false); }
+
+	// Stop drawing this node and everything under it. The subtree keeps its position, its children and
+	// its channels — a hidden workspace is a workspace that is still arranged, which is what makes
+	// coming back to it free.
+	bool Hide(EntityId id) noexcept { return SetHidden(id, true); }
+
 private:
+	bool SetHidden(EntityId id, bool hidden) noexcept
+	{
+		Entity* const entity = Mutable(id);
+
+		if (entity == nullptr)
+		{
+			return false;
+		}
+
+		entity->Flags = hidden ? entity->Flags | Node::Hidden : entity->Flags & ~Node::Hidden;
+
+		return true;
+	}
+
 	[[nodiscard]] static constexpr Instant Earlier(Instant left, Instant right) noexcept
 	{
 		return left < right ? left : right;

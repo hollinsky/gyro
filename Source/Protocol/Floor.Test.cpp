@@ -183,6 +183,191 @@ GYRO_TEST(Floor, ClosingASessionRetiresItsFloorAndLeavesEveryOtherAlone)
 // The placement's half of the same fact. A window centred on `outputs.front()` regardless of who is
 // being shown there is an application a person launched, running and drawing, on a monitor they are
 // not looking at and cannot bring it to.
+// The container a shell declares, and the one thing about it that matters more than anything it can
+// do: it outlives the shell that asked for it.
+GYRO_TEST(Floor, ADeclaredContainerIsHandedBackToTheShellThatComesBackForIt)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, Nobody).has_value());
+
+	const EntityId workspace = floors.Declare(scene, Nobody, "workspace-2", { 1920.0, 0.0, 0.0 });
+	GYRO_REQUIRE(!workspace.IsNull());
+
+	// Under the floor rather than beside it, which decision 55 decides: a workspace authored as a third
+	// root would be created after the chrome root and therefore in front of it, and every window in it
+	// would draw over the shell's own panel.
+	GYRO_CHECK(scene.Find(workspace)->Parent == floors.Container(Nobody));
+
+	// Applied at birth and never animated — the one place a shell states a coordinate with no
+	// transition over it, because a container being created has nowhere to have come from (190).
+	GYRO_CHECK_EQ(scene.Find(workspace)->Translation.Model().X, 1920.0);
+
+	// The shell crashed and came back. It asks by the same name and is handed the same node, so not one
+	// window in it has moved and the person's arrangement survived a crash they did not cause.
+	GYRO_CHECK(floors.Declared(Nobody, "workspace-2") == workspace);
+	GYRO_CHECK(floors.Declare(scene, Nobody, "workspace-2", { 0.0, 0.0, 0.0 }) == workspace);
+
+	// And the position it asked with the second time was ignored rather than applied, which is the half
+	// that would otherwise teleport every window in the container to wherever the restarted shell
+	// guessed.
+	GYRO_CHECK_EQ(scene.Find(workspace)->Translation.Model().X, 1920.0);
+
+	// A different name is a different container.
+	GYRO_CHECK(floors.Declare(scene, Nobody, "workspace-3", {}) != workspace);
+	GYRO_CHECK(floors.Declared(Nobody, "nothing-under-this-name").IsNull());
+}
+
+// Names are per session for the reason floors are: two people logged in are two desktops, and a
+// workspace one of them named is not the other's.
+GYRO_TEST(Floor, ADeclaredNameReachesOneSessionAndNotTheOther)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, First).has_value());
+	GYRO_REQUIRE(floors.Open(scene, Second).has_value());
+
+	const EntityId mine = floors.Declare(scene, First, "workspace-1", {});
+	const EntityId theirs = floors.Declare(scene, Second, "workspace-1", {});
+
+	GYRO_REQUIRE(!mine.IsNull());
+	GYRO_REQUIRE(!theirs.IsNull());
+	GYRO_CHECK(mine != theirs);
+
+	GYRO_CHECK(floors.Declared(First, "workspace-1") == mine);
+	GYRO_CHECK(floors.Declared(Second, "workspace-1") == theirs);
+
+	// And a session with no floor at all declares nothing rather than declaring it somewhere.
+	GYRO_CHECK(floors.Declare(scene, Nobody, "workspace-1", {}).IsNull());
+}
+
+// Removing a container hands its windows back rather than taking them with it, which is the whole
+// difference between a person closing a workspace and losing everything on it.
+GYRO_TEST(Floor, RemovingAContainerReturnsWhatIsInItToTheFloor)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, Nobody).has_value());
+
+	const EntityId floor = floors.Container(Nobody);
+	const EntityId workspace = floors.Declare(scene, Nobody, "workspace-2", { 1920.0, 0.0, 0.0 });
+	GYRO_REQUIRE(!workspace.IsNull());
+
+	const EntityId window = scene.CreateContainer(workspace, { .Extent = Window(800.0F, 600.0F) }).value();
+	const EntityId other = scene.CreateContainer(workspace, { .Extent = Window(640.0F, 480.0F) }).value();
+
+	{
+		SceneCommit commit{ scene, CommitAuthor::Shell, clock.Now(), Transition::WorkspaceSwitch };
+
+		floors.Undeclare(commit, scene, Nobody, workspace);
+	}
+
+	GYRO_CHECK(scene.Find(window)->Parent == floor);
+	GYRO_CHECK(scene.Find(other)->Parent == floor);
+
+	// The container itself is retiring rather than gone — decision 114's path, which every lifetime in
+	// this file takes — and its name is free again the moment it is removed rather than when the
+	// serialiser gets to it.
+	GYRO_CHECK(scene.Find(workspace)->Retiring);
+	GYRO_CHECK(floors.Declared(Nobody, "workspace-2").IsNull());
+
+	// A second removal of the same container does nothing, which is a shell removing one twice.
+	{
+		SceneCommit again{ scene, CommitAuthor::Shell, clock.Now(), Transition::WorkspaceSwitch };
+
+		floors.Undeclare(again, scene, Nobody, workspace);
+	}
+
+	GYRO_CHECK(scene.Find(window)->Parent == floor);
+}
+
+// One placer per session, and the claim is what decides whether the Floorplanner runs at all (141).
+GYRO_TEST(Floor, PlacementIsClaimedByOneClientAndGivenBackWhenItGoes)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, First).has_value());
+	GYRO_REQUIRE(floors.Open(scene, Second).has_value());
+
+	// Two connections, which is all this needs of them: the claim is keyed on the client and never
+	// dereferences one.
+	auto* const shell = reinterpret_cast<wl_client*>(std::uintptr_t{ 0x10 });
+	auto* const other = reinterpret_cast<wl_client*>(std::uintptr_t{ 0x20 });
+
+	GYRO_CHECK(!floors.IsPlacing(First));
+
+	GYRO_REQUIRE(floors.ClaimPlacement(First, shell));
+	GYRO_CHECK(floors.IsPlacing(First));
+
+	// **A second claim is refused rather than shared**, which is the difference from a claimed chord: a
+	// keystroke can be told to everybody who asked and a window has exactly one place to be.
+	GYRO_CHECK(!floors.ClaimPlacement(First, other));
+	GYRO_CHECK(!floors.ClaimPlacement(First, shell));
+
+	// One session's shell says nothing about another's, which is the partition holding on the one piece
+	// of window-management state gyro carries.
+	GYRO_CHECK(!floors.IsPlacing(Second));
+	GYRO_CHECK(floors.ClaimPlacement(Second, other));
+
+	// Somebody else letting go changes nothing, so one of a client's two scene objects going does not
+	// take the other's claim with it.
+	floors.ReleasePlacement(First, other);
+	GYRO_CHECK(floors.IsPlacing(First));
+
+	// And the holder letting go brings the Floorplanner back, which is what keeps a session usable
+	// across a shell restart.
+	floors.ReleasePlacement(First, shell);
+	GYRO_CHECK(!floors.IsPlacing(First));
+	GYRO_CHECK(floors.ClaimPlacement(First, other));
+}
+
+// The entrance a placement carries, which is decision 141's *shown when placed* and is the reason a
+// window is created at zero opacity in the first place.
+GYRO_TEST(Floor, PlacingAWindowLandsItsPositionAndPlaysTheOpening)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	const std::array outputs{ Panel() };
+	scene.SetOutputs(outputs);
+
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, Nobody).has_value());
+
+	const EntityId floor = floors.Container(Nobody);
+	const EntityId workspace = floors.Declare(scene, Nobody, "workspace-1", {});
+	GYRO_REQUIRE(!workspace.IsNull());
+
+	// A window as `Protocol/Shell.cpp` creates one: already displaced and invisible, which is the
+	// entrance's start value rather than a state anybody sees.
+	const EntityId window =
+		scene.CreateContainer(floor, { .Scale = { 1.1F, 1.1F, 1.0F }, .Extent = { 800.0F, 600.0F }, .Opacity = 0.0F })
+			.value();
+
+	PlaceWindow(scene, window, workspace, { 120.0, 80.0, 0.0 }, clock.Now());
+
+	// The position landed rather than animating: a window has nowhere to have travelled from before it
+	// has been anywhere, and a spring here would slide it in from the origin.
+	GYRO_CHECK(scene.Find(window)->Parent == workspace);
+	GYRO_CHECK(scene.Find(window)->Translation.IsAtRest());
+	GYRO_CHECK_EQ(scene.Find(window)->Translation.Presentation(clock.Now()).X, 120.0);
+
+	// And the opening is running on the two channels `Transition::WindowOpen` speaks to, from where the
+	// node was authored rather than from wherever a shell last left it.
+	GYRO_CHECK(!scene.Find(window)->Opacity.IsAtRest());
+	GYRO_CHECK_EQ(scene.Find(window)->Opacity.Model(), 1.0F);
+	GYRO_CHECK_EQ(scene.Find(window)->Opacity.Presentation(clock.Now()), 0.0F);
+	GYRO_CHECK_EQ(scene.Find(window)->Scale.Model().X, 1.0F);
+}
+
 GYRO_TEST(Floor, AWindowIsPlacedOnAnOutputShowingItsOwnSession)
 {
 	ManualClock clock{ Monotonic::FromNanoseconds(1) };
