@@ -2475,7 +2475,7 @@ move — [Protocol/Tier.h](../Source/Protocol/Tier.h) is this list transcribed, 
   text-input and input-method, idle-inhibit.
 - **System tier** — screencopy and screencast, [virtual output
   registration](#virtual-outputs-and-why-remote-desktop-is-one), foreign-toplevel management,
-  key bindings, layer-shell, output configuration, the lock protocol below, and
+  key bindings, chrome surfaces, output configuration, the lock protocol below, and
   [the shell's](#the-shell) own scene, policy, and background protocols.
 
 The last two in the shared tier are there for a reason worth recording, because it is not the usual
@@ -2506,10 +2506,16 @@ shell and the applications is real there and a socket in gyro's own directory do
 Who creates a *session's* System listener, where it lives and how a process is judged worthy of it
 remain [open](Open.md), and the shell is what makes that urgent rather than theoretical.
 
-**Two globals occupy the tier**, and between them they are what a shell needs to exist at all rather
+**Three globals occupy the tier**, and between them they are what a shell needs to exist at all rather
 than a sample of the eventual list. `ext_foreign_toplevel_list_v1` says which windows there are;
-`gyro_bindings_v1` is the key that summons a shell, claimed once as a keysym and a modifier mask and
-answered with the instant the device reported the press —
+`gyro_chrome_v1` says which surfaces are not windows —
+[decision 187](Decisions.md#187-a-shell-declares-a-surface-to-be-chrome-once-and-that-one-word-takes-it-out-of-the-floor-the-walk-and-the-list),
+and it is what a launcher, a panel and an overview all need before they can be drawn at all: a surface
+above every window, absent from the list above, stepped over by `Alt+Tab`, and made of a
+[named material](#materials-not-filter-calls). It is deliberately not layer-shell, whose anchors,
+exclusive zones and interactivity modes are the window management [the shell](#the-shell) owns rather
+than the compositor. And `gyro_bindings_v1` is the key that summons a shell, claimed once as a keysym
+and a modifier mask and answered with the instant the device reported the press —
 [decision 186](Decisions.md#186-a-shell-claims-a-chord-by-keysym-once-and-is-told-the-instant-the-key-was-pressed),
 and gyro's own protocol rather than an upstream one, since nothing upstream describes a compositor
 handing a key to a party it has already trusted. It is the sharpest case the tier exists for: an
@@ -2669,6 +2675,15 @@ moment gyro got round to it — which is what lets two shell processes reacting 
 the same origin and have gyro compose their commits into one gesture. gyro's own keys are matched
 first and cannot be claimed, and a chord a person *holds* is not expressible yet, so the `Alt+Tab`
 stand-in below stays where it is.
+
+**And what it can already do is draw something that is not a window.** `gyro_chrome_v1` is the second
+verb: a shell declares one of its own toplevels to be chrome before it maps, and that one word puts it
+above every window of its session, out of the window list, out of the walk, and — through
+`set_material` — into glass or smoke. It is the first protocol in gyro that carries a material at all,
+so before it every client's window was `Material::None` for the whole of a run and the material system
+had no caller but a gym. What it cannot yet say is *where*: a chrome surface is placed by the
+Floorplanner like any window, which is what a launcher wants and is not what a panel wants, and
+[Open.md](Open.md) carries the anchoring and the exclusive zone that are missing.
 
 ### Declare, do not drive
 

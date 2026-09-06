@@ -45,6 +45,7 @@
 #include "Testing/Test.h"
 #include "Wayland/ExtForeignToplevelListV1.h"
 #include "Wayland/GyroBindingsV1.h"
+#include "Wayland/GyroChromeV1.h"
 #include "Wayland/LinuxDmabufV1.h"
 #include "Wayland/PresentationTime.h"
 #include "Wayland/Viewporter.h"
@@ -620,9 +621,10 @@ GYRO_TEST(ProtocolRoundTrip, ASurfaceAndARegionSurviveAWholeCommit)
 	// argument count or a wrong type is a protocol error and the connection would be gone.
 	GYRO_CHECK(!pair.Client.Fault().has_value());
 
-	// One node, and it is gyro's own floor rather than anything the client authored — a surface with no
-	// role is not a window, and nothing about the requests above says it is one.
-	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 1 });
+	// Two nodes, and both are gyro's own — the session's floor and the chrome root above it (187) —
+	// rather than anything the client authored: a surface with no role is not a window, and nothing
+	// about the requests above says it is one.
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 2 });
 	GYRO_CHECK_EQ(pair.Textures.Adopted, std::uint32_t{ 0 });
 }
 
@@ -1034,8 +1036,9 @@ struct Toplevel
 	return toplevel.Window.IsValid();
 }
 
-// The window gyro authored, found the way anything without an id would find it: the floor is the only
-// root, and a window is a child of it.
+// The window gyro authored, found the way anything without an id would find it: the floor is the
+// *first* root and a window is a child of it. The chrome root (187) is the last, and `ChromeNode`
+// below is the same walk down the other one.
 [[nodiscard]] const Entity* WindowNode(const SceneStore& scene)
 {
 	const Entity* const floor = scene.Find(scene.FirstRoot());
@@ -1220,7 +1223,7 @@ GYRO_TEST(ProtocolRoundTrip, AToplevelIsConfiguredBeforeItIsAskedToDrawAnything)
 	GYRO_CHECK(toplevel.WindowEvents.States.empty());
 
 	// Nothing is on screen: the client has been told it may draw and has not.
-	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 2 });
 }
 
 // **A refusal is still an answer, and this is the test that says so.** gyro declines fullscreen and
@@ -1350,10 +1353,10 @@ GYRO_TEST(ProtocolRoundTrip, AnAcknowledgedFrameBecomesAWindowCentredOnTheOutput
 
 	GYRO_CHECK(!pair.Client.Fault().has_value());
 
-	// The floor, the window, and the pixels under it. Two nodes per window rather than one, which is a
-	// toplevel as decision 111 describes it: a container holding its own surface and, one day, its
-	// subsurfaces.
-	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 3 });
+	// The floor, the empty chrome root above it, the window, and the pixels under it. Two nodes per
+	// window rather than one, which is a toplevel as decision 111 describes it: a container holding its
+	// own surface and, one day, its subsurfaces.
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 4 });
 	GYRO_CHECK_EQ(pair.Textures.Adopted, std::uint32_t{ 1 });
 
 	const Entity* const window = WindowNode(pair.Store);
@@ -2174,7 +2177,7 @@ GYRO_TEST(ProtocolRoundTrip, ABufferCommittedBeforeTheConfigureIsAcknowledgedEnd
 	GYRO_REQUIRE(pair.Client.Fault().has_value());
 	GYRO_CHECK_EQ(pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::XdgSurfaceError::UnconfiguredBuffer));
 
-	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 2 });
 }
 
 GYRO_TEST(ProtocolRoundTrip, DestroyingTheToplevelRetiresTheWindowRatherThanRemovingIt)
@@ -2204,7 +2207,7 @@ GYRO_TEST(ProtocolRoundTrip, DestroyingTheToplevelRetiresTheWindowRatherThanRemo
 
 	pair.Turn();
 
-	GYRO_REQUIRE(pair.Store.Count() == 3);
+	GYRO_REQUIRE(pair.Store.Count() == 4);
 
 	toplevel.Window.Destroy();
 
@@ -2212,11 +2215,11 @@ GYRO_TEST(ProtocolRoundTrip, DestroyingTheToplevelRetiresTheWindowRatherThanRemo
 
 	GYRO_CHECK(!pair.Client.Fault().has_value());
 
-	// **Still three, and still where it was.** A window that is closing is a window a person is still
+	// **Still four, and still where it was.** A window that is closing is a window a person is still
 	// looking at, so the subtree keeps its links and its position and goes on being drawn until every
 	// channel on it has settled; the store frees it on the serialisation pass that finds it at rest.
 	// Freeing here instead is a window that vanishes rather than one that leaves.
-	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 3 });
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 4 });
 
 	const Entity* const window = WindowNode(pair.Store);
 	GYRO_REQUIRE(window != nullptr);
@@ -4545,7 +4548,7 @@ namespace
 	return bound.Listener.Object().Bind<Wayland::WlSubcompositor>(global->Name, global->Version);
 }
 
-// The window's own id, which `WindowNode` has and does not return: the floor is the only root and a
+// The window's own id, which `WindowNode` has and does not return: the floor is the first root and a
 // window is a child of it.
 [[nodiscard]] EntityId WindowId(const SceneStore& scene)
 {
@@ -4596,8 +4599,9 @@ GYRO_TEST(ProtocolRoundTrip, ASubsurfaceReachesTheWorldWhenItsParentCommits)
 
 	GYRO_REQUIRE(!WindowId(pair.Store).IsNull());
 
-	// The floor, the window and its pixels: three, which is where every test that maps a window ends.
-	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 3 });
+	// The floor and the chrome root, the window and its pixels: four, which is where every test that
+	// maps a window ends.
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 4 });
 
 	DrawnSurface child;
 	GYRO_REQUIRE(Draw(bound, child, std::byte{ 0x77 }));
@@ -4616,7 +4620,7 @@ GYRO_TEST(ProtocolRoundTrip, ASubsurfaceReachesTheWorldWhenItsParentCommits)
 
 	// **The child committed and nothing is on screen**, which is the synchronized default doing its
 	// job: a toolkit states every part of its window and the window is what publishes them.
-	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 3 });
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 4 });
 
 	toplevel.Drawn.Surface.Commit();
 
@@ -4626,7 +4630,7 @@ GYRO_TEST(ProtocolRoundTrip, ASubsurfaceReachesTheWorldWhenItsParentCommits)
 
 	// Two more nodes, which is decision 111's pair a second time: a container to hang the child's own
 	// subsurfaces off and the image that is its pixels.
-	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 5 });
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 6 });
 
 	const std::vector<EntityId> children = Children(pair.Store, WindowId(pair.Store));
 	GYRO_REQUIRE_EQ(children.size(), std::size_t{ 2 });
@@ -4741,7 +4745,7 @@ GYRO_TEST(ProtocolRoundTrip, AWindowThatUnmapsTakesItsSubsurfacesWithIt)
 
 	pair.Turn();
 
-	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 5 });
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 6 });
 
 	// The window takes itself off the screen, and the part of it a subsurface holds cannot stay: a
 	// rectangle of an application that is no longer showing anything is worse than nothing at all,
@@ -4779,10 +4783,10 @@ GYRO_TEST(ProtocolRoundTrip, AWindowThatUnmapsTakesItsSubsurfacesWithIt)
 
 	pair.Turn();
 
-	// Four more on top of the five that are retiring: a window and its pixels, and the subsurface's own
+	// Four more on top of the six that are retiring: a window and its pixels, and the subsurface's own
 	// pair under them. The client rebuilt no objects and gyro reused no nodes — the ones that went down
 	// are still on their way out, which is decision 114's whole point.
-	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 9 });
+	GYRO_CHECK_EQ(pair.Store.Count(), std::uint32_t{ 10 });
 }
 
 namespace
@@ -5892,4 +5896,363 @@ GYRO_TEST(ProtocolRoundTrip, TheCompositorsOwnKeysAreNotAShellsToClaim)
 	(*pair.Host)->OnKey(Press(KEY_ESC, false, pair.Clock.Now()), true);
 	(*pair.Host)->OnKey(Press(KEY_LEFTALT, false, pair.Clock.Now()), false);
 	(*pair.Host)->OnKey(Press(KEY_LEFTCTRL, false, pair.Clock.Now()), false);
+}
+
+namespace
+{
+// The chrome root and what hangs on it (187). Decision 55 makes the *last* root the frontmost, and the
+// floor is created first, so this walk and `WindowNode`'s go down the two ends of the top level.
+[[nodiscard]] EntityId ChromeRoot(const SceneStore& scene)
+{
+	EntityId last;
+
+	for (EntityId root = scene.FirstRoot(); !root.IsNull(); root = scene.Find(root)->NextSibling)
+	{
+		last = root;
+	}
+
+	return last;
+}
+
+[[nodiscard]] const Entity* ChromeNode(const SceneStore& scene)
+{
+	const Entity* const root = scene.Find(ChromeRoot(scene));
+
+	return root == nullptr ? nullptr : scene.Find(root->FirstChild);
+}
+
+// A shell's surface, declared and then mapped in that order — which is the order the protocol insists
+// on, because what being chrome changes is decided when the surface enters the world.
+struct Chrome
+{
+	Wayland::GyroChromeManagerV1 Manager;
+	Wayland::GyroChromeV1 Object;
+	Toplevel Window;
+};
+
+[[nodiscard]] bool BindChrome(BoundCompositor& bound, Chrome& chrome)
+{
+	const Registry::Global* const global = bound.Listener.Find(Wayland::GyroChromeManagerV1::WireName);
+
+	if (global == nullptr)
+	{
+		return false;
+	}
+
+	// No listener on either interface, because neither declares an event: what a shell learns about its
+	// own launcher, it learns through `xdg_toplevel`.
+	chrome.Manager = bound.Listener.Object().Bind<Wayland::GyroChromeManagerV1>(global->Name, global->Version);
+
+	return chrome.Manager.IsValid();
+}
+
+[[nodiscard]] bool Declare(Pair& pair, BoundCompositor& bound, Chrome& chrome, std::byte fill)
+{
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	if (!BindChrome(bound, chrome) || !Role(bound, chrome.Window, fill))
+	{
+		return false;
+	}
+
+	chrome.Object = chrome.Manager.GetChrome(chrome.Window.Window);
+
+	if (!chrome.Object.IsValid())
+	{
+		return false;
+	}
+
+	chrome.Window.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	chrome.Window.XdgSurface.AckConfigure(chrome.Window.SurfaceEvents.Serial);
+	chrome.Window.Drawn.Surface.Attach(chrome.Window.Drawn.Buffer, 0, 0);
+	chrome.Window.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	return true;
+}
+} // namespace
+
+GYRO_TEST(ProtocolRoundTrip, AnApplicationCannotDeclareItselfChrome)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-chrome-user" };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	// The tier from the far side of the socket. An application handed this could draw a window over
+	// every other window on the machine, keep it there through every click, and stay out of any list a
+	// person could find it in — which is a credential prompt nobody can dismiss or attribute.
+	GYRO_CHECK(bound.Listener.Find(Wayland::GyroChromeManagerV1::WireName) == nullptr);
+
+	// The rest of the registry is untouched, which is the failure a filter is most likely to have.
+	GYRO_CHECK(bound.Listener.Find(Wayland::XdgWmBase::WireName) != nullptr);
+	GYRO_CHECK(bound.Listener.Find(Wayland::WlCompositor::WireName) != nullptr);
+}
+
+GYRO_TEST(ProtocolRoundTrip, ALauncherHangsAboveTheWindowsRatherThanAmongThem)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-chrome-above", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel window;
+	GYRO_REQUIRE(Show(pair, bound, window, std::byte{ 0x20 }));
+
+	Chrome chrome;
+	GYRO_REQUIRE(Declare(pair, bound, chrome, std::byte{ 0x60 }));
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// **The whole of what being chrome does to the scene**: the two surfaces are in different chains.
+	// An ordinary window is a child of the floor, which is the first root; the launcher is a child of
+	// the chrome root, which is the last — so it is in front of every window of this session, and no
+	// reordering inside the floor can reach it.
+	const Entity* const ordinary = WindowNode(pair.Store);
+	const Entity* const launcher = ChromeNode(pair.Store);
+
+	GYRO_REQUIRE(ordinary != nullptr);
+	GYRO_REQUIRE(launcher != nullptr);
+
+	GYRO_CHECK_EQ(ordinary->Parent, pair.Store.FirstRoot());
+	GYRO_CHECK_EQ(launcher->Parent, ChromeRoot(pair.Store));
+	GYRO_CHECK(ordinary->Parent != launcher->Parent);
+
+	// And it is a window in every other respect — it was configured, it acknowledged, it has pixels
+	// under it. Being chrome takes nothing away from xdg-shell, which is the reason this is an object on
+	// a toplevel rather than a role of its own.
+	GYRO_CHECK(!launcher->FirstChild.IsNull());
+	GYRO_CHECK(chrome.Window.SurfaceEvents.Serial != 0);
+}
+
+GYRO_TEST(ProtocolRoundTrip, AShellIsNotToldAboutItsOwnLauncher)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-chrome-list", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel window;
+	GYRO_REQUIRE(Show(pair, bound, window, std::byte{ 0x20 }));
+
+	window.Window.SetTitle("Editing Decisions.md");
+
+	Chrome chrome;
+	GYRO_REQUIRE(Declare(pair, bound, chrome, std::byte{ 0x60 }));
+
+	chrome.Window.Window.SetTitle("Launcher");
+
+	pair.Turn();
+
+	ForeignListEvents events;
+	const Wayland::ExtForeignToplevelListV1 list = BindForeign(bound, events);
+
+	GYRO_REQUIRE(list.IsValid());
+
+	pair.Turn();
+
+	// **One window on this machine, not two.** The client most likely to be holding one of these lists is
+	// the same shell that drew the launcher — so without the filter the first thing a switcher shows a
+	// person is the switcher, and the close button beside it asks the shell to close itself.
+	GYRO_REQUIRE(events.Handles.size() == 1);
+	GYRO_CHECK(events.Handles.front()->Title == "Editing Decisions.md");
+}
+
+GYRO_TEST(ProtocolRoundTrip, AMaterialArrivesWithThePixelsItWasSentWith)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-chrome-material", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Chrome chrome;
+	GYRO_REQUIRE(Declare(pair, bound, chrome, std::byte{ 0x60 }));
+
+	// Nothing asked for, nothing drawn: a surface is `None` until a shell says otherwise, which is what
+	// every application's window stays.
+	GYRO_REQUIRE(ChromeNode(pair.Store) != nullptr);
+	GYRO_CHECK(ChromeNode(pair.Store)->Dress == Material::None);
+
+	chrome.Object.SetMaterial(Wayland::GyroChromeV1Material::Glass);
+
+	pair.Turn();
+
+	// **Nothing yet, and that is the point.** The request landed and was parsed; what has not happened is
+	// a `wl_surface.commit`. A material applied at the request would let a shell change what its
+	// launcher is made of a frame before it changes what is drawn on it.
+	GYRO_CHECK(ChromeNode(pair.Store)->Dress == Material::None);
+
+	chrome.Window.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(ChromeNode(pair.Store)->Dress == Material::Glass);
+
+	// The other direction, because a material that could only be put on would be one a shell could not
+	// take off — an overview's dimming has to leave when the overview does.
+	chrome.Object.SetMaterial(Wayland::GyroChromeV1Material::None);
+	chrome.Window.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(ChromeNode(pair.Store)->Dress == Material::None);
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+}
+
+GYRO_TEST(ProtocolRoundTrip, AMaterialGyroHasNoNameForEndsTheConnectionRatherThanDrawingNothing)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-chrome-unknown", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Chrome chrome;
+	GYRO_REQUIRE(Declare(pair, bound, chrome, std::byte{ 0x60 }));
+
+	// A shell built against a newer version of this protocol than the compositor it is talking to.
+	chrome.Object.SetMaterial(static_cast<Wayland::GyroChromeV1Material>(7));
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::GyroChromeV1Error::BadMaterial));
+}
+
+GYRO_TEST(ProtocolRoundTrip, AWindowAlreadyOnScreenCannotBecomeChrome)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-chrome-late", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Chrome chrome;
+	GYRO_REQUIRE(BindChrome(bound, chrome));
+	GYRO_REQUIRE(Show(pair, bound, chrome.Window, std::byte{ 0x60 }));
+
+	// **Refused rather than served, because the surface is already in the world.** Honouring it would
+	// mean moving a mapped window between two roots and out of two lists while a person was looking at
+	// it — the window they clicked a moment ago rising above everything and vanishing from their own
+	// switcher, with nothing on screen to say why.
+	chrome.Object = chrome.Manager.GetChrome(chrome.Window.Window);
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(
+		pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::GyroChromeManagerV1Error::AlreadyMapped)
+	);
+}
+
+GYRO_TEST(ProtocolRoundTrip, ASurfaceIsDeclaredChromeOnceAndOnlyOnce)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-chrome-twice", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Chrome chrome;
+	GYRO_REQUIRE(BindChrome(bound, chrome));
+	GYRO_REQUIRE(Role(bound, chrome.Window, std::byte{ 0x60 }));
+
+	chrome.Object = chrome.Manager.GetChrome(chrome.Window.Window);
+
+	pair.Turn();
+
+	GYRO_REQUIRE(!pair.Client.Fault().has_value());
+
+	// A second declaration is a shell that has lost track of its own surfaces, and the state it would
+	// leave behind is two objects setting the material of one launcher — the last request to arrive
+	// winning, which is a flicker nobody can reproduce.
+	const Wayland::GyroChromeV1 again = chrome.Manager.GetChrome(chrome.Window.Window);
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(
+		pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::GyroChromeManagerV1Error::AlreadyChrome)
+	);
+	GYRO_CHECK(again.IsValid());
+}
+
+GYRO_TEST(ProtocolRoundTrip, AChromeObjectCannotBeDroppedWhileItsSurfaceIsOnScreen)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-chrome-drop", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Chrome chrome;
+	GYRO_REQUIRE(Declare(pair, bound, chrome, std::byte{ 0x60 }));
+
+	// **The one destroy in gyro's own protocols that can fail.** Chrome is fixed for the life of a
+	// surface, so there is nothing to give a mapped one back to: the alternative is a launcher that
+	// drops behind the windows and appears in the switcher in the middle of a person typing into it.
+	chrome.Object.Destroy();
+
+	pair.Turn();
+
+	GYRO_REQUIRE(pair.Client.Fault().has_value());
+	GYRO_CHECK_EQ(pair.Client.Fault()->Code, static_cast<std::uint32_t>(Wayland::GyroChromeV1Error::Mapped));
+}
+
+GYRO_TEST(ProtocolRoundTrip, DroppingTheManagerLeavesTheSurfaceItDeclared)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-chrome-manager", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Chrome chrome;
+	GYRO_REQUIRE(Declare(pair, bound, chrome, std::byte{ 0x60 }));
+
+	chrome.Manager.Destroy();
+
+	pair.Turn();
+
+	// A factory is a factory. The same rule the chord protocol states (186), checked here for the same
+	// reason: a shell that tidies up its manager and finds its panel has quietly become an ordinary
+	// window would have no way to tell what it did.
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_REQUIRE(ChromeNode(pair.Store) != nullptr);
+
+	chrome.Object.SetMaterial(Wayland::GyroChromeV1Material::Smoke);
+	chrome.Window.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_CHECK(ChromeNode(pair.Store)->Dress == Material::Smoke);
 }

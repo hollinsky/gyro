@@ -1842,3 +1842,47 @@ to *no* by the rest — which is the shape decision 182 rejected for `IPresenter
 here, because this interface already exists to answer a question about one texture id rather than about
 a frame.
 
+
+## A shell can say a surface is chrome but not where it goes, so a panel has nowhere to be
+
+Decision 187 gives a shell a surface that draws above every window, stays out of the switcher and can
+be made of glass — and places it by centring it on the output holding the pointer, which is what the
+Floorplanner does to every window because it is the one placement that takes no parameter (141).
+
+For a launcher that is exactly right and is why the protocol shipped without an answer. For a panel it
+is nothing like right: a status bar belongs along an edge of a named output, and the request that says
+so does not exist. Nor does the other half of it — the space a maximised window must not cover — which
+is what layer-shell calls an exclusive zone and is the reason it has one.
+
+**The reason this is open rather than decided is that it is two questions wearing one coat.** *Where
+does this surface go* is arithmetic the compositor can do from an anchor and a margin, and it is
+roughly what `Positioner.h` already does for a popup against its parent. *What must not be covered* is
+a constraint on every other window on the machine, which is window management and is decision 51's to
+give to the shell — except that the shell cannot enforce it against windows it does not place, which is
+all of them while the Floorplanner is the placer. So the second half probably waits for a shell that
+declares a placement model at all, and the first half could land tomorrow.
+
+What it costs today is that the only chrome worth writing is chrome that wants the middle of the
+screen. A dock, a status bar and a notification stack are all unwritable, and the workaround — a
+full-screen transparent surface with the panel painted at the top of it — is worse than nothing: it
+would take the pointer across the whole screen, and it would ask the compositor to blur a panel-sized
+region as though it were the size of the display.
+
+## A chrome surface has a material but no shadow, so a launcher sits flat on the desktop
+
+`Material` and `Elevation` are two named axes on the same entity, and decision 187 puts the first on
+the wire and not the second. A launcher over a person's windows is exactly the case decision 104's
+shadow was built for — it is what makes a floating thing read as floating rather than as a hole cut in
+the screen — and a shell cannot ask for one.
+
+The reason to leave it out was that a second enum on the wire before anything has drawn with the first
+is guessing, and that is still the reason. What would settle it is looking at a run bar with glass and
+no shadow under it on a real panel, which is what step three of the shell work exists to make possible.
+Two outcomes are both plausible: that `Elevation` belongs beside `set_material` as a second named
+request, or that a chrome surface should simply carry the elevation its material implies, which is a
+table in `Seam/Dressing.h` rather than a word on the wire.
+
+**Neither can be looked at on the CPU renderer.** `Blit` refuses a material and a shadow alike and
+loses the whole frame, so this and everything else decision 187 made possible is visible only nested or
+on DRM. That is decision 79's floor doing what it says, and it is worth naming here because it is now
+the first thing between a person and the picture this protocol exists to produce.

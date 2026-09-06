@@ -14,14 +14,20 @@ namespace
 // Whether this surface is a window this protocol describes, and one this client is entitled to hear
 // about.
 //
-// **Three questions and the third is the one that matters.** A popup is in the same registry as a
+// **Four questions and the last two are the ones that matter.** A popup is in the same registry as a
 // window — `HostContext::Windows()` is every mapped `xdg_surface` — and the protocol is about
 // toplevels, so a menu is not enumerated. An unmapped surface is not in the registry at all and the
 // null check is belt and braces. The session comparison is [Foreign.h](Foreign.h)'s: one process
 // serves every user on this machine, and a list must not describe a window belonging to somebody else.
+//
+// **And chrome is not a window** (187). The client most likely to be holding one of these lists is the
+// same shell that drew the panel and the launcher, so without this the first thing a switcher shows a
+// person is the switcher — and closing that entry is a shell being asked to close itself.
 [[nodiscard]] bool Enumerable(const ClientXdgSurface& window, const HostContext& context, SessionId session) noexcept
 {
-	if (window.Toplevel() == nullptr || window.Window().IsNull())
+	const ClientXdgToplevel* const toplevel = window.Toplevel();
+
+	if (toplevel == nullptr || window.Window().IsNull() || toplevel->IsChrome())
 	{
 		return false;
 	}

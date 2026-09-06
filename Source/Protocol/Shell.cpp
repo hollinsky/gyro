@@ -15,6 +15,7 @@
 #include "Animation/Author/Bundle.h"
 #include "Core/ColorState.h"
 #include "Core/Texture.h"
+#include "Protocol/Chrome.h"
 #include "Protocol/Floor.h"
 #include "Protocol/Popup.h"
 #include "Protocol/Seat.h"
@@ -135,7 +136,45 @@ void ClientXdgToplevel::OnGone()
 		m_Surface->Orphan();
 	}
 
+	// **The chrome object outliving its toplevel is a client error the compositor still has to
+	// survive** (187). The protocol says it must be destroyed first and libwayland will destroy objects
+	// in whatever order a client asks, so the link is cut here rather than trusted.
+	if (m_ChromeObject != nullptr)
+	{
+		m_ChromeObject->Forget();
+		m_ChromeObject = nullptr;
+	}
+
 	delete this;
+}
+
+bool ClientXdgToplevel::IsMapped() const noexcept
+{
+	return m_Surface != nullptr && m_Surface->IsMapped();
+}
+
+bool ClientXdgToplevel::BecomeChrome(ClientChrome& object) noexcept
+{
+	if (m_Chrome)
+	{
+		return false;
+	}
+
+	m_Chrome = true;
+	m_ChromeObject = &object;
+
+	return true;
+}
+
+void ClientXdgToplevel::ApplyMaterial() noexcept
+{
+	if (!m_MaterialStaged)
+	{
+		return;
+	}
+
+	m_MaterialStaged = false;
+	m_Material = m_PendingMaterial;
 }
 
 void ClientXdgToplevel::Configure() const
@@ -919,6 +958,10 @@ void ClientXdgSurface::OnSurfaceCommitted(ClientSurface& surface)
 	if (m_Toplevel != nullptr)
 	{
 		m_Toplevel->ApplyBounds();
+
+		// And the material, for the same reason one step further: a shell that changes what its launcher
+		// is made of and redraws it in one commit must not be seen with one of the two applied (187).
+		m_Toplevel->ApplyMaterial();
 	}
 
 	if (!HasRole())
@@ -1011,7 +1054,14 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 	// a child to its parent.
 	wl_client* const client = Object().WireClient();
 
-	EntityId container = m_Context->Floor(client);
+	// **A third answer to the same question, and it is the whole of what being chrome does to the
+	// scene** (187): a surface the shell declared goes on its session's chrome root rather than on its
+	// floor. Both are roots of the session and the chrome one is the later, so decision 55 draws it in
+	// front of every window — and a click raising a window (162) reorders the floor's chain, which the
+	// launcher is not in.
+	const bool chrome = m_Toplevel != nullptr && m_Toplevel->IsChrome();
+
+	EntityId container = chrome ? m_Context->Chrome(client) : m_Context->Floor(client);
 
 	if (m_Popup != nullptr)
 	{
@@ -1094,7 +1144,10 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		// keyboard would be a person's next keystroke going nowhere.
 		if (m_Popup == nullptr)
 		{
-			scene->Focus().Offer(*window);
+			// **Chrome takes the keyboard and is stepped over by the walk**, which is the split
+			// `Scene/Focus.h`'s `FocusKind` exists for: a launcher a person cannot type into is not one,
+			// and an `Alt+Tab` that landed on the shell's own panel would be the switcher listing itself.
+			scene->Focus().Offer(*window, chrome ? FocusKind::Chrome : FocusKind::Window);
 
 			// **And into the window registry, which is the mapped toplevels of the whole session.** A
 			// popup is deliberately not in it: what the set is asked is which window is activated, and a
@@ -1121,10 +1174,25 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		// The container above it accepts nothing and is not told to — decision 111's toplevel is a frame
 		// around the pixels, and what a client declared a region for is the surface.
 		static_cast<void>(commit.AcceptInput(m_Content, state.Input));
+
+		// **On the window container rather than on the pixels, and inside the client's own commit.** The
+		// material is drawn behind what the client painted, so it belongs to the node whose quad is the
+		// window (111) — the image child is the pixels themselves and a material behind those would be a
+		// blur the size of the buffer rather than of the window. Written whether or not it changed, which
+		// costs a byte store and removes the state that would otherwise have to remember whether it did.
+		if (chrome)
+		{
+			static_cast<void>(commit.Dress(m_Window, m_Toplevel->Dress()));
+		}
 	}
 
 	if (mapping && m_Popup == nullptr)
 	{
+		// **Chrome is placed exactly as a window is, and that is a gap rather than a decision** (187). The
+		// Floorplanner centres it on the output holding the pointer, which is what a launcher wants and
+		// is not what a panel wants — there is no way for a shell to say *along the top edge* and no way
+		// to reserve the space a maximised window must not cover. Docs/Open.md carries it.
+		//
 		// **A second transaction, because this one is gyro's.** The placement is not something the
 		// client asked for — decision 141 has the Floorplanner author it, stamped with the arrival of
 		// the window because nothing routed it and there is no earlier moment an entrance could point

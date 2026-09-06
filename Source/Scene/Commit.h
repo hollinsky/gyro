@@ -323,6 +323,30 @@ public:
 		return true;
 	}
 
+	// The material drawn behind this node's own pixels, which is decision 33's *named surface* rather
+	// than a filter with parameters on it.
+	//
+	// **A commit verb for `Resize`'s reason, because it is the same fact as the pixels it sits behind.**
+	// A shell that changes its material and redraws in one `wl_surface.commit` has stated one
+	// arrangement, and applying the two in different frames would show a frame of the new blur under the
+	// old artwork — which on a launcher opening is the first frame a person sees of it.
+	//
+	// **No motion argument, because a material does not animate.** There is nothing between two names to
+	// interpolate, and a cross-fade from glass to smoke would be a third material nobody declared.
+	bool Dress(EntityId id, Material material) noexcept
+	{
+		Entity* entity = Mutable(id);
+
+		if (entity == nullptr)
+		{
+			return false;
+		}
+
+		entity->Dress = material;
+
+		return true;
+	}
+
 private:
 	[[nodiscard]] static constexpr Instant Earlier(Instant left, Instant right) noexcept
 	{

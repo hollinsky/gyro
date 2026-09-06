@@ -14,6 +14,7 @@
 #include "Core/Time.h"
 #include "Core/Wake.h"
 #include "Protocol/Bindings.h"
+#include "Protocol/Chrome.h"
 #include "Protocol/Compositor.h"
 #include "Protocol/Context.h"
 #include "Protocol/Data.h"
@@ -345,6 +346,9 @@ private:
 
 	BindingsGlobal m_Bindings;
 	wl_global* m_BindingsGlobal = nullptr;
+
+	ChromeGlobal m_Chrome;
+	wl_global* m_ChromeGlobal = nullptr;
 
 	// One per session, each authored before its session's listener is taken and outliving every client
 	// on it. A development run has exactly one, whose session is `None`.

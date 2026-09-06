@@ -14715,3 +14715,121 @@ session, which is small and real; Docs/Open.md carries it.
 
 **No serial.** Activating a window from a chord will want one, and the protocol that carries the verb
 is where it belongs rather than on the key that preceded it.
+
+### 187. A shell declares a surface to be chrome, once, and that one word takes it out of the floor, the walk and the list
+
+`gyro_chrome_v1`, and the second protocol gyro serves that no upstream document describes. A shell says
+that one of its `xdg_toplevel`s is part of the desktop rather than a window on it, and everything that
+distinguishes a launcher from an application follows from that single declaration: it hangs above every
+window of its session, it is not enumerated by `ext_foreign_toplevel_list_v1`, `Alt+Tab` steps over it,
+and it can be made of glass.
+
+The alternative rejected outright is four independent opt-outs. It reads more composable and it is
+worse in the one way that matters: a shell that forgot one would put its own launcher in the switcher
+it was drawing, or leave a panel that falls behind the next window a person clicks — and every one of
+those failures is invisible to the shell's author until somebody is looking at a screen.
+
+#### Not layer-shell, and the line is decision 51's
+
+`zwlr_layer_shell_v1` and its `ext_` successor are the obvious answer and were rejected. They carry
+anchors, exclusive zones, layer selection and keyboard-interactivity modes, which are window management
+— the half decision 51 hands to the shell. A compositor that implements them is implementing a layout
+policy on the shell's behalf, and has to have opinions about what *top* means relative to a fullscreen
+window before anybody has asked for one. They also have no way to name a material, which is half of
+what this protocol is for.
+
+What is here instead is only the part that has to be the compositor's because nothing else can be it:
+where a surface sits in the world, whether it is a window, and what it is made of.
+
+#### An object on a toplevel rather than a role of its own
+
+`xdg_decoration`'s shape. A chrome surface keeps the whole of xdg-shell — it is configured with *pick
+your own size*, it acknowledges, it maps on its first buffer, and it is told when it has the keyboard.
+A role of its own would mean a second configure sequence and a second set of ways to get one wrong, for
+a surface that wants exactly what `xdg_toplevel` already does.
+
+**It is decided before the first map and never changes.** `get_chrome` on a mapped toplevel is an
+error, and `gyro_chrome_v1.destroy` while the surface is on screen is another — the one destructor in
+gyro's own protocols that can fail. What both refuse is the same picture: a window rising above
+everything and vanishing from a person's own switcher, or a launcher dropping behind the windows, in
+the middle of somebody looking at it.
+
+#### Two roots per session rather than one root and a flag
+
+`Protocol/Floor.h` authors a second root beside the floor, and a chrome surface is parented into that
+one. The reason is one line of decision 55: the sibling list is the paint order, so click-to-focus
+(162) raising a window moves it to the end of the chain it is in. With the launcher in the same chain,
+clicking any window behind it would put that window in front of it — a person's own click hiding the
+thing they were typing into. With two chains the ordering is structural, and no `Raise` on either side
+can reach across.
+
+Rejected: a flag on the entity and a raise that skips chrome. It works and it puts the rule in the
+verb rather than in the shape, so every future caller of `Raise` — a shell declaring a stacking model,
+a workspace switch — has to know about it or reintroduce the bug.
+
+#### Focus is split in half, and only here
+
+`Scene/Focus.h`'s stack answers two questions: who has the keyboard, and what `Alt+Tab` walks. Chrome
+needs the first and must not be in the second — a launcher a person cannot type into is not one, and a
+walk that stopped on the shell's own panel would be the switcher listing itself. So an entry carries a
+`FocusKind` and the walk steps over chrome, which is why it is a loop rather than one modular step: a
+session with a panel and a launcher up has two entries to pass in a single press.
+
+Rejected: a second stack. Two lists that have to stay in step across every map, unmap and retirement,
+and the bug they produce is focus on a window the walk no longer knows about.
+
+#### The material is a name, and this is the first protocol that carries one
+
+Decision 33 says effects are named materials rather than parameterized filter calls, and until now
+nothing but a gym could set one — no protocol carried a material, so every client's window was
+`Material::None` for the whole of gyro's life. `set_material` is the first way in, and it takes a name:
+there is no radius, no tint and no opacity on the wire.
+
+The argument is the one decision 33 already makes, seen from the client's side. The compositor is the
+only party that can make every glass surface on the machine look like the same glass at the same
+moment, across two renderers and whatever the device in front of a person will actually do — the tier
+table in `Seam/Dressing.h` is that judgement. A shell able to ask for a 32 pixel blur is a shell whose
+panel stops matching the notification beside it the first time either is edited.
+
+**It is double-buffered onto the toplevel's own commit**, beside the window geometry and the client's
+minimum and maximum. A shell that changes what its launcher is made of and redraws it in one commit
+must not be seen with one of the two applied: one frame of the new blur under the old artwork, on the
+frame a person is most likely to be watching.
+
+**It is written on the window container rather than on the pixels.** Decision 111's toplevel is a
+container holding an image child, and the material is drawn behind what the client painted — so it
+belongs to the node whose quad is the window. On the image it would be a blur the size of the buffer,
+which for a toolkit that draws a shadow margin is a rectangle larger than the window.
+
+A material gyro has no name for is an error rather than a silent `None`. A shell built against a newer
+version of this protocol would otherwise look correct to itself and wrong on screen, with nothing
+anywhere naming the disagreement.
+
+#### Where it sits, and what a person can now see
+
+The global is System tier (`Protocol/Tier.h`), so an application is never offered it. That row is not a
+formality: a client able to declare itself chrome could hold a window over every other window on the
+machine, keep it there through every click, and stay out of any list a person could find it in — which
+is a credential prompt nobody can dismiss or attribute.
+
+**Glass only draws on the Vulkan renderer.** `Blit` refuses a material outright and loses the whole
+frame, so a chrome surface asking for one has to be looked at nested or on DRM. That is not new and it
+is worth writing down here, because this is the first protocol that lets a client reach it.
+
+#### What is deliberately not here
+
+**No placement.** A chrome surface is placed by the Floorplanner exactly as a window is — centred on
+the output holding the pointer — and there is no way to say *along the top edge*, no way to pick an
+output, and no way to reserve the space a maximised window must not cover. That is what a launcher
+wants and is not what a panel wants, and it is the largest thing this protocol will grow. Docs/Open.md
+carries it.
+
+**No elevation.** A launcher over a person's windows wants a shadow under it, and `Elevation` is a
+second named axis sitting right beside `Material` on the same entity. It is left out because adding a
+second enum to the wire before anything has drawn with the first is guessing, and because `Blit`
+refuses a shadow for the same reason it refuses a material.
+
+**No exclusivity and no input layer.** Nothing here says *this surface takes every keystroke* or *this
+surface is under the pointer wherever it is*. A launcher does not need either — it takes the keyboard
+by mapping, like a window — and an overview that dims the desktop will, which is the request that
+should bring the version bump.

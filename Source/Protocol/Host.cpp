@@ -225,6 +225,16 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		return Failure(ENOMEM, "advertising gyro_bindings_v1");
 	}
 
+	m_ChromeGlobal = Wayland::Server::GyroChromeManagerV1::Advertise(*display, ChromeVersion, m_Chrome);
+
+	if (m_ChromeGlobal == nullptr)
+	{
+		// Fatal, and this one fails *loudly* where the last fails quietly: a shell that came up without it
+		// still maps its launcher, and what a person gets is an opaque window in the middle of the screen
+		// that lands in their alt-tab and falls behind the next thing they click.
+		return Failure(ENOMEM, "advertising gyro_chrome_manager_v1");
+	}
+
 	return {};
 }
 

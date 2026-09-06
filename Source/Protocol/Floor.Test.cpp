@@ -58,22 +58,66 @@ GYRO_TEST(Floor, AFloorIsOneContainerPerSessionAndOnlyEverOne)
 	SessionFloors floors;
 	GYRO_REQUIRE(floors.Open(scene, Nobody).has_value());
 	GYRO_CHECK(!floors.Container(Nobody).IsNull());
-	GYRO_CHECK_EQ(scene.Count(), std::uint32_t{ 1 });
+
+	// **Two roots per session rather than one**, which is decision 187: the floor the windows hang on
+	// and the chrome root the shell's own surfaces hang on, and they are two so that raising a window
+	// (162) can never reorder one past the other.
+	GYRO_CHECK(!floors.Chrome(Nobody).IsNull());
+	GYRO_CHECK(floors.Chrome(Nobody) != floors.Container(Nobody));
+	GYRO_CHECK_EQ(scene.Count(), std::uint32_t{ 2 });
 
 	// A second call for the same session is a wiring mistake rather than a state to serve, and the
 	// failure of letting it through is two floors with one person's windows split between them and no
 	// way to tell which is on screen.
 	GYRO_CHECK(!floors.Open(scene, Nobody).has_value());
-	GYRO_CHECK_EQ(scene.Count(), std::uint32_t{ 1 });
+	GYRO_CHECK_EQ(scene.Count(), std::uint32_t{ 2 });
 
 	// A second *session* is two floors, which is decision 21's two people logged in at once.
 	GYRO_REQUIRE(floors.Open(scene, First).has_value());
-	GYRO_CHECK_EQ(scene.Count(), std::uint32_t{ 2 });
+	GYRO_CHECK_EQ(scene.Count(), std::uint32_t{ 4 });
 	GYRO_CHECK(floors.Container(First) != floors.Container(Nobody));
+	GYRO_CHECK(floors.Chrome(First) != floors.Chrome(Nobody));
 
 	// A session nobody has offered a listener for has no floor at all, which is also the answer a commit
 	// from a client whose session has already ended gets.
 	GYRO_CHECK(floors.Container(Second).IsNull());
+	GYRO_CHECK(floors.Chrome(Second).IsNull());
+}
+
+GYRO_TEST(Floor, TheChromeRootIsInFrontOfTheFloorAndNothingAWindowDoesChangesThat)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1) };
+	SceneStore scene{ clock };
+
+	SessionFloors floors;
+	GYRO_REQUIRE(floors.Open(scene, Nobody).has_value());
+
+	// Decision 55 makes the sibling list the paint order and the *last* root the frontmost, so the whole
+	// of the ordering guarantee is that the chrome root was created second.
+	EntityId last;
+
+	for (EntityId root = scene.FirstRoot(); !root.IsNull(); root = scene.Find(root)->NextSibling)
+	{
+		last = root;
+	}
+
+	GYRO_CHECK_EQ(last, floors.Chrome(Nobody));
+
+	// **And the guarantee survives the gesture it exists for.** A window raised by a click (162) goes to
+	// the end of the chain it is in — which is the floor's, not the top level — so a person clicking a
+	// window behind the launcher does not put it in front of the launcher.
+	const EntityId window = scene.CreateContainer(floors.Container(Nobody), {}).value();
+	const EntityId behind = scene.CreateContainer(floors.Container(Nobody), {}).value();
+
+	GYRO_CHECK(scene.Raise(window));
+	GYRO_CHECK_EQ(scene.Find(window)->Parent, floors.Container(Nobody));
+	GYRO_CHECK(scene.Find(window)->NextSibling.IsNull());
+
+	// The floor is still the first root and the chrome root is still the last: a raise inside one chain
+	// cannot reach the other, which is the property two roots buy that one root and a flag would not.
+	GYRO_CHECK_EQ(scene.FirstRoot(), floors.Container(Nobody));
+	GYRO_CHECK_EQ(scene.Find(floors.Container(Nobody))->NextSibling, floors.Chrome(Nobody));
+	GYRO_CHECK(scene.Find(behind) != nullptr);
 }
 
 // The partition as the frame thread reads it: a floor is a root and its session is on the root, never

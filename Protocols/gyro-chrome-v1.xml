@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="gyro_chrome_v1">
+
+  <copyright>
+    Copyright © 2026 Paul Hollinsky
+
+    Permission to use, copy, modify, distribute, and sell this
+    software and its documentation for any purpose is hereby granted
+    without fee, provided that the above copyright notice appear in
+    all copies and that both that copyright notice and this permission
+    notice appear in supporting documentation, and that the name of
+    the copyright holders not be used in advertising or publicity
+    pertaining to distribution of the software without specific,
+    written prior permission.  The copyright holders make no
+    representations about the suitability of this software for any
+    purpose.  It is provided "as is" without express or implied
+    warranty.
+
+    THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
+    SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+    FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
+    SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
+    AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+    ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+    THIS SOFTWARE.
+  </copyright>
+
+  <interface name="gyro_chrome_manager_v1" version="1">
+    <description summary="surfaces the shell draws, which are not windows">
+      A shell declares that one of its toplevels is part of the desktop rather
+      than a window on it: a launcher, a panel, a switcher, an overview.
+
+      Everything here follows from that one declaration, and the reason it is one
+      declaration rather than several is that a client which had to opt out of
+      being a window one behaviour at a time would be a client that forgets one.
+      What a person would see if it did is a launcher in their own alt-tab, or a
+      panel listed as an open window in the switcher the same shell is drawing.
+
+      A chrome surface is an xdg_toplevel and keeps all of xdg-shell: it is
+      configured, acknowledges, attaches a buffer and maps by the same handshake
+      an application uses, and it is told when it has the keyboard. What changes
+      is what the compositor does with it once it is mapped.
+
+      It is drawn above every window of its session, and clicking a window does
+      not bring that window in front of it. It is not offered to any protocol
+      that enumerates the windows on this machine, so a shell holding a window
+      list is not told about its own panel. It takes the keyboard when it maps,
+      because a launcher a person cannot type into is not one - but the
+      compositor's walk through the windows steps over it, so it is never a place
+      an alt-tab can land and a person who dismisses it goes back to what they
+      were doing.
+
+      What is not here yet is where a chrome surface goes. The compositor places
+      it exactly as it places a window, which is centred on the output holding
+      the pointer, and there is no way to say "along the top edge" or to reserve
+      the space a maximised window must not cover. A launcher wants the placement
+      that already exists; a panel wants the one that does not.
+
+      Every object here belongs to a client the compositor has granted the run of
+      a session, and an application is never offered this global.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager">
+        Destroys the manager. Chrome objects already created are unaffected and
+        their surfaces go on being chrome.
+      </description>
+    </request>
+
+    <request name="get_chrome">
+      <description summary="declare a toplevel to be chrome">
+        Declares that this toplevel is chrome and creates the object its material
+        is set through.
+
+        This must be requested before the toplevel is first mapped, because what
+        it changes - where the surface is drawn, whether it is enumerated,
+        whether the walk through the windows visits it - is decided when the
+        surface enters the world. A toplevel that has already mapped is the
+        already_mapped error.
+
+        A toplevel is chrome for the whole of its life. There is no way to hand a
+        surface back and forth between being a panel and being a window, and the
+        reason is that a person is looking at it: a window that stopped being in
+        the alt-tab while they were holding it down, or a panel that fell behind
+        the window under it, would be the compositor changing the rules in the
+        middle of a gesture.
+      </description>
+      <arg name="id" type="new_id" interface="gyro_chrome_v1" summary="the chrome object"/>
+      <arg name="toplevel" type="object" interface="xdg_toplevel" summary="the toplevel that is chrome"/>
+    </request>
+
+    <enum name="error">
+      <entry name="already_chrome" value="0" summary="the toplevel already has a chrome object"/>
+      <entry name="already_mapped" value="1" summary="the toplevel has already been mapped"/>
+    </enum>
+  </interface>
+
+  <interface name="gyro_chrome_v1" version="1">
+    <description summary="one chrome surface">
+      A toplevel that is chrome, and the object its material is set through.
+
+      It must be destroyed before the toplevel it was made from, and it may not
+      be destroyed while that toplevel is mapped: chrome is fixed for the life of
+      the surface, so there is no state for the compositor to return the surface
+      to while a person is looking at it.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the chrome object">
+        Destroys the object. The toplevel must be unmapped, or the mapped error
+        is raised.
+      </description>
+    </request>
+
+    <request name="set_material">
+      <description summary="set the material drawn behind the surface">
+        Sets the material the compositor draws behind this surface's own pixels.
+
+        A material is a name rather than a set of parameters - there is no
+        radius, no tint and no opacity here - because the compositor is the party
+        that has to make every surface wearing one look like the same material at
+        the same moment, across two renderers and whatever the device it is
+        running on will actually do. A shell that could ask for a 32 pixel blur
+        would be a shell whose panel stops matching the notification beside it
+        the first time either is changed.
+
+        The material is drawn behind the surface, so it is seen only where the
+        surface's own pixels are transparent. A shell that paints its launcher
+        opaque and asks for glass gets an opaque launcher.
+
+        This is double-buffered state: it takes effect on the next
+        wl_surface.commit of the toplevel's surface, along with everything else
+        that commit says. A shell that changes its material and its pixels
+        together has them arrive together, rather than showing one frame of the
+        new blur under the old artwork.
+
+        The default is none. A material this compositor does not know is the
+        bad_material error.
+      </description>
+      <arg name="material" type="uint" enum="material" summary="the material to draw"/>
+    </request>
+
+    <enum name="material">
+      <description summary="the materials a surface can be drawn in">
+        Named surfaces rather than a filter to configure. The list is short on
+        purpose and grows by the compositor learning a new one, never by a client
+        describing one.
+      </description>
+      <entry name="none" value="0" summary="nothing is drawn behind the surface"/>
+      <entry name="glass" value="1" summary="a blurred, tinted backdrop, over content the person arranged"/>
+      <entry name="smoke" value="2" summary="dark and heavier, legible over content the compositor did not choose"/>
+    </enum>
+
+    <enum name="error">
+      <entry name="mapped" value="0" summary="destroyed while the toplevel was mapped"/>
+      <entry name="bad_material" value="1" summary="the material is not one this compositor knows"/>
+    </enum>
+  </interface>
+
+</protocol>

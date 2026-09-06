@@ -661,8 +661,10 @@ gyro_add_bindings(WaylandProtocols
 		# gyro's own, out of Protocols/ rather than out of a package directory. Named in the client list
 		# as well as the server one, and it is the first protocol where that is a test's doing rather
 		# than a nested output's: Integration/ProtocolRoundTrip.Test.cpp is what puts gyro's client codec
-		# in front of gyro's server, and a chord claimed over a real socket is checked nowhere else.
+		# in front of gyro's server, and what these two do over a real socket — a chord claimed, a
+		# surface declared to be chrome — is checked nowhere else.
 		gyro-bindings-v1
+		gyro-chrome-v1
 )
 
 # The typed server bindings, over libwayland — the other half of decision 2's split, and the wrapper
@@ -692,8 +694,10 @@ gyro_add_bindings(WaylandServerProtocols
 		# gyro's own, out of Protocols/ rather than out of a package directory. Named in the client list
 		# as well as the server one, and it is the first protocol where that is a test's doing rather
 		# than a nested output's: Integration/ProtocolRoundTrip.Test.cpp is what puts gyro's client codec
-		# in front of gyro's server, and a chord claimed over a real socket is checked nowhere else.
+		# in front of gyro's server, and what these two do over a real socket — a chord claimed, a
+		# surface declared to be chrome — is checked nowhere else.
 		gyro-bindings-v1
+		gyro-chrome-v1
 )
 
 # The CPU renderer, and PORTABLE is the load-bearing word here for a stronger reason than it is
@@ -1005,6 +1009,7 @@ gyro_add_module(Protocol DISPATCH
 		Scene
 	SOURCES
 		Bindings.cpp
+		Chrome.cpp
 		Clipboard.cpp
 		Compositor.cpp
 		Data.cpp
@@ -1032,6 +1037,7 @@ gyro_add_module(Protocol DISPATCH
 		Viewporter.cpp
 	TESTS
 		Bindings.Test.cpp
+		Chrome.Test.cpp
 		Clipboard.Test.cpp
 		Dmabuf.Test.cpp
 		Drag.Test.cpp

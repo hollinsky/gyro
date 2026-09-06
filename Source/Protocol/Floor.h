@@ -32,11 +32,18 @@
 // gates on: a session nobody is showing costs one comparison per frame rather than one per window in
 // it.
 //
-// **The floor is the root rather than a container under one, and that is a refusal to build ahead.**
-// A session with a workspace and a panel in it wants more containers, and decision 141 has gyro
-// authoring them on the shell's declaration — but they will be *roots carrying the same session*,
-// which the run already represents, so there is nothing an extra node above the floor would buy today
-// beyond a node in every walk.
+// **The floor is a root rather than a container under one, and the second root is the shell's.**
+// Decision 141 has gyro authoring more containers on a shell's declaration and says they will be
+// *roots carrying the same session*, which the run already represents — and decision 187 is the first
+// of them: a chrome root per session, created beside the floor and after it, holding the surfaces a
+// shell draws.
+//
+// **It is a second root rather than a raised child of the floor**, and one line decides it: decision
+// 55 makes the sibling list the paint order, so a click that raises a window (162) moves that window
+// to the end of the chain it is in. With a launcher in the same chain, clicking any window behind it
+// would put that window in front of it — the person's own click hiding the thing they were typing
+// into. Two roots make the ordering structural instead: everything on the floor is behind everything
+// on the chrome root whatever either chain does to itself, and neither `Raise` can reach across.
 //
 // **A development run has one floor and its session is `None`**, which is the same object doing the
 // same job: `HostListener::Own` binds a socket with no agent behind it and no session to attribute a
@@ -58,6 +65,12 @@ public:
 	//
 	// Refused for a session that already has one, which would be a second offer accepted for a uid that
 	// `Session/Control.h` allows only one of.
+	//
+	// **Both roots are authored here, in this order**, because the order *is* the z order: the chrome
+	// root is created second and so is the later root, which decision 55 makes the frontmost. Nothing
+	// re-raises it and nothing needs to — a root is only appended when a session opens, and the pointer
+	// glyph, which is the one node that must stay in front of even the shell, re-raises itself every
+	// dispatch iteration for exactly this reason (`Scene/Cursor.h`).
 	[[nodiscard]] Result<void> Open(SceneStore& scene, SessionId session);
 
 	// The session ended, so its floor does. Retires the subtree rather than destroying it, which is the
@@ -73,6 +86,14 @@ public:
 	// tests rather than parenting into whatever came back.
 	[[nodiscard]] EntityId Container(SessionId session) const noexcept;
 
+	// What a *chrome* surface of this session is parented into (187), or null on the same terms as
+	// `Container` — a session that has ended, or one that never had a floor.
+	//
+	// A shell's launcher and an application's window are told apart by exactly this call and nothing
+	// else in the scene: there is no flag on the entity, because what being chrome means is which of
+	// two chains a node hangs in, and a node already carries the chain it is in.
+	[[nodiscard]] EntityId Chrome(SessionId session) const noexcept;
+
 private:
 	// A session and its floor. A vector and a scan because the count is the people logged into this
 	// machine — a map would be a hash and an allocation to search two entries.
@@ -80,7 +101,10 @@ private:
 	{
 		SessionId Session = SessionId::None;
 		EntityId Container{};
+		EntityId Chrome{};
 	};
+
+	[[nodiscard]] const Floor* Find(SessionId session) const noexcept;
 
 	std::vector<Floor> m_Floors;
 };

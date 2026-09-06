@@ -42,12 +42,63 @@
 // a held modifier and not a verb behind the leader; what it costs here is a cursor, and the argument
 // for it being a window rather than a position is at `CycleNext`.
 //
+// What a focusable thing is, and the walk through the windows is the only reader of it.
+//
+// **It exists because a launcher needs one half of focus and not the other.** A shell's own surfaces
+// (187) have to take the keyboard when they map — a launcher a person cannot type into is not one —
+// and must never be somewhere `Alt+Tab` can stop, because the shell drawing the switcher would then
+// be in its own list. One stack answers both questions and this is what tells them apart, rather than
+// a second stack that would have to be kept in step with this one across every map, unmap and
+// retirement.
+enum class FocusKind
+{
+	// An application's window, which is what cycling is for and what every caller but one means.
+	Window,
+
+	// A surface the shell draws: a launcher, a panel, an overview. It takes the keyboard and the walk
+	// steps over it, so dismissing it puts a person back on the window they were using rather than
+	// wherever a cycle had wandered to.
+	Chrome,
+};
+
 // **Rejected: focus as a flag on the entity.** It reads naturally — one `bool` beside `Retiring` — and
 // it makes *who is focused* a scan of the world, which is decision 115's rejected axis in a second
 // place. Worse, two flags set at once is a representable state, and the bug it produces is two windows
 // with a focus ring and a keyboard talking to the wrong one.
 class SceneFocus
 {
+	// One entry, which is an entity and whether the walk through the windows visits it.
+	//
+	// **The private section comes first here, which is the one place in this file that is about the
+	// compiler rather than about focus**: every verb below looks an entity up, and a lookup helper with
+	// a deduced return type has to be declared before the bodies that call it.
+	struct Entry
+	{
+		EntityId Id{};
+		FocusKind Kind = FocusKind::Window;
+	};
+
+	using Entries = std::vector<Entry>;
+
+	[[nodiscard]] Entries::iterator Find(EntityId id) noexcept
+	{
+		return std::find_if(m_Stack.begin(), m_Stack.end(), [id](const Entry& entry) noexcept {
+			return entry.Id == id;
+		});
+	}
+
+	[[nodiscard]] Entries::const_iterator Find(EntityId id) const noexcept
+	{
+		return std::find_if(m_Stack.begin(), m_Stack.end(), [id](const Entry& entry) noexcept {
+			return entry.Id == id;
+		});
+	}
+
+	void Erase(EntityId id) noexcept
+	{
+		std::erase_if(m_Stack, [id](const Entry& entry) noexcept { return entry.Id == id; });
+	}
+
 public:
 	// The window the keyboard is on, or null where nothing is focusable.
 	//
@@ -64,20 +115,25 @@ public:
 			return m_Candidate;
 		}
 
-		return m_Stack.empty() ? EntityId{} : m_Stack.back();
+		return m_Stack.empty() ? EntityId{} : m_Stack.back().Id;
 	}
 
 	// A window became focusable, which is *mapped* for a client's toplevel. Takes focus, per the stack
 	// policy above, and moves an entity already in the stack to the top rather than adding it twice.
-	void Offer(EntityId id)
+	//
+	// **The kind defaults to `Window` because that is what offering has always meant here**, and chrome
+	// is the exception that has to name itself: there is exactly one caller that passes anything else,
+	// and a default the other way would make every test and every future author opt out of being the
+	// shell.
+	void Offer(EntityId id, FocusKind kind = FocusKind::Window)
 	{
 		if (id.IsNull())
 		{
 			return;
 		}
 
-		std::erase(m_Stack, id);
-		m_Stack.push_back(id);
+		Erase(id);
+		m_Stack.push_back(Entry{ .Id = id, .Kind = kind });
 
 		// A window opening ends a walk through the windows, because the walk is about which of the ones
 		// already there a person meant and this is a new answer to that. Without it the cycle's cursor
@@ -91,7 +147,7 @@ public:
 	// **It runs at retirement rather than at destruction**, and decision 114's two steps are why: a
 	// closing window is still on screen for as long as its exit takes, and keystrokes must not go on
 	// reaching it while it collapses. The store calls this from `Retire`, so no author has to remember.
-	void Withdraw(EntityId id) noexcept { std::erase(m_Stack, id); }
+	void Withdraw(EntityId id) noexcept { Erase(id); }
 
 	// Put focus on an entity that is already focusable, which is the verb a shell declaring a model
 	// calls and the one an alt-tab lands on. False where the entity is not in the stack — focusing a
@@ -99,7 +155,7 @@ public:
 	// adding one here would put focus somewhere nothing can draw a ring around.
 	bool Focus(EntityId id)
 	{
-		const auto at = std::find(m_Stack.begin(), m_Stack.end(), id);
+		const auto at = Find(id);
 
 		if (at == m_Stack.end())
 		{
@@ -130,6 +186,12 @@ public:
 	// An application that exits mid-gesture takes its entry out of the stack, and an index into it would
 	// then be pointing at somebody else — where a name that is no longer there simply resumes the walk
 	// from the focused window, which is what a person would expect of the one that just vanished.
+	//
+	// **Chrome is stepped over rather than skipped once**, which is why the walk is a loop and not one
+	// modular step: a session with a launcher and a panel up has two entries the cycle must pass in a
+	// single press, and stopping on either would put focus on the shell's furniture. Where there is no
+	// window at all — a person pressing `Alt+Tab` with nothing but a panel on screen — the answer is
+	// null and nothing is cycling, rather than a walk that spins.
 	EntityId CycleNext() noexcept { return Step(true); }
 	EntityId CyclePrevious() noexcept { return Step(false); }
 
@@ -152,10 +214,7 @@ public:
 	// **A membership test rather than a window onto the stack**, which stays private for the reason
 	// below — and rather than letting the caller try `Focus` and read the answer, which would move focus
 	// as a side effect of asking whether it could.
-	[[nodiscard]] bool Contains(EntityId id) const noexcept
-	{
-		return std::find(m_Stack.begin(), m_Stack.end(), id) != m_Stack.end();
-	}
+	[[nodiscard]] bool Contains(EntityId id) const noexcept { return Find(id) != m_Stack.end(); }
 
 	// How many windows could take focus. The stack itself stays private: the order below the top is
 	// gyro's fallback and not a list anything else should be making decisions from.
@@ -172,17 +231,31 @@ private:
 		}
 
 		const auto count = static_cast<std::ptrdiff_t>(m_Stack.size());
-		const auto at = std::find(m_Stack.begin(), m_Stack.end(), m_Candidate);
-		const std::ptrdiff_t from = (at == m_Stack.end()) ? count - 1 : at - m_Stack.begin();
+		const auto at = Find(m_Candidate);
+		std::ptrdiff_t from = (at == m_Stack.end()) ? count - 1 : at - m_Stack.begin();
 
-		m_Candidate = m_Stack[static_cast<std::size_t>((from + (forward ? count - 1 : 1)) % count)];
+		// At most one lap. Every step lands somewhere the walk has not been this press, so a stack that is
+		// all chrome terminates having moved nothing rather than looking for a window that is not there.
+		for (std::ptrdiff_t taken = 0; taken < count; ++taken)
+		{
+			from = (from + (forward ? count - 1 : 1)) % count;
 
-		return m_Candidate;
+			const Entry& entry = m_Stack[static_cast<std::size_t>(from)];
+
+			if (entry.Kind == FocusKind::Window)
+			{
+				m_Candidate = entry.Id;
+
+				return m_Candidate;
+			}
+		}
+
+		return EntityId{};
 	}
 
 	// Newest last. A vector and a scan, because the length is the windows on the machine and every verb
 	// here runs when one opens or closes rather than per frame or per keystroke.
-	std::vector<EntityId> m_Stack;
+	Entries m_Stack;
 
 	// Where a walk through the windows has got to, and null when nobody is walking. It is deliberately
 	// not a position: see `CycleNext`.

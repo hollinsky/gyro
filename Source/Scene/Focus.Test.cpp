@@ -291,3 +291,88 @@ GYRO_TEST(SceneFocus, CyclingWithOneWindowOrNoneIsANoOp)
 	GYRO_CHECK(focus.Focused() == only);
 	GYRO_CHECK(focus.EndCycle() == only);
 }
+
+GYRO_TEST(SceneFocus, ALauncherTakesTheKeyboardAndTheWalkStepsOverIt)
+{
+	SceneFocus focus;
+	const EntityId first{ 1, 1 };
+	const EntityId second{ 2, 1 };
+	const EntityId launcher{ 3, 1 };
+
+	focus.Offer(first);
+	focus.Offer(second);
+
+	// **The half chrome keeps.** A launcher a person cannot type into is not a launcher, so it takes the
+	// keyboard the moment it maps exactly as a window does.
+	focus.Offer(launcher, FocusKind::Chrome);
+	GYRO_CHECK(focus.Focused() == launcher);
+
+	// **The half it does not.** The walk goes *down* the stack, so the first step off the launcher is the
+	// window it is covering — and every step after it is the walk a person would have got with no
+	// launcher on screen at all. What the launcher never is, is somewhere the walk stops.
+	GYRO_CHECK(focus.CycleNext() == second);
+	GYRO_CHECK(focus.CycleNext() == first);
+
+	// The lap back over the top: the launcher sits between `first` and `second` in the order and the
+	// walk passes it without stopping, which is the step a single modular hop would have landed on.
+	GYRO_CHECK(focus.CycleNext() == second);
+}
+
+GYRO_TEST(SceneFocus, DismissingTheLauncherPutsAPersonBackOnTheWindowTheyWereUsing)
+{
+	SceneFocus focus;
+	const EntityId window{ 1, 1 };
+	const EntityId launcher{ 2, 1 };
+
+	focus.Offer(window);
+	focus.Offer(launcher, FocusKind::Chrome);
+
+	GYRO_CHECK(focus.Focused() == launcher);
+
+	// The shell unmaps its launcher, which retires the entity and withdraws it here. Focus falls to the
+	// entity beneath, which is the stack policy doing exactly what it does for a window closing — and
+	// what it has to do, because typing into nothing after dismissing a launcher is the failure a person
+	// would report as *the keyboard stopped working*.
+	focus.Withdraw(launcher);
+
+	GYRO_CHECK(focus.Focused() == window);
+}
+
+GYRO_TEST(SceneFocus, AScreenWithNothingButChromeOnItHasNowhereToCycleTo)
+{
+	SceneFocus focus;
+	const EntityId panel{ 1, 1 };
+	const EntityId launcher{ 2, 1 };
+
+	focus.Offer(panel, FocusKind::Chrome);
+	focus.Offer(launcher, FocusKind::Chrome);
+
+	// **Two chrome entries in a row is what makes the walk a loop rather than one modular step**, and a
+	// stack that is *all* chrome is where that loop has to terminate: a person pressing `Alt+Tab` with
+	// only a panel and a launcher on screen gets nothing, rather than the compositor spinning looking
+	// for a window that is not there.
+	GYRO_CHECK(focus.CycleNext().IsNull());
+	GYRO_CHECK(focus.CyclePrevious().IsNull());
+
+	// And nothing was disturbed by the asking: the launcher still has the keyboard.
+	GYRO_CHECK(focus.Focused() == launcher);
+	GYRO_CHECK(focus.EndCycle().IsNull());
+	GYRO_CHECK(focus.Focused() == launcher);
+}
+
+GYRO_TEST(SceneFocus, ChromeIsStillSomethingAClickCanFocus)
+{
+	SceneFocus focus;
+	const EntityId window{ 1, 1 };
+	const EntityId launcher{ 2, 1 };
+
+	focus.Offer(launcher, FocusKind::Chrome);
+	focus.Offer(window);
+
+	// Click-to-focus (162) asks `Contains` on the way up from what the pointer hit and then names the
+	// entity outright. Chrome is in the stack, so a person clicking back onto the launcher after
+	// clicking a window gets the keyboard back — the walk is the only reader that treats it differently.
+	GYRO_CHECK(focus.Contains(launcher));
+	GYRO_CHECK(focus.Focus(launcher));
+	GYRO_CHECK(focus.Focused() == launcher);
+}

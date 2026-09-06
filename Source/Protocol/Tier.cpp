@@ -6,6 +6,7 @@
 
 #include "Wayland/Server/ExtForeignToplevelListV1.h"
 #include "Wayland/Server/GyroBindingsV1.h"
+#include "Wayland/Server/GyroChromeV1.h"
 #include "Wayland/Server/LinuxDmabufV1.h"
 #include "Wayland/Server/LinuxDrmSyncobjV1.h"
 #include "Wayland/Server/PresentationTime.h"
@@ -67,6 +68,12 @@ constexpr std::array Table{
 	// authority stated as plainly as the protocol can state it: an application handed this could take
 	// every keystroke on the machine out of every other application's reach and never be found.
 	std::pair{ Wayland::Server::GyroBindingsV1::WireName, GlobalTier::System },
+
+	// The surfaces the desktop is made of rather than the windows on it. An application handed this
+	// could draw over every window on the machine, stay in front of the one a person clicks, and be in
+	// no list that would let them find it and close it — which is the shape of a phishing overlay
+	// stated as plainly as a protocol can state it.
+	std::pair{ Wayland::Server::GyroChromeManagerV1::WireName, GlobalTier::System },
 };
 
 // The row for an interface, or null where the table does not name it. The two callers below want

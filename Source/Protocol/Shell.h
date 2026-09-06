@@ -15,6 +15,7 @@
 #include "Protocol/Surface.h"
 #include "Wayland/Server/Wayland.h"
 #include "Wayland/Server/XdgShell.h"
+#include "World/Material.h"
 
 // `xdg_wm_base`: the role that turns a client's rectangle of pixels into a window.
 //
@@ -58,6 +59,7 @@
 // The advertised version. See above before raising it.
 inline constexpr std::uint32_t ShellVersion = 4;
 
+class ClientChrome;
 class ClientXdgSurface;
 
 // One `xdg_toplevel`: a window with a title, and the requests a person's window manager would answer.
@@ -97,6 +99,40 @@ public:
 	// survive: this object stays alive until its own destroy request arrives, and must not be holding a
 	// pointer into freed memory while it waits.
 	void Forget() noexcept { m_Surface = nullptr; }
+
+	// Decision 187: this toplevel is a surface the shell draws rather than a window on the desktop.
+	//
+	// **Set once and never cleared, which is the protocol's rule and not an implementation shortcut.**
+	// `gyro_chrome_manager_v1.get_chrome` refuses a toplevel that has already mapped, so what is being
+	// asked at every point that reads this is settled before the surface enters the world — and a
+	// surface that could stop being chrome halfway through its life would be a launcher falling behind
+	// the windows while a person was typing into it.
+	[[nodiscard]] bool IsChrome() const noexcept { return m_Chrome; }
+
+	// Whether this window is in the world, asked of the `xdg_surface` that owns the answer. False for a
+	// toplevel whose surface was destroyed out of order, which is the same answer for the same reason:
+	// there is nothing on screen.
+	[[nodiscard]] bool IsMapped() const noexcept;
+
+	// The declaration itself, and the back link that keeps the two objects from outliving each other in
+	// either order. Refused where this toplevel is already chrome, which is the caller's error to post.
+	[[nodiscard]] bool BecomeChrome(ClientChrome& object) noexcept;
+
+	// The chrome object went away. The toplevel stays chrome — see `IsChrome` — and simply loses the
+	// ability to be redressed.
+	void ForgetChrome() noexcept { m_ChromeObject = nullptr; }
+
+	// The material staged by `gyro_chrome_v1.set_material`, landing at the next commit like everything
+	// else a client says. `Dress` is what actually arrived.
+	void StageMaterial(Material material) noexcept
+	{
+		m_PendingMaterial = material;
+		m_MaterialStaged = true;
+	}
+
+	void ApplyMaterial() noexcept;
+
+	[[nodiscard]] Material Dress() const noexcept { return m_Material; }
 
 	void OnSetParent(Wayland::Server::XdgToplevel parent) override { (void)parent; }
 
@@ -266,6 +302,17 @@ private:
 	PixelSize<SurfaceSpace> m_Min{};
 	PixelSize<SurfaceSpace> m_Max{};
 	bool m_BoundsStaged = false;
+
+	// Decision 187. The flag and the object are deliberately two things: the flag is what this toplevel
+	// *is* and outlives every object, and the pointer is only the client's handle on it.
+	bool m_Chrome = false;
+	ClientChrome* m_ChromeObject = nullptr;
+
+	// What the shell says this surface is made of, staged and current, double buffered for the reason
+	// the bounds are.
+	Material m_PendingMaterial = Material::None;
+	Material m_Material = Material::None;
+	bool m_MaterialStaged = false;
 };
 
 // One `xdg_positioner`: the client's description of where a popup should go, accumulated across as

@@ -89,6 +89,18 @@ public:
 		return m_Floors->Container(m_Server->SessionOf(client));
 	}
 
+	// The same question for a surface the shell declared to be chrome (187), which hangs on its
+	// session's chrome root rather than on its floor. Null on the same terms and for the same reasons.
+	[[nodiscard]] EntityId Chrome(wl_client* client) const noexcept
+	{
+		if (m_Floors == nullptr || m_Server == nullptr)
+		{
+			return {};
+		}
+
+		return m_Floors->Chrome(m_Server->SessionOf(client));
+	}
+
 	// Which session a client's requests belong to, for the two places that need the id itself rather
 	// than the floor: placing a window on an output that session is shown on, and nothing else yet.
 	[[nodiscard]] SessionId Session(wl_client* client) const noexcept
