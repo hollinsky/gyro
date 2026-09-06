@@ -583,6 +583,35 @@ void CheckTheGpuCostIsReported(Fixture& fixture)
 
 } // namespace
 
+// A screen that has come up can already draw a fade for the first window closed on it.
+//
+// **The claim is about *when*, not whether.** Dynamic rendering bakes the attachment's format into
+// the pipeline, so the programs a snapshot is drawn under have to exist before a window closes — and
+// the only place they can be built is the bind, because a frame that compiled one would spend a
+// tenth of a second on the thread that owes the next refresh. What a person would see otherwise is
+// the very first window they ever close taking six refreshes to begin leaving, on a machine that is
+// otherwise keeping every frame.
+GYRO_TEST(RenderImport, TheFirstWindowClosedOnAScreenFadesLikeEveryOneAfterIt)
+{
+	std::optional<Fixture> fixture = Available("TheFirstWindowClosedOnAScreenFadesLikeEveryOneAfterIt");
+
+	if (!fixture)
+	{
+		return;
+	}
+
+	GYRO_REQUIRE(fixture->Output().Status().has_value());
+	GYRO_REQUIRE(fixture->Renderer().Status().has_value());
+
+	// Nothing is proven against an output nobody has bound, which is the same answer this gives after
+	// a set is released.
+	GYRO_CHECK_EQ(fixture->Renderer().DrawsSnapshots(), false);
+
+	GYRO_REQUIRE(fixture->Renderer().BindTargets(fixture->Output().Targets(), ColorState::Srgb()).has_value());
+
+	GYRO_CHECK(fixture->Renderer().DrawsSnapshots());
+}
+
 // The whole path, in one test: allocate, import, draw the damage, read the bytes back.
 GYRO_TEST(RenderImport, DamageIsDrawnAndTheRestSurvives)
 {

@@ -423,7 +423,7 @@ Result<void> VulkanTextures::Reserve(TextureId id, PixelSize<BufferSpace> size)
 		         .View = VK_NULL_HANDLE,
 		         .Set = VK_NULL_HANDLE,
 		         .Size = size,
-		         .Format = PixelFormat{ .Code = FormatArgb8888, .Modifier = ModifierInvalid },
+		         .Format = PixelFormat{ .Code = StorageFormat, .Modifier = ModifierInvalid },
 		         .Imported = false };
 
 	Image* const existing = Lookup(id);

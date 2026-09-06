@@ -672,6 +672,20 @@ Result<void> VulkanRenderer::BindTargets(std::span<const RenderTarget> targets, 
 		}
 	}
 
+	// The binding a snapshot is drawn under, built here for the reason the target's is and refused
+	// here rather than in a frame.
+	//
+	// **A failure is not the bind's**, which is the one difference from every other `Prepare` on this
+	// path. Decision 46 already has an answer for a screen that cannot hold snapshots — the windows on
+	// it close at once instead of fading — and refusing to come up over it would trade a fade for a
+	// black screen, which is the wrong direction on every rung decision 35 defines. What must not
+	// happen is discovering the format later: `Record` may not compile, so a snapshot whose pipeline
+	// was never built is one that is not drawn at all.
+	//
+	// On an eight-bit output this is the pair `Import` just prepared and `Build` returns immediately.
+	// It is a second binding only where the panel is deeper than the atlas.
+	m_Snapshots = m_TargetCount > 0 && m_Pipeline.Prepare(VulkanFormat(StorageFormat), output).has_value();
+
 	if (Result<void> settled = Settle(); !settled)
 	{
 		ReleaseTargets();
@@ -987,6 +1001,10 @@ void VulkanRenderer::ReleaseTargets() noexcept
 	// leaves the count at zero and the staging buffer still holding a mapping onto a device the root
 	// is about to tear down.
 	m_Readback.Reset();
+
+	// Nothing is drawable until a bind says otherwise, snapshots included: a released set is an output
+	// with no pipelines proven against it.
+	m_Snapshots = false;
 
 	if (m_Device == nullptr || !m_Device->IsValid() || m_TargetCount == 0)
 	{

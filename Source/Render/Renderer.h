@@ -198,6 +198,14 @@ public:
 	// finished before `Record` returned.
 	[[nodiscard]] bool ExportsTimeline() const noexcept { return m_TimelineFd.IsValid(); }
 
+	// Whether a closing window on this output can be given a copy of its last frame.
+	//
+	// True from the bind that built the pipelines a snapshot is drawn under, and false on a device
+	// that would not build them — which decision 46 already describes the look of: the windows on that
+	// screen close at once instead of fading. It is answered here rather than in a frame because the
+	// only other way to answer it there is to build one, and a frame may not.
+	[[nodiscard]] bool DrawsSnapshots() const noexcept { return m_Snapshots; }
+
 	// Which execution this renderer was built for. Read back so that a test can say in one line
 	// which of the two it is holding, rather than inferring it from what it passed.
 	[[nodiscard]] Fusion Fuses() const noexcept { return m_Fusion; }
@@ -521,6 +529,15 @@ private:
 	// The images `GatherSampled` found, reused across frames so that the walk allocates nothing.
 	// Decision 36's rule, and the reason `MaxSampledImages` is a refusal rather than a resize.
 	std::array<VkImage, MaxSampledImages> m_Sampled{};
+
+	// Whether this output's snapshots can be drawn, decided at the bind that built the pipelines for
+	// them and read by `Record` rather than derived there.
+	//
+	// False is not an error: decision 46 lets a screen with no snapshot storage close its windows at
+	// once instead of fading, and a screen whose device would not build the pipeline is the same
+	// picture arrived at one step earlier. What it must never be is decided in a frame — a pipeline
+	// built there is a hundred milliseconds on the thread that owes a refresh.
+	bool m_Snapshots = false;
 
 	Fusion m_Fusion = Fusion::Selected;
 

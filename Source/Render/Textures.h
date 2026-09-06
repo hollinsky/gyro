@@ -11,6 +11,7 @@
 #include "Render/Device.h"
 #include "Render/Vulkan.h"
 #include "Seam/Importer.h"
+#include "Seam/RenderTarget.h"
 
 // Seam/Importer.h's dispatch half on a Vulkan device: a client's buffer becoming something a
 // fragment can sample.
@@ -66,6 +67,24 @@
 // picture that silently stops updating. Fixed because `Adopt` may not grow a pool a frame is
 // currently allocating from.
 inline constexpr std::uint32_t MaxTextureImages = 1024;
+
+// The format an image gyro draws into is reserved in.
+//
+// **Named here rather than chosen at the allocation, because a renderer has to build its pipelines
+// against it before any frame draws one.** Dynamic rendering bakes the attachment's format into the
+// pipeline, so a composite that discovered this format when it first went to fill a snapshot would
+// be compiling inside a frame — a hundred milliseconds on the thread that owes a picture every
+// refresh, landing on the first frame anybody ever closed a window on. `VulkanRenderer::BindTargets`
+// prepares this pair alongside the target's, where building one is legal, and on an ordinary
+// eight-bit output the two are the same pair and it costs nothing at all.
+//
+// Premultiplied eight-bit, which is what a composite writes and what everything that samples the
+// result already expects. **What it costs on a ten-bit output is range**, and that is an open
+// question rather than a settled one: a snapshot of a window on an HDR screen is held to eight bits
+// per channel for the length of its exit, which is a fade that bands where the live window did not.
+// Both candidate formats are thirty-two bits per pixel, so the memory is identical and the trade is
+// purely the extra binding a wider one would ask every renderer to build.
+inline constexpr std::uint32_t StorageFormat = FormatArgb8888;
 
 // SPEC: how many distinct images one output may sample in one frame.
 //
