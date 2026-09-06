@@ -601,22 +601,33 @@ GYRO_TEST(SceneAtlas, AWindowWhosePixelsWentAwayKeepsTheOneSceneItsPictureComesF
 
 	SceneSerializer serializer;
 
-	// The pass that publishes the scene the picture comes out of. It spends the grace and does not end
-	// it, so the window is still here and its rectangle is still held.
-	static_cast<void>(serializer.Serialize(store));
+	// The scene the picture comes out of, and then several more of the fade. Nothing here cuts it
+	// short: the window goes on crossing, its rectangle stays held, and `Frame/Evaluator.h` draws it
+	// from the atlas once the copy has been made.
+	for (int pass = 0; pass < 4; ++pass)
+	{
+		static_cast<void>(serializer.Serialize(store));
 
-	GYRO_REQUIRE(store.IsLive(*window));
-	GYRO_CHECK(store.Find(*window)->Retiring);
-	GYRO_CHECK(store.AwaitsSnapshot(pixels));
+		GYRO_REQUIRE(store.IsLive(*window));
+		GYRO_CHECK(store.Find(*window)->Retiring);
+		GYRO_CHECK(store.AwaitsSnapshot(pixels));
 
-	// And the pass after it, where the grace is spent: the exit ends, the sweep frees the subtree, and
-	// the rectangle goes back. The pixels stop being owed on the same pass, which is what lets the
-	// holder give the id up against a scene that no longer names it.
+		clock.Advance(std::chrono::milliseconds{ 16 });
+	}
+
+	// And it ends where every retirement ends — the fade settling, not this. The sweep frees the
+	// subtree, the rectangle goes back, and the buffer stops being owed on the pass after, which is
+	// what lets the holder give the id up against a scene that no longer names it.
+	clock.Advance(std::chrono::seconds{ 2 });
+
 	static_cast<void>(serializer.Serialize(store));
 
 	GYRO_CHECK(!store.IsLive(*window));
-	GYRO_CHECK(!store.AwaitsSnapshot(pixels));
 	GYRO_CHECK(store.Atlases().IsEmpty());
+
+	static_cast<void>(serializer.Serialize(store));
+
+	GYRO_CHECK(!store.AwaitsSnapshot(pixels));
 }
 
 // Decision 46 answers a window with no rectangle by cutting rather than fading, and a client that took

@@ -981,21 +981,15 @@ private:
 	// scene ever says this window is leaving. That is why closing a window has never animated: not a
 	// missing fade, but a fade nothing was ever told about.
 	//
-	// So a root with a rectangle reserved for it is held rather than finished, for exactly one
-	// published scene. That scene carries the window, its exit and the pixels still under it, which is
-	// everything the frame thread needs to take the picture — and the pass after it finishes the exit
-	// the way this always did.
+	// So a root with a rectangle reserved for it is held rather than finished. The scenes it goes on
+	// crossing in carry the window, its exit and the pixels still under it: the first of them is what
+	// the frame thread copies the picture out of, and every one after it is a frame of the fade drawn
+	// from that copy. What ends the exit is the exit finishing, the way decision 114 always meant.
 	//
 	// **The caller keeps the pixels for as long as this says so**, which is what `true` means and why
 	// it is worth returning. The id would otherwise be given up during this same step and reclaimed
 	// once the frame thread reached the scene that still names it, which is a window copying itself out
 	// of memory the registry had already handed back.
-	//
-	// **One scene and not the length of the fade**, because nothing draws from the atlas yet: past that
-	// scene the window has a picture and no way to show it, so holding it longer would fade a rectangle
-	// with nothing in it — worse than the cut, and decision 20's own reason for the snapshot. When the
-	// walk can draw from a snapshot the grace becomes the exit's whole length and this becomes the
-	// question of whether the picture was taken.
 	//
 	// A root with no reservation is cut here as it always was: decision 46 answers exhaustion with a
 	// window that cuts instead of fading, and a client that took its pixels away with nowhere to copy
@@ -1034,31 +1028,25 @@ private:
 		return held;
 	}
 
-	// Age every grace by one pass and end the ones that have had theirs.
+	// Forget the graces whose exits have ended, which is the whole of what ending one takes.
 	//
-	// **Called from the sweep and therefore before the walk**, which is what makes the count a count of
-	// *published* scenes rather than of steps: an entry armed while a client's requests were being read
-	// is marked here on the same pass, is published by the walk below, and is finished by the next
-	// sweep — so the one scene it was granted is a scene that actually crossed.
+	// **Nothing here cuts an exit short, and that is the change decision 20 was waiting for.** The
+	// grace used to be one published scene, because past that scene a window had a picture and no way
+	// to show it — and fading an empty rectangle is worse than cutting. `Frame/Evaluator.h` draws a
+	// closing window from its picture now, so what a grace holds open is simply the exit, and what ends
+	// it is the exit finishing: the fade settles, the sweep below frees the subtree, and this drops the
+	// entry on the pass after that.
+	//
+	// **Which is also what gives the buffer back**, one pass later still. Holding a client's pixels for
+	// the length of a fade is what decision 20 refuses to do — but what that entry refuses is a hold on
+	// a *live* client's buffer, which stalls a client that is still drawing. This surface has been
+	// destroyed; the buffer will never be attached again, and what is held is memory rather than
+	// anybody's ability to paint. It is also the floor under the whole arrangement: a machine whose
+	// renderer never takes the picture goes on drawing the window from its own pixels for the whole
+	// exit rather than from an empty rectangle.
 	void ExpireExitGrace() noexcept
 	{
-		std::erase_if(m_Grace, [this](Reprieved& held) {
-			if (Find(held.Root) == nullptr)
-			{
-				return true;
-			}
-
-			if (!held.Published)
-			{
-				held.Published = true;
-
-				return false;
-			}
-
-			static_cast<void>(FinishRetirement(held.Root));
-
-			return true;
-		});
+		std::erase_if(m_Grace, [this](const Reprieved& held) { return Find(held.Root) == nullptr; });
 	}
 
 	// The retirement roots, for the sweep that decides which of them have finished. `Scene/Serializer.h`
@@ -1438,10 +1426,6 @@ private:
 	{
 		EntityId Root;
 		TextureId Texture;
-
-		// Whether the scene this grace bought has been walked yet. Set by the first sweep that sees the
-		// entry, read by the second, which is what spends it.
-		bool Published = false;
 	};
 
 	std::vector<Reprieved> m_Grace;

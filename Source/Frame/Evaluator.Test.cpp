@@ -1973,3 +1973,179 @@ GYRO_TEST(Evaluator, AClosingWindowThatDeclaredAGroupDoesNotBakeItsShadowIntoThe
 	GYRO_CHECK(!list.Items[0].Lift.Draws());
 	GYRO_CHECK(list.Items[0].Opacity > 0.4F && list.Items[0].Opacity < 0.6F);
 }
+
+// Decision 20's whole purpose, arriving: once the copy exists, a closing window is one image drawn
+// from it and its subtree is not walked at all. That is what lets the exit go on after the client has
+// gone, and it is what makes the fade cost one quad a frame instead of the whole window.
+GYRO_TEST(Evaluator, AClosingWindowWithAPictureIsOneImageAndItsSubtreeIsNotWalked)
+{
+	Wire wire;
+
+	// The closing window has two nodes under it, and a window behind it that must still be drawn.
+	std::array nodes{
+		Container(2, 300.0, 200.0), Image(0, 300.0, 200.0), Image(1, 320.0, 220.0), Image(2, 800.0, 0.0)
+	};
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1), Texel(2), Texel(3) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	// Nothing pictured yet, so the frame that takes the copy walks the whole window.
+	const DrawList taking = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_REQUIRE_EQ(taking.Items.size(), std::size_t{ 3 });
+	GYRO_REQUIRE_EQ(taking.Captures.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(taking.Captures[0].Count, 2U);
+
+	// And once it has been taken, the window is the picture: one item for it, plus the window behind.
+	const std::array<std::uint32_t, 1> pictured{ 11 };
+
+	EvaluateRequest request = Frame(snapshot);
+	request.Pictured = pictured;
+
+	const DrawList list = evaluator.Evaluate(request);
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 2 });
+
+	const DrawTexture* const drawn = AsTexture(list.Items[0]);
+
+	GYRO_REQUIRE(drawn != nullptr);
+
+	// The atlas image, and the window's rectangle inside it.
+	GYRO_CHECK_EQ(drawn->Texture, TextureId{ 911, 1 });
+	GYRO_CHECK_EQ(drawn->Source.Origin.X, 0.0F);
+	GYRO_CHECK_EQ(drawn->Source.Extent.Width, 100.0F);
+	GYRO_CHECK_EQ(drawn->Source.Extent.Height, 60.0F);
+
+	// **Still reported, and that is not redundant.** `Frame/Capture.h` forgets a reservation the walk
+	// stops naming, so a window that dropped out of the list once its picture existed would have its
+	// rectangle handed back and taken again — the copy repeating for the whole fade.
+	GYRO_REQUIRE_EQ(list.Captures.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Captures[0].Reservation, 11U);
+	GYRO_CHECK_EQ(list.Captures[0].First, 0U);
+	GYRO_CHECK_EQ(list.Captures[0].Count, 1U);
+}
+
+// The picture was composited into the target's colour when it was taken, so drawing it back through a
+// conversion would put the window through the same transfer twice — a window changing colour at the
+// instant it starts to leave, which is the one moment somebody is certainly looking at it.
+GYRO_TEST(Evaluator, APictureIsDrawnBackInTheColourItWasTakenIn)
+{
+	Wire wire;
+
+	std::array nodes{ Image(0, 300.0, 200.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const std::array<std::uint32_t, 1> pictured{ 11 };
+
+	EvaluateRequest request = Frame(snapshot);
+	request.Pictured = pictured;
+	request.Target = ColorState::Composite();
+
+	const DrawList list = evaluator.Evaluate(request);
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Color, ColorState::Composite());
+}
+
+// The snapshot deliberately leaves the window's own shadow out, because a shadow is a height applied
+// to a rectangle rather than pixels. This is the other half of that: the frame drawing the picture
+// back casts it again, around wherever the exit has the window now.
+GYRO_TEST(Evaluator, AWindowDrawnFromItsPictureCastsTheShadowThePictureLeftOut)
+{
+	Wire wire;
+
+	std::array nodes{ Container(1, 300.0, 200.0), Image(0, 300.0, 200.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Lift = Elevation::Floating;
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const std::array<std::uint32_t, 1> pictured{ 11 };
+
+	EvaluateRequest request = Frame(snapshot);
+	request.Pictured = pictured;
+
+	const DrawList list = evaluator.Evaluate(request);
+
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK(list.Items[0].Lift.Draws());
+	GYRO_CHECK(AsTexture(list.Items[0]) != nullptr);
+}
+
+// A reservation this output has no pixels for is not this window's, and reading it as one would draw a
+// window out of whatever the atlas happens to hold there.
+GYRO_TEST(Evaluator, AWindowIsOnlyDrawnFromAPictureItsOwnReservationNames)
+{
+	Wire wire;
+
+	std::array nodes{ Container(1, 300.0, 200.0), Image(0, 300.0, 200.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	// Somebody else's rectangle, on the same screen.
+	const std::array<std::uint32_t, 1> pictured{ 12 };
+
+	EvaluateRequest request = Frame(snapshot);
+	request.Pictured = pictured;
+
+	const DrawList list = evaluator.Evaluate(request);
+
+	// Walked, not replayed: the one image under the container, drawn from the client's own pixels.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+
+	const DrawTexture* const drawn = AsTexture(list.Items[0]);
+
+	GYRO_REQUIRE(drawn != nullptr);
+	GYRO_CHECK_EQ(drawn->Texture, TextureId{ 1, 1 });
+}

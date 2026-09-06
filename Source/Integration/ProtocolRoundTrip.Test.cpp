@@ -2497,7 +2497,7 @@ GYRO_TEST(ProtocolRoundTrip, AClosingWindowGoesOnLeavingAfterTheClientHasStopped
 // copy of the last committed frame, outliving the client that drew it. Until it exists, a departure
 // with nothing to draw is cut rather than played out as an empty rectangle, which is decision 46's
 // answer to a shortfall reached one step earlier than that entry reaches for it.
-GYRO_TEST(ProtocolRoundTrip, AWindowWhoseClientTookItsPixelsKeepsTheOneSceneItsPictureComesFrom)
+GYRO_TEST(ProtocolRoundTrip, AWindowWhoseClientTookItsPixelsStillPlaysItsWholeExit)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
 
@@ -2555,23 +2555,31 @@ GYRO_TEST(ProtocolRoundTrip, AWindowWhoseClientTookItsPixelsKeepsTheOneSceneItsP
 
 	SceneSerializer serializer;
 
-	// The pass that publishes the scene the picture is taken from. It spends the grace rather than
-	// ending it, so the window is still here and still leaving.
-	static_cast<void>(serializer.Serialize(pair.Store));
+	// The scene the picture is taken from, and then more of them: the exit runs its whole length, which
+	// is what a person sees as the window shrinking and fading out rather than blinking away.
+	for (int pass = 0; pass < 4; ++pass)
+	{
+		static_cast<void>(serializer.Serialize(pair.Store));
 
-	GYRO_REQUIRE(WindowNode(pair.Store) != nullptr);
-	GYRO_CHECK(WindowNode(pair.Store)->Retiring);
+		GYRO_REQUIRE(WindowNode(pair.Store) != nullptr);
+		GYRO_CHECK(WindowNode(pair.Store)->Retiring);
+		GYRO_CHECK_EQ(pair.Textures.Retired, std::uint32_t{ 0 });
 
-	// The pass after it, where the grace is spent: the exit ends where it was going rather than
-	// snapping back, the subtree is freed, and the window is gone. That is still a cut — nothing draws
-	// from a snapshot yet — but it is a cut one scene later than it was, and that scene is the one the
-	// picture comes out of.
+		pair.Clock.Advance(std::chrono::milliseconds{ 16 });
+	}
+
+	// It ends where every exit ends: the fade settles, the sweep frees the subtree, and the window is
+	// gone — having been drawn the whole way down rather than cut on the frame its client went away.
+	pair.Clock.Advance(std::chrono::seconds{ 2 });
+
 	static_cast<void>(serializer.Serialize(pair.Store));
 
 	GYRO_CHECK(WindowNode(pair.Store) == nullptr);
 
 	// **And now the pixels go back.** `HostContext` gives up what it was holding on the first step
-	// after the scene that stopped naming it, which is this one.
+	// after the scene that stopped naming it.
+	static_cast<void>(serializer.Serialize(pair.Store));
+
 	pair.Turn();
 
 	GYRO_CHECK_EQ(pair.Textures.Retired, std::uint32_t{ 1 });

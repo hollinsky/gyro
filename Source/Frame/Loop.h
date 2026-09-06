@@ -1238,6 +1238,8 @@ private:
 		      .Outputs = m_Outputs.size(),
 		      .Resolution = output.m_Configuration.Resolution,
 		      .Presentation = decision.Presentation,
+		      .Pictured = m_Captures.Held(index),
+		      .Target = output.m_Configuration.Color,
 		      .Mode = decision.Mode() }
 		);
 

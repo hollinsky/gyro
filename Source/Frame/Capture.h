@@ -104,6 +104,22 @@ public:
 		return output < m_Filled.size() && m_Filled[output].Holds(reservation);
 	}
 
+	// Everything this output has pixels for, handed to the walk so that a closing window whose picture
+	// exists is drawn from it instead of from the surface it no longer has.
+	//
+	// **A span into this object rather than a question asked per node**, because the walk is inside a
+	// frame section and the answer cannot change while it runs: the proposal that fills this is made
+	// from the list the walk produces, so nothing is added to it until the walk is over.
+	[[nodiscard]] std::span<const std::uint32_t> Held(std::size_t output) const noexcept
+	{
+		if (output >= m_Filled.size())
+		{
+			return {};
+		}
+
+		return { m_Filled[output].Reservations.data(), m_Filled[output].Count };
+	}
+
 private:
 	// What one output has already drawn. A fixed run scanned linearly, which is shorter than an index
 	// would be: the retiring set is a handful by construction (46), and this is asked once per exit

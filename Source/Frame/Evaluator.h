@@ -165,6 +165,28 @@ struct EvaluateRequest
 	// because there is no global clock to make it anything else.
 	Instant Presentation{};
 
+	// The reservations this output already has pixels for, from `Frame/Capture.h`. A closing window
+	// named here is drawn *from* its picture and its subtree is not walked at all.
+	//
+	// **It has to arrive rather than be asked for, because the walk is what decides the question.** The
+	// memory of what has been drawn is the frame thread's and lives one level up (46), and the walk
+	// runs before the proposal that would fill it — so by the time anything could be asked, the list
+	// this is about has already been built. A handful of integers, scanned linearly, for the same
+	// reason the memory itself is a run: the retiring set is small by construction.
+	//
+	// Empty is every frame before a window closes, and the frame that takes each picture.
+	std::span<const std::uint32_t> Pictured{};
+
+	// The colour the composite is being drawn in, which is `IRenderer::BindTargets`' own argument.
+	//
+	// **Only a snapshot needs it, and it needs it to say that nothing is owed.** Every other item
+	// carries the colour its client tagged its pixels with and the renderer converts on the way to the
+	// target; a snapshot was composited *into* the target's colour when its picture was taken, so
+	// drawing it back through a conversion would put a window through the same transfer twice — a
+	// closing window changing colour on the frame the fade begins, which is the one frame a person is
+	// certain to be looking at it.
+	ColorState Target = ColorState::Srgb();
+
 	// Which composite is about to be recorded. The walk does not read it and decision 94 is why: the
 	// floor tier is a cheaper shader over the same items, so the same tree is traversed and the same
 	// springs are evaluated whichever verdict came back. It is here because an evaluator that ever
@@ -641,6 +663,21 @@ private:
 		// immediately for a window with nothing under it.
 		const ExitCapture pending = Reserved(node, index, chain, view, runs.Exits, request.Output, m_Count);
 
+		// **The picture exists, so this window is one image and its subtree is not walked.** Decision 20
+		// draws a window leaving the screen from its own copy of its last frame, and this is the frame
+		// that copy is finally for: the client's buffers are gone, its subsurfaces may be gone, and what
+		// is left is a rectangle of the atlas and wherever the exit has moved the window to since. It is
+		// also what makes the exit cost nothing — a fade that re-walked and re-drew a whole window every
+		// frame would be at its most expensive exactly while a person was watching it leave.
+		//
+		// **Before the group and before the dressing**, because both are already in the picture: a
+		// group's flattening is what the copy was taken of, and a material was drawn into it. Emitting
+		// either again would put it on twice.
+		if (Pictured(request.Pictured, pending.Reservation))
+		{
+			return Replay(pending, node, chain, view, own, lift, request.Target);
+		}
+
 		// **And the picture stops at the window, so its own shadow is not drawn into it.** The slot is
 		// the window's rectangle and nothing more, so a shadow emitted here would be scissored off at
 		// the window's edges — but squaring it off is not what is wanted either. A shadow is not the
@@ -901,6 +938,109 @@ private:
 		// other item's do. It is device-sized because a flattened subtree has no surface behind it —
 		// the members' projections are already baked into the bound this is the size of.
 		m_Items[item].Extent = { bounded ? bounds.Extent.Width : 0.0F, bounded ? bounds.Extent.Height : 0.0F };
+	}
+
+	// Whether this output has already drawn the picture behind that reservation. Linear over a handful
+	// (46), and false for the zero a node with no snapshot carries.
+	[[nodiscard]] static bool Pictured(std::span<const std::uint32_t> pictured, std::uint32_t reservation) noexcept
+	{
+		if (reservation == 0)
+		{
+			return false;
+		}
+
+		for (const std::uint32_t held : pictured)
+		{
+			if (held == reservation)
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	// Draw a closing window from its picture: one image, the whole window, at wherever the exit has it
+	// now.
+	//
+	// **The quad is the node's own and is asked for again rather than reused**, which is the whole
+	// point of drawing this per frame instead of once. The rectangle in the atlas is fixed — it was
+	// measured when the window retired — and this quad is not: it is where the exit's scale and the
+	// window's transform put the window on *this* frame, so the picture follows the animation the way
+	// the live window would have.
+	//
+	// **The shadow is cast here rather than being in the picture**, which is the other half of what the
+	// snapshot deliberately left out: a shadow is this height applied to this quad, and the quad is the
+	// one above. Casting it fresh is what keeps decision 105's promise that a shadow animates with its
+	// window instead of being an image that scales along with it.
+	//
+	// **The record is still filed, and a filed record is what keeps the reservation.** `Frame/Capture.h`
+	// forgets a reservation the walk stops naming, so a window that dropped out of the list the frame
+	// after its picture was taken would have its rectangle handed back and then taken again — the copy
+	// repeating for the length of the fade, which is the one thing that memory exists to stop.
+	[[nodiscard]] bool Replay(
+		const ExitCapture& pending,
+		const Node& node,
+		const ComposedTransform& chain,
+		const OutputView& view,
+		float opacity,
+		Shadow lift,
+		ColorState target
+	)
+	{
+		const std::optional<Quad> quad = view.Project(chain, node.Extent);
+
+		// Off the target, behind the viewer, or turned away — the same absence every other node answers
+		// with, and a window that is not on this screen owes no items here. The record is not filed
+		// either, which is correct: `Frame/Capture.h` reads the run as *what is still leaving on this
+		// output*, and this is not.
+		if (!quad)
+		{
+			return true;
+		}
+
+		DrawItem item{};
+
+		item.Shape = *quad;
+		item.Extent = node.Extent;
+		item.Opacity = opacity;
+		item.Lift = lift;
+		item.Color = target;
+		const Rect<BufferSpace> texels = Texels(pending.Slot);
+
+		item.Content = DrawTexture{ .Texture = pending.Into, .Source = texels };
+
+		// **Classified per frame like every other image, and the answer changes during the exit.** The
+		// picture was written at this output's density, so on the frame the fade begins it maps to the
+		// screen one texel to one pixel and is drawn sharp; a frame later the exit has scaled the window
+		// and it does not. Asking the same question the live window was asked is what makes the swap to
+		// the snapshot invisible — a window that changed sharpness at the instant it started to leave
+		// would read as a flicker, and it is the one moment a person is certainly watching it.
+		item.Sampling = Classify(chain, node.Extent, texels);
+
+		const std::uint32_t at = Emit(item);
+
+		if (at == NoItem)
+		{
+			return false;
+		}
+
+		Accumulate(quad->Bounds());
+
+		ExitCapture filed = pending;
+		filed.First = at;
+
+		File(filed);
+
+		return true;
+	}
+
+	// An atlas rectangle as the texels a sampler reads, which is the same rectangle said in the type
+	// the draw list carries source rectangles in.
+	[[nodiscard]] static Rect<BufferSpace> Texels(PixelRect<BufferSpace> slot) noexcept
+	{
+		return { { static_cast<float>(slot.Origin.X), static_cast<float>(slot.Origin.Y) },
+			     { static_cast<float>(slot.Extent.Width), static_cast<float>(slot.Extent.Height) } };
 	}
 
 	// The snapshot a node is closing under on this output, opened at the item it is about to emit.
