@@ -13,6 +13,7 @@
 #include "Core/Session.h"
 #include "Core/SlotAllocator.h"
 #include "Core/Time.h"
+#include "Core/Trace.h"
 #include "Scene/Atlas.h"
 #include "Scene/Entity.h"
 #include "Scene/Focus.h"
@@ -1013,12 +1014,22 @@ private:
 				continue;
 			}
 
+			// **The second mark, and the one that names the moment an exit dies of its client rather than
+			// of its animation.** A window that reaches here with no rectangle is hard-settled on the
+			// spot, so its fade ends in the same step it began and no published scene ever carries a
+			// frame of it — which on screen is a window that vanishes, and in every row of the trace is
+			// a window that was never there. Read against `exit reserved` a moment earlier, the pair
+			// says whether the reservation was refused or whether the client simply arrived first.
 			if (!m_Atlases.Holds(root))
 			{
+				TraceMark("exit cut", TraceThread, TraceTag(root.Index));
+
 				static_cast<void>(FinishRetirement(root));
 
 				continue;
 			}
+
+			TraceMark("exit reprieved", TraceThread, TraceTag(root.Index));
 
 			Reprieve(root, texture);
 

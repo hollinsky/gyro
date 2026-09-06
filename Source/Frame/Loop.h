@@ -1566,6 +1566,18 @@ private:
 			// `Frame/Capture.h` — and on the renderer's own count rather than on what was offered.
 			m_Captures.Landed(submission->Captured);
 
+			// **The fourth mark, and the one the other three cannot stand in for: what the renderer
+			// actually took.** `captures` above says what this frame offered, and a renderer with no
+			// snapshot path — `Blit`, today — accepts none of them without failing anything, so the walk
+			// goes on proposing and `Held` stays empty and the window is never drawn from its picture.
+			// That is a fade that works on one backend and not on another, which is the shape a person
+			// debugging this would otherwise chase through both. On an output's own row rather than the
+			// thread's, because whether a picture exists is a fact about one screen's atlas.
+			if (!captures.empty() && submission->Captured == 0)
+			{
+				TraceMark("captures refused", output.m_Trace, TraceTag(captures.size()));
+			}
+
 			// What the record produced, filled into the layer the test was run against rather than a second
 			// one built here: committing a partition assembled differently from the one the hardware accepted
 			// asks a different question of it.

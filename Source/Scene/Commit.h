@@ -10,6 +10,7 @@
 #include "Core/Handle.h"
 #include "Core/Texture.h"
 #include "Core/Time.h"
+#include "Core/Trace.h"
 #include "Geometry/NodeTransform.h"
 #include "Geometry/Shape.h"
 #include "Geometry/Space.h"
@@ -351,10 +352,22 @@ public:
 		// `Abandon` below already does when a client takes them away.
 		const Coverage cover = Cover(*m_Scene, id);
 
-		if (cover.Reachable)
+		// **The first of the four marks an exit that never appeared is diagnosed by, and the only one
+		// that can say *nothing was ever going to be drawn*.** A refusal is silent by design — the line
+		// above discards the result and the paragraph above that says why it is allowed to — so a window
+		// that cuts instead of fading looks identical here to one that faded correctly. The mark is what
+		// separates them, and it is on the dispatch thread's own row because a retirement is one event
+		// about one window rather than something that happened to a screen.
+		if (!cover.Reachable)
 		{
-			static_cast<void>(m_Scene->ReserveExit(id, ReachOf(cover, m_Scene->Outputs()), cover.Bounds));
+			TraceMark("exit unreachable", TraceThread, TraceTag(id.Index));
+
+			return true;
 		}
+
+		const bool reserved = m_Scene->ReserveExit(id, ReachOf(cover, m_Scene->Outputs()), cover.Bounds);
+
+		TraceMark(reserved ? "exit reserved" : "exit unreserved", TraceThread, TraceTag(id.Index));
 
 		return true;
 	}

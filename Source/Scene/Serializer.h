@@ -10,6 +10,7 @@
 #include "Animation/Solve/Spring.h"
 #include "Core/Session.h"
 #include "Core/Time.h"
+#include "Core/Trace.h"
 #include "Core/Wake.h"
 #include "Geometry/AxisTransform.h"
 #include "Geometry/NodeTransform.h"
@@ -248,8 +249,23 @@ private:
 		// Collected first and destroyed second, because destroying is what edits the list being iterated.
 		for (const EntityId root : m_Dead)
 		{
+			// **The third mark: the pass an exit ends on, which is the pass that says how long it ran.**
+			// The two marks upstream say a window was allowed to leave slowly; this one says how many
+			// scenes it actually got, because the reader can count the publications between the
+			// reservation and this. An exit that reads as a fade a person can see is tens of them, and
+			// the failure this is here to catch is the one that reads as one or two — a spring that was
+			// already inside its threshold when it was authored, which is invisible in a picture and
+			// obvious as two marks a millisecond apart.
+			TraceMark("exit ended", TraceThread, TraceTag(root.Index));
+
 			[[maybe_unused]] const bool destroyed = store.Destroy(root);
 		}
+
+		// What the scene about to be built still carries out of the exits in flight, sampled every pass
+		// rather than only where it changes: a counter that steps is the shape a reader can see a fade's
+		// whole length in, and one written only on the edges would draw the same picture for an exit that
+		// lasted a second and one that lasted a frame.
+		TraceCount("retiring", static_cast<std::int64_t>(store.RetiringRoots().size()));
 	}
 
 	// Whether every channel of every entity in this subtree has settled. One still moving keeps the whole
