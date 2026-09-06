@@ -1222,6 +1222,43 @@ add_custom_target(Portability ALL
 )
 
 # The module graph, flattened to "Name=Dep,Dep|Name=Dep,Dep" because a -P script takes no maps.
+# gyro's shell, and the third binary this project ships.
+#
+# **Not PORTABLE, and the reason is what a shell is rather than what it happens to include.** It is a
+# Wayland client on Linux: `memfd_create` is how its pixels reach the compositor, and xkbcommon is how
+# the keymap gyro sends it becomes the character a person typed. A shell that ran on a machine with
+# neither would be a shell with no compositor to talk to.
+#
+# No DISPATCH. The dispatch and frame halves are the compositor's two threads and this is a different
+# process, so neither keyword has anything to say about it — declaring one would claim a partition
+# that does not exist here.
+#
+# It DEPENDS on `Wire` for the client codec and `Text` for the glyphs, which is decision 2's split
+# seen from the far end: gyro wrote a client codec for the nested backend, and the shell is the second
+# caller it always implied.
+gyro_add_module(Shell
+	DEPENDS
+		Core
+		Geometry
+		Text
+		Wire
+	SOURCES
+		Bar.cpp
+		Canvas.cpp
+		Session.cpp
+)
+
+# The generated client bindings, xkbcommon for the layout, and spdlog for the handful of lines that
+# say which socket the shell reached and at what size. PUBLIC on the bindings because the module's
+# headers name `Wayland::` types: a bar holds proxies.
+target_link_libraries(Shell
+	PUBLIC
+		WaylandProtocols
+	PRIVATE
+		PkgConfig::xkbcommon
+		spdlog::spdlog
+)
+
 get_property(GYRO_MODULES GLOBAL PROPERTY GYRO_MODULES)
 set(GYRO_MODULE_GRAPH "")
 foreach(MODULE IN LISTS GYRO_MODULES)
@@ -1297,6 +1334,16 @@ target_link_libraries(gyro-session
 	PRIVATE
 		Core
 		Session
+		spdlog::spdlog
+)
+
+add_executable(gyro-shell
+	Source/Shell/Main.cpp
+)
+target_link_libraries(gyro-shell
+	PRIVATE
+		Core
+		Shell
 		spdlog::spdlog
 )
 
