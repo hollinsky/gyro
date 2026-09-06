@@ -35,9 +35,18 @@ constexpr std::uint32_t SummonKeysym = XKB_KEY_space;
 
 int main(int argument, char** arguments)
 {
+	bool summon = false;
+
 	for (int index = 1; index < argument; ++index)
 	{
 		const std::string_view option{ arguments[index] };
+
+		if (option == "--summon")
+		{
+			summon = true;
+
+			continue;
+		}
 
 		if (option == "--verbose")
 		{
@@ -69,6 +78,11 @@ int main(int argument, char** arguments)
 		spdlog::error("gyro-shell: {}", opened.error());
 
 		return EXIT_FAILURE;
+	}
+
+	if (summon)
+	{
+		bar.Summon();
 	}
 
 	spdlog::info("gyro-shell: ready, super and space");

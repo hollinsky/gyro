@@ -47,6 +47,13 @@ public:
 	// keyboard. Nothing is on screen when this returns: the bar is summoned rather than started.
 	[[nodiscard]] Result<void> Open(Session& session, std::uint32_t modifiers, std::uint32_t keysym);
 
+	// Brings the bar up as though the chord had been pressed.
+	//
+	// **For the machine where the chord cannot be pressed**, which is every headless and dumping run:
+	// those backends have no keyboard, so without this there is no way to put the bar in front of a
+	// renderer at all and the only instrument for the surface is a panel and a hand.
+	void Summon() { Show(); }
+
 	// Whether the bar is on screen, which is what the loop reports and what a test would assert.
 	[[nodiscard]] bool Shown() const noexcept { return m_Shown; }
 
