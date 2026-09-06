@@ -3605,9 +3605,7 @@ excellent and macOS does it — and it would put user-controlled pixels on a scr
 photograph of a convincing password field.
 [Decision 43](#43-lock-and-greeter-are-one-ui-locking-is-an-output-reassignment) buys structural
 anti-spoofing by ensuring a locked session is not composited at all, and this would reopen it
-through a side door. After authentication the question dissolves: the lock screen shows the
-wallpaper of the user who locked it, which is the uid that supplied it, and nobody can phish
-themselves.
+through a side door.
 
 That restriction costs a nicety and returns something larger. Decision 43 records "the locked screen
 cannot show user-owned content" as an accepted cost, because the greeter is a different uid and
@@ -3616,6 +3614,21 @@ without weakening the property — gyro composites the image and the greeter nev
 most visible piece of *this is my machine* returns as a consequence of the isolation rather than as
 an exception to it. Notifications and media controls stay out of scope for the reasons already given
 there.
+
+**The lock half of that is withdrawn, and what it leaves behind is a simpler rule rather than a
+worse one.** *(Revised 2026-09-05, with decision 43's revision of the same date.)* The two paragraphs
+above end by saying the question dissolves after authentication, because the lock screen shows the
+wallpaper of the uid that supplied it. Decision 43 no longer does: a locked output shows the
+*system's* background, so there is no user-attributed image on a locked screen for the rule to have
+to permit. The restriction above is therefore no longer an exception with a carve-out at the end of
+it — it is simply true, at login and at lock alike, and the whole of what it now says is that gyro
+does not put an arbitrary user's picture on a screen somebody else may type a password into.
+
+**What is left needing an answer is the keying**, which was justified by the lock case and is now
+justified by login alone: the background this decision has gyro persist is one image, and *per uid*
+is a claim that the login gate below needs a different one per user before their shell has spoken.
+That is a real question with a small blast radius, and it is [open](Open.md) rather than settled by
+the withdrawal.
 
 #### An output is not reassigned until the incoming session's shell has presented
 
@@ -6630,6 +6643,29 @@ isolation; it works precisely because gyro, not the greeter, is the party that a
 pixels. The same decision refuses the neighbouring move — compositing a user's background before
 that user has authenticated — for the reason this decision exists.
 
+**What a locked output shows is the *system* background, and the exception above dissolves rather
+than being kept.** *(Revised 2026-09-05.)* The paragraph above is an exception carved into an
+isolation rule, and an exception is a thing that has to be re-defended at every future edit by
+somebody who was not there. Saying instead that the background behind a locked screen is the
+machine's — the same one that is behind the greeter, behind the recovery console, and on screen
+between one session and the next — removes it. There is then no user-owned pixel on a locked screen
+at all, the cost this decision accepts becomes *total* rather than nearly total, and an absolute rule
+turns out to be cheaper to keep than a good rule with a hole in it.
+
+**What it gives up is a promise rather than a picture, and the picture mostly comes back by ordinary
+means.** gyro holds one background and it is the system's; whether that background *follows the last
+person to log in* is a question about the shell design and not about this decision. If it does, a
+locked screen shows the wallpaper of the person who locked it again — with no per-uid cache, no rule
+about authentication, and no exception anywhere in the argument. What is genuinely surrendered is the
+guarantee: [Experience.md](Experience.md#the-machine-holds-several-people) promised your own
+background on your own lock screen and now promises that a locked machine is not an anonymous slab,
+which is the weaker and the honest sentence.
+
+**It also takes the per-uid keying off this path.** Decision 51 keys the persisted copy by uid and
+this decision was its only stated consumer, so the keying now has to be justified by the login case
+or dropped. That is decision 51's question and [Open.md](Open.md)'s, not this one's — nothing about
+locking depends on which way it goes, which is the point of moving it.
+
 The designed answer, **not built initially**, is a **lock-screen content surface**: a locked session
 may present one non-interactive surface, which gyro composites below the greeter's UI on the output
 that session was locked out of. It works because the privacy decision ("hide previews when locked")
@@ -6647,10 +6683,15 @@ Decision 25 already says gyro owns lock state and not lock UI; that is now load-
 tidy.
 
 **And a locked output is never blank.** *(Amended 2026-08-16; this entry previously said the output
-stays black across a respawn.)* Decision 51 gives gyro the background and a persisted copy per uid,
-so the locked state gyro composites is available with no client running — locking is immediate, the
-greeter's UI arrives over the wallpaper when it is ready, and a greeter crash costs the password
-prompt rather than the picture. Decision 51's session-ready gate does **not** apply to lock: waiting
+stays black across a respawn. Amended again 2026-09-05: the background is the system's rather than a
+copy held per uid, per the revision above.)* Decision 51 gives gyro the background, so the locked
+state gyro composites is available with no client running — locking is immediate, the greeter's UI
+arrives over the wallpaper when it is ready, and a greeter crash costs the password prompt rather
+than the picture. It is available with nothing *authored*, too, which is what makes it free rather
+than cheap: [Scene/Background.h](../Source/Scene/Background.h) is a `SessionId::None` root and
+gyro's own roots draw on every output whatever session it is showing, so what an outgoing session
+fades away to reveal is already there. Decision 51's session-ready gate does **not** apply to lock:
+waiting
 for the greeter would hold the outgoing session's pixels on a screen that is supposed to be locked,
 which is the failure decision 59 exists to prevent, at a seam that recurs many times a day rather
 than once. **Lock is the one output reassignment that may not wait.**
@@ -6659,6 +6700,13 @@ The general form is worth stating, because the first reading of this went the ot
 between isolation and the experience is a defect in the architecture, not a trade to be settled by
 ranking them. Here the second look found that gyro already held the pixels, and the conflict was
 never real. See [Experience.md](Experience.md#the-six-promises).
+
+[Decision 188](#188-a-session-transition-is-a-live-cross-fade-the-output-owns-and-the-cut-is-its-absence)
+later says what the reassignment *is* while it is happening: both sessions composited live, with the
+outgoing one's opacity a coefficient on the output. That sharpens this entry rather than changing it,
+and it carries the three properties — monotone, time-bounded, and unreachable by any client — that
+keep the anti-spoofing argument true across an interval in which the locked session is briefly still
+on screen.
 
 **Rejected: `ext-session-lock-v1` 's model**, with the lock surface as a client of the locked
 session. It is the ecosystem-standard approach and it solves the notification problem for free. It
@@ -14833,3 +14881,164 @@ refuses a shadow for the same reason it refuses a material.
 surface is under the pointer wherever it is*. A launcher does not need either — it takes the keyboard
 by mapping, like a window — and an overview that dims the desktop will, which is the request that
 should bring the version bump.
+
+### 188. A session transition is a live cross-fade the output owns, and the cut is its absence
+
+*(Decided 2026-09-05, answering [Open.md](Open.md)'s "Whether session switch and lock want
+output-sized snapshots" and completing
+[decision 43](#43-lock-and-greeter-are-one-ui-locking-is-an-output-reassignment), which made locking
+an output reassignment and never said what a reassignment looks like while it is happening.)*
+
+**An output moving from one session to another composites both, live, for the length of the
+transition. The outgoing session's opacity is a coefficient on the *output* rather than on either
+session, and a reassignment carrying no coefficient is the cut — which is what suspend takes and
+what every reassignment does today.**
+
+#### The incoming side is live in every design, so a snapshot is a second mechanism
+
+This is the argument that settles it, and it is not the frozen video. At unlock the session being
+returned to has been running the whole time; at a fast user switch both sides are. A snapshot can
+only ever stand in for the *outgoing* half, because there is no photograph of a frame nobody has
+drawn. So a design that snapshots one side and composites the other has two mechanisms for one
+transition, with the join between them at whichever end of the fade a person happens to be looking
+at. Live on both sides is one mechanism, and it is the same one for lock, unlock, login and user
+switch.
+
+The frozen video is the second argument and it belongs to the person rather than to the code. A
+laptop locked with something playing freezes for the length of the fade under a snapshot, at the one
+moment [Experience.md](Experience.md#one-continuous-image) promises the smoothest thing on the
+machine.
+
+#### The cost has two answers already and does not need a third
+
+Open.md's objection was a second output's worth of `C` for the length of the transition, on the
+budget [decision 29](#29-outputs-are-periodic-real-time-tasks-the-test-allocates-effect-budget)
+defends. The cost is real; what the entry missed is that a shortfall here is not a new problem with
+a new answer. `Admit` returns a degraded plan and never a refusal, rung 2 of
+[decision 30](#30-budget-shortfalls-are-answered-by-spending-less-chunking-and-early-rendering-are-contingencies)'s
+ladder reduces an output's allocation, and
+[decision 34](#34-effect-quality-is-a-tier-gyro-chooses-and-the-floor-tier-is-the-recovery-path)
+spends that as a quality tier step. Beside it,
+[decision 46](#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)
+answers exhaustion by hard-settling springs so older transitions finish early. So a lock on a machine
+that cannot afford the fade gives up blur first and the tail of the fade second, and both are
+mechanisms that already exist and are already the answer to this question one radius in. A transition
+that ends early reads as speed; a transition that freezes reads as breakage. That is decision 30's
+sentence and it applies here unchanged.
+
+The snapshot was never free either, and every one of its costs lands somewhere worse: an
+output-sized read-back and an output-sized allocation demanded at the instant the machine is
+busiest, a capture frame of latency in front of a transition decision 43 says may not wait, and a
+storage scheme Open.md's own entry suspected would not fit the exit atlas.
+
+**And the peak is not the doubling it looks like.** `C` is a property of what is on screen rather
+than of how many sessions are on it, and the greeter is a background and a password field. Lock and
+unlock are the transitions that happen many times a day and they are the cheap ones. A switch between
+two loaded desktops is the expensive one and is rare, which is the right way round.
+
+#### The transition belongs to the output
+
+Decision 21 says an output is assigned to at most one session at a time, and the transition is
+exactly the interval in which that is false — so it cannot be a property of either session, and it
+cannot be a property of a session at all, since a session is shown on several outputs and a switch
+need not move them together.
+
+So `SceneOutput` carries an outgoing session beside the one it is showing, and one opacity
+coefficient. In the frame walk that is one comparison and one multiply:
+[Frame/Evaluator.h](../Source/Frame/Evaluator.h) already gates a root on whether its session matches
+the output's and already carries an inherited opacity down the tree, so an outgoing root enters the
+walk at the fade's value instead of at 1. On the wire the per-output `Sessions` run becomes a pair
+and a coefficient index; decision 84's length rule and the all-`None` default that means *an
+unpartitioned scene* both stand as written.
+
+**Written now rather than when the greeter exists**, which is decision 69's rule about changing a
+type while it still has one caller: this run has one writer and one reader, and a snapshot layout is
+the class of thing that is free at line zero and a migration afterwards.
+
+The coefficient is a **compositor-owned animatable** rather than a node's, which is the shape
+[Architecture.md](Architecture.md#the-ladder) already anticipates for the idle dim ramp — one
+channel gyro authors for itself, moving under the catalog, belonging to no client. This is its
+second occupant rather than a new idea.
+
+#### There is no lock state machine, and the two questions that looked like one are separate
+
+**Immediate against animated is not a new axis.** The store already separates an immediate write from
+a sprung one and already uses it twice — [Scene/Cursor.h](../Source/Scene/Cursor.h) writes the
+pointer glyph immediately every dispatch iteration, and [Protocol/Drag.h](../Source/Protocol/Drag.h)
+writes a dragged window's position immediately rather than sprung. So suspend writes the endpoint and
+the chord retargets a spring. The cut is the base case and the fade is the one carrying a
+coefficient, and nothing anywhere has to record which kind of transition this is.
+
+***Lock requested* against *locked* is a real distinction that belongs to
+[decision 59](#59-suspend-is-a-handshake-on-the-control-connection-resume-is-a-modeset)'s suspend
+handshake rather than to the world.** What that handshake needs is the locked state **presented**
+rather than entered, and that is a question asked of the return channel:
+[Publication/Return.h](../Source/Publication/Return.h) carries the published sequence that reached
+the glass per output and [Scene/Return.h](../Source/Scene/Return.h) already drains it, so the
+acknowledgement waits for a report naming the sequence that carried the reassignment. Observed rather
+than asserted, which is the difference between a fact and a flag somebody has to remember to clear —
+and the flag is the one that fails silently, since a lock that believes itself presented and is not
+is decision 59's whole failure mode.
+
+**What does need a bit is smaller than either, and it is a refusal rather than a state:** an output
+showing a locked session may not be reassigned except by the party entitled to unlock it. Without
+one, `ShowSession` in the composition root hands every output showing nobody to the next session that
+connects, so a fresh login walks onto a locked screen.
+
+#### What a session can be reached by follows from which outputs show it
+
+Decision 43's isolation is a claim about input as much as about pixels, and today it is false in a
+place that has nothing to do with locking: [Scene/Hit.h](../Source/Scene/Hit.h) walks every root
+whatever session the output is showing, and [Scene/Focus.h](../Source/Scene/Focus.h) is one stack for
+the machine. Two connected sessions are therefore two sets of windows that can both catch a click and
+both hold the keyboard, which is
+[Experience.md](Experience.md#the-machine-holds-several-people)'s *no arrangement in which one person
+types a password into another person's window* not being kept.
+
+**The rule is that a session is reachable exactly where it is presented.** The hit test enters a root
+only where that root's session is the output's or is gyro's own, and the focus stack skips entries
+whose session is shown on no output at all. That is not lock work and it is not a new mechanism — it
+is the gate `Frame/Evaluator.h` already applies to drawing, applied to the other two things a root
+can be on the receiving end of. It has to land *before* the lock verb, because a lock that reassigns
+the outputs and leaves the keyboard where it was is a lock in name.
+
+The fade does not complicate it. Input follows the session the output is *moving to*, from the
+instant the transition is authored rather than when it settles — otherwise the first characters of a
+password land in the terminal a person was just using.
+
+#### Decision 43's anti-spoofing property survives, and why is worth stating
+
+That argument is about the locked *steady state*: a locked output has been assigned elsewhere and the
+user's session is not composited at all, so a malicious client cannot draw a false prompt because it
+cannot draw. A cross-fade composites it, briefly, which looks like a hole in that argument and is not
+one — but only because of three properties that have to be kept deliberately.
+
+The fade is **monotone**, so the outgoing session's contribution only ever falls. It is
+**time-bounded** by the catalog rather than by anything a client says. And the coefficient is
+authored by the composition root on a channel no protocol reaches, so a client cannot start a
+transition, extend one, re-enter one, or push the opacity back up. Under those three the transition
+is a *departure* from a screen the person is already looking at, toward a prompt that has not arrived
+— rather than an interval in which a client gets to paint next to one. What must never be built is a
+transition a client can influence, which is decision 43's sentence one layer down.
+
+#### Rejected
+
+**Rejected: the output-sized snapshot**, which is Open.md's entry as it was written and the position
+this entry was expected to confirm. It buys bounded cost and pays with a freeze at the moment of
+most attention, an allocation and a read-back at the moment of least headroom, and a second
+mechanism for the half of the transition it cannot cover.
+
+**Rejected: a lock state enum on the session.** `Unlocked`, `Locking`, `Locked` reads well, and every
+value in it is answerable from something that already exists — which is decision 16's *derived, never
+maintained* being the test rather than a preference. The value that looks least derivable, *has the
+locked frame been seen*, is precisely the one the return channel answers exactly.
+
+**Rejected: an opacity per session rather than per output.** One number instead of one per output,
+and it is wrong the first time somebody with two monitors switches user on one of them — both
+screens fade and one of them was not asked to.
+
+**Rejected: compositing the outgoing session into an offscreen and fading that.** It is the middle
+position: live, so nothing freezes, and bounded, since the fade then samples one image. It costs an
+offscreen the size of the output and a full-screen sample per frame to save the difference between
+compositing a settled scene and compositing it under an opacity — which is not where the cost is.
+The blur is what is expensive, and this pays for the blur anyway.

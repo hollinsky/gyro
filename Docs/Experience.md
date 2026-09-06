@@ -105,11 +105,12 @@ whole boot is one picture that starts as the manufacturer's logo and becomes a l
 arrives over it. It does not go through an intermediate blank, and the desktop does not assemble in
 visible stages — panel, then wallpaper, then windows. Three beats become one.
 
-**Locking.** Locking is immediate and never waits for anything. The screen becomes your own
+**Locking.** Locking is immediate and never waits for anything. The screen becomes the system's own
 background at once, and whatever asks for your password arrives over it — the same way your desktop
-arrives over that background at login. It does not blank first, it is not delayed by anything
-starting up, and it does not stop being locked or stop being drawn if the thing asking for the
-password dies.
+arrives over that background at login. What you were doing goes on running as it leaves, so a film
+playing when you lock does not freeze on its way off the screen. It does not blank first, it is not
+delayed by anything starting up, and it does not stop being locked or stop being drawn if the thing
+asking for the password dies.
 
 **Suspend and resume.** The machine goes to sleep already showing the locked screen, so it wakes
 showing the locked screen. There is no moment on waking where the desktop is readable by whoever
@@ -292,9 +293,11 @@ arrangement in which one person types a password into another person's window.
 a locked machine, because on a locked machine it is not drawing at all. This is a property of the
 system rather than a rule the system tries to enforce.
 
-**A locked machine still shows you it is yours.** The background is your own, so the lock screen is
-not an anonymous slab — and that is true without any part of your session being visible to whatever
-is asking for the password.
+**A locked machine is not an anonymous slab.** The system's own background is behind the lock screen,
+as it is behind the greeter and behind the recovery console, so a locked machine looks like a machine
+rather than like a black screen with a box on it. Nothing of your session is behind it — that is the
+point of it rather than a shortcoming, and it is what makes the promise above hold without an
+exception in it.
 
 **Locking one screen does not stop the session.** A laptop locked at the desk keeps running a
 session you are connected to from somewhere else. Lock is about what is presented, not about what is
@@ -391,7 +394,7 @@ Stated so that they are choices rather than disappointments.
 | --- | --- |
 | Your open applications survive gyro restarting | The screen survives it; the applications do not. Everyone logged in loses everything open, at once |
 | Two people using one machine at the same time on different screens | One person at the machine at a time, with other sessions alive and warm behind |
-| A locked screen showing notifications, media controls, or widgets | Your own background, and nothing else of yours — for now. This is a deferred absence rather than a refusal: content a locked session may present is designed and unbuilt. Acting on it while locked is refused permanently, since a keystroke meant for the password field must never reach a locked application |
+| A locked screen showing notifications, media controls, or widgets | The system's own background, and nothing of yours at all — for now. This is a deferred absence rather than a refusal: content a locked session may present is designed and unbuilt. Acting on it while locked is refused permanently, since a keystroke meant for the password field must never reach a locked application |
 | Overlapping surfaces that intersect in three dimensions | Depth is a visual effect, not a geometry model. Things stack; they do not pass through each other |
 | Applications drawn at exactly their own scale on every display | Whatever is being displayed smaller than it drew itself is scaled down, which is the direction that survives scaling well |
 | X11 applications sharp on mixed-density displays | One density, resampled elsewhere. The limitation belongs to X11 |

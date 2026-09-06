@@ -2552,11 +2552,15 @@ a false password prompt because it cannot draw.
 The cost is that the locked screen cannot show user-owned content: notifications, media controls,
 and widgets are all the same problem, since they live at the user's uid and the greeter is not it.
 
-Wallpaper is the exception, and the route it takes is the one any further exception has to take.
-[gyro owns the background](#the-background) and holds a persisted copy, so a locked output shows the
-wallpaper of the user who locked it with gyro compositing the image and the greeter never receiving
-it. The isolation is not relaxed to allow this; it works because gyro, rather than the greeter, is
-already the party holding the pixels.
+**There is no exception to that, and the background is not one.** *(Revised 2026-09-05; this
+previously made wallpaper the exception, shown per uid.)* What is behind a locked screen is the
+*system's* background — the same one behind the greeter, behind the recovery console, and on screen
+between one session and the next. [gyro owns it](#the-background), so it is composited with no client
+running and the greeter never receives it, which is the property that mattered. What changes is that
+it is the machine's picture rather than a user's, so there is no user-owned pixel on a locked screen
+at all and the isolation is absolute instead of nearly so. If the background comes to follow the last
+person to log in, a locked screen shows the wallpaper of whoever locked it again — by ordinary means,
+with no per-uid cache and no rule about who has authenticated.
 
 The designed answer for the rest, deliberately not built initially, is a **lock-screen content
 surface** — one non-interactive surface a locked session may present, composited below the greeter's
@@ -2569,15 +2573,36 @@ and one greeter serves every session, so its crash locks out everybody. The logi
 it, and gyro's lock state must be entirely independent of the greeter's liveness.
 
 **The greeter is not on the path to being locked, and a locked output is never blank.** Because
-[gyro owns the background](#the-background) and holds a persisted copy per uid, the locked state
-gyro composites — the wallpaper of the user who locked the output — is available with no client
-running at all. So locking is immediate, the greeter's UI arrives over that background whenever it
-is ready, and a greeter crash mid-lock costs the password prompt rather than the picture. The
+[gyro owns the background](#the-background), the locked state gyro composites is available with no
+client running at all, and with nothing authored either: the background is a root of gyro's own and
+those draw on every output whatever session it is showing, so what an outgoing session fades away to
+reveal is already there. So locking is immediate, the greeter's UI arrives over that background
+whenever it is ready, and a greeter crash mid-lock costs the password prompt rather than the
+picture. The
 [session-ready gate](#an-output-waits-for-its-sessions-shell) deliberately does **not** apply here:
 waiting for the greeter to present would hold the *outgoing* session's pixels on a screen that is
 supposed to be locked, which is the same failure
 [the suspend handshake](#suspend-and-resume) exists to prevent, at a seam that recurs many times a
 day rather than once. Lock is the one output reassignment that may not wait.
+
+**A reassignment is a live cross-fade, and the cut is its absence.** Both sessions are composited
+for the length of the transition, with the outgoing one's opacity a coefficient on the *output*
+rather than on either session — so nothing freezes on its way off the screen, and the same mechanism
+serves lock, unlock, login and a future user switch. A reassignment carrying no coefficient is the
+cut, which is what suspend takes: the locked state has to be on the glass before the clock stops, and
+an animation is a thing to wait for. Immediate against animated is therefore not a mode but the
+presence of a spring, which is the distinction the scene store already makes for the pointer glyph
+and for a window under a drag. Rationale, the rejected snapshot, and the three properties that keep
+the anti-spoofing argument true across the fade are in
+[decision 188](Decisions.md#188-a-session-transition-is-a-live-cross-fade-the-output-owns-and-the-cut-is-its-absence).
+
+**A session is reachable exactly where it is presented.** The isolation above is a claim about input
+as much as about pixels, so the hit test enters a root only where that root's session is the output's
+or is gyro's own, and the focus stack skips a session shown on no output. That is the same gate the
+frame walk applies to drawing, applied to the other two things a root can be on the receiving end of.
+During a transition, input follows the session the output is moving *to* from the moment it is
+authored rather than when it settles — otherwise the first characters of a password land in the
+terminal the person was just using.
 
 ### Activity, input, and frame callbacks
 
@@ -2765,16 +2790,17 @@ before any shell is running:
   decoder. The header carries the surface's [color state](#color), stored as delivered so that
   loading it reuses the client-buffer import path rather than adding a second one.
 - **Written by the [helper thread](#threads)**, debounced so a rotating-wallpaper slideshow does not
-  write to disk every thirty seconds, and kept in gyro's own state directory keyed by uid.
+  write to disk every thirty seconds, and kept in gyro's own state directory.
 - **Scaled and placed** when the mode it is shown at differs from the mode it was captured at, which
   is the computation [BGRT continuation](#from-firmware-to-gyro) already needs.
-- **Never composited before that user has authenticated.** Showing a selected user's wallpaper on
-  the login screen is tempting and would put user-controlled pixels where another user may be about
-  to type a password. After authentication the question dissolves, since the wallpaper on a locked
-  output belongs to the uid that supplied it.
 
-That last rule is what lets [locking](#locking) show a user's own wallpaper at all: gyro composites
-the image and the greeter never receives it, so the isolation is not weakened to get it.
+**The background is the machine's rather than a user's, which is what removes the rule that used to
+be here.** *(Revised 2026-09-05.)* This list previously carried *never composited before that user
+has authenticated*, and keyed the cache per uid, so that [locking](#locking) could show the wallpaper
+of whoever locked the output. Locking now shows the system's background instead, so there is no
+user-attributed image to withhold and no moment at which withholding it is the question. Whether the
+persisted copy stays keyed per uid for *login* is a narrower question than the one that motivated it
+and is [open](Open.md).
 
 Whether a background is one image per session or one per output is deliberately
 [open](Open.md). The cache is written and read at moments when no per-output intent has

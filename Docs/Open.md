@@ -650,13 +650,6 @@ is to do the work.
   both" is the horn that is *correct* about density on both, and "in one, sampled by the other"
   resamples an already-resampled snapshot — the one place the resample-once rule would be broken by
   storage rather than by geometry.
-- **Whether session switch and lock want output-sized snapshots.** Decision 21 keeps unpresented
-  sessions alive, so a crossfade *could* composite both live — at the cost of a second output's
-  worth of `C` for the length of the transition, on the frame budget decision 29 defends. A snapshot
-  of the outgoing session's last frame buys that back, and nobody can perceive that it froze during
-  a 300 ms slide. If that is right, decision 43's locking wants the same thing, and both are one or
-  two output-sized images rather than atlas slots — which changes sizing and probably means separate
-  storage.
 - **The last-good-frame for unresponsive clients.** Showing an application's last good frame while
   it is hung is a real feature and the same shape as an exit snapshot, but with an unbounded
   lifetime. It is the case that tests decision 46's admission rule, so it is worth deciding whether
@@ -750,6 +743,19 @@ is to do the work.
   state directory, outside the user's control. Deleted accounts leave images behind, a machine with
   many users accumulates a bounded but unstated amount of disk, and nothing says what the cap is or
   who prunes. Small, and the kind of thing that is never written down unless it is written down now.
+
+  **The per-uid keying has lost one of its two consumers and the question is now whether it has
+  one.** *(Narrowed 2026-09-05 by
+  [decision 188](Decisions.md#188-a-session-transition-is-a-live-cross-fade-the-output-owns-and-the-cut-is-its-absence)'s
+  companion revision to [decision 43](Decisions.md#43-lock-and-greeter-are-one-ui-locking-is-an-output-reassignment).)*
+  Locking used to want the wallpaper of the user who locked the output and now shows the system's, so
+  what is left asking for a per-uid image is login — [Experience.md](Experience.md#one-continuous-image)
+  promises that after authentication the screen shows *that user's own background*, before their shell
+  has handed one over. On a single-user machine one image keeps that promise by itself. On a shared
+  one it does not, and the choice is between keeping the cache keyed for a case that only appears with
+  a second user on the machine, or weakening the promise to *the machine's background, then yours*.
+  Nothing is built either way, and the entry above is the same disk question at whichever cardinality
+  this lands on.
 - **Whether logind accepts a VT-less graphical session on `seat0` .** The login agent registers
   sessions through `pam_systemd`, and decision 37 has no VTs to give it. Needs testing, not
   assuming.
