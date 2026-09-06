@@ -2,6 +2,7 @@
 
 #include <linux/input-event-codes.h>
 
+#include <array>
 #include <cstdint>
 
 #include "Core/Time.h"
@@ -112,6 +113,64 @@ struct ChordVerdict
 	bool Consumed = false;
 };
 
+// One verb, in the two forms it is asked for.
+//
+// **A table rather than a switch, because there are two askers and one vocabulary.** A verb arrives
+// as a keycode from a keyboard and as a letter from [Trigger.h](Trigger.h)'s development pipe, and
+// two switches keyed on the same three verbs is how `s` comes to mean a screenshot in one and
+// nothing in the other. Each row names something that exists: a recovery console and a gym cycle
+// would both name things that do not, and a key bound to a stub is worse than one that says nothing.
+struct Verb
+{
+	// What is printed on the key, which is also what a person writes into the pipe.
+	char Letter;
+
+	// What the kernel calls that key. Matched on rather than on a keysym for the same reason the
+	// leader is: the way out may not depend on a keymap having compiled or on a layout somebody chose.
+	std::uint32_t Code;
+
+	ChordAction Action;
+};
+
+inline constexpr std::array<Verb, 3> Verbs{ {
+	{ 'q', KEY_Q, ChordAction::Quit },
+	{ 't', KEY_T, ChordAction::Trace },
+	{ 's', KEY_S, ChordAction::Screenshot },
+} };
+
+// What a keycode asks for, and `None` for every key that asks for nothing. `Esc` is among those
+// deliberately — leaving a mode is the one thing a person tries first, and it backing out is what
+// `None` already does at the call site rather than a fallthrough somebody has to find.
+[[nodiscard]] constexpr ChordAction VerbFor(std::uint32_t code) noexcept
+{
+	for (const Verb& verb : Verbs)
+	{
+		if (verb.Code == code)
+		{
+			return verb.Action;
+		}
+	}
+
+	return ChordAction::None;
+}
+
+// The same question asked with the letter instead, which is the only form a pipe can carry. A
+// separate name rather than an overload, because `KEY_Q` is an `int` and both conversions from one
+// are the same rank — an overload set here is a call that does not compile at the site that wants it
+// most.
+[[nodiscard]] constexpr ChordAction VerbForLetter(char letter) noexcept
+{
+	for (const Verb& verb : Verbs)
+	{
+		if (verb.Letter == letter)
+		{
+			return verb.Action;
+		}
+	}
+
+	return ChordAction::None;
+}
+
 // The leader state machine. One per input path; it holds only what is being held down.
 class Chord
 {
@@ -156,7 +215,7 @@ public:
 		{
 			m_Armed = false;
 
-			return { .Action = Verb(event.Code), .Consumed = true };
+			return { .Action = VerbFor(event.Code), .Consumed = true };
 		}
 
 		// **Before the leader and after it**, which is to say it is neither: the leader is a mode and this
@@ -213,25 +272,6 @@ private:
 		}
 
 		return (code == KEY_LEFTALT || code == KEY_RIGHTALT) ? m_Alt : m_Shift;
-	}
-
-	// The verbs, and each one names something that exists: a recovery console and a gym cycle would
-	// both name things that do not, and a key bound to a stub is worse than one that says nothing.
-	// `Esc` is spelled out as *back out* rather than left to the `None` below it, because leaving a
-	// mode is the one thing a person tries first and it should not depend on a fallthrough.
-	[[nodiscard]] static constexpr ChordAction Verb(std::uint32_t code) noexcept
-	{
-		switch (code)
-		{
-			case KEY_Q:
-				return ChordAction::Quit;
-			case KEY_T:
-				return ChordAction::Trace;
-			case KEY_S:
-				return ChordAction::Screenshot;
-			default:
-				return ChordAction::None;
-		}
 	}
 
 	std::uint8_t m_Control = 0;

@@ -14539,3 +14539,53 @@ discarded a frame and has nothing for a host that simply goes quiet. It is a muc
 gyro is a client there, the host is another compositor, and a person still has their own desktop — and
 it wants the host's own timeout rather than a copy of this one, so it is Open.md's.
 
+
+### 185. The chord's verbs can be asked for from outside the process, through a fifo no ordinary run has
+
+`Ctrl+Alt+Esc S` writes what the panel is showing. The frame it writes is the frame the key was
+pressed on, so the only party that can ever ask for one is a person sitting at the machine with their
+hands on the keyboard — not a script, not a test that has just arranged two windows, and not somebody
+working on gyro from another terminal. That is the whole of what this is for: **`--chord-pipe` makes
+the same three verbs reachable by writing a letter into a fifo**, so `echo s > /run/gyro/chord` takes
+the picture, `t` writes a trace and `q` stops the compositor.
+
+The kernel's magic SysRq is the shape being copied, down to the vocabulary being one letter — and on
+the hardware gyro is developed on there is no SysRq key at all, which is already recorded as the
+reason the chord exists (148). What the pipe adds is the half a keyboard cannot give: a capture that
+can be *asked for by something that is not a hand*.
+
+**Off unless the command line asks for it, and that is a security boundary rather than tidiness.**
+One of the verbs stops the compositor, and gyro is one process serving every session on the machine
+(21), so a pipe anybody can write to is a pipe anybody can end everybody's session with. There is no
+credential check on it and there should not be one: *who may ask gyro for something* is
+`Session/Control.h`'s question, answered with `SO_PEERCRED` and a uid the kernel named (165), and a
+debugging pipe that grew a second answer to it is one that drifts from the first. So the whole of the
+protection is that a run without the flag has no pipe at all.
+
+**Rejected: folding it into the shell's System socket.** gyro binds a `Trust::System` listener for the
+shell that will eventually run on it (183), and reusing that listener was the obvious saving. It is
+wrong on the verb rather than on the mechanism: `q` ends every session on the machine, and a shell —
+a program a person's desktop restarts, updates and crashes — must never be able to do that. A tier
+says what a party is trusted *with*, and nothing about being the shell earns the power to switch the
+computer off.
+
+**Rejected: a signal.** `SIGUSR1` already writes a trace, which is why that verb is cheap, but there
+are three verbs and two user signals and the next one would have none left. A pipe carries a
+vocabulary; a signal carries only the fact that it arrived.
+
+**Rejected: a socket.** The point is that the client side is `echo`. A socket wants a connect, and
+somebody debugging gyro over ssh at two in the morning should not have to write a program to press a
+key.
+
+**Opened read-write, which is the one implementation detail worth recording.** A fifo with no writer
+reads end-of-file, and a descriptor at end-of-file is permanently readable — so a run polling one
+would spin the dispatch thread for the rest of its life every time somebody's `echo` exited. gyro
+holding a write end of its own means the pipe never has zero writers, so a drain that finds nothing
+is `EAGAIN` and the descriptor goes quiet. `Input/Trigger.Test.cpp` asserts the *unreadability*
+rather than the read, because that is the failure: reading zero bytes is correct and being woken to
+do it forever is not.
+
+**The verb table moved out of `Chord` to make this one vocabulary rather than two.** A verb is now a
+letter, a keycode and an action in one row, asked by either — because two switches keyed on the same
+three verbs is how `s` comes to mean a screenshot from a keyboard and nothing from a pipe, six months
+after nobody is looking.

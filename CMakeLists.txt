@@ -1122,8 +1122,10 @@ gyro_add_module(Input DISPATCH
 		Seam
 	SOURCES
 		Devices.cpp
+		Trigger.cpp
 	TESTS
 		Chord.Test.cpp
+		Trigger.Test.cpp
 )
 
 # libinput for the devices, libudev for the enumeration behind them, and spdlog for the line naming

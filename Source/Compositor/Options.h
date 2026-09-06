@@ -13,6 +13,7 @@
 #include "Core/Time.h"
 #include "Frame/Admission.h"
 #include "Gym/Gym.h"
+#include "Input/Trigger.h"
 #include "Scene/Density.h"
 #include "Seam/Renderer.h"
 #include "Session/Handover.h"
@@ -256,6 +257,19 @@ struct Options
 	// is off rather than doing nothing visible.
 	std::string CaptureDirectory;
 	bool Capture = false;
+
+	// Where `Input/Trigger.h`'s development pipe goes, or empty for a run that has none.
+	//
+	// **Off by default, and it is a security boundary rather than tidiness.** One of the verbs behind
+	// it stops the compositor, and gyro is one process serving every session on the machine — so a
+	// pipe anybody can write to is a pipe anybody can end everybody's session with. There is no
+	// credential check on it and there should not be one: `Session/Control.h` is where *who may ask
+	// gyro for something* is answered, with `SO_PEERCRED` behind it, and a debugging pipe that grew a
+	// second answer to that question is one that drifts from the first. What the flag buys is a
+	// capture, a trace or a stop that can be asked for by a script or from another terminal, which is
+	// the difference between somebody being able to look at what gyro drew and having to be sitting
+	// in front of it with their hands on the keyboard.
+	std::string ChordPipe;
 
 	// **Never put a client on an overlay plane, and composite every item on the GPU instead.**
 	// Decision 152's partition is a per-frame answer with no state behind it, so turning it off is a
@@ -831,6 +845,15 @@ inline constexpr double MaximumArcminutes = 10.0;
 			{
 				options.CaptureDirectory = value;
 			}
+
+			continue;
+		}
+
+		if (Detail::Matches(argument, "--chord-pipe", value))
+		{
+			// Bare is the default path, for `--capture` bare's reason: somebody typing this wants to be
+			// able to ask for a screenshot rather than an argument about where the pipe lives.
+			options.ChordPipe = value.empty() ? std::string{ Input::DefaultTriggerPath } : std::string{ value };
 
 			continue;
 		}

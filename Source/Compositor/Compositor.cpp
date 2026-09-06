@@ -60,6 +60,7 @@
 #include "Headless/Renderer.h"
 #include "Input/Chord.h"
 #include "Input/Devices.h"
+#include "Input/Trigger.h"
 #include "Nested/Host.h"
 #include "Nested/Input.h"
 #include "Nested/Output.h"
@@ -1864,6 +1865,34 @@ private:
 		return {};
 	}
 
+	// The same verbs, asked for from outside the process, where the command line asked for a pipe.
+	//
+	// **Separate from the keyboard rather than part of it**, because the two have nothing in common
+	// but the vocabulary: a machine with no seat at all still wants this, and a machine with a
+	// keyboard on it usually should not have it. It is also a *startup* failure rather than a warning,
+	// unlike an absent device set — somebody who typed the flag is about to drive gyro from a script,
+	// and a run that came up without the pipe and said so in a log line is one that script hangs on.
+	[[nodiscard]] Result<void> OpenChordPipe()
+	{
+		if (m_Options.ChordPipe.empty())
+		{
+			return {};
+		}
+
+		Result<std::unique_ptr<Input::ChordTrigger>> trigger = Input::ChordTrigger::Open(m_Options.ChordPipe);
+
+		if (!trigger)
+		{
+			return std::unexpected{ trigger.error() };
+		}
+
+		m_Trigger = std::move(*trigger);
+
+		m_ChordAsked.ConnectTo<&Compositor::OnChordAction>(m_Trigger->Action, *this);
+
+		return m_DispatchWait.Watch(m_Trigger->Descriptor().Value);
+	}
+
 	// One of the chord's three walking actions as the host's own vocabulary. A function rather than a
 	// third enumeration read straight across, because `Input` may not name `Protocol` and the root is
 	// the only party that sees both.
@@ -1888,7 +1917,25 @@ private:
 	{
 		const Input::ChordVerdict verdict = m_Chord.Feed(event);
 
-		switch (verdict.Action)
+		OnChordAction(verdict.Action);
+
+		// Only where there is one: `--gym` runs the same loop with no clients behind it, and a scene gyro
+		// authored for itself has nothing to route a keystroke to.
+		if (m_Clients)
+		{
+			m_Clients->OnKey(event, verdict.Consumed);
+		}
+	}
+
+	// What a verb does, with no key behind it any more.
+	//
+	// **Split out from the keystroke because there are two ways to ask now**, the second being
+	// [Input/Trigger.h](../Input/Trigger.h)'s development pipe — and the split is what makes the two
+	// the same thing rather than a second implementation that drifts. Both arrive on the dispatch
+	// thread, so nothing here has to know which one it was.
+	void OnChordAction(Input::ChordAction action)
+	{
+		switch (action)
 		{
 			case Input::ChordAction::Quit:
 				spdlog::info("stopping: ctrl+alt+esc q");
@@ -1947,20 +1994,13 @@ private:
 				// is routed there. `--gym` has nothing to hand it to and nothing to focus.
 				if (m_Clients)
 				{
-					m_Clients->OnFocusCycle(Stepped(verdict.Action));
+					m_Clients->OnFocusCycle(Stepped(action));
 				}
 
 				break;
 
 			case Input::ChordAction::None:
 				break;
-		}
-
-		// Only where there is one: `--gym` runs the same loop with no clients behind it, and a scene gyro
-		// authored for itself has nothing to route a keystroke to.
-		if (m_Clients)
-		{
-			m_Clients->OnKey(event, verdict.Consumed);
 		}
 	}
 
@@ -2162,6 +2202,20 @@ private:
 					m_InputFailed = true;
 
 					spdlog::error("input stopped: {}", drained.error());
+				}
+			}
+
+			// **Beside the keyboard and for its reason**, one iteration being one causal sequence: a verb
+			// written into the pipe is acted on before the step it may cause. A failure here is reported
+			// once and left alone exactly as the device set's is — a debugging pipe that stopped working
+			// is not a reason to stop compositing.
+			if (m_Trigger && !m_TriggerFailed)
+			{
+				if (const Result<void> drained = m_Trigger->Drain(); !drained)
+				{
+					m_TriggerFailed = true;
+
+					spdlog::error("the chord pipe stopped: {}", drained.error());
 				}
 			}
 
@@ -2653,9 +2707,9 @@ private:
 			}
 		}
 
-		// The third and last, and Session/Control.h is what keeps it to one: a listener and a connection
-		// per agent are multiplexed behind an epoll descriptor of that module's own, so the wait grows by
-		// a file rather than by a registry and decision 126 stands.
+		// The third, and Session/Control.h is what keeps it to one: a listener and a connection per agent
+		// are multiplexed behind an epoll descriptor of that module's own, so the wait grows by a file
+		// rather than by a registry and decision 126 stands.
 		if (m_Control)
 		{
 			if (const Result<void> watched = m_DispatchWait.Watch(m_Control->Descriptor().Value); !watched)
@@ -2665,6 +2719,11 @@ private:
 		}
 
 		if (const Result<void> opened = OpenInput(); !opened)
+		{
+			return opened;
+		}
+
+		if (const Result<void> opened = OpenChordPipe(); !opened)
 		{
 			return opened;
 		}
@@ -3224,6 +3283,13 @@ private:
 	IInput* m_Input = nullptr;
 
 	Input::Chord m_Chord;
+
+	// The development pipe, where `--chord-pipe` asked for one, and whether it has stopped working.
+	// Held here so that it is closed — and the fifo removed — when the run ends.
+	std::unique_ptr<Input::ChordTrigger> m_Trigger;
+	bool m_TriggerFailed = false;
+
+	Connection<Input::ChordAction> m_ChordAsked;
 	Connection<const KeyEvent&> m_Key;
 	Connection<const PointerMotion&> m_PointerMotion;
 	Connection<const PointerPosition&> m_PointerPosition;

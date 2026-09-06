@@ -29,8 +29,9 @@
 //
 // **Input is that second kind, and it is still one more `pollfd`.** libinput hands over one descriptor
 // for the whole seat, and Session/Control.h hands over one for every agent behind its own epoll, so a
-// run with everything in it waits on four files rather than one-per-device and one-per-agent — and what
-// a ring would multiplex is a set small enough to name. What would actually change the answer is a set
+// run with everything in it waits on five files rather than one-per-device and one-per-agent — the
+// fifth being Input/Trigger.h's development pipe, which is a flag away from not existing at all — and
+// what a ring would multiplex is a set small enough to name. What would actually change the answer is a set
 // whose *size* is not known when the thread starts, because that is where an array stops being a wait
 // and starts being a registry.
 //
@@ -145,13 +146,13 @@ public:
 	//
 	// Public because Wait.cpp sizes its `pollfd` array off it — the two were independent numbers that
 	// had to agree, which is half of how the third descriptor went missing.
-	static constexpr std::size_t MaxWatched = 4;
+	static constexpr std::size_t MaxWatched = 5;
 
 private:
 	Fd m_Fd;
 
 	// Borrowed rather than owned, which is why they are plain `int`s beside an `Fd`.
-	std::array<int, MaxWatched> m_Watched{ -1, -1, -1, -1 };
+	std::array<int, MaxWatched> m_Watched{ -1, -1, -1, -1, -1 };
 	std::size_t m_Watching = 0;
 
 	std::atomic<bool> m_Stopping{ false };
