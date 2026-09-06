@@ -5189,6 +5189,22 @@ backdrop, a flat tint, and a blurred backdrop again. Nothing has been drawn on a
 happen on, which is why this stays open rather than being settled by the change that produced it —
 2026-08-22.)*
 
+**The gap is closed, and this ladder now owns the whole visual axis.** *(Added 2026-09-06.)* It was
+watched: a pointer over the run bar, the blur behind it flat for one refresh and back. The answer is
+neither of the two this entry offered — the floor composite is not redefined and flooring does not
+inherit the stickiness. The record-time check simply stops choosing a tier, because the two
+enumerators were never two amounts of degradation but two timescales, and a visual axis on the fast
+one produces the breathing this ladder's stickiness exists to prevent whatever value it takes. So
+rung 3 is reached from here, slowly and stickily, exactly like rungs 1 and 2, and `RenderMode::Floor`
+stops being a second opinion about quality held by the frame loop.
+
+That makes the sentence above — *a tier recomputed per frame makes effects flicker at the margin,
+which is a worse artefact than the dropped frame it avoids* — unconditional rather than a rule with a
+door beside it, and hands this ladder a debt: nothing today assigns a `Tier` at all, so until the
+probe and the measured cost below exist, a machine over its budget judders where it used to hold a
+flat backdrop.
+[Decision 191](#191-late-arrival-selects-a-frame-never-a-tier--the-record-time-check-is-planned-or-wait).
+
 **The cut point is computed at commit time, not per frame.** Effects are recorded in declared
 priority order against a running cost sum; where that sum crosses the allocation is where optional
 work stops. Because commits are declarative, this is known before the frame is recorded, and the
@@ -5715,7 +5731,12 @@ the first is unconditional:
    A missed frame corrupts nothing; the next frame is evaluated at its own presentation time and is
    exact.
 2. **An overrun of up to `P − C_min` costs exactly one frame.** Conditional on the floor tier
-   existing and on the record-time check below.
+   existing and on the record-time check below. *(Superseded 2026-09-06 — the record-time check no
+   longer reaches the floor tier, so an overrun costs one frame by being skipped rather than by being
+   drawn cheaply, and the promise no longer rests on `C_min` at all. The floor is now reached only by
+   [decision 34](#34-effect-quality-is-a-tier-gyro-chooses-and-the-floor-tier-is-the-recovery-path)'s
+   ladder, on the slow timescale.
+   [Decision 191](#191-late-arrival-selects-a-frame-never-a-tier--the-record-time-check-is-planned-or-wait).)*
 3. **A larger overrun costs `⌈overrun / P⌉` frames** — a GPU reset, a driver stall, a client's 50 ms
    batch — and animation is still exactly correct throughout, so it reads as a brief hold rather
    than a lurch.
@@ -5748,6 +5769,17 @@ primitive throughout, so this costs nothing new:
 The third case matters as much as the second. Submitting work that will also be late keeps the GPU
 busy and deepens the cascade; skipping is what stops it. This is decision 30's deliberate frame drop
 with a precise trigger rather than a policy judgement.
+
+**The middle line is gone, and what is left is two.** *(Revised 2026-09-06.)* The second line asked
+whether the frame *owed* could still be reached by drawing it cheaply, and it could not tell the two
+reasons a frame is unreachable apart: gyro's own work still in flight, which is what this entry was
+written about, and content that simply arrived after the instant its inputs were owed, which no tier
+can rescue and none should try to. Read the check as arrival control and the middle line has nothing
+to do — late content belongs to the next frame it can make at full quality, which is the first line
+against a later deadline. What survives is *draw it planned at the frame it can reach, or wait*, and
+[decision 191](#191-late-arrival-selects-a-frame-never-a-tier--the-record-time-check-is-planned-or-wait)
+is why, including what it costs: a machine that genuinely cannot sustain a planned composite now has
+no answer on the frame path until decision 34's ladder is built.
 
 **The three lines are a fixpoint, and applying them once is a deadlock.** *(Added 2026-08-22.)* The
 third line's *target the next deadline* is the first line's input: the check runs again against the
@@ -15468,3 +15500,100 @@ a container**, which a restarted shell is not told — it learns its workspaces 
 window is in which, so it cannot redraw a workspace strip without asking every window where it is.
 And **nesting**: a container is a child of the floor and nothing else, which is enough for a
 workspace and is not enough for a grid inside one.
+
+### 191. Late arrival selects a frame, never a tier — the record-time check is planned or wait
+
+*(Added 2026-09-06.)* Every frame has an instant by which its inputs are owed: `deadline −
+Reserve(planned) − Lead`, which is already the instant the frame loop arms its wake at. Content
+arriving after it belongs to the next frame whose deadline it can still make **at full quality**. The
+record-time check selects a frame; it never selects a tier.
+
+That is [Experience.md](Experience.md#every-frame)'s promise read literally — *when work arrives late,
+it arrives late; it does not arrive wrong* — and
+[decision 35](#35-a-miss-costs-one-frame-bounded-by-the-floor-composite)'s floor line was the one
+mechanism on the frame path able to make late work arrive wrong.
+
+**What was watched, which is what settles it.** A pointer moved over the run bar on a nested output.
+The blur behind the bar went flat for one refresh and came back — the material drawing its tint with
+no chain under it, which is what
+[decision 117](#117-a-gather-reads-the-target-it-is-drawing-into-the-numbers-live-in-seam-and-the-tier-rides-the-request)
+made `RenderMode::Floor` mean and is the *do not render the material* rung the quality ladder (34)
+ends at — and the person watching noticed the flat frame and did not notice the dropped one beside
+it.
+Open.md had held this question open for a blur, a scene that animates, and somebody watching. That is
+what it got.
+
+**The floor tier fired where nothing was being over-asked.** At that moment the GPU had been idle for
+17.6 ms, the governor had the clock parked at its 100 MHz floor, and the planned composite costs
+2.34 ms of a 16.65 ms period. The loop had gone idle and armed nothing, which is correct — with no
+pending damage there is no frame to arm *for*. A client then committed 14.0 ms into the period, the
+loop woke 130 µs later against a median wake latency of 141 µs, and found 2.65 ms in front of a
+deadline that wanted 4.17 ms. It floored, and **landed a refresh late anyway**: it spent the picture
+and bought nothing, which is the sentence the `worthTheTier` clause already carries for the branch
+below the one that fired.
+
+**Nothing was late except the arrival.** The frame thread is not the suspect it looks like: across
+the same capture its 286 timer wakes are 141 µs late at the median and 240 µs at the worst, and the
+285 draws they produced never floored once. An armed loop already implements the rule at the top of
+this entry without deciding anything — it wakes with the planned reserve in front of it and reads
+whatever snapshot exists, so content landing 3 ms before a vblank is simply not in it and falls to the
+next frame. Only the wake *out of idle* meets a deadline it has never armed for, and that is 5 draws
+in 290.
+
+**The frame the content could make was already computed, and already returned one branch lower.**
+`Assess` derives `plannedReach` — the first refresh the planned composite reaches from now — directly
+above the floor branch, and the branch beneath returns exactly it. Removing the floor branch and the
+`takeFloor` block under it leaves three lines:
+
+```
+	plannedReach == owed  →  draw it planned, at the frame owed
+	plannedReach >  owed  →  draw it planned, at the frame it can make
+	otherwise             →  wait
+```
+
+which is the rule at the top of this entry and nothing else. The middle line is the shift to the next
+frame: one refresh of latency, no change of appearance.
+
+**Why a tier may not move on the frame path at all.** `RenderMode` and `Tier` looked like two amounts
+of degradation and are two *timescales*. A tier is a judgement about what a machine can sustain, and
+[Experience.md](Experience.md#the-picture-is-correct) requires it to be *chosen once and held* — a
+blur that breathes with load reads as cheap even when no frame is missed. A mode was a judgement about
+one deadline. Putting a visual axis on the fast one guarantees the breathing the slow one exists to
+prevent, at whatever value it takes, which is why this is a rule about the axis rather than a tuning
+of the branch.
+
+**The floor composite was never cheap enough to be worth it either.** Measured on the same capture:
+planned is a 1.06 ms base composite, a 0.44 ms extract, a 0.21 ms blur and a 0.64 ms dressing —
+2.34 ms; the floored frame is a single 1.71 ms pass. `C_min` is **73% of `C_planned`**, so rung 3 buys
+27% for a visible artefact. [Architecture.md](Architecture.md#the-floor-tier) calls `C_min` a design
+target rather than a residue. It is a residue, and the number is why the trade was worse than
+decision 35 assumed rather than merely mis-timed.
+
+**What this leaves owed.** The frame path can no longer answer a machine that genuinely cannot sustain
+a planned composite. That case is real, it is what the floor tier is *for*, and it belongs to the quality ladder that
+steps on measured capability (34) — which today has no code behind it at all: nothing anywhere
+assigns a `Tier`, and the allocation shortfall `Admit` already computes as `Rung::Tier` is only
+printed. Until that is built, a machine over its budget
+judders where it used to hold a flat backdrop. That is the right direction to be wrong in, since
+decision 34 already rules the dropped frame the lesser artefact, but it is a debt rather than a
+silence.
+
+**Rejected: giving the floor decision 34's stickiness**, so it steps rather than blinks. It trades one
+bad frame for several mediocre ones, still puts appearance on the frame path, and at 27% is not buying
+enough to pay for either.
+
+**Rejected: defining the floor composite to hold the previous frame's blur** rather than dropping to a
+fill — Open.md's leading answer, and a good idea in the wrong place. Holding the blur saves the
+extract and the blur, 0.64 ms, within 0.01 ms of what flooring saves, so it is cost-equivalent and
+looks right. But a composite that looks the same is not a degradation rung; it is an optimisation of
+the planned one and should be argued as that, against the risk this entry cannot settle by reading —
+the held result is registered to the previous frame's backdrop, so under a *moving* window the blur
+lags its own glass.
+
+**Rejected: keeping the floor branch and correcting its estimate.** `ReservedFloorGpu()` reserved
+0.48 ms against a floor frame that cost 2.2 ms, because its measured window is fed only by floor
+frames and there are almost none — so the branch fired on a prediction 4.6× optimistic. Correcting it
+makes this frame come out right and leaves the category wrong: on a slightly cheaper scene the floor
+tier fits, fires correctly by its own rule, and is still a backdrop snapping flat to buy one refresh
+of latency on content nobody has seen yet. The estimate is a real defect, worth fixing on its own
+terms for the day the tier ladder reaches the floor deliberately. It is not what broke this frame.

@@ -86,6 +86,14 @@ person deliberately took, which is the cheapest thing in this document to spend.
 frames last. A transition rendered with a cheaper blur is better than a transition that stutters,
 and this is the same ordering [How it degrades](#how-it-degrades) states from the other end.
 
+**Quality is spent by being set lower and left there, never frame by frame.** The ordering says which
+thing to give up on a machine that cannot keep up; it does not license the picture changing while
+somebody is looking at it, which is the promise under [The picture is
+correct](#the-picture-is-correct). A blur that is slightly cheaper for as long as you own the machine
+is invisible. The same blur leaving and returning between two refreshes is not a cheaper transition,
+it is a broken one — and it is worth saying here, because reading this ordering as a per-frame trade
+is how a system arrives at the second while believing it chose the first.
+
 **Cohesion and sharpness are separated in time rather than ranked.** Things are permitted to be soft
 while they move and are required to be sharp once they stop, so the apparent conflict between a
 transition looking smooth and the result looking crisp is resolved by when each claim applies.
@@ -371,7 +379,9 @@ touched.**
   one without your attention gives way, and a tie goes to the slower one. The panel under your hands
   keeps the lowest latency the machine can produce, unconditionally.
 - **Effects give way before frames do.** The first thing spent is a small amount of quality in
-  something that was about to be blurred anyway. Frames are given up only after that.
+  something that was about to be blurred anyway. Frames are given up only after that. What is spent
+  is then *held* — the level follows the machine's ability to keep up, which changes rarely, and
+  never because a single frame ran late.
 - **When too many things close at once, the ones you are watching finish properly.** The rest
   finish early. Nobody is watching the twenty-ninth menu to close.
 - **A component that misbehaves degrades itself.** An application that abuses the system spends

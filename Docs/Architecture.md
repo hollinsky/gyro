@@ -297,7 +297,7 @@ cannot produce a period no panel agreed to.
 after a mode set, and after [device migration](#device-migration), the last observation describes a
 world that no longer exists — and a stale observation is worse than none, because `NextDeadline()`
 then returns an instant in the deep past and [the frame loop](#the-frame-loop)'s timing policy fails
-every branch forever rather than falling to the floor tier. An invalid clock owes no frame and arms
+every branch forever rather than admitting any frame at all. An invalid clock owes no frame and arms
 no timer until an observation re-seeds it.
 
 What it answers meanwhile is chosen rather than convenient. Saturating forward — `Unscheduled` —
@@ -1157,8 +1157,10 @@ all, and it is worth putting as a failure rather than as a rule, because the rul
 bookkeeping and the failure does not. Suppose gyro servoes a 144 Hz panel down to 100 Hz to fit a
 projector beside it, and admits the set. A game goes fullscreen on the panel and takes the refresh
 rate. `P` returns to 6.944 ms, demand rises, and the projector starts missing — quietly, because
-[the frame loop](#the-frame-loop) contains a miss by falling to the floor tier rather than by
-reporting one. Nothing changed that an event-shaped trigger list would have recognised, so admission
+[the frame loop](#the-frame-loop) contained a miss by falling to the floor tier rather than by
+reporting one. (Since
+[decision 191](Decisions.md#191-late-arrival-selects-a-frame-never-a-tier--the-record-time-check-is-planned-or-wait)
+it drops the frame instead, which is louder but no more self-reporting; the argument is unchanged.) Nothing changed that an event-shaped trigger list would have recognised, so admission
 control never re-ran and never stepped the projector's quality tier, which was sitting there
 available the whole time. That is why the trigger is stated as any input to the test.
 
@@ -1426,7 +1428,7 @@ expressible as a reaction afterwards:
 
 The first row is the one that bites hardest if it is forgotten: a stale clock returns a deadline in
 the deep past, and [the frame loop](#the-frame-loop)'s timing policy then fails every branch forever
-instead of falling to the floor tier.
+instead of admitting any frame at all.
 
 **And the last frame is the resume image.** KMS holds the scanout buffer across suspend — the same
 property [device migration](#device-migration) relies on — so if the locked state was presented
@@ -1702,8 +1704,11 @@ rather than a promise. The obvious implementation does not have that property: a
 halves the resolution per pass, so the two rungs become one lever and the radius falls out of the
 structure. See [decision 117](Decisions.md#117-a-gather-reads-the-target-it-is-drawing-into-the-numbers-live-in-seam-and-the-tier-rides-the-request).
 
-The third rung is `RenderMode::Floor` rather than a tier of its own — decision 35's record-time check
-already picks a mode per frame, and a material at the floor paints its tint with no chain under it.
+The third rung is `RenderMode::Floor` rather than a tier of its own, and it is reached from *this*
+ladder — slowly, stickily, and never during an animation, exactly like the two above it. A material at
+the floor paints its tint with no chain under it. The record-time check used to pick that mode per
+frame as well, which put a visual axis on the one timescale that may not carry one; it no longer does.
+See [decision 191](Decisions.md#191-late-arrival-selects-a-frame-never-a-tier--the-record-time-check-is-planned-or-wait).
 
 A **startup capability probe** runs the real pass chain at two or three sizes and picks a tier,
 which is then stable. Stability is the point: a quality level that drifts with load reads as cheap
@@ -1726,10 +1731,12 @@ The floor composite — no effects, base composite only — is a first-class ren
 and headless golden images, not an emergency fallback. A recovery path that has never run is broken
 when it is needed.
 
-Its cost `C_min` is a design target rather than a residue, because it bounds what the system can
-absorb: an overrun is recoverable in one frame only if `t_done + C_min ≤ deadline`. A cheap floor
-composite is what buys the promise in
-[decision 35](Decisions.md#35-a-miss-costs-one-frame-bounded-by-the-floor-composite).
+`C_min` used to bound what the system could absorb — an overrun was recoverable in one frame only if
+`t_done + C_min ≤ deadline` — which made it a design target rather than a residue. The record-time
+check no longer reaches the floor, so it bounds nothing on that timescale, and what `C_min` is worth
+as the quality ladder's bottom rung is [open](Open.md): the first measurement puts it at 73% of
+`C_planned`, which is not obviously worth a rung. See
+[decision 191](Decisions.md#191-late-arrival-selects-a-frame-never-a-tier--the-record-time-check-is-planned-or-wait).
 
 ## Color
 
@@ -1909,7 +1916,7 @@ spuriously. See [decision 80](Decisions.md#80-the-frame-loop-is-a-step-the-compo
 	for each output in due:                    // earliest deadline first
 		target = the frame after the last one committed, never the last one presented
 		if previous frame still executing or now + C_planned > deadline(target):
-			fall to the floor tier, or skip this output entirely   // see below
+			target the next frame it can reach, or skip this output entirely  // see below
 		evaluate animations at Clock(output).PresentationAt(target)
 		record and submit per the admitted plan
 		Presenter(output).Present(...)
@@ -1959,17 +1966,19 @@ the pacing, and presentation feedback stays what it is for, which is the clock. 
 The one exception is that first `if`, which is the whole of gyro's runtime timing policy:
 
 ```
-	now + C_planned ≤ deadline   →  render the planned tier
-	now + C_min     ≤ deadline   →  render the floor tier
-	otherwise                    →  skip this output's frame, target the next deadline
+	now + C_planned ≤ deadline        →  render it planned, for the frame owed
+	now + C_planned ≤ later deadline  →  render it planned, for that frame instead
+	otherwise                         →  wait
 ```
 
 Completion of the previous frame is polled non-blockingly through its timeline semaphore, so this
-costs two comparisons and no stall. The third case is not a failure path but the mechanism that
-stops a cascade: submitting work that will also be late keeps the GPU busy and makes the next frame
-late too. **This is why damage must accumulate per output since its last successful present, never
-per frame** — a skipped frame would otherwise lose damage and corrupt the next one. See
-[decision 35](Decisions.md#35-a-miss-costs-one-frame-bounded-by-the-floor-composite).
+costs two comparisons and no stall. It selects a *frame* and never a tier: content that arrives after
+the instant its inputs were owed belongs to the next frame it can reach at full quality, which is the
+second line, and the third stops a cascade — submitting work that will also be late keeps the GPU busy
+and makes the next frame late too. **This is why damage must accumulate per output since its last
+successful present, never per frame** — a skipped frame would otherwise lose damage and corrupt the
+next one. See [decision 35](Decisions.md#35-a-miss-costs-one-frame-bounded-by-the-floor-composite) and
+[decision 191](Decisions.md#191-late-arrival-selects-a-frame-never-a-tier--the-record-time-check-is-planned-or-wait).
 
 That region is what the glass has not seen, and it is not what the renderer is scissored to. The image
 `AcquireTarget` returns has been round a ring, so it is stale by every frame since it was last drawn as

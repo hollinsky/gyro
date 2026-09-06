@@ -45,6 +45,20 @@ single package rather than by construction. The bindings now compare the counts 
 that type can exist. An entry that names work can still be hiding a question, and the way to find out
 is to do the work.
 
+A seventh left by the route the triage rule names and no entry had used before: somebody watched it
+happen. *The floor composite must not flicker* said in as many words that it would not yield to an
+afternoon of reading, that it was a perceptual question, and that it wanted a blur, a scene that
+animates, and somebody watching — and it got all three, on a run bar, as a blurred backdrop snapping
+flat for one refresh and back. It became
+[decision 191](Decisions.md#191-late-arrival-selects-a-frame-never-a-tier--the-record-time-check-is-planned-or-wait).
+Two things about that are worth keeping. The entry was right that watching was required and wrong
+about what watching would settle: the perceptual trade it posed — is a flicker worse than a dropped
+frame — never had to be judged, because the trace taken at the same time priced the two composites
+and the flat frame turned out to be buying 27%. And what the watching actually supplied was not a
+verdict on the artefact but the *occasion* to look, which no amount of reading was going to produce
+on its own. An entry that needs a user in front of it may still be settled by arithmetic once the
+user is there.
+
 - **Re-reading the abort inventory on major libwayland bumps.** The count went 6 → 18 across 1.23 to
   1.24, and the reading behind decision 2 is a snapshot of `1.26.0-9-ged0b9f1` rather than a
   property of the library. What wants watching specifically is a new site reachable from client
@@ -593,43 +607,26 @@ is to do the work.
   standing. Overview entry is still the worst case for it: a thumbnail per window, in a frame that
   may also be retiring surfaces. It belongs in the same derivation as the atlas multiple above rather
   than in one of its own.
-- **The floor composite must not flicker, and the ladder as written says it will.** Decision 34's
-  rung 3 is *the material is not rendered — an opaque or simply tinted fill*, and decision 35's
-  record-time check picks the floor tier **per frame**. So a one-frame excursion is a blurred
-  backdrop snapping flat and back inside a period. Decision 34 already names that failure and rejects
-  it — *"a tier recomputed per frame makes effects flicker at the margin, which is a worse artefact
-  than the dropped frame it avoids"* — and answers it with stickiness that governs the commit-time
-  quality tier and says nothing about the record-time floor. Two mechanisms on one visual axis with
-  opposite policies, and the correlation runs the wrong way: the record-time check fires most during
-  animation, which is exactly when decision 34 says never to change tier. It also outruns what
-  [Experience.md](Experience.md#how-it-degrades) promises: *effects give way before frames do*, and
-  what is spent first is *"a small amount of quality in something that was about to be blurred
-  anyway"* — which is rung 1. A per-frame excursion to rung 3 is not a small amount, and the same
-  document's account of lateness is that work *"arrives late — it does not arrive wrong"*.
-
-  The leading answer is that **the floor composite is defined to be visually continuous rather than
-  absent** — a floored frame reuses the previous frame's blur result instead of dropping to a fill,
-  which is stale by a frame, costs almost nothing, and reads as a held backdrop rather than a missing
-  one. That makes this a constraint on what the floor composite *contains* rather than on when it is
-  chosen, which is why it sits beside the entry below rather than inside decision 35.
-
-  Three alternatives, kept because the first is not obviously right. Give the floor decision 34's own
-  stickiness, so it is a step rather than a blink, at the cost of several mediocre frames instead of
-  one bad one. Forbid flooring during an animation outright, which is decision 34's rule applied
-  honestly and which leaves nothing but the frame drop in the case the floor tier exists for. Or take
-  decision 34 at its word that the dropped frame is the *lesser* artefact, and remove the second
-  branch of the record-time check for one-frame transients entirely.
-
-  **This one will not yield to an afternoon of reading.** It is a perceptual question, and the third
-  category the preamble names: it wants a blur, a scene that animates, and somebody watching. What it
-  specifically must not be settled on is the strength of the argument above, since the entire claim is
-  about what an eye notices. Nothing is blocked meanwhile — there are no effects yet, so today's floor
-  composite draws the same nothing more cheaply — and it becomes real the day a blur exists.
-- **`C_min` as a number.** Decision 35 makes the floor composite's cost the bound on recoverable
-  overrun, which makes it a target rather than a measurement. What that target should be is
-  undecided; the visibility half of *what the floor composite may contain* is the entry above, and
-  the two constrain each other, since a floor that holds the previous blur is a different number from
-  one that draws a flat fill.
+- **`C_min` as a number, and whether the floor composite can earn its place.** Decision 35 made the
+  floor composite's cost the bound on recoverable overrun, which made it a target rather than a
+  measurement. [Decision 191](Decisions.md#191-late-arrival-selects-a-frame-never-a-tier--the-record-time-check-is-planned-or-wait)
+  takes the frame path away from it, so `C_min` no longer bounds anything on that timescale and the
+  question is now what it is worth as decision 34's bottom rung. The first measurement is not
+  encouraging: on a nested output with one dressed panel, planned is 2.34 ms and floored is 1.71 ms,
+  so `C_min` is **73% of `C_planned`** and the whole of rung 3 buys 27%. The base composite dominates
+  and no effect change touches it. If that ratio holds on a real panel with a real scene, the ladder
+  ends at rung 2 and the floor composite is a test and golden-image mode only — which is what
+  [Architecture.md](Architecture.md#the-floor-tier) already says it primarily is, arrived at from the
+  other end. What would change the ratio is the dressing composite, 0.64 ms of the 2.34, which is
+  paid whether or not there is a chain under it.
+- **Whether a planned composite may hold the previous frame's blur.** Decision 191 rejected this as a
+  *floor* and named it an optimisation of the planned composite instead, on the grounds that a
+  composite which looks the same is not a degradation rung. It is worth what flooring was worth —
+  reusing the chain result saves the extract and the blur, 0.64 ms, within 0.01 ms of what flooring
+  saved — for no change of appearance while the backdrop behind the glass is still. What is not known
+  is the moving case: the held result is registered to the previous frame's backdrop, so under a
+  window in motion the blur lags its own glass, and whether that reads as softness, as sliding, or as
+  nothing at all wants the same thing the entry it came from wanted — a panel and somebody watching.
 - **Scheduling policy constants.** The `// SPEC:` numbers in `FrameClockPolicy`, `TimingPolicy`, and
   `BudgetPolicy` cite this entry and it had never been written. They are the clearance the
   variable-refresh servo keeps from the panel's longest period, the servo's per-frame step bound, the
