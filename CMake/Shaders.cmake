@@ -25,6 +25,18 @@
 # The stage a file extension names, spelled the way the generated symbol should read. A file whose
 # extension is not here is a fatal error rather than a stage glslang would have inferred, because
 # the inference is what would silently compile a compute shader as a fragment one.
+# **The compiler may be supplied from outside this tree, and that is what a cross build does with it.**
+# Everything above says the compiler is a build tool rather than a library, and the consequence is one
+# this variable makes actionable: a tree configured for another architecture cannot run a glslang it
+# just cross-compiled, so the binary has to come from somewhere that built for the host. Empty is the
+# ordinary case and keeps the CPM package in CMakeLists.txt; a path names a glslang already on the
+# machine, and the package is then not fetched at all.
+#
+# **Rejected: `find_program(glslang)`.** It would pick up whatever a distribution shipped without
+# anyone choosing it, and the SDK pin exists precisely because the three Vulkan components have to
+# agree. Supplying this is a decision; discovering it is a coincidence.
+set(GYRO_HOST_GLSLANG "" CACHE FILEPATH "A glslang executable built for the host; empty builds the pinned one")
+
 set(GYRO_SHADER_STAGE_vert Vertex)
 set(GYRO_SHADER_STAGE_frag Fragment)
 set(GYRO_SHADER_STAGE_comp Compute)
@@ -63,7 +75,7 @@ function(gyro_add_shaders MODULE)
 			COMMAND ${CMAKE_COMMAND} -E make_directory "${GENERATED}/${MODULE}/Shaders"
 			# vulkan1.3 because Render/Device.cpp refuses anything older, and the target environment
 			# is what decides whether a construct the device requires is even legal to emit.
-			COMMAND $<TARGET_FILE:glslang-standalone>
+			COMMAND ${GYRO_GLSLANG_COMMAND}
 				-V
 				--target-env vulkan1.3
 				--quiet
@@ -77,7 +89,7 @@ function(gyro_add_shaders MODULE)
 				--vn "${NAME}${GYRO_SHADER_STAGE_${STAGE}}Spirv"
 				-o "${OUTPUT}"
 				"${INPUT}"
-			DEPENDS "${INPUT}" glslang-standalone
+			DEPENDS "${INPUT}" ${GYRO_GLSLANG_DEPENDS}
 			# **Without this an edit to an included header rebuilds nothing.** `DEPENDS` above names
 			# the one file on the command line, so a shared header changes and every shader that
 			# includes it keeps its stale SPIR-V — a picture that is wrong until somebody deletes the

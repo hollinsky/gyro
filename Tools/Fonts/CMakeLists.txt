@@ -37,6 +37,26 @@ target_include_directories(FontBaker PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_executable(GyroFonts Main.cpp)
 target_link_libraries(GyroFonts PRIVATE FontBaker)
 
+# Installed for Tools/Bindings' reason and by the same arrangement: a cross build takes its baker from
+# a host build of this project through `GYRO_HOST_FONTS`, because a baker compiled for the target is
+# one the build machine cannot run.
+include(GNUInstallDirs)
+install(TARGETS GyroFonts RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# **The tests are optional, and the one caller that turns them off is a
+# distribution.** They compile Source/Testing, which is written against the same
+# C++23 the compositor is, while this project is built by whatever compiler the
+# *build host* has -- and a build host is routinely several releases behind the
+# cross toolchain the image is built with. Yocto's Ubuntu 24.04 host is GCC 13,
+# which has no <print>; the tool itself compiles there and only the tests do not.
+#
+# **Rejected: lowering what the tests may use to the oldest host worth
+# supporting.** That is a standard-library subset nothing enforces, so it would
+# be rediscovered one header at a time by whoever next builds an image.
+option(GYRO_TOOL_TESTS "Build this tool's own tests; off for a build host older than the tree" ON)
+
+if(GYRO_TOOL_TESTS)
+
 # The corpus test reads Vendor/Spleen as this checkout has it rather than a fixture beside it, which is
 # the rule Tools/Bindings' parser tests already follow: a copy is a snapshot that stops testing the
 # thing that matters.
@@ -50,3 +70,5 @@ target_link_libraries(FontBakerTests PRIVATE FontBaker)
 target_compile_definitions(FontBakerTests PRIVATE GYRO_FONT_DIR="${GYRO_ROOT}/Vendor/Spleen")
 
 add_test(NAME FontBaker COMMAND FontBakerTests)
+
+endif()

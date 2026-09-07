@@ -38,8 +38,23 @@
 include(ExternalProject)
 
 find_package(PkgConfig REQUIRED)
-pkg_get_variable(GYRO_WAYLAND_DATA_DIR wayland-scanner pkgdatadir)
-pkg_get_variable(GYRO_WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+#
+# **Both are overridable, because pkg-config answers this one wrong under a sysroot.** `pkgdatadir`
+# is a plain variable rather than a compiler flag, so pkg-config hands back the path as it will be on
+# the machine being built *for* -- `/usr/share/wayland` -- with no sysroot in front of it. A cross
+# build that took that answer would parse the *host's* protocol XML and generate bindings for whatever
+# version the build machine happened to have. Naming the two directories is how a cross build says
+# where its own copies are.
+set(GYRO_WAYLAND_DATA_DIR "" CACHE PATH "Where wayland.xml is; empty asks pkg-config")
+set(GYRO_WAYLAND_PROTOCOLS_DIR "" CACHE PATH "Where the wayland-protocols XML tree is; empty asks pkg-config")
+
+if(NOT GYRO_WAYLAND_DATA_DIR)
+	pkg_get_variable(GYRO_WAYLAND_DATA_DIR wayland-scanner pkgdatadir)
+endif()
+
+if(NOT GYRO_WAYLAND_PROTOCOLS_DIR)
+	pkg_get_variable(GYRO_WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+endif()
 
 # gyro's own, in this repository. Named absolutely because `gyro_add_bindings` is called from the top
 # level and a relative path would be read against whichever directory reached it.
@@ -78,7 +93,26 @@ pkg_check_modules(WAYLAND_SERVER REQUIRED IMPORTED_TARGET wayland-server)
 # verification runs each time, re-runs CMake, and a regenerated build.ninja drops the stored header
 # dependencies for every translation unit. The mechanism above already covers what the glob was for,
 # so the redundancy bought nothing and charged several minutes for it.
+# **The generator may be supplied prebuilt, which is the other half of the cross-compilation argument
+# above.** ExternalProject inherits the environment it was launched in, so under a cross build's
+# `CC`/`CXX` the sub-build produces a generator for the target and the first rule that runs it fails
+# with `Exec format error`. A distribution builds the tools once for the host and names them here.
+#
+# The sub-build's own tests go with it: `BindingsParserTests` is built by the project this skips, so
+# a tree using a prebuilt generator has nothing to run and the whoever built it ran them already.
+set(GYRO_HOST_BINDINGS "" CACHE FILEPATH "A prebuilt GyroBindings for the host; empty builds one here")
+
 set(GYRO_BINDINGS_BINARY_DIR ${CMAKE_BINARY_DIR}/Tools/Bindings)
+
+if(GYRO_HOST_BINDINGS)
+	set(GYRO_BINDINGS_TOOL ${GYRO_HOST_BINDINGS})
+
+	# An empty target of the same name, so the generation rules below carry one spelling rather than
+	# two. A custom target is always considered out of date, which costs nothing here because it has
+	# no command, and keeps `DEPENDS ... BindingsGenerator` meaning the same thing either way.
+	add_custom_target(BindingsGenerator)
+else()
+
 set(GYRO_BINDINGS_TOOL ${GYRO_BINDINGS_BINARY_DIR}/GyroBindings)
 
 
@@ -100,6 +134,8 @@ add_test(
 	NAME Bindings
 	COMMAND ${GYRO_BINDINGS_BINARY_DIR}/BindingsParserTests
 )
+
+endif()
 
 # `wl_surface` to `WlSurface`, `xdg-shell` to `XdgShell` — Tools/Bindings/Naming.h's rule, restated
 # here because the build has to know an output file's name before the generator has run once.

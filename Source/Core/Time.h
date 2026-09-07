@@ -225,7 +225,7 @@ template<>
 struct std::formatter<Instant> : std::formatter<Duration>
 {
 	template<typename Context>
-	auto format(Instant instant, Context& context) const
+	typename Context::iterator format(Instant instant, Context& context) const
 	{
 		return std::formatter<Duration>::format(instant.time_since_epoch(), context);
 	}

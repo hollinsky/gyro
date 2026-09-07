@@ -17,6 +17,25 @@ set(FETCHCONTENT_QUIET OFF)
 
 set(GYRO_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Source)
 
+# **Where the three C++ libraries come from, which is a packager's question rather than a person's.**
+#
+# Off, spdlog, Vulkan-Headers and volk arrive through CPM at configure time -- pinned, fetched and
+# built in this tree, which is what makes a fresh clone build with nothing installed but the platform
+# stack. On, they are taken from the system with `find_package`, because a build inside a distribution
+# has no network after its fetch step, and a second copy of a library in an image is a second copy to
+# track a security advisory through.
+#
+# **The pins are what is given up, and the cost is named here rather than discovered.** The three
+# blocks below pin Vulkan-Headers and volk to one SDK on purpose: volk's dispatch table is generated
+# from a header revision, and a table built against one revision over a `vulkan_core.h` from another
+# is a null entry in the middle of a struct rather than a configure error. Vulkan packaging updates
+# the set in lockstep, which is what makes this safe where it is turned on; a system that ships them
+# at different revisions is one it should stay off for.
+#
+# glslang is not in this set even though it is fetched beside them, because it is not linked -- it is
+# a build tool, and `GYRO_HOST_GLSLANG` in CMake/Shaders.cmake is the variable that supplies it.
+option(GYRO_SYSTEM_DEPENDENCIES "Take spdlog, Vulkan-Headers and volk from the system rather than CPM" OFF)
+
 # Setup CPM
 set(CPM_SOURCE_CACHE "${CMAKE_SOURCE_DIR}/.cpm-cache" CACHE PATH "CPM cache directory")
 include(CMake/CPM.cmake)
@@ -162,13 +181,35 @@ find_package(Threads REQUIRED)
 # formatter and the line that prints it drift apart. One vocabulary, decided here.
 set(SPDLOG_USE_STD_FORMAT ON CACHE BOOL "spdlog formats with std::format" FORCE)
 
-CPMAddPackage(
-	NAME spdlog
-	GITHUB_REPOSITORY gabime/spdlog
-	GIT_TAG v1.17.0
-	SYSTEM YES
-	EXCLUDE_FROM_ALL YES
-)
+if(GYRO_SYSTEM_DEPENDENCIES)
+	find_package(spdlog 1.15 REQUIRED)
+
+	# **The formatting back end is a property of the build spdlog was compiled with, not of this one**,
+	# which is what makes the paragraph above a check rather than a cache variable. `SPDLOG_FMT_EXTERNAL`
+	# is carried on the imported target by spdlog's own config, and a system copy built that way sends
+	# every log line through fmt -- which does not consult a `std::formatter`. Left to fail on its own
+	# it is a wall of template errors at an arbitrary log site, so it is caught here with the name of
+	# the setting that fixes it.
+	get_target_property(GYRO_SPDLOG_DEFINITIONS spdlog::spdlog INTERFACE_COMPILE_DEFINITIONS)
+
+	if(GYRO_SPDLOG_DEFINITIONS MATCHES "SPDLOG_FMT_EXTERNAL")
+		message(FATAL_ERROR
+			"The system spdlog was built against external fmt. gyro's log sites print types it "
+			"declares std::formatter specializations for -- Wake, FrameDecision, OutputConfiguration, "
+			"Budget, Plan -- and fmt does not consult those. Rebuild spdlog with "
+			"-DSPDLOG_USE_STD_FORMAT=ON and -DSPDLOG_FMT_EXTERNAL=OFF, or turn "
+			"GYRO_SYSTEM_DEPENDENCIES off and let CPM build it."
+		)
+	endif()
+else()
+	CPMAddPackage(
+		NAME spdlog
+		GITHUB_REPOSITORY gabime/spdlog
+		GIT_TAG v1.17.0
+		SYSTEM YES
+		EXCLUDE_FROM_ALL YES
+	)
+endif()
 
 # Vulkan, and every part of it arrives through CPM rather than pkg-config. See
 # Docs/Decisions.md decision 107; the short of it is that gyro never links the loader. volk resolves
@@ -181,25 +222,34 @@ CPMAddPackage(
 # entry in the middle of a struct.
 set(VULKAN_HEADERS_ENABLE_MODULE OFF CACHE BOOL "No Vulkan-Hpp C++20 module; gyro is not on Vulkan-Hpp" FORCE)
 
-CPMAddPackage(
-	NAME Vulkan-Headers
-	GITHUB_REPOSITORY KhronosGroup/Vulkan-Headers
-	GIT_TAG v1.4.357
-	SYSTEM YES
-	EXCLUDE_FROM_ALL YES
-)
+if(GYRO_SYSTEM_DEPENDENCIES)
+	# The package names are the ones the two projects install configs under rather than the ones CPM
+	# fetches them by, which is why they are spelled differently here: `VulkanHeaders` for the headers
+	# and lowercase `volk` for the loader. Both hand back the same targets the CPM path does --
+	# `Vulkan::Headers` and `volk::volk` -- so nothing downstream of this block knows which arm ran.
+	find_package(VulkanHeaders REQUIRED)
+	find_package(volk REQUIRED)
+else()
+	CPMAddPackage(
+		NAME Vulkan-Headers
+		GITHUB_REPOSITORY KhronosGroup/Vulkan-Headers
+		GIT_TAG v1.4.357
+		SYSTEM YES
+		EXCLUDE_FROM_ALL YES
+	)
 
-# Named explicitly rather than left to volk's own search, which tries FindVulkan first and would
-# quietly prefer a distribution's headers over the pinned ones on a machine that has both.
-set(VULKAN_HEADERS_INSTALL_DIR "${Vulkan-Headers_SOURCE_DIR}" CACHE PATH "The headers volk generates against" FORCE)
+	# Named explicitly rather than left to volk's own search, which tries FindVulkan first and would
+	# quietly prefer a distribution's headers over the pinned ones on a machine that has both.
+	set(VULKAN_HEADERS_INSTALL_DIR "${Vulkan-Headers_SOURCE_DIR}" CACHE PATH "The headers volk generates against" FORCE)
 
-CPMAddPackage(
-	NAME volk
-	GITHUB_REPOSITORY zeux/volk
-	GIT_TAG vulkan-sdk-1.4.357.0
-	SYSTEM YES
-	EXCLUDE_FROM_ALL YES
-)
+	CPMAddPackage(
+		NAME volk
+		GITHUB_REPOSITORY zeux/volk
+		GIT_TAG vulkan-sdk-1.4.357.0
+		SYSTEM YES
+		EXCLUDE_FROM_ALL YES
+	)
+endif()
 
 # The GLSL front end, and it is a build tool rather than a library gyro links. CMake/Shaders.cmake is
 # the argument; the short of it is that decision 103's variant lattice is enumerable, so every module
@@ -216,13 +266,26 @@ set(ENABLE_SPVREMAPPER OFF CACHE BOOL "Nothing here remaps SPIR-V" FORCE)
 set(GLSLANG_TESTS OFF CACHE BOOL "glslang's own suite is not gyro's" FORCE)
 set(GLSLANG_ENABLE_INSTALL OFF CACHE BOOL "Nothing here is installed" FORCE)
 
-CPMAddPackage(
-	NAME glslang
-	GITHUB_REPOSITORY KhronosGroup/glslang
-	GIT_TAG vulkan-sdk-1.4.357.0
-	SYSTEM YES
-	EXCLUDE_FROM_ALL YES
-)
+# `GYRO_HOST_GLSLANG` is CMake/Shaders.cmake's, declared there because that is the file that runs the
+# compiler; this is the one place that has to know whether it was answered. The two variables set in
+# each arm are what gyro_add_shaders spells its rule with -- a command, and a target to order against
+# where there is one. A supplied binary has no target behind it, and an empty DEPENDS is how a rule
+# says the only thing it waits for is its input.
+if(GYRO_HOST_GLSLANG)
+	set(GYRO_GLSLANG_COMMAND ${GYRO_HOST_GLSLANG})
+	set(GYRO_GLSLANG_DEPENDS "")
+else()
+	CPMAddPackage(
+		NAME glslang
+		GITHUB_REPOSITORY KhronosGroup/glslang
+		GIT_TAG vulkan-sdk-1.4.357.0
+		SYSTEM YES
+		EXCLUDE_FROM_ALL YES
+	)
+
+	set(GYRO_GLSLANG_COMMAND $<TARGET_FILE:glslang-standalone>)
+	set(GYRO_GLSLANG_DEPENDS glslang-standalone)
+endif()
 
 # The test harness, declared before the modules whose tests link it.
 gyro_add_module(Testing PORTABLE OBJECT

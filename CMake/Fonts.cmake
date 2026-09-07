@@ -19,7 +19,20 @@
 
 include(ExternalProject)
 
+# **The baker may be supplied prebuilt**, for CMake/Bindings.cmake's reason and with the same shape:
+# a sub-build launched under a cross toolchain produces a baker for the target, and a baker that
+# cannot be executed stops the build at the first face. The tests go with the sub-build that is
+# skipped, which is where the corpus check lives -- so a tree using a prebuilt baker trusts the
+# machine that built it, exactly as it trusts the tables it is about to compile.
+set(GYRO_HOST_FONTS "" CACHE FILEPATH "A prebuilt GyroFonts for the host; empty builds one here")
+
 set(GYRO_FONTS_BINARY_DIR ${CMAKE_BINARY_DIR}/Tools/Fonts)
+
+if(GYRO_HOST_FONTS)
+	set(GYRO_FONTS_TOOL ${GYRO_HOST_FONTS})
+	add_custom_target(FontBaker)
+else()
+
 set(GYRO_FONTS_TOOL ${GYRO_FONTS_BINARY_DIR}/GyroFonts)
 
 ExternalProject_Add(FontBaker
@@ -41,6 +54,8 @@ add_test(
 	NAME FontBaker
 	COMMAND ${GYRO_FONTS_BINARY_DIR}/FontBakerTests
 )
+
+endif()
 
 # The faces, and the whole ladder in one invocation — Text/Font.h's `Nearest` walks it in order, so
 # there is one array and one rule rather than one per size.
