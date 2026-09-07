@@ -1277,7 +1277,7 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 		}
 	}
 
-	// **Where a shell has claimed placement, gyro does not place and the window waits** (190). It is
+	// **Where a shell has claimed placement, gyro does not place and the window waits** (198). It is
 	// already at zero opacity and a tenth over size, so waiting is invisible rather than a window
 	// sitting at the origin — which is decision 141's *shown when placed* being literally true rather
 	// than approximately. The shell learns the window exists through

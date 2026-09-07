@@ -31,7 +31,7 @@ GYRO_TEST(Scene, TheWireTransitionsAreTheOnesTheCatalogHasSpringsFor)
 
 GYRO_TEST(Scene, ThereIsNoWireNameForNotAnimating)
 {
-	// **The load-bearing absence, and the whole of decision 190.** `Transition::None` is what every
+	// **The load-bearing absence, and the whole of decision 198.** `Transition::None` is what every
 	// client commit in the tree uses and what a shell may never name: a shell able to set a position
 	// with no motion sixty times a second is a shell hand-animating the desktop, which is decision 51's
 	// falsifiable test failing. Zero is the value a zeroed field or an uninitialised enum lands on, so

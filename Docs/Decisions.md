@@ -15335,172 +15335,6 @@ mechanism document reached the answer first, from the resampling rule, which is 
 this entry rests on.
 
 
-### 190. A shell says where the windows are and never how they get there; a commit names a transition and there is no way to name none
-
-*(Decided 2026-09-06, settling the half of [Open.md](Open.md)'s *the scene vocabulary closes
-arrangement and not trajectory* that
-[decision 112](#112-a-commit-is-a-scope-with-an-origin-and-the-wire-says-when-it-closes) narrowed it
-to, and building the seam
-[decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) has described since it was
-written. `gyro_scene_v1` is the third of gyro's own protocols, after
-[186](#186-a-shell-claims-a-chord-by-keysym-once-and-is-told-the-instant-the-key-was-pressed)'s
-chords and [187](#187-a-shell-declares-a-surface-to-be-chrome-once-and-that-one-word-takes-it-out-of-the-floor-the-walk-and-the-list)'s
-chrome.)*
-
-**A shell declares containers by name, puts windows into them, and names one catalog transition per
-commit. It cannot name a transition meaning *none*.** Everything below is that last sentence being
-paid for, because refusing *none* is the only part of this design that costs a shell something.
-
-#### The falsifiable test says the catalog has to be unnameable-around
-
-Decision 51 states the test this protocol has to pass: *if a shell can produce motion that does not
-match the catalog, the line is in the wrong place.* Decision 112 found the one way a closed
-vocabulary still fails it — decision 89 makes setting a model value *be* a retarget, so *set this
-without starting anything* has to be sayable somewhere — and left open whether a shell may say it.
-It may not. A shell holding a free *none* republishes a position sixty times a second and has
-hand-animated the desktop with a nicer spelling: no springs, no coefficients, one frame of lag, and
-[Animation.md](Animation.md)'s first priority lost quietly rather than in something anyone reviews.
-
-**The cost that made it a real question is paid at creation instead.** Open.md weighed the rule
-against "a shell that wants to place a window without animating it", and the answer is that every
-such case is a coordinate stated before there is anything on screen to move. A container being made
-has nowhere to have come from, so `get_container` carries its position and applies it at birth; a
-window being placed for the first time has never been anywhere, so its position lands too. What is
-left over — a container the shell already has, at a position it can see — is a change a person is
-watching, and there is no honest reason for it not to animate.
-
-**`Transition::None` therefore stays exactly what decision 112 needs it for and nothing more**: every
-`wl_surface.commit` in the tree, gyro's own placements, and the two transactions `PlaceWindow` opens.
-The wire enum is the catalog minus that one entry, mapped one to one, and a shell built against a
-newer protocol gets an error rather than a fall back — falling back would land on `None` and hand it
-precisely the write this entry withholds. Zero on the wire is not a transition, which matters because
-zero is what a zeroed field lands on.
-
-#### The first placement is the entrance, and the shell's transition is not consulted for it
-
-Decision 141 has a window *shown when placed* and the entrance starting when the placement lands. So
-`place_window` on a window nobody has placed does two things gyro decides: the position lands under
-`Transition::None`, and the window then arrives under `Transition::WindowOpen`, both stamped with the
-commit's origin. What the shell contributes is that timestamp — the entrance starts when the person
-pressed the key rather than when the shell got round to answering, which is decision 51's shared `t₀`
-doing the work it was written for.
-
-**Consulting the shell's transition here would break two ways and one of them is silent.** A shell
-naming `WorkspaceSwitch` would have a new window slide in from wherever its node happened to sit; a
-shell naming `WindowOpen` — the obvious guess — would find its position *silently dropped*, because
-that entry is deliberately silent about translation and a channel a transition says nothing about is
-a channel a write does not reach. A protocol whose most obvious use is its worst failure is one
-nobody should have to read carefully, so the shell says where and gyro says how it arrives.
-
-#### Placement is claimed, and the claim is a request rather than a bind
-
-The Floorplanner places every window at map today, and it has to stand down before the first window
-or a person sees it centred and then jumping to wherever the shell wanted it — which is the flash
-decision 141's *shown when placed* exists to prevent. So there is a `claim_placement`, and the
-session's windows wait for whoever holds it.
-
-**A request rather than holding the global**, because the `System` tier admits three kinds of client
-and only one of them is the window manager: a screen recorder or a settings panel binding
-`gyro_scene_v1` to move its own surface would silently suppress placement for the whole session. And
-**a second claim is a protocol error**, which is where this parts company with 186's chords: several
-clients may hold one chord because a keystroke can be told to all of them, and a window has exactly
-one place to be. What a person would see if the second claim were tolerated is a machine that has
-stopped opening windows, with nothing anywhere naming the disagreement.
-
-The claim is released when the object is destroyed or the client goes, so a shell crash brings the
-Floorplanner back and the session stays usable — which is decision 141's restart gap served by the
-same mechanism rather than by a special case.
-
-#### A container is gyro's, named by the shell, and a child of the floor
-
-Decision 141 already settles the ownership and this is what the wire shape follows from. `destroy`
-on a `gyro_container_v1` releases the *object* and leaves the container standing, which is the
-opposite of what destroying an object usually means and is exactly the point: a crash destroys every
-object a client held at once, and if that took the containers with it a shell crash would dissolve
-every workspace and pile forty windows into one heap. `remove` is the deliberate act, and what it
-does with whatever is still inside is hand it back to the floor — the container of last resort, which
-141 already guarantees exists.
-
-**Under the floor rather than beside it**, which decision 55 decides in one line: the sibling list is
-the paint order, and [Floor.h](../Source/Protocol/Floor.h) keeps the floor and the chrome root as two
-chains precisely so that raising a window can never put it in front of the shell's own launcher. A
-workspace authored as a third root would be created later and therefore be in front, and every window
-in it would draw over the panel. Decision 141's sentence about further containers being *roots
-carrying the same session* is corrected here: that is right for the chrome root, which has to be in
-front of the floor, and wrong for everything a shell declares, which has to be behind it.
-
-#### A window is named by the handle that already promises never to reuse a name
-
-`place_window` takes an `ext_foreign_toplevel_handle_v1`. That object is already `System` tier,
-already filtered to the asking client's own session, already excludes the shell's own chrome (187),
-and already carries decision 15's generational handle as its identifier — which is the machine's
-promise not to reuse a name, written down once. [Foreign.h](../Source/Protocol/Foreign.h) said
-enumeration was landing "alone" because acting on a window "needs the seam that does not exist yet",
-and this is that seam arriving without a second name for the same thing.
-
-**A closed handle is ignored rather than being an error.** An application quitting while a shell is
-halfway through a batch is ordinary and no care on the shell's part avoids it, since the `closed`
-event and the request cross on the wire. Ending the shell over it would make every application's exit
-a chance to take the desktop down.
-
-#### Rejected
-
-**Rejected: a shell may name *none* freely.** The simplest answer, and its defence is that the
-failure is self-punishing — a shell stepping a transform at its own frame rate publishes no
-coefficients and looks visibly worse than the catalog on every machine. That is true and it is an
-argument about taste rather than about mechanism, and decision 51's test is not about taste.
-
-**Rejected: *none* on a node the person cannot see yet.** More permissive and closes the same hole,
-and it needs the visibility flag itself governed or hide-mutate-show at sixty hertz reopens it. The
-rule above is airtight without a second rule holding it up, and the cases it was meant to buy turn
-out to be creation, which already carries its own coordinate.
-
-**Rejected: binding the global is the claim.** No extra request, and it cannot tell a window manager
-from a settings panel.
-
-**Rejected: the Floorplanner places and the shell moves the window afterwards.** No claim, no race,
-and it costs exactly the flash-at-origin-then-jump that *shown when placed* exists to prevent.
-
-**Rejected: a scene-specific handle for a window.** Typed to this protocol and therefore tidier, and
-it is a second name for one window and so a second way for a shell to hold a stale one.
-
-**Rejected: containers as roots**, above. **Rejected: `remove` refusing a container that still holds
-windows**, which sounds like the careful answer and loses to a race the shell cannot close — a window
-can map into a container between the shell emptying it and removing it, and a protocol error for that
-is a desktop that dies when an application opens at the wrong moment.
-
-**Rejected: a gesture request.** Not deferred out of tidiness — three things are absent and each
-would have to be invented to specify it. [Scene/Entity.h](../Source/Scene/Entity.h) carries four
-sprung channels and no driven one, so there is nothing dispatch-side for
-[decision 65](#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)'s
-progress parameter to be authored into; [Input/Devices.cpp](../Source/Input/Devices.cpp) drops
-libinput's swipe and pinch events for want of a recognizer; and Open.md says the gesture vocabulary
-"wants a screen rather than an argument". `Animation/Author/Drive.h` and `World/Node.h`'s
-`DrivenRamp` are the two ends that exist, with the middle missing. Adding the request is a version
-bump.
-
-#### Consequences
-
-`Protocol` gains `Scene.cpp`, `SessionFloors` gains the declared containers and the placement claim,
-and `SceneStore` gains `Reparent` — the one structural change a shell makes that is neither a create
-nor a remove. `SceneCommit` gains `Reparent`, `Show` and `Hide`; the first is a commit verb rather
-than a setter because a node's position is relative to its parent, so a reparent alone is never the
-whole sentence and applying it without the move beside it puts the window at the coordinates it had
-in the workspace it just left.
-
-**`Reparent` refuses a null parent and a parent inside the subtree being moved.** The second is the
-unbounded traversal decision 90 exists to make unreachable, reached through the authoring side rather
-than through the published run — and it is refused where it is written rather than detected where it
-is walked, since the walk runs at `SCHED_FIFO`.
-
-**What is still open, and none of it is a gap in this entry.** The gesture, above. Decision 95's
-**reference** kind, which is what an overview needs to show a live window in two places at once and
-which wants the backward-index rule and the hiding of the originals stated on the wire. **What is in
-a container**, which a restarted shell is not told — it learns its workspaces are back and not which
-window is in which, so it cannot redraw a workspace strip without asking every window where it is.
-And **nesting**: a container is a child of the floor and nothing else, which is enough for a
-workspace and is not enough for a grid inside one.
-
 ### 191. Late arrival selects a frame, never a tier — the record-time check is planned or wait
 
 *(Added 2026-09-06.)* Every frame has an instant by which its inputs are owed: `deadline −
@@ -15884,3 +15718,170 @@ Linux 7.1.9`, `version 0.0.0-296-g67e3aaf+` with the dirty flag beside the hash,
 `pages not locked, not asked for`, `scheduling normal, not asked for`, `clocksource tsc`, and the ring
 size. The dirty flag earns its place there — a trace from a working tree is one whose source cannot be
 recovered, and that is worth knowing before an afternoon goes into reading it.
+
+
+### 198. A shell says where the windows are and never how they get there; a commit names a transition and there is no way to name none
+
+*(Decided 2026-09-06, settling the half of [Open.md](Open.md)'s *the scene vocabulary closes
+arrangement and not trajectory* that
+[decision 112](#112-a-commit-is-a-scope-with-an-origin-and-the-wire-says-when-it-closes) narrowed it
+to, and building the seam
+[decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) has described since it was
+written. `gyro_scene_v1` is the third of gyro's own protocols, after
+[186](#186-a-shell-claims-a-chord-by-keysym-once-and-is-told-the-instant-the-key-was-pressed)'s
+chords and [187](#187-a-shell-declares-a-surface-to-be-chrome-once-and-that-one-word-takes-it-out-of-the-floor-the-walk-and-the-list)'s
+chrome.)*
+
+**A shell declares containers by name, puts windows into them, and names one catalog transition per
+commit. It cannot name a transition meaning *none*.** Everything below is that last sentence being
+paid for, because refusing *none* is the only part of this design that costs a shell something.
+
+#### The falsifiable test says the catalog has to be unnameable-around
+
+Decision 51 states the test this protocol has to pass: *if a shell can produce motion that does not
+match the catalog, the line is in the wrong place.* Decision 112 found the one way a closed
+vocabulary still fails it — decision 89 makes setting a model value *be* a retarget, so *set this
+without starting anything* has to be sayable somewhere — and left open whether a shell may say it.
+It may not. A shell holding a free *none* republishes a position sixty times a second and has
+hand-animated the desktop with a nicer spelling: no springs, no coefficients, one frame of lag, and
+[Animation.md](Animation.md)'s first priority lost quietly rather than in something anyone reviews.
+
+**The cost that made it a real question is paid at creation instead.** Open.md weighed the rule
+against "a shell that wants to place a window without animating it", and the answer is that every
+such case is a coordinate stated before there is anything on screen to move. A container being made
+has nowhere to have come from, so `get_container` carries its position and applies it at birth; a
+window being placed for the first time has never been anywhere, so its position lands too. What is
+left over — a container the shell already has, at a position it can see — is a change a person is
+watching, and there is no honest reason for it not to animate.
+
+**`Transition::None` therefore stays exactly what decision 112 needs it for and nothing more**: every
+`wl_surface.commit` in the tree, gyro's own placements, and the two transactions `PlaceWindow` opens.
+The wire enum is the catalog minus that one entry, mapped one to one, and a shell built against a
+newer protocol gets an error rather than a fall back — falling back would land on `None` and hand it
+precisely the write this entry withholds. Zero on the wire is not a transition, which matters because
+zero is what a zeroed field lands on.
+
+#### The first placement is the entrance, and the shell's transition is not consulted for it
+
+Decision 141 has a window *shown when placed* and the entrance starting when the placement lands. So
+`place_window` on a window nobody has placed does two things gyro decides: the position lands under
+`Transition::None`, and the window then arrives under `Transition::WindowOpen`, both stamped with the
+commit's origin. What the shell contributes is that timestamp — the entrance starts when the person
+pressed the key rather than when the shell got round to answering, which is decision 51's shared `t₀`
+doing the work it was written for.
+
+**Consulting the shell's transition here would break two ways and one of them is silent.** A shell
+naming `WorkspaceSwitch` would have a new window slide in from wherever its node happened to sit; a
+shell naming `WindowOpen` — the obvious guess — would find its position *silently dropped*, because
+that entry is deliberately silent about translation and a channel a transition says nothing about is
+a channel a write does not reach. A protocol whose most obvious use is its worst failure is one
+nobody should have to read carefully, so the shell says where and gyro says how it arrives.
+
+#### Placement is claimed, and the claim is a request rather than a bind
+
+The Floorplanner places every window at map today, and it has to stand down before the first window
+or a person sees it centred and then jumping to wherever the shell wanted it — which is the flash
+decision 141's *shown when placed* exists to prevent. So there is a `claim_placement`, and the
+session's windows wait for whoever holds it.
+
+**A request rather than holding the global**, because the `System` tier admits three kinds of client
+and only one of them is the window manager: a screen recorder or a settings panel binding
+`gyro_scene_v1` to move its own surface would silently suppress placement for the whole session. And
+**a second claim is a protocol error**, which is where this parts company with 186's chords: several
+clients may hold one chord because a keystroke can be told to all of them, and a window has exactly
+one place to be. What a person would see if the second claim were tolerated is a machine that has
+stopped opening windows, with nothing anywhere naming the disagreement.
+
+The claim is released when the object is destroyed or the client goes, so a shell crash brings the
+Floorplanner back and the session stays usable — which is decision 141's restart gap served by the
+same mechanism rather than by a special case.
+
+#### A container is gyro's, named by the shell, and a child of the floor
+
+Decision 141 already settles the ownership and this is what the wire shape follows from. `destroy`
+on a `gyro_container_v1` releases the *object* and leaves the container standing, which is the
+opposite of what destroying an object usually means and is exactly the point: a crash destroys every
+object a client held at once, and if that took the containers with it a shell crash would dissolve
+every workspace and pile forty windows into one heap. `remove` is the deliberate act, and what it
+does with whatever is still inside is hand it back to the floor — the container of last resort, which
+141 already guarantees exists.
+
+**Under the floor rather than beside it**, which decision 55 decides in one line: the sibling list is
+the paint order, and [Floor.h](../Source/Protocol/Floor.h) keeps the floor and the chrome root as two
+chains precisely so that raising a window can never put it in front of the shell's own launcher. A
+workspace authored as a third root would be created later and therefore be in front, and every window
+in it would draw over the panel. Decision 141's sentence about further containers being *roots
+carrying the same session* is corrected here: that is right for the chrome root, which has to be in
+front of the floor, and wrong for everything a shell declares, which has to be behind it.
+
+#### A window is named by the handle that already promises never to reuse a name
+
+`place_window` takes an `ext_foreign_toplevel_handle_v1`. That object is already `System` tier,
+already filtered to the asking client's own session, already excludes the shell's own chrome (187),
+and already carries decision 15's generational handle as its identifier — which is the machine's
+promise not to reuse a name, written down once. [Foreign.h](../Source/Protocol/Foreign.h) said
+enumeration was landing "alone" because acting on a window "needs the seam that does not exist yet",
+and this is that seam arriving without a second name for the same thing.
+
+**A closed handle is ignored rather than being an error.** An application quitting while a shell is
+halfway through a batch is ordinary and no care on the shell's part avoids it, since the `closed`
+event and the request cross on the wire. Ending the shell over it would make every application's exit
+a chance to take the desktop down.
+
+#### Rejected
+
+**Rejected: a shell may name *none* freely.** The simplest answer, and its defence is that the
+failure is self-punishing — a shell stepping a transform at its own frame rate publishes no
+coefficients and looks visibly worse than the catalog on every machine. That is true and it is an
+argument about taste rather than about mechanism, and decision 51's test is not about taste.
+
+**Rejected: *none* on a node the person cannot see yet.** More permissive and closes the same hole,
+and it needs the visibility flag itself governed or hide-mutate-show at sixty hertz reopens it. The
+rule above is airtight without a second rule holding it up, and the cases it was meant to buy turn
+out to be creation, which already carries its own coordinate.
+
+**Rejected: binding the global is the claim.** No extra request, and it cannot tell a window manager
+from a settings panel.
+
+**Rejected: the Floorplanner places and the shell moves the window afterwards.** No claim, no race,
+and it costs exactly the flash-at-origin-then-jump that *shown when placed* exists to prevent.
+
+**Rejected: a scene-specific handle for a window.** Typed to this protocol and therefore tidier, and
+it is a second name for one window and so a second way for a shell to hold a stale one.
+
+**Rejected: containers as roots**, above. **Rejected: `remove` refusing a container that still holds
+windows**, which sounds like the careful answer and loses to a race the shell cannot close — a window
+can map into a container between the shell emptying it and removing it, and a protocol error for that
+is a desktop that dies when an application opens at the wrong moment.
+
+**Rejected: a gesture request.** Not deferred out of tidiness — three things are absent and each
+would have to be invented to specify it. [Scene/Entity.h](../Source/Scene/Entity.h) carries four
+sprung channels and no driven one, so there is nothing dispatch-side for
+[decision 65](#65-interactive-transitions-are-driven-by-a-progress-parameter-not-by-a-moving-target)'s
+progress parameter to be authored into; [Input/Devices.cpp](../Source/Input/Devices.cpp) drops
+libinput's swipe and pinch events for want of a recognizer; and Open.md says the gesture vocabulary
+"wants a screen rather than an argument". `Animation/Author/Drive.h` and `World/Node.h`'s
+`DrivenRamp` are the two ends that exist, with the middle missing. Adding the request is a version
+bump.
+
+#### Consequences
+
+`Protocol` gains `Scene.cpp`, `SessionFloors` gains the declared containers and the placement claim,
+and `SceneStore` gains `Reparent` — the one structural change a shell makes that is neither a create
+nor a remove. `SceneCommit` gains `Reparent`, `Show` and `Hide`; the first is a commit verb rather
+than a setter because a node's position is relative to its parent, so a reparent alone is never the
+whole sentence and applying it without the move beside it puts the window at the coordinates it had
+in the workspace it just left.
+
+**`Reparent` refuses a null parent and a parent inside the subtree being moved.** The second is the
+unbounded traversal decision 90 exists to make unreachable, reached through the authoring side rather
+than through the published run — and it is refused where it is written rather than detected where it
+is walked, since the walk runs at `SCHED_FIFO`.
+
+**What is still open, and none of it is a gap in this entry.** The gesture, above. Decision 95's
+**reference** kind, which is what an overview needs to show a live window in two places at once and
+which wants the backward-index rule and the hiding of the originals stated on the wire. **What is in
+a container**, which a restarted shell is not told — it learns its workspaces are back and not which
+window is in which, so it cannot redraw a workspace strip without asking every window where it is.
+And **nesting**: a container is a child of the floor and nothing else, which is enough for a
+workspace and is not enough for a grid inside one.

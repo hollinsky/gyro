@@ -288,7 +288,7 @@ and the interface is what lets the headless sweep place time at arbitrary phase.
   design problem seen three ways, and it still wants a screen rather than an argument.
 
   *(Annotated 2026-09-06.)* The rest of the vocabulary is now on the wire —
-  [decision 190](Decisions.md#190-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none)'s
+  [decision 198](Decisions.md#198-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none)'s
   `gyro_scene_v1` carries containers, placement and the transition — and the gesture is the one part
   of it that was not specified, because three things are missing rather than one: `Scene/Entity.h`
   carries four sprung channels and no driven one, `Input/Devices.cpp` drops libinput's swipe and pinch
@@ -319,7 +319,7 @@ and the interface is what lets the headless sweep place time at arbitrary phase.
   **shell** may name it freely, which is the half that decides whether the catalog is enforceable.
 
   **Answered 2026-09-06: a shell may not name it, and the cost is paid at creation.**
-  [Decision 190](Decisions.md#190-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none)
+  [Decision 198](Decisions.md#198-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none)
   makes `gyro_scene_v1.commit` carry the catalog minus `None`, so every change a shell makes to
   something on screen animates. What the rule was weighed against turned out to be a coordinate
   stated before there is anything to move — a container being made has nowhere to have come from, and
@@ -372,7 +372,7 @@ and the interface is what lets the headless sweep place time at arbitrary phase.
   or the restart gap — gyro's **Floorplanner** places it centered on the pointer's output. What stays
   open is layout below: the shell still declares and moves containers, and none of that policy is
   gyro's. *(Built 2026-09-06 by
-  [decision 190](Decisions.md#190-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none)
+  [decision 198](Decisions.md#198-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none)
   — a shell declares a container by a name it mints, places windows into it, and claims placement so
   the Floorplanner stands down. One correction to this entry's own wording came out of writing it: a
   declared container is a **child of the floor** and not a root beside it, because decision 55 makes
@@ -389,7 +389,7 @@ and the interface is what lets the headless sweep place time at arbitrary phase.
   to overlap their own dismissal are common, and the failure is a popup that pops rather than
   reverses. Wants a toolkit in front of it, not an argument.
 - **What a restarted shell is told about what it left behind.** *(New 2026-09-06, from
-  [decision 190](Decisions.md#190-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none).)*
+  [decision 198](Decisions.md#198-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none).)*
   A shell that comes back after a crash asks for its containers by name and is handed the ones it
   left, with the same windows still in them and still where they were — which is the property decision
   141 makes containers gyro's for. What it is not told is *which window is in which*, so it can put

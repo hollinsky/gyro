@@ -202,7 +202,7 @@ GYRO_TEST(Floor, ADeclaredContainerIsHandedBackToTheShellThatComesBackForIt)
 	GYRO_CHECK(scene.Find(workspace)->Parent == floors.Container(Nobody));
 
 	// Applied at birth and never animated — the one place a shell states a coordinate with no
-	// transition over it, because a container being created has nowhere to have come from (190).
+	// transition over it, because a container being created has nowhere to have come from (198).
 	GYRO_CHECK_EQ(scene.Find(workspace)->Translation.Model().X, 1920.0);
 
 	// The shell crashed and came back. It asks by the same name and is handed the same node, so not one

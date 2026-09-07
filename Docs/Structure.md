@@ -1620,7 +1620,7 @@ something instead. `SessionFloors` holds the declared containers and the claim b
 remove, and `SceneCommit` gains `Reparent`, `Show` and `Hide`. What is missing is the gesture, which
 needs a driven channel dispatch-side and a recognizer in `Input` first; decision 95's reference kind,
 which is what an overview needs; what is *in* a container, which a restarted shell is not told; and
-nesting (190).
+nesting (198).
 
 `Trace` is what this module knows about a trace row that `Core` cannot: how a client's row is spelled,
 which truncates the program name and never the pid, since the pid is what joins this client to its own

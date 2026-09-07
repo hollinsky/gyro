@@ -6807,7 +6807,7 @@ GYRO_TEST(ProtocolRoundTrip, ALauncherGivesTheKeyboardBackToTheWindowUnderItAndT
 	// instead is the sentence naming it.
 }
 
-// Decision 190's protocol: a shell says where the windows are, and gyro says what the change looks
+// Decision 198's protocol: a shell says where the windows are, and gyro says what the change looks
 // like. This is that seam over a real socket, with gyro's client codec on one end and gyro's server on
 // the other — which is the only place in the tree either is checked against a demarshaller that is not
 // its own.
@@ -7144,7 +7144,7 @@ GYRO_TEST(ProtocolRoundTrip, AWorkspaceCarriesItsWindowsAndSpringsUnderTheNamedT
 	GYRO_CHECK_EQ(pair.Store.Find(moved->FirstChild)->Translation.Model().X, 100.0);
 }
 
-// The one thing a shell cannot say, and decision 190 in a single assertion.
+// The one thing a shell cannot say, and decision 198 in a single assertion.
 GYRO_TEST(ProtocolRoundTrip, AShellCannotAskForAChangeThatDoesNotAnimate)
 {
 	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());

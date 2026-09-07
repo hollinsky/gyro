@@ -576,7 +576,7 @@ public:
 	// placed**, so this is not a cosmetic distinction: it is created already displaced and at zero
 	// opacity, and what brings it to one is the entrance the placement carries.
 	//
-	// It is false for exactly as long as the session's shell has claimed placement (190) and has not
+	// It is false for exactly as long as the session's shell has claimed placement (198) and has not
 	// answered for this window. With no shell claiming, the Floorplanner places at the instant the
 	// window arrives and this is true before any frame is drawn.
 	[[nodiscard]] bool IsPlaced() const noexcept { return m_Placed; }

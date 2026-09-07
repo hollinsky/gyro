@@ -130,7 +130,7 @@ public:
 	}
 
 	// The session skeleton itself, for the one client that writes to it rather than reading it: a shell
-	// declaring containers and claiming placement (190). Null outside a host, which is the same absence
+	// declaring containers and claiming placement (198). Null outside a host, which is the same absence
 	// `Store()` reports and for the same reason.
 	//
 	// **Non-const where `Floor()` and `Chrome()` above are questions**, and the asymmetry is the tier:

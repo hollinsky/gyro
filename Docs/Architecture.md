@@ -2801,7 +2801,7 @@ Floorplanner like any window, which is what a launcher wants and is not what a p
 first two were prerequisites for: a shell declares a container by a name it mints, puts windows into
 it, moves it, and says once per commit what kind of change that was. Rationale and rejected
 alternatives in [decision
-190](Decisions.md#190-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none).
+198](Decisions.md#198-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none).
 Four things about it are worth stating here because they are the shape of the whole seam:
 
 - **There is no way to say *no transition*.** The wire enum is the motion catalog minus `None`, so

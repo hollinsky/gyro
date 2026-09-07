@@ -100,7 +100,7 @@ public:
 	[[nodiscard]] EntityId Chrome(SessionId session) const noexcept;
 
 	// The container this session's shell declared under that name, or null where it has not declared
-	// one (190).
+	// one (198).
 	//
 	// **The name is the shell's and the container is gyro's, which is the whole of why there is a
 	// lookup here at all.** A shell that crashes takes every wire object it held with it and not one
@@ -116,7 +116,7 @@ public:
 	// **The position is applied at birth and never animated**, which is the one place a shell states a
 	// coordinate with no transition over it: a container being created has nowhere to have come from,
 	// so there is nothing for a motion to describe. That is what lets `gyro_scene_v1.commit` refuse to
-	// carry *no transition* at all — see decision 190.
+	// carry *no transition* at all — see decision 198.
 	//
 	// **The arguments are ignored for a container that already exists**, and that is not a shortcut. A
 	// restarting shell asks with whatever it last knew; what survived is the truth, and overwriting it
@@ -207,7 +207,7 @@ void PlaceOnFloor(
 // therefore also its entrance.
 //
 // **Two transactions and neither of them is the caller's**, which is the shape `Protocol/Shell.cpp`
-// already had for the Floorplanner and which decision 190 hands to a shell without handing over what
+// already had for the Floorplanner and which decision 198 hands to a shell without handing over what
 // it means. The position lands with no motion — a window has nowhere to travel from before it has
 // been anywhere — and the window then arrives at it under `Transition::WindowOpen`, both stamped with
 // the same instant, because a person opened one window rather than two things happening to it.

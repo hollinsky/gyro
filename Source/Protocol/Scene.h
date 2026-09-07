@@ -31,7 +31,7 @@ class SceneManager;
 // to write its own springs would be a shell whose overview animates a little differently from the
 // launcher beside it, and nobody could say why the machine felt cheap.
 //
-// **There is no way to say *no transition*, and that is decision 190's whole argument.** Decision 112
+// **There is no way to say *no transition*, and that is decision 198's whole argument.** Decision 112
 // left exactly this half open — a transition meaning *none* has to exist for client commits whatever
 // is decided for shells, and whether a shell may name it freely "decides whether the catalog is
 // enforceable". It may not: a shell that could set a position with no motion sixty times a second
