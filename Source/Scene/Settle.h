@@ -47,15 +47,34 @@ struct SettlePolicy
 	double Position = 1.0 / 16.0;
 	double Velocity = 1.0;
 
-	// Opacity has no output pixel to be expressed in, which is exactly what Docs/Open.md says is
-	// unresolved about it. The narrowest thing that is true anyway: a composite lands on an eight-bit
-	// wire in the ordinary case, so a residual below half a code point cannot be the difference between
-	// two pixels that leave the machine, and a rate below one code point per second cannot accumulate
-	// into one either. That is a representability argument rather than a perceptual one, and it is
-	// deliberately the weaker of the two — it settles what can be settled and leaves the perceptual half
-	// to the review with a screen in front of it that the dressing numbers already want.
-	float Opacity = 1.0F / 512.0F;
-	float OpacityRate = 1.0F / 256.0F;
+	// Opacity has no output pixel to be expressed in, and what these were before is a representability
+	// argument: half a code point on an eight-bit wire, and a rate that cannot accumulate into one in a
+	// second. That argument was sound and answered the wrong question. **The review with a screen in
+	// front of it has now happened, and what it found is that the pair was not balanced.**
+	//
+	// **What a person perceives is the size of the jump when the animation is cut**, because settling
+	// ends a channel where it stands rather than easing it the rest of the way — the same thing decision
+	// 54's sub-pixel snap is bounding one field up. A window fading out is cut at this opacity, so this
+	// is the pop: two code points of an eight-bit composite, over the whole area of a window that is
+	// already nearly gone. Half a code point bought nothing a person could see and cost a third of a
+	// second of it.
+	//
+	// **The rate was doing all of the work, which is the defect rather than the length.** The velocity
+	// bound decays from the amplitude times the frequency rather than from the amplitude, so it starts a
+	// factor of ω higher and needs that much further to fall — at the old pair a window close crossed
+	// its position threshold at 277 ms and its rate threshold at 372 ms, and spent the difference
+	// composited, holding an atlas rectangle and a dead client's buffers, at under one percent opacity.
+	// The geometric pair above is chosen so its two crossings land within a tenth of a second of each
+	// other; these now do the same across the whole catalog, converging exactly at `Standard` and
+	// further out.
+	//
+	// **The tail is not only redundant frames, which is what the paragraph above this used to weigh it
+	// against.** Decision 46 bounds the exit atlas at a handful of rectangles and decision 20 has a
+	// closing window holding its client's pixels until it settles, so an invisible tail is a reservation
+	// and a buffer somebody else may be waiting for — a cost the *representability* argument had no way
+	// to see, and the reason erring long is not free here the way it is for a geometric channel.
+	float Opacity = 1.0F / 128.0F;
+	float OpacityRate = 1.0F / 16.0F;
 };
 
 // The policy resolved against an output set: four thresholds, in the four channels' own units.
