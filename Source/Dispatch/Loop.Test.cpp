@@ -1,5 +1,6 @@
 #include "Dispatch/Loop.h"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstddef>
@@ -7,10 +8,12 @@
 #include <memory>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "Core/Clock.h"
 #include "Core/Time.h"
+#include "Core/Trace.h"
 #include "Core/Wake.h"
 #include "Geometry/Scale.h"
 #include "Geometry/Space.h"
@@ -555,4 +558,296 @@ GYRO_TEST(DispatchLoop, TheLoopDrawsTheCursorTheAuthorNeverAuthored)
 
 	GYRO_CHECK(fixture.Loop.Cursor().Container().IsNull());
 	GYRO_CHECK(fixture.Loop.Store().Find(container) == nullptr);
+}
+
+namespace
+{
+// Every mark the dispatch thread's own row carried, in the order it carried them. The row is shared
+// with `published`, `deferred` and whatever a later reader adds, so the caller says which vocabulary
+// it is reading rather than taking the whole row.
+[[nodiscard]] std::vector<std::string_view> MarksOn(const TraceBuffer& trace, std::span<const std::string_view> wanted)
+{
+	std::array<TraceEvent, 256> events{};
+	const std::size_t count = trace.Copy(events);
+
+	std::vector<std::string_view> marks;
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		const TraceEvent& event = events[index];
+
+		if (event.Scope != TraceThread || event.Kind != TraceKind::Mark)
+		{
+			continue;
+		}
+
+		const std::string_view name{ event.Name };
+
+		if (std::ranges::find(wanted, name) != wanted.end())
+		{
+			marks.push_back(name);
+		}
+	}
+
+	return marks;
+}
+
+// The five names an iteration can give for its own wake.
+constexpr std::string_view WakeNames[] = { "returns", "input", "due", "unattributed" };
+} // namespace
+
+// **The row tiles, which is what makes the dispatch thread's duty cycle readable at all.** Before this
+// the row carried a `serialize` span and two marks, so an iteration that spent its time somewhere else
+// — a scene walk over a thousand nodes, an author reading a flood of client requests — was a gap on the
+// row indistinguishable from a thread that was asleep.
+GYRO_TEST(DispatchLoop, AnIterationIsOneSliceAndTheSerializeSpanIsInsideIt)
+{
+	Fixture fixture;
+
+	std::array<TraceRecord, 256> records{};
+	TraceBuffer trace;
+
+	trace.Arm(records, fixture.Clock);
+
+	GYRO_REQUIRE(fixture.Open("lanes"));
+
+	EnrollTracing(&trace);
+
+	static_cast<void>(fixture.Loop.Step());
+
+	EnrollTracing(nullptr);
+
+	std::array<TraceEvent, 256> events{};
+	const std::size_t count = trace.Copy(events);
+
+	std::vector<std::string_view> opened;
+	std::size_t depth = 0;
+	std::size_t serialized = 0;
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		const TraceEvent& event = events[index];
+
+		if (event.Scope != TraceThread)
+		{
+			continue;
+		}
+
+		if (event.Kind == TraceKind::Begin)
+		{
+			opened.emplace_back(event.Name);
+
+			// The claim is nesting rather than presence: a `serialize` span that is a sibling of the
+			// iteration is the row this change exists to replace.
+			if (std::string_view{ event.Name } == "serialize")
+			{
+				GYRO_CHECK_EQ(depth, std::size_t{ 1 });
+
+				++serialized;
+			}
+
+			++depth;
+		}
+
+		if (event.Kind == TraceKind::End)
+		{
+			GYRO_REQUIRE(depth > 0);
+
+			--depth;
+		}
+	}
+
+	GYRO_REQUIRE(!opened.empty());
+	GYRO_CHECK_EQ(opened.front(), std::string_view{ "iteration" });
+	GYRO_CHECK_EQ(serialized, std::size_t{ 1 });
+
+	// Balanced, which is what keeps one iteration from swallowing the rest of the capture: an unclosed
+	// span is closed at the newest record by the writer, so a leak here draws a slice that runs to the
+	// right edge of the trace and buries every iteration after it.
+	GYRO_CHECK_EQ(depth, std::size_t{ 0 });
+}
+
+// **A wake says what woke it, because a wake that does nothing has to be tellable from one that could
+// not have done nothing.** The frame row learned this first — `idle` against `armed for nothing` — and
+// the reason is Docs/Architecture.md#doing-nothing-must-cost-nothing: a thread that ran and produced
+// nothing is either a fact about the world or a defect, and a row that cannot say which leaves a reader
+// with a gap where the explanation belongs.
+GYRO_TEST(DispatchLoop, AWakeIsMarkedWithWhatWokeIt)
+{
+	Fixture fixture;
+	ScriptedInput input;
+
+	std::array<TraceRecord, 512> records{};
+	TraceBuffer trace;
+
+	trace.Arm(records, fixture.Clock);
+
+	GYRO_REQUIRE(fixture.Open("settle"));
+
+	fixture.Loop.Observe(input);
+
+	EnrollTracing(&trace);
+
+	// Nothing has happened yet and nothing was armed, so nothing on this row can name the cause. It is
+	// not `idle`: the author reads its clients inside `Advance`, so an iteration serving a flood of
+	// requests looks exactly like this one from here.
+	const Wake first = fixture.Loop.Step();
+
+	// The frame thread hands a frame back, which is the wake this loop cannot arm for itself.
+	fixture.Consume();
+
+	static_cast<void>(fixture.Loop.Step());
+
+	// A hand on the mouse, with nothing else outstanding.
+	input.Push(4.0, 0.0);
+
+	const Wake third = fixture.Loop.Step();
+
+	// And the instant this loop asked for, arriving. The schedule owns this wake whatever else fired,
+	// and nothing else did.
+	GYRO_REQUIRE(third.Which != Wake::Kind::Settled);
+
+	fixture.Reach(third);
+
+	static_cast<void>(fixture.Loop.Step());
+
+	EnrollTracing(nullptr);
+
+	GYRO_CHECK(first.Which != Wake::Kind::Settled);
+
+	const std::vector<std::string_view> marks = MarksOn(trace, WakeNames);
+
+	GYRO_REQUIRE_EQ(marks.size(), std::size_t{ 4 });
+	GYRO_CHECK_EQ(marks[0], std::string_view{ "unattributed" });
+	GYRO_CHECK_EQ(marks[1], std::string_view{ "returns" });
+	GYRO_CHECK_EQ(marks[2], std::string_view{ "input" });
+	GYRO_CHECK_EQ(marks[3], std::string_view{ "due" });
+}
+
+// What the wake drained, as a number rather than as a name. A client or a device that floods this loop
+// is what a publication misses its frame behind, and a burst of reports is the frame thread coming back
+// from having fallen behind — neither is visible in a mark that only says *some*.
+GYRO_TEST(DispatchLoop, AWakeCountsWhatItDrained)
+{
+	Fixture fixture;
+	ScriptedInput input;
+
+	std::array<TraceRecord, 512> records{};
+	TraceBuffer trace;
+
+	trace.Arm(records, fixture.Clock);
+
+	GYRO_REQUIRE(fixture.Open("lanes"));
+
+	fixture.Loop.Observe(input);
+
+	EnrollTracing(&trace);
+
+	// Two frames back and three pushes of the mouse, drained by one iteration.
+	fixture.Consume();
+	fixture.Consume();
+
+	input.Push(1.0, 0.0);
+	input.Push(1.0, 0.0);
+	input.Push(0.0, 1.0);
+
+	static_cast<void>(fixture.Loop.Step());
+
+	// And a second iteration with neither, which is the sample that has to be a zero: a counter emitted
+	// only when it was nonzero holds its last value across every quiet iteration after it, so the row
+	// would read as a backlog that never cleared.
+	static_cast<void>(fixture.Loop.Step());
+
+	EnrollTracing(nullptr);
+
+	std::array<TraceEvent, 512> events{};
+	const std::size_t count = trace.Copy(events);
+
+	std::vector<std::pair<std::string_view, std::uint64_t>> samples;
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		const TraceEvent& event = events[index];
+
+		if (event.Scope != TraceThread || event.Kind != TraceKind::Count)
+		{
+			continue;
+		}
+
+		const std::string_view name{ event.Name };
+
+		if (name == "returns" || name == "input")
+		{
+			samples.emplace_back(name, event.Payload);
+		}
+	}
+
+	GYRO_REQUIRE_EQ(samples.size(), std::size_t{ 4 });
+	GYRO_CHECK_EQ(samples[0].first, std::string_view{ "returns" });
+	GYRO_CHECK_EQ(samples[0].second, std::uint64_t{ 2 });
+	GYRO_CHECK_EQ(samples[1].first, std::string_view{ "input" });
+	GYRO_CHECK_EQ(samples[1].second, std::uint64_t{ 3 });
+	GYRO_CHECK_EQ(samples[2].second, std::uint64_t{ 0 });
+	GYRO_CHECK_EQ(samples[3].second, std::uint64_t{ 0 });
+}
+
+// The one arrow left in the trace, and decision 144's reason for it: a publication is numbered by this
+// thread and a frame by the panel it lands on, so no name on either side can find the other. Everything
+// else this row says is a tag or a name, and a deferral is the one thing on it that is about the *other*
+// thread being late.
+GYRO_TEST(DispatchLoop, APublishedSceneStillDrawsItsArrowAndADeferralStillSaysSo)
+{
+	Fixture fixture;
+
+	std::array<TraceRecord, 512> records{};
+	TraceBuffer trace;
+
+	trace.Arm(records, fixture.Clock);
+
+	GYRO_REQUIRE(fixture.Open("lanes"));
+
+	EnrollTracing(&trace);
+
+	// The frame thread never consumes, so the ring fills and the steps past that are refused.
+	for (std::size_t step = 0; step < SnapshotRingDepth + 1; ++step)
+	{
+		fixture.Reach(fixture.Loop.Step());
+	}
+
+	EnrollTracing(nullptr);
+
+	std::array<TraceEvent, 512> events{};
+	const std::size_t count = trace.Copy(events);
+
+	std::size_t published = 0;
+	std::size_t deferred = 0;
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		const TraceEvent& event = events[index];
+
+		if (event.Scope != TraceThread || event.Kind != TraceKind::Mark)
+		{
+			continue;
+		}
+
+		if (std::string_view{ event.Name } == "published")
+		{
+			// The arrow, and the sequence the frame thread's `acquired` mark draws the other end of.
+			GYRO_CHECK(event.Arrow);
+			GYRO_CHECK(event.Payload != 0);
+
+			++published;
+		}
+
+		if (std::string_view{ event.Name } == "deferred")
+		{
+			GYRO_CHECK(event.Arrow);
+
+			++deferred;
+		}
+	}
+
+	GYRO_CHECK_EQ(published, SnapshotRingDepth);
+	GYRO_CHECK_EQ(deferred, std::size_t{ 1 });
 }

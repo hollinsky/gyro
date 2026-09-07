@@ -189,14 +189,19 @@ public:
 			return Wake::Never();
 		}
 
-		// The author's whole iteration, and the row it lands on is this thread's — so the trace reads as
-		// two rows with arrows between them rather than one interleaved column.
-		const TraceSpan step{ "step" };
+		// **The iteration is one slice and everything below is inside it**, which is the frame row's rule
+		// applied to the row beside it and for the same reason: a publication that arrived late is either
+		// an iteration that started late or one that took too long, and the two have opposite fixes. The
+		// row tiling is also what makes this thread's duty cycle readable at a glance — the gaps are what
+		// a machine that has stopped changing is supposed to be mostly made of.
+		const TraceSpan iteration{ "iteration" };
+
+		std::uint64_t returned = 0;
 
 		{
 			const TraceSpan collect{ "collect" };
 
-			Collect();
+			returned = Collect();
 		}
 
 		// **Beside the outbox's own reclamation and under the same number.** Everything strictly below
@@ -206,6 +211,10 @@ public:
 		m_Textures.Reclaim(m_Outbox.Watermark());
 
 		const Instant now = m_Store.Now();
+
+		Woke(returned, m_Input, now);
+
+		m_Input = 0;
 
 		TraceSpan advance{ "author" };
 
@@ -305,8 +314,14 @@ public:
 		// yet is waiting on the clock and on nothing else, so a world that has settled would sleep
 		// through the instant it was meant to fade up. See `Scene/Background.h`.
 		const Wake wake = Sooner(Sooner(authored, background), m_Serializer.Republish());
+		const Wake next = published ? wake : Sooner(wake, Wake::At(Advanced(now, PublishRetryInterval)));
 
-		return published ? wake : Sooner(wake, Wake::At(Advanced(now, PublishRetryInterval)));
+		// Remembered rather than recomputed, because `Woke` above has no other way to ask whether the
+		// instant this loop named has arrived — and an alarm the next iteration reconstructs from the
+		// fold is one it can only reconstruct after the drain it is trying to explain.
+		m_Armed = next;
+
+		return next;
 	}
 
 	// The world this loop authors into, so that a test can ask what is in the scene rather than infer it
@@ -414,15 +429,6 @@ public:
 	[[nodiscard]] const SceneReturn& Return() const noexcept { return m_Return; }
 
 private:
-	// Drain the return channel to empty, which is what advances the watermark and puts every buffer
-	// below it back in the pool. Taking one report and stopping would leave reclamation a frame behind
-	// forever, since the frame thread posts one per frame whatever else happened.
-	//
-	// **Each report is handed on rather than counted and dropped.** `SnapshotOutbox::Collect` takes the
-	// watermark and performs the reclamation it authorises, which is the half that is a memory-safety
-	// property; `SceneReturn` takes what is left — decision 115's derivation, which is where a presented
-	// sequence becomes a frame callback and a hold becomes a `wl_buffer.release`. Both halves see every
-	// report, and neither can be advanced without the other running.
 	// A mouse, a touchpad or a trackpoint moved the seat's cursor.
 	//
 	// **The displacement has already been through the acceleration curve**, which is `Core/Input.h`'s
@@ -431,6 +437,8 @@ private:
 	// accumulated here is the accelerated result, which is what `ScenePointer` is for.
 	void OnMotion(const PointerMotion& motion)
 	{
+		++m_Input;
+
 		static_cast<void>(m_Store.Pointer().Move({ motion.DeltaX, motion.DeltaY }, m_Store.Outputs()));
 	}
 
@@ -441,16 +449,96 @@ private:
 	// it rather than moved to the contact: `Scene/Pointer.h` forbids driving the seat's cursor from a
 	// touch, because a pointer that jumps to wherever a finger landed is the behaviour every
 	// touchscreen laptop that gets this wrong exhibits.
-	void OnTouch(const TouchEvent&) { m_Store.Pointer().Hide(); }
+	void OnTouch(const TouchEvent&)
+	{
+		++m_Input;
 
-	void Collect()
+		m_Store.Pointer().Hide();
+	}
+
+	// Drain the return channel to empty, which is what advances the watermark and puts every buffer
+	// below it back in the pool. Taking one report and stopping would leave reclamation a frame behind
+	// forever, since the frame thread posts one per frame whatever else happened.
+	//
+	// **Each report is handed on rather than counted and dropped.** `SnapshotOutbox::Collect` takes the
+	// watermark and performs the reclamation it authorises, which is the half that is a memory-safety
+	// property; `SceneReturn` takes what is left — decision 115's derivation, which is where a presented
+	// sequence becomes a frame callback and a hold becomes a `wl_buffer.release`. Both halves see every
+	// report, and neither can be advanced without the other running.
+	//
+	// **What it drained is returned rather than only accumulated**, because the row wants the depth of
+	// one wake and `m_Reports` is the depth of the whole run. A frame thread that fell behind and came
+	// back hands over a burst, and a burst is the shape that says which side was late.
+	[[nodiscard]] std::uint64_t Collect()
 	{
 		FrameReport report{};
+		std::uint64_t drained = 0;
 
 		while (m_Outbox.Collect(report))
 		{
 			m_Return.Drain(report);
 			++m_Reports;
+			++drained;
+		}
+
+		return drained;
+	}
+
+	// Say why this iteration is running, on the dispatch thread's own row.
+	//
+	// **A wake that does nothing must be visible, which is the same rule the frame row's `idle` serves**:
+	// Docs/Architecture.md#doing-nothing-must-cost-nothing means a thread that woke and drew nothing is
+	// either a fact about the world or a defect, and a reader can only tell which if the wake is drawn at
+	// all. Before this the row said nothing between publications, so a frame thread starving for a scene
+	// was beside a row that could not say whether this thread had even run.
+	//
+	// **A mark for every cause rather than one chosen by priority.** The frame row picks a single name
+	// because its marks explain a refusal and a refusal has one reason; here two causes really are true
+	// at once — a report and an animation edge landing in one wake is the ordinary case at panel rate —
+	// and choosing between them would be the instrument deciding which of two facts to hide.
+	//
+	// **`unattributed` is the honest name for a wake with no visible cause, and not a placeholder for
+	// `idle`.** Client traffic is read inside `ISceneAuthor::Advance`, so an iteration serving a flood is
+	// indistinguishable here from one that serves nothing: the mark says *nothing this row can name woke
+	// it*, which is true, where `idle` would claim nothing happened and be a lie on every keystroke a
+	// window responds to. The day `Advance` reports what it drained is the day this splits in two.
+	void Woke(std::uint64_t returned, std::uint64_t input, Instant now) const noexcept
+	{
+		// Sampled every iteration including the zeros, because a counter is a value at every instant: one
+		// emitted only when it was nonzero draws a plateau at the last burst and reads as a backlog that
+		// never cleared.
+		TraceCount("returns", static_cast<std::int64_t>(returned));
+		TraceCount("input", static_cast<std::int64_t>(input));
+
+		bool named = false;
+
+		if (returned != 0)
+		{
+			TraceMark("returns");
+
+			named = true;
+		}
+
+		if (input != 0)
+		{
+			TraceMark("input");
+
+			named = true;
+		}
+
+		// The previous iteration's answer, and due means the instant this loop asked for has arrived — so
+		// the schedule owns this wake whatever else also fired, which is the frame row's reading and is
+		// honest for the same reason: that instant is one this loop named and is now being served.
+		if (m_Armed.IsDue(now))
+		{
+			TraceMark("due");
+
+			named = true;
+		}
+
+		if (!named)
+		{
+			TraceMark("unattributed");
 		}
 	}
 
@@ -480,6 +568,16 @@ private:
 	// set that goes away while this loop is alive has to be able to drop the observer.
 	Connection<const PointerMotion&> m_Motion;
 	Connection<const TouchEvent&> m_Touch;
+
+	// The wake this loop last asked for, kept so that the next iteration can say whether the instant it
+	// named is what it is serving. Nothing reads it but the trace, and it costs the assignment.
+	Wake m_Armed = Wake::Never();
+
+	// Seat events since the last step, written by the two handlers above and cleared by the step that
+	// reports them. It is a tally rather than a flag because a flood is the interesting shape: a device
+	// emitting a thousand motions a second is a real cause of a publication that did not go out in time,
+	// and *there was input* cannot say that.
+	std::uint64_t m_Input = 0;
 
 	std::uint64_t m_Publications = 0;
 	std::uint64_t m_Deferrals = 0;
