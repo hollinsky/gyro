@@ -1984,6 +1984,15 @@ fakes are not two implementations and `IEventSource` would gain a verb only they
 the one place that knows both a Vulkan device and a nested presenter, which is what decision 120
 moved the allocator to the waist for (80, 83, 120, 121, 126, 127, 128)
 
+`Notify` is the datagram gyro sends the service manager, and it is the only thing in the tree that
+speaks to systemd rather than being configured by it: `READY=1` and a status sentence, on an
+`AF_UNIX` socket, with no libsystemd — which is what lets `Deploy/gyro.service` be `Type=notify`, and
+therefore what makes ordering a login agent after gyro mean anything. What is *not* there is the half
+[decision 49](Decisions.md#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot)
+actually rests on: `FDSTORE=1` needs the descriptor taken back out on the next start, and storing
+without adopting turns a restart from a black screen into a compositor that refuses to open a card
+node it is already master of.
+
 ### Shell
 
 *platform, not one of gyro's threads.*

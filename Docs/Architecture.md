@@ -490,6 +490,15 @@ gyro waits on two things: a DRM device with its driver's firmware loaded, and `/
 udev rules applied. Nothing else — no D-Bus, no network, no user, no VT, no `XDG_RUNTIME_DIR`. So
 `gyro.service` is udev-triggered on the DRM device and starts before nearly everything.
 
+**gyro says when it is ready, and the unit is `Type=notify` for it.** `READY=1` goes out once the
+mode is set, the world is laid out against the modes the panel gave, and the control socket is bound
+and being drained — so a unit ordered after gyro's starts against a machine whose screen is gyro's
+and whose control socket answers, which is what the login agent below will need and what
+`Type=simple` cannot express: there, a compositor that dies initializing Vulkan is one the manager
+already called started. It is an `AF_UNIX` datagram rather than libsystemd, for the reason
+[decision 49](Decisions.md#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot)
+gives, and `FDSTORE=1` is not yet sent on it — see [Restart](#restart).
+
 That is not merely early; it is early enough to displace what normally renders first, and the design
 takes that seriously. **gyro is the only thing that ever writes to the display**, from the firmware
 handoff to shutdown.
@@ -551,6 +560,14 @@ of gyro's exposure to a black screen. This is the same property that makes
 [re-exec](#the-pre-vulkan-console) seamless, and the reading behind
 [decision 49](Decisions.md#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot)
 is what established they are one mechanism rather than two.
+
+**Neither half is built, and they are one commit rather than two.** The datagram channel exists —
+`READY=1` goes out on it, per [above](#boot-and-the-display-lifetime) — and `FDSTORE=1` deliberately
+does not, because storing the descriptor without taking it back out through `LISTEN_FDS` on the next
+start is worse than not storing it at all: the store is still holding the old open file description,
+so the restarted gyro opens the card node fresh and is refused as *another process is DRM master* by
+the very mechanism that kept the picture. Until both halves land, a restart is the black screen this
+section exists to remove.
 
 **Most failures must never reach here.** Parse failures, resource exhaustion, and protocol
 violations are client-fatal by construction, per [resource accounting](#resource-accounting).

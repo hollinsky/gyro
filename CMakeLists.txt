@@ -1191,12 +1191,14 @@ gyro_add_module(Compositor
 	SOURCES
 		Capture.cpp
 		Compositor.cpp
+		Notify.cpp
 		RealTime.cpp
 		Uring.cpp
 		Wait.cpp
 	TESTS
 		Binding.Test.cpp
 		Capture.Test.cpp
+		Notify.Test.cpp
 		Options.Test.cpp
 		Schedule.Test.cpp
 		Uring.Test.cpp

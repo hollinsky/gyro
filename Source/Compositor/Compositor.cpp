@@ -34,6 +34,7 @@
 #include "Blit/Blit.h"
 #include "Compositor/Binding.h"
 #include "Compositor/Capture.h"
+#include "Compositor/Notify.h"
 #include "Compositor/RealTime.h"
 #include "Compositor/Schedule.h"
 #include "Compositor/Uring.h"
@@ -1806,6 +1807,8 @@ public:
 			m_Result = Iterate();
 		} };
 
+		AnnounceReady();
+
 		frame.join();
 
 		// **After the frame thread and not beside it.** The frame thread is what decides a run is over —
@@ -1886,6 +1889,45 @@ private:
 		}
 
 		return std::format("SCHED_FIFO at {}", m_Options.Priority);
+	}
+
+	// Tell the service manager gyro is up, which is the last thing startup does.
+	//
+	// **Here rather than at the end of `Open`, because what makes the unit *active* should be the
+	// moment gyro is doing its job rather than the moment it could.** By this line the mode is already
+	// set — `Open` performs a blocking commit before the frame thread exists — the world is laid out
+	// against the modes the panel actually gave, the control socket is bound, and the thread that
+	// drains it is running. So a login agent ordered after this unit starts against a machine whose
+	// screen is gyro's and whose control socket answers, which is the whole of what ordering could
+	// mean here.
+	//
+	// **The first frame is deliberately not waited for.** There is no signal from the frame thread that
+	// does not cost the startup handshake the line above refuses, and what it would buy is nothing: an
+	// output that never presents is a machine to be caught by `TimeoutStartSec=` at ninety seconds
+	// either way.
+	//
+	// A failure to say so is a warning rather than an error, because it is not gyro's failure to have:
+	// the compositor is running, the machine has a picture, and what is lost is the service manager's
+	// opinion about a unit whose process it can see.
+	void AnnounceReady()
+	{
+		const std::string address = ServiceManagerAddress();
+
+		if (address.empty())
+		{
+			return;
+		}
+
+		const std::string status = std::format("{}, {} output(s), {}", Name(m_Options.Backend), m_Count, Scheduling());
+
+		if (const Result<void> told = NotifyReady(address, status); !told)
+		{
+			spdlog::warn("the service manager was not told gyro is ready: {}", told.error());
+		}
+		else
+		{
+			spdlog::info("ready: {}", status);
+		}
 	}
 
 	// Everything the trace's identity block carries that this root can go and find out, gathered once

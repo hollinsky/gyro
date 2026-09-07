@@ -12,9 +12,12 @@
 # **What is missing is missing because it is not built**, and is named here rather than discovered by
 # somebody wondering why the unit is so short:
 #
-# - `Type=notify` and `FDSTORE=1` want `sd_notify`, which gyro does not send. Decision 49 rests the
-#   whole of "the last frame holds across a restart" on the service manager holding the DRM
-#   descriptor open, and until that datagram exists a restart is a black screen.
+# - `FDSTORE=1` wants a second datagram and, more to the point, the other half of it. Decision 49
+#   rests the whole of "the last frame holds across a restart" on the service manager holding the DRM
+#   descriptor open — so a gyro that stores the descriptor and does not take it back out through
+#   `LISTEN_FDS` on the next start opens the card node fresh and is refused as *another process is DRM
+#   master*, by the store that was meant to save it. Until both halves exist a restart is a black
+#   screen, which is worse than a failure to start and is what `StartLimitBurst` below is sized for.
 # - `OnFailure=` wants `gyro --console`, which is not a flag yet. Decision 37 has it as the only
 #   local way into a machine whose compositor will not start, since there is no VT to fall back to.
 # - `AmbientCapabilities=CAP_SYS_NICE` waits for `Render` to ask for a high-priority Vulkan queue.
@@ -78,6 +81,15 @@ WorkingDirectory=/var/lib/gyro
 #     [Service]
 #     Environment=GYRO_OPTIONS=--background=/usr/share/gyro/background.pam
 ExecStart=@GYRO_BINDIR@/gyro --backend=drm --control $GYRO_OPTIONS
+
+# **`READY=1` when the screen is gyro's and the control socket answers**, which is what makes ordering
+# against this unit mean anything: under `Type=simple` the manager calls gyro started the instant it
+# has forked, so a compositor that dies initializing Vulkan looks like one that started, and the login
+# agent would begin against a machine with no control socket to offer a listener on. It is also what
+# turns a startup that wedges into a unit the manager kills at `TimeoutStartSec=` rather than a black
+# machine nobody is told about. `Compositor/Notify.h` is the datagram, and it is not libsystemd.
+Type=notify
+NotifyAccess=main
 
 Restart=on-failure
 RestartSec=1
