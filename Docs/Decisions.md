@@ -16027,3 +16027,105 @@ cut needs a reservation carried back over `Publication/Return.h` and a lookup di
 Carried in [Open.md](Open.md) with what it would take, and left unbuilt on purpose: the mark exists so
 that the next empty exit is one trace rather than five rounds of instrumentation, and what produced it
 is what should choose the mechanism.
+
+### 200. A client-registered virtual output renders into a ring the client allocated, and the descriptors reach the frame thread the way a texture does
+
+*(Decided 2026-09-06, on asking what it would take to put gyro's picture on an Android Auto head
+unit and finding that the presenter for it has existed since
+[decision 102](#102-a-virtual-output-allocates-the-buffers-it-hands-out-and-that-is-what-stands-the-renderer-up)
+with its allocation pointed the wrong way.)*
+
+**gyro imports the images a virtual output presents into, and the client that registered the output
+is the party that allocated them.** `IDmabufAllocator` is not consulted on this path at all: the
+output adopts a set of descriptors it was handed, and its ring behaves exactly as it does over a set
+it allocated — acquire, present, hold until the consumer releases.
+
+**This is [decision 26](#26-remote-presentation-is-a-virtual-output-with-client-supplied-targets)'s
+consequence being built rather than a new position.** That entry already says buffer ownership
+inverts and targets are dmabuf only, and decision 102 already says the case it built was the
+degenerate one where the consumer imposes no constraint. What is new is only that the constraint
+holder now exists and is a different process.
+
+**Why the constraint is genuinely the client's, and not something gyro could guess.** An encoder
+imports into a VA-API or V4L2 device, and what that device will take — the modifier, the alignment,
+whether the planes may be interleaved — is a fact about hardware gyro never opened. This is decision
+102's rejection of *exporting the targets from the Vulkan device* seen from the far side: a renderer
+verified against images it allocated for itself is verified against the one configuration that
+cannot fail, and an encoder handed images it did not choose is the same mistake with the failure
+moved to a machine nobody is watching.
+
+**The descriptors cross the waist as a record, because the module graph will not permit a call.**
+`Protocol` is a dispatch module depending on `Core`, `Geometry` and `Scene`; it may not name `Seam`
+and it certainly may not name `Virtual`, which is frame-side and platform. The road already exists
+and carries exactly this cargo: [Scene/Textures.h](../Source/Scene/Textures.h) holds a client's
+`RawFd` in a portable record, and the far side imports it. A registration is that with an output's
+description instead of a texture's.
+
+**Rejected: `Protocol` calling `VirtualDevice::Add` directly.** It is four lines and one `#include`,
+and `CheckLayering.cmake` refuses it for the reason the check exists — the edge would run from the
+dispatch thread into a presenter the frame thread owns, and the first thing built on top of it would
+be a protocol handler mutating a ring mid-composite.
+
+**Rejected: gyro allocating the ring and offering it to the client.** It is what every existing
+presenter does, so it looks like the smaller change. It puts the modifier choice in the process that
+has no idea what will read the pixels, and the failure it produces is an encoder falling back to a
+copy — a full frame of bandwidth per frame, on the consumer's side, where gyro's numbers cannot see
+it.
+
+**Rejected: `wl_shm` targets**, which decision 26 already refuses: a dmabuf's size is fixed at
+allocation, so the truncate-and-fault hazard shm is read around has no equivalent here, and
+accepting shm would import it.
+
+**A reconfiguration is a renegotiation, and that is the consequence to plan for.** gyro cannot
+resize a ring it did not allocate, so a mode change on a client-registered output is not something
+the presenter can honour by itself — it invalidates the target set and asks the client for another
+one. The existing machinery is the right shape for it: `TargetsInvalidated` already means *the
+images are gone and none may be acquired*, and the frame loop already tolerates that state.
+
+### 201. A virtual output's cadence is its consumer's, and the client states the ceiling admission needs
+
+*(Decided 2026-09-06, answering [Open.md](Open.md)'s *what a virtual output's cadence should be when
+nobody is asking for one*, which had been carried on the belief that a period driven by backpressure
+would break the one thing `FrameClock` assumes is stable. The reading says otherwise.)*
+
+**A client-registered virtual output commands no period. It presents when it has damage and a free
+target, and its consumer releasing a buffer is what makes the next frame possible.** The client
+states one number at registration — the shortest interval in which it may demand a frame — and that
+number is the `P` admission control is given.
+
+**Nothing about this is new machinery, which is the argument.**
+[Frame/Admission.h](../Source/Frame/Admission.h) already defines `P` as *the shortest interval in
+which an output may demand a frame*, and
+[decision 66](#66-arrival-control-is-an-input-to-admission-control)'s table of who controls arrivals
+already has the row for a client free-running against a bound. `FrameClock`'s answer for a clock
+with no live anchor is `Unscheduled`, which arms no timer, costs an idle output nothing, and lets
+any damage present as soon as it is ready — that is
+[decision 31](#31-vrr-is-a-scheduling-degree-of-freedom-not-only-a-latency-feature)'s account
+of the first frame after an idle variable-refresh output, and a consumer-paced output simply lives
+there.
+
+**What a person perceives is the head unit showing a frame the moment the encoder is ready for one,
+and the panel in front of them never dropping a frame because of it.** A stalled consumer stops
+asking; it does not accumulate a debt the compositor pays later.
+
+**Rejected: gyro driving a period the client asked for**, with release as backpressure underneath.
+It reads as the safer answer because it hands `FrameClock` the stable number it is written around.
+What it actually does is composite frames the consumer is not ready to take: either the ring stalls
+and the period was a fiction, or the frames are drawn and thrown away, and that is GPU time taken
+from the panel somebody is looking at to produce pixels nobody will ever see.
+
+**Rejected: no stated ceiling at all.** *Present whenever a target frees* is a complete description
+of the mechanism and is unschedulable — an output that may demand a frame at any interval has to be
+budgeted as able to demand one continuously, which is the entire frame thread, so the set containing
+it admits nothing else. The ceiling is what makes the negotiation decision 26 requires possible: a
+client asks for 60, is told what the budget affords, and takes it or asks for less.
+
+**Frames are dropped and never deferred**, which decision 26 already requires and which this makes
+mechanical: there is no queue to accumulate in. A consumer that has released nothing has no free
+target, `AcquireTarget` answers nothing, and the frame loop's existing skip is the whole of the
+behaviour.
+
+**What this leaves open is the recorder that wants every frame**, which is the same mechanism read
+with a different intent: a consumer that must not miss anything releases fast enough that it never
+does, and one that cannot keep up misses frames rather than slowing the compositor down. Whether a
+recorder is owed anything stronger than that is a question for the first one, not for this entry.

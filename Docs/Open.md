@@ -471,6 +471,12 @@ and the interface is what lets the headless sweep place time at arbitrary phase.
   pass (much cheaper, but the renderer grows a YUV output path it otherwise would not have), or both
   can be offered. HDR sharpens it — P010 and transfer functions. This is the one part of decision 26
   with a real performance number attached and it should not be decided from the armchair.
+  *(Annotated 2026-09-06.)* The first consumer converts, and that is a starting position rather than
+  an answer: [decision 200](Decisions.md#200-a-client-registered-virtual-output-renders-into-a-ring-the-client-allocated-and-the-descriptors-reach-the-frame-thread-the-way-a-texture-does)
+  puts the ring in the client's hands, so a client wanting NV12 today allocates NV12 and does the pass
+  itself, where the cost is visible in its own numbers and not in gyro's. What settles the entry is
+  that measurement — a real encoder, a real frame size — against the same composite ending in a YUV
+  target, and the fused path is worth building exactly when the figure says so.
 - **A nested session types gyro's layout rather than the surrounding session's.** *(What is left of
   this entry after
   [decision 173](Decisions.md#173-nested-gyro-takes-input-from-the-hosts-seat-and-a-host-window-is-an-absolute-device-bound-to-the-output-it-is)
@@ -1214,13 +1220,14 @@ and the interface is what lets the headless sweep place time at arbitrary phase.
   prediction built for a GPU queue tracks well. It will not yield to reading — it wants a panel, a
   scene, and `LP_NUM_THREADS` turned down — and nothing is blocked meanwhile, because a virtual output
   never waits on a point and the path is exercised end to end without a display.
-- **What a virtual output's cadence should be when nobody is asking for one.** Decision 102 gives it
-  a `VblankTimeline`, which needs a period, and a recording at a fixed rate has an obvious one. A test
-  stepping frame by frame does not, and neither does an encoder that wants to consume as fast as the
-  compositor produces. Presenting at whatever rate the consumer releases buffers is the honest answer
-  and it makes the output's period a function of backpressure, which is the one thing
-  [FrameClock](../Source/Frame/FrameClock.h) is built to assume is stable. Small, and worth settling
-  before a second consumer exists rather than after.
+- **What a virtual output's cadence should be when nobody is asking for one.** *(Answered 2026-09-06
+  by [decision 201](Decisions.md#201-a-virtual-outputs-cadence-is-its-consumers-and-the-client-states-the-ceiling-admission-needs),
+  and the premise this entry rested on was wrong.)* Presenting at whatever rate the consumer releases
+  is the honest answer and it does not make the period a function of backpressure, because there is no
+  commanded period to make a function of anything: `FrameClock` answers `Unscheduled` for a clock with
+  no live anchor, which arms no timer and lets damage present as soon as it is ready. What the client
+  states instead is a ceiling — the shortest interval it may demand a frame in — which is what
+  [Admission.h](../Source/Frame/Admission.h) means by `P` and what decision 66 already has a row for.
 - **How long a held commit waits when there is no acquire point.**
   [Decision 125](Decisions.md#125-nesteds-release-timelines-come-from-a-drm-node-it-opens-itself)'s
   fallback polls `IRenderer::IsComplete` from the drain and asks to be looked at again in half a

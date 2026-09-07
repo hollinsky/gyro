@@ -820,6 +820,7 @@ gyro_add_module(Virtual
 		Buffer.cpp
 		Dump.cpp
 		Heap.cpp
+		Imported.cpp
 		Pam.cpp
 		Pixels.cpp
 		Sink.cpp
@@ -828,6 +829,7 @@ gyro_add_module(Virtual
 		Buffer.Test.cpp
 		Device.Test.cpp
 		Dump.Test.cpp
+		Imported.Test.cpp
 		Output.Test.cpp
 		Pam.Test.cpp
 		Pixels.Test.cpp
