@@ -2210,11 +2210,67 @@ what gyro did.
 **And two counters that trend.** *Is this machine about to start dropping frames* — the slack
 counter, which walks toward zero over a hundred frames and is invisible in any one of them. *Was a
 long span work or a low clock* — the operating point sampled beside each batch, which is what turns
-a slow part into a parked one.
+a slow part into a parked one. *Is a frame slow because its textures were paged out* — the device-local
+heap's headroom sampled beside each batch, which on an integrated part is a class of stutter that
+otherwise looks exactly like a slow device. The fragment count is cut at the marks the batch already
+had, so *we drew the screen 2.9 times over* decomposes into which of the composite, the extract and
+the blur chain did the drawing.
+
+**The rows above are the frame's. Four more are the machine's, and they are named by the world rather
+than by the source.** A client is `firefox`, a session is a uid, an input event's row is the seat — so
+a row's name cannot be the string literal a record carries, and a table beside the ring holds it
+instead, written by the dispatch thread and read by the writer at snapshot. That table is the whole
+mechanism behind the four.
+
+*A client's row* is claimed as the connection is admitted and named for the pid the uid check already
+read, then renamed to the program when the client sets an `app_id`. It carries what a client's own
+frame loop is made of: the commit, the frame callback that let it draw again, the release that gave
+its pixels back, and the presentation it was told about. Two questions read straight off it with no
+counter. *How fast is this client* is the gap from a callback to the next commit. *Is gyro forcing
+this client into another buffer* is the gap from a commit to its release. The pid is in the name for
+the reason gyro's own thread rows carry a real kernel thread id: merged with a system trace, the
+client's own scheduling lands on a row beside gyro's, and that merge is the argument for the format.
+A window title never goes in — a title is the document somebody has open, and a capture is a file that
+gets mailed to other people.
+
+*The input row* is where the compositor stops being the beginning of the story. Every event carries
+the kernel's own timestamp, and the row marks three instants: where the device says it happened, where
+gyro read it off the queue, and where a client was handed it. The first gap is the stack ahead of
+gyro, the second is gyro's routing — and until this existed a lagging pointer looked identical either
+way. Motion is folded to one mark per drain because a thousand-hertz mouse marked per event laps the
+ring and destroys the frame it caused. The name is the kind of event and never its content: a keycode
+in a trace is a keylogger.
+
+*The session row* is what makes a capture of a boot legible. gyro starts before the login prompt, so
+an agent connecting, a greeting that went unanswered, a session established or refused, and a session
+ending are all events nobody can reproduce on demand. A refusal is marked with the sentence that
+refused it. A uid identifies a session and a username never does.
+
+*The log row* puts spdlog's output on the same timeline, through a bounded store beside the rings
+rather than through one, since a log message is a runtime string and a record is a literal and a
+number.
+
+**And the file says what produced it.** A capture three weeks old, or from somebody else's machine,
+used to carry no way back to the build that wrote it. The header now names the invocation, the version
+and git hash with a dirty flag beside it, the kernel, the backend and each output's mode, the GPU and
+driver, the ring size, whether `SCHED_FIFO` and locked pages were actually obtained — the fact most
+likely to explain an entire capture of misses — and the clocksource, because gyro's promise that a
+record costs no syscall holds only where the kernel's clocksource has a vDSO mode, and where it does
+not every duration in the file is inflated by the instrument that measured it. `CLOCK_REALTIME` joins
+the anchor for the same reason: a trace that cannot be lined up against a journal line or against a
+person saying it stuttered at about quarter past is a trace that has to be read alone.
 
 See [decision 139](Decisions.md#139-the-trace-ring-is-always-armed-and-the-format-is-somebody-elses),
 [decision 140](Decisions.md#140-a-composite-is-cut-at-its-barriers-and-counted-by-its-fragments) and
-[decision 144](Decisions.md#144-a-frame-is-one-object-drawn-on-five-rows-and-the-rows-say-its-number-rather-than-pointing-at-each-other).
+[decision 144](Decisions.md#144-a-frame-is-one-object-drawn-on-five-rows-and-the-rows-say-its-number-rather-than-pointing-at-each-other)
+for the frame's half, and
+[192](Decisions.md#192-a-trace-row-can-be-named-while-gyro-runs-and-a-client-gets-one-of-sixty-four),
+[193](Decisions.md#193-the-dispatch-row-says-what-woke-it-and-the-wake-it-cannot-name-is-unattributed),
+[194](Decisions.md#194-the-gpu-row-carries-the-headroom-and-the-fragment-count-is-cut-at-the-marks-the-batch-already-had),
+[195](Decisions.md#195-the-session-row-is-one-row-and-a-refusal-is-marked-with-the-sentence-that-refused-it),
+[196](Decisions.md#196-input-is-marked-where-the-device-says-it-happened-and-never-by-what-was-pressed) and
+[197](Decisions.md#197-a-trace-says-what-produced-it-and-the-log-runs-beside-the-frames)
+for the machine's.
 
 ## Sessions and users
 

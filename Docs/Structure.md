@@ -1077,7 +1077,11 @@ Timebase (`Time.h`), `IClock`, `Signal`, `Result`, `Fd`, `Wake`, `Handle` the ge
 (15), `SlotAllocator`, `FrameSection`, `Trace` the always-armed ring every module records into,
 whose rows are one screen's life of a frame, whose slices carry that frame's number rather than an
 arrow to it, and whose `TraceAttribute` is the number a slice has to carry but must not be named by
-— one more record in the ring rather than a field on every record (139, 144), `ColorState`, `Pam`
+— one more record in the ring rather than a field on every record (139, 144), and whose naming table
+is how a row gets a name the source did not know: a client, a session and the seat are named by the
+world, so the name lives in a fixed-size table beside the ring under a mutex, written by the dispatch
+thread and read by the writer at snapshot, rather than in a record that would then either copy bytes
+on the frame path or dangle (192), `ColorState`, `Pam`
 the netpbm grammar both directions read — here rather than beside the dump writer that has emitted
 it since frames were first written to disk, because the reader's caller is `Scene` and a second
 statement of a format nothing else on the machine checks agrees on the day it is written (139, 179)
@@ -1296,7 +1300,13 @@ process whose death takes every session on the machine: `SO_PEERCRED` on the con
 questions asked of the offered descriptor — an `AF_UNIX` stream, listening, bound inside the runtime
 directory of the uid the *kernel* named — one session per uid, and two caps. It multiplexes its
 listener and every agent's connection behind one epoll descriptor, so `Compositor/Wait.h`'s array
-grows by a file rather than becoming the registry decision 126 would have to be reopened for. What
+grows by a file rather than becoming the registry decision 126 would have to be reopened for. It is
+also where the session row is written: an agent connecting, a greeting or an acceptance that went
+unanswered — the two halves of a stalled handshake, visible only from the end that stayed up — a
+session established, ended, or refused with the sentence that refused it as the mark's name, which
+works because every reason in the file is already a literal with static storage. A uid identifies a
+session and a username never does, and a test sweeps the row rather than trusting the comment (195).
+What
 it does not do is adopt: the listener leaves through a verb rather than a signal, because a
 broadcast can never transfer a resource (Core/Fd.h), and the party that takes it is `Protocol` (22,
 126, 165)
@@ -1612,9 +1622,16 @@ needs a driven channel dispatch-side and a recognizer in `Input` first; decision
 which is what an overview needs; what is *in* a container, which a restarted shell is not told; and
 nesting (190).
 
+`Trace` is what this module knows about a trace row that `Core` cannot: how a client's row is spelled,
+which truncates the program name and never the pid, since the pid is what joins this client to its own
+threads in a merged system trace. A row is claimed where the connection is admitted, beside the
+`SO_PEERCRED` check that already read the pid, and renamed when the client sets an `app_id`. A window
+title is never written into one — a title is the document a person has open and a capture gets mailed
+to strangers — and the rule is stated both there and at the call site.
+
 What a person still cannot do is *drag* anything — between windows or between applications — and
 there is no middle-click paste, both of which are Open.md's (2, 21, 51, 87, 111, 112, 114, 115, 126,
-131, 136, 141, 143, 146, 149, 152, 162, 163, 166, 171, 172, 174, 176, 186, 187, 190)
+131, 136, 141, 143, 146, 149, 152, 162, 163, 166, 171, 172, 174, 176, 186, 187, 190, 192)
 
 ### Input
 
@@ -1628,7 +1645,13 @@ and no resume, which is decision 145's answer for DRM master applied to the seco
 key carries the kernel's keycode and libinput's own `CLOCK_MONOTONIC` timestamp, converted at ingest
 because it is the `t₀` an animation starts from (26) — no keymap, because xkbcommon belongs beside
 the seat that sends one to clients and a compositor whose escape hatch moved when somebody selected
-Dvorak would not be one. `Chord` is that hatch: `Ctrl+Alt+Esc` arms a leader and the next key is a
+Dvorak would not be one. `Latency` is where an event enters the trace, and it exists because the device's timestamp is the
+earliest instant anything in the process can know about: an arrival mark is stamped with it and a
+drain mark with the clock's now, so the stack ahead of gyro and gyro itself stop being one number. A
+mark's name is the kind of event and never its content — a keycode in a trace is a keylogger, and the
+argument sits in the file rather than in a document. Motion folds to one mark per drain, since a
+thousand-hertz mouse marked per event laps the ring and destroys the frame it caused. `Chord` is that
+hatch: `Ctrl+Alt+Esc` arms a leader and the next key is a
 verb, `q` quits and `t` writes a trace. `Alt+Tab` is the one binding not behind the leader, because
 cycling needs somewhere to stop and only a held modifier says *still choosing* and then *this one*
 (177). Matched on keycodes and read before anything routes to a client, for the same reason — the
@@ -1655,7 +1678,12 @@ behind a dispatch half and the root is neither thread, so `Compositor.cpp` canno
 `PORTABLE` then keeps the producer half of the publication boundary runnable with no GPU, no seat
 and no compositor. `Textures` is decision 136's minter, and the `Seam` edge is what earns it the
 job: minting is dispatch-side, importing goes through the waist, and releasing is the watermark, and
-this is the only module that sees all three. It holds the pixels because the importer borrows them,
+this is the only module that sees all three. The loop's own row is one slice per iteration with the
+work nested inside, plus a mark for every cause the wake had rather than one chosen by priority —
+a report and an animation edge arriving together is the ordinary case at panel rate. The wake it
+cannot account for is `unattributed` and deliberately not `idle`, because client traffic is drained
+inside the author, so an iteration that served a flood looks identical from here to one that served
+nothing (193). It holds the pixels because the importer borrows them,
 which is also what lets a device rebuild re-adopt every live image under the same ids; a retirement
 is sealed with the sequence about to be published — the first that cannot name it — and reclaimed
 beside the outbox's own, under the same number. Not yet Architecture.md's dispatch loop: input,
@@ -1679,8 +1707,16 @@ the run after the interesting one; the ring is the continuous cost and a snapsho
 Perfetto's protobuf rather than Chrome's JSON for one reason: a `.pftrace` is a concatenation of
 self-delimiting packets, so gyro's trace and a system trace merge with `cat` — which is the only way
 to see what gyro cannot see about itself, being `sched_switch`, `dma_fence` and `gpu_scheduler`.
-`Core` is the whole of `DEPENDS` on purpose: a tracer permitted to name `Frame` would read a budget
-to annotate a record with and become an instrument whose absence changes the answer. The clock is
+`Recorder` also holds the log store — a bounded ring of fixed-size messages beside the rings proper,
+because a log line is a runtime string and a record is a literal and a number, and because spdlog
+already allocates and locks so logging was never legal on the frame path anyway. The sink that feeds it
+is the composition root's, not this module's. `Core` is the whole of `DEPENDS` on purpose: a tracer
+permitted to name `Frame` would read a budget to annotate a record with and become an instrument whose
+absence changes the answer. The same rule is why the run's identity — kernel, version, backend,
+clocksource, whether real-time priority was actually granted — arrives as plain strings the root
+gathered rather than as anything this module reads for itself, and why `Schema` now records which
+Perfetto `.proto` each field number was verified against: a wrong number writes a field the reader
+skips, which opens as a row nothing recorded on. The clock is
 reachable from the trace path and the *now* is not, because nothing there returns an `Instant` —
 which is also why `Core/Clock.cpp` grew the boot-time reader the merge needs, returning two raw
 counts rather than a second domain something could schedule against (36, 57, 139, 144)
@@ -1805,10 +1841,15 @@ only mid-batch preemption is inside — and Vulkan offers nothing that separates
 While a trace ring is armed the pair becomes a *run*: a mark at every point the command buffer
 already drains — composite, extract, blur, resumed composite — never one inside a render pass,
 because a mark between two draws would order two things the hardware was overlapping and the
-instrument would report the cost it just created. What decomposes a pass instead is a fragment count
-from one pipeline-statistics query, and what places the run on the wall is
-`VK_EXT_calibrated_timestamps`, read once per collection because an anchor taken at startup drifts a
-whole refresh out over a session.
+instrument would report the cost it just created. What decomposes a pass instead is a fragment count,
+one pipeline-statistics query per span beginning and ending where a mark is already written, so the
+figure says which of the composite, the extract and the blur chain drew the pixels while ordering
+nothing the barriers had not already ordered; the batch total is the exact sum of them. What places
+the run on the wall is `VK_EXT_calibrated_timestamps`, read once per collection because an anchor
+taken at startup drifts a whole refresh out over a session. Beside it `VK_EXT_memory_budget` samples
+the device-local heap's headroom, sampled where the batch is recorded rather than where its stamps
+come back — two frames later the pressure that evicted the texture has passed — and reported as the
+distance to the line rather than the line, because that is what predicts an eviction on sight (194).
 
 `GpuCost` is still the first stamp against the last, which is what lets tracing be switched on
 without moving the tier a panel draws at (140). `Unfused` is decision 62's *other* execution and the

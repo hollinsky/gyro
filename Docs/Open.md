@@ -59,6 +59,25 @@ verdict on the artefact but the *occasion* to look, which no amount of reading w
 on its own. An entry that needs a user in front of it may still be settled by arithmetic once the
 user is there.
 
+An eighth left by growing the consumer it was faulted for lacking. *`Emit`'s promise of no syscall is
+a property of the machine's clocksource* asked whether the composition root should read
+`/sys/devices/system/clocksource/clocksource0/current_clocksource`, and argued against itself on the
+grounds that this was a `/sys` read producing a number nothing decides against — with
+[decision 57](Decisions.md#57-one-timebase-clock_monotonic-converted-at-ingest-and-nowhere-else)
+standing behind the objection. It became
+[decision 197](Decisions.md#197-a-trace-says-what-produced-it-and-the-log-runs-beside-the-frames)
+once there was somewhere for the number to go: written into a trace's header it sits beside the very
+cost figures it inflates, which is a reader rather than a decider. The entry was not wrong that a
+number nothing consumes does not earn a syscall; what it could not see was that the consumer was one
+change away. An entry that rests on *nothing would use this* is worth re-reading whenever something
+new starts reporting.
+
+The same reading measured one thing it left alone, kept here because it is a number and this is where
+it was taken: `IClock::Now` being virtual costs between 0.0 and 0.16 ns against a 13.3 ns clock read,
+in the noise and an order of magnitude better than [Clock.h](../Source/Core/Clock.h)'s own estimate of
+"roughly a tenth". Resolving the clock to a concrete type when a buffer is armed would buy nothing,
+and the interface is what lets the headless sweep place time at arbitrary phase.
+
 - **Re-reading the abort inventory on major libwayland bumps.** The count went 6 → 18 across 1.23 to
   1.24, and the reading behind decision 2 is a snapshot of `1.26.0-9-ged0b9f1` rather than a
   property of the library. What wants watching specifically is a new site reachable from client
@@ -1296,35 +1315,6 @@ user is there.
   painter's order — which is decision 60's group flattening arriving from the cost side rather than the
   correctness side, and is not obviously compatible with a material reading the target as of before its
   own item began.
-
-- **`Emit`'s promise of no syscall is a property of the machine's clocksource, not of the code.**
-  [Trace.h](../Source/Core/Trace.h) says a record is four stores and a release with "no allocation,
-  no lock, no syscall", and the always-armed ring makes that claim tens of times a frame on the
-  `SCHED_FIFO` thread. The syscall half of it is not something the file can be correct enough to
-  guarantee: `MonotonicClock::Now` calls `clock_gettime(CLOCK_MONOTONIC)`, and glibc only services
-  that in userspace when the kernel's current clocksource has a vDSO mode. On `tsc` it does. On
-  `acpi_pm` or `hpet` — an unstable TSC, some virtual machines, older parts — the vDSO falls through
-  and every record becomes a real syscall on the thread that must not make one. Measured on this
-  machine, which is `tsc` with enhanced IBRS: 13.3 ns through the vDSO against 118 ns forced through
-  `syscall(SYS_clock_gettime)`, so about nine times, and worse on a machine paying for retpolines and
-  PTI. What that actually costs is why this is an open item and not an alarm — at Trace.h's own
-  "tens" of records it is roughly six microseconds a frame instead of one, which is a twentieth of a
-  percent of a 60 Hz refresh and does not drop anything. The reason to carry it is that gyro is a boot
-  service that reports cost figures, and on a machine where the vDSO is not servicing the clock every
-  figure it reports is inflated by its own instrument by an amount nothing in the trace says. So what
-  is open is whether the composition root should read
-  `/sys/devices/system/clocksource/clocksource0/current_clocksource` once at startup and say what it
-  found. Against doing it: that is a `/sys` read producing a number nothing decides against, and the
-  rule that the timebase has one reader and no reachable now
-  ([57](Decisions.md#57-one-timebase-clock_monotonic-converted-at-ingest-and-nowhere-else)) is there
-  to keep exactly that kind of read from accumulating a consumer. A log line nobody reads is not an
-  instrument either.
-
-  What is *not* open is the virtual call. `IClock::Now` being virtual costs between 0.0 and 0.16 ns
-  measured against the same 13.3 ns read — in the noise, and an order of magnitude better than
-  [Clock.h](../Source/Core/Clock.h)'s own estimate of "roughly a tenth". Resolving the clock to a
-  concrete type when a buffer is armed would buy nothing, and the interface is what lets the headless
-  sweep place time at arbitrary phase.
 
 - **The idle state the frame thread wakes from, which costs more than everything gyro does before the
   composite.** `TimingPolicy::Lead` is five hundred microseconds because that is what a capture

@@ -15597,3 +15597,290 @@ makes this frame come out right and leaves the category wrong: on a slightly che
 tier fits, fires correctly by its own rule, and is still a backdrop snapping flat to buy one refresh
 of latency on content nobody has seen yet. The estimate is a real defect, worth fixing on its own
 terms for the day the tier ladder reaches the floor deliberately. It is not what broke this frame.
+
+### 192. A trace row can be named while gyro runs, and a client gets one of sixty-four
+
+*(Added 2026-09-06, extending
+[decision 144](#144-a-frame-is-one-object-drawn-on-five-rows-and-the-rows-say-its-number-rather-than-pointing-at-each-other).)*
+
+Decision 144 settled what a frame's rows are and why one screen's are consecutive, and every one of
+them is named where it is declared — which is what let the encoder derive a row's name from its
+number and nothing else. The three subjects worth adding to this instrument next are not like that.
+A client is `firefox`, a session is a uid, and an input device is whatever the kernel calls it: all
+named by the world rather than by the source.
+
+**A record cannot carry a name and must not learn to.** A record is four relaxed stores and a
+release, and the name in it is a pointer to a string literal precisely so that the interning happens
+on the writer thread and nothing on the frame path formats anything (139, 36). So a runtime name goes
+in a table *beside* the ring, keyed by row number, written by the dispatch thread and read by the
+writer when it takes a snapshot. Rejected: a pointer into a heap string in the record, which is a
+copy on the frame path if the ring owns the bytes and a dangling pointer at snapshot if the caller
+does — the second being the worse failure, because it reads as a corrupt name in a file rather than
+as a crash anybody can attribute.
+
+**The table is a fixed buffer per row and it truncates.** Rejected: a `std::string` per row, on the
+grounds that a table which allocates is a table somebody eventually names a row from inside a frame
+section — and the abort that follows lands in the allocator with nothing pointing back at the call
+that caused it. A truncated application name is legible; a compositor that dies because it was asked
+what to call a row is not.
+
+**A plain mutex, both directions.** Naming happens tens of times an hour and never against a
+deadline. Rejected: a lock-free double-buffered table, which is a second concurrency argument to
+carry for an operation whose cost nobody can measure.
+
+**Sixty-four client rows, handed out round-robin.** The point of a row is that a person can read down
+it, so a row has to mean one thing for the length of the file they opened. Round-robin is what buys
+that: a row is only reused after the pool has been walked, which on any real machine is longer than
+the ring's window. Rejected: `SlotAllocator`, whose last-freed-first reuse is right for entity
+storage and wrong here — it would hand the next client the row the last one just left, and two
+applications' work would interleave on a row a person reads as one application. Its generations buy
+nothing either, since nothing ever resolves a row back to a client. The residual caveat is stated
+where the pool is: a machine that churns sixty-four clients inside one window does get a row with two
+occupants.
+
+**Running out of rows is not an error.** The sixty-fifth client's marks go to the dispatch thread's
+own row. Rejected: a refusal the caller has to answer for, which is decision 27's shape and is wrong
+for this one — losing the separation costs legibility, and losing the events is a hole in the picture
+at exactly the moment the machine got interesting.
+
+**A row nobody named still gets a descriptor.** `client 7` rather than silence, because a track with
+no descriptor is the one defect `Tools/TraceDump.cpp --check` exists to tell apart from a row nothing
+happened on.
+
+### 193. The dispatch row says what woke it, and the wake it cannot name is `unattributed`
+
+*(Added 2026-09-06.)*
+
+The frame thread's row names every wake that declined to draw — `queue full`, `over budget`, `idle`,
+`armed for nothing` — and decision 144 records that this vocabulary is most of what made a capture
+readable, because two thirds of that loop's wakes do no work and drawing them the same shape as a
+frame is what made the old picture unreadable. The dispatch row had none of it: a `serialize` span, a
+`published` or `deferred` mark, and a watermark. So a capture showing the frame thread starving for a
+publication said nothing about what the other thread was doing instead, or whether it had woken at
+all.
+
+**The iteration is one slice and the work nests inside it**, so the row tiles and the thread's duty
+cycle is readable at a glance rather than inferred from the gaps between spans.
+
+**A mark for every cause the iteration had, not one name chosen by priority.** The frame row picks one
+because its marks explain a refusal and a refusal has a single reason; here a frame report and an
+animation edge landing in one wake is the ordinary case at panel rate. Rejected: the frame row's
+single-name form, which would have made the instrument decide which of two true things to hide.
+
+**The no-visible-cause mark is `unattributed` and deliberately not `idle`.** Client traffic is drained
+inside `ISceneAuthor::Advance`, which answers only when to come back, so an iteration that served a
+flood of requests looks identical from this row to one that served nothing. Naming that `idle` would
+be the trace asserting something false about the busiest case. Rejected: plumbing a drained count out
+through `Advance` to make the name honest, which widens a seam interface to carry a number the
+Wayland server can sample onto this row itself.
+
+**The drained depths are counters sampled every iteration, zeros included.** Rejected: sampling only
+when nonzero, which leaves the counter sitting at the last burst and draws a backlog that never
+cleared.
+
+*Left to the composition root:* which descriptor woke the thread. `Compositor/Wait.h`'s `ppoll` never
+asks which file returned, and the control socket, libinput and the trigger pipe are all drained in the
+root before the loop steps — so the loop's marks name what the iteration *found*, which is the honest
+subset, and the root marks what it drained (126).
+
+### 194. The GPU row carries the headroom, and the fragment count is cut at the marks the batch already had
+
+*(Added 2026-09-06, extending
+[decision 140](#140-a-composite-is-cut-at-its-barriers-and-counted-by-its-fragments).)*
+
+Decision 140 gave the GPU row a position, a decomposition and a denominator. It left two questions the
+row could not answer. *Was this frame slow because its textures were paged out* — which on an
+integrated part looks exactly like a slow device, and is a whole class of stutter nothing in the trace
+could show. And *which part did the drawing* — one fragment count wrapped the whole batch, so
+`2.9 times over` was a fact about the frame and not about the composite, the extract or the blur chain.
+
+**Memory pressure is `VK_EXT_memory_budget`, sampled beside the batch, and reported as headroom.** The
+largest device-local heap's usage and the distance left before the driver takes memory back. Reported
+as headroom rather than as the budget because what predicts an eviction is the distance to the line:
+*1400 held, 90 left* says on sight what *1400 held, 1490 allowed* makes a person subtract. Rejected: a
+row per heap, which demands the reader know the device's memory model to find the one heap that can
+evict a texture mid-composite.
+
+**Sampled where the batch is recorded, not where its stamps are read back.** The costs are collected
+two frames later, by which time the pressure that evicted the texture has passed — a reading taken
+there would show comfortable headroom against the very span it exists to explain. Rejected: sampling
+beside the calibration, which is where it would have been cheapest and where it would have been wrong.
+
+**Only while a ring is armed**, which is decision 140's closing property held to: an untraced frame
+makes no driver call and writes exactly the two timestamp queries it wrote before. Nothing a person
+switches on may move the tier a panel draws at.
+
+**The extension counts as a capability by being listed, and the honesty check moved to the reading.** A
+driver that lists it and then answers with a zero budget reports nothing and loses the two counters.
+Rejected: probing the query before the device exists, which would mean reading fields the
+specification only promises to fill once the extension has been enabled — decision 108's *ask the
+query* applied one layer earlier than it works.
+
+**A segment's fragment count is an attribute on its span, and the batch total stays a counter.** Every
+query begins and ends where a mark is already written, at a barrier the composite already had and
+outside every render pass instance, so it orders nothing the batch was not already ordering — which
+is the test decision 140 sets and the reason a query *inside* a pass is still refused. Rejected: a
+counter per segment, which puts composite, extract and blur on one track stepping at every barrier and
+draws a sawtooth joining three unrelated figures into a line that means nothing. Rejected: a batch-wide
+query nesting the segment ones, which Vulkan forbids outright — so the total is the exact sum of the
+spans instead, and is the same number it reported before.
+
+**What the reading found on the way:** a ring armed between a frame's record and its collection could
+read the previous traced frame's query results back as `VK_SUCCESS`. Recording how many queries were
+actually written closes it. That was a real defect, present before this entry, and it would have
+reported a stale fragment count for exactly one frame after somebody switched tracing on — the frame
+they were looking at.
+
+### 195. The session row is one row, and a refusal is marked with the sentence that refused it
+
+*(Added 2026-09-06.)*
+
+Nothing in a capture said a session existed. gyro is a boot service that subsumes the splash and
+outlives every login, so the events missing from the picture were the ones nobody can reproduce: what
+happened before anybody logged in, what happened at the moment a user switched, and what happened when
+an agent died mid-handshake. A stutter at login was unexplainable from a trace because the trace did
+not contain the login.
+
+**Both halves of a stalled handshake are marked, and gyro is the only end that can see them.**
+`Session/Agent.h` already argues that the intermediate states are the useful ones — stuck in
+`Greeting` is a gyro that took the connection and not the message, stuck in `Offering` is one that
+would not have the listener and did not say so. An `agent connected` with no `agent greeted` after it
+*is* the first of those, recorded from the side that stayed up.
+
+**The connection is marked before the caps refuse it**, so a connection gyro rejects instantly still
+shows as having arrived. A refusal that leaves no trace of the attempt is the shape of an
+unauthenticated entry point nobody can audit.
+
+**A refusal is marked with its own sentence.** Every reason in that file is already a string literal
+with static storage, which is exactly what a record needs, so the mark's name is the sentence a person
+would have read in the log. Rejected: an enum of refusal kinds, which is a second spelling of a
+sentence that already exists and has to be kept in step with it.
+
+**One row for every session, and the identity is printed into the name.** A uid before a session
+exists, a session id once one does, with the mark names saying which. Rejected: a row per session,
+which on a machine with three users is dozens of near-empty rows where a search for one number already
+lights up only that session's events (144).
+
+**The identity is in the label rather than an attribute**, because an attribute binds to the slice open
+on its row and this row is marks all the way down — an attribute here would attach to nothing. The
+stated cost is that a peer the kernel will not name labels zero, which swallows a genuine root agent
+along with it, on a machine that has a larger problem than its trace.
+
+**Never a username, never a runtime directory, never a socket path.** A `.pftrace` gets mailed to
+somebody who was not at the machine. A uid is a number on that machine; a name is a person. A test
+sweeps the row for all three rather than leaving the rule to a comment.
+
+*What this does not reach:* the agent's own side. `SessionAgent` and `Child` are compiled into
+`gyro-session`, a separate executable that enrolls no ring and takes no snapshot, so a mark there
+would record into nothing. And `SessionControl` still has no caller outside its own test, so these
+marks are ahead of the composition root rather than live.
+
+### 196. Input is marked where the device says it happened, and never by what was pressed
+
+*(Added 2026-09-06.)*
+
+Input latency is the number a person perceives most directly and the trace did not contain it. Every
+row began where gyro decided to do something; nothing recorded the instant the kernel says the device
+produced the event, which is the earliest moment anything in the process can know about. So a pointer
+that lagged read the same whether the stack ahead of gyro had stalled or gyro had.
+
+**Three marks, and the two gaps between them are the answer.** The arrival is stamped with the
+event's own timestamp — libinput reports one and `Input/Chord.h` already argues it is the only honest
+thing to measure against — the drain is stamped where gyro read the queue, and the delivery is stamped
+in the seat where a client was actually handed the event. The first gap is the kernel, libinput, and
+how long the dispatch thread took to reach the descriptor; the second is gyro's own routing and focus
+work. From there the existing rows finish the story unchanged, so end-to-end latency is read by
+scrolling down a column, which is the property decision 144 exists to protect.
+
+**An event that lands on gyro's own floor gets no delivery mark.** Nothing was delivered, and the two
+marks to its left still say the compositor spent the time. Rejected: a delivery mark naming gyro,
+which would draw a handover that did not happen.
+
+**The high-rate kinds are folded into one mark per drain, at the oldest stamp in it, carrying the
+count.** A thousand-hertz mouse marked per event would lap a thirty-second ring in a fraction of it
+and destroy the evidence of the frame it caused — the instrument erasing the thing it was armed for.
+The fold keeps what the question needs: the distance from the oldest stamp to the drain is the worst
+latency in the batch, and the count says how far behind gyro had fallen. Rejected: a mark per motion
+event, on the argument above. A folded kind's near edge is the *end* of the drain rather than the
+moment each event left the queue, because the seat coalesces to one `wl_pointer.motion` per iteration
+anyway and a per-event edge would draw handovers that never occur.
+
+**The name is the kind and never the content.** No keycode, no keysym, no modifier state. A keycode in
+a trace is a keylogger, and a `.pftrace` is a file people mail to each other; the argument sits where
+the marks are emitted rather than in a document, and a test drives two hundred and fifty-six distinct
+keycodes and asserts that exactly four names come out with an empty label. A press and a release are
+separate literals per kind, because a release that never arrived is what a stuck key looks like and
+the pair beside each other is the whole diagnosis. Rejected: one literal with the state in the label,
+which is a number printed into a name and therefore the first foothold for a keycode.
+
+**Coordinates are not recorded either.** Rejected deliberately rather than overlooked: they would have
+been cheap as an attribute on the arrival, they cannot be read against a time axis anyway, and a
+capture carrying a cursor track is a recording of what somebody was doing on their screen. Drawing the
+line at *no content* rather than at *no keystrokes* is what keeps it a line.
+
+### 197. A trace says what produced it, and the log runs beside the frames
+
+*(Added 2026-09-06, closing [Open.md](Open.md)'s entry on reading the clocksource.)*
+
+A `.pftrace` carried the compositor's work and nothing about the compositor. Three weeks later, or
+arriving from somebody else's machine, it could not be tied to a build, a kernel, a driver, a panel,
+or even to a run that got the priority it asked for — and every figure in it is only as meaningful as
+those. This entry is the header that fixes that, and two things that ride along with it.
+
+**The facts are gathered by the composition root and handed to `Trace` as strings.** `uname`, `/sys`
+and the generated version header are all things a `PORTABLE` module may not touch, and decision 139's
+argument for `Trace` depending on `Core` and nothing else — that a tracer permitted to reach upward
+becomes an instrument whose absence changes the answer — applies just as well to a tracer that reaches
+sideways at the machine. Rejected: letting `Trace` read any of it itself, which is one `#include` and
+the end of the property.
+
+**Written both as process labels and as annotations on one instant**, because the two are read by
+different parties: the labels are what a person sees on the process in the Perfetto UI, and the
+annotations are what a tool can pull out.
+
+**Every field number was read out of Perfetto's `.proto` files rather than recalled, and what was
+checked against what is recorded beside the numbers.** This is not diligence for its own sake:
+`Trace/Schema.h` already states the hazard, which is that a wrong field number does not fail — it
+writes a field the reader skips, and the trace opens with the data silently missing, which is
+indistinguishable from a row nothing recorded on. A number nobody verified is worse than a fact left
+out, because the second is visible.
+
+**The clocksource is read, and having a consumer is what changed.** [Open.md](Open.md) refused this
+on the grounds that it was a `/sys` read producing a number nothing decides against, and that decision
+57 exists to stop exactly that kind of read from accumulating one. The answer is that the number does
+not need a decision, it needs a *reader*: `Core/Trace.h` promises a record costs no syscall, and that
+promise holds only where the kernel's current clocksource has a vDSO mode. On `acpi_pm` or `hpet` every
+record on the `SCHED_FIFO` thread becomes a real syscall — measured at about nine times the cost — so
+every duration in that file is inflated by the instrument that measured it, and nothing in the file
+said so. Written into the header it sits beside the very figures it inflates. Rejected: the log line
+the open entry considered, which is a number nobody reads at the moment they are reading the trace.
+
+**Whether real-time priority and locked pages were actually obtained is part of the header**, and it
+is the fact most likely to explain a whole capture. A run that silently fell back to normal scheduling
+produces a timeline of misses with no cause visible anywhere in it.
+
+**The log goes on a row of its own, through a store beside the rings rather than through one.** A log
+message is a runtime string of unbounded length and a record carries a string literal and a `uint64`,
+so it cannot go through the ring without either allocating on the frame path or interning something
+nobody can intern. A bounded store of fixed-size messages under a mutex, oldest dropped, is legitimate
+precisely because spdlog already allocates and takes locks — logging was *already* forbidden on the
+frame path, so the sink adds no prohibition that was not there. Sized as a fraction of the ring so
+that `--trace-buffer` moves both windows together, since two halves of one picture covering different
+stretches of time is worse than either alone. Rejected: widening the record to carry a message, which
+buys one feature at the cost of the property the whole ring is built around.
+
+**The sink lives in the composition root rather than in `Trace`**, which keeps `Trace` on `Core` alone
+and puts the sink where spdlog is already configured.
+
+**The root marks which descriptor it drained**, which finishes the vocabulary
+[decision 193](#193-the-dispatch-row-says-what-woke-it-and-the-wake-it-cannot-name-is-unattributed)
+started. The wait still never asks `ppoll` which file returned (126); the drains say so themselves as
+they run. That is what turns `unattributed` from a shrug into a signal, because once the control
+socket, the seat, the chord pipe and the frame thread's doorbell all announce themselves, an
+iteration that names none of them is a wake nothing on this machine can account for.
+
+*What a real capture's header reads, on the machine this was written on:* the invocation, `kernel
+Linux 7.1.9`, `version 0.0.0-296-g67e3aaf+` with the dirty flag beside the hash, `backend headless`,
+`pages not locked, not asked for`, `scheduling normal, not asked for`, `clocksource tsc`, and the ring
+size. The dirty flag earns its place there — a trace from a working tree is one whose source cannot be
+recovered, and that is worth knowing before an afternoon goes into reading it.
