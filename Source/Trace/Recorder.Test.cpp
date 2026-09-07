@@ -3,9 +3,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <system_error>
 #include <thread>
+#include <vector>
 
 #include "Core/Clock.h"
 #include "Core/Trace.h"
@@ -296,4 +298,98 @@ GYRO_TEST(Recorder, ALateRecordIsSortedBackIntoItsPlace)
 	// Unsorted this is the distance from *now* back to the epoch, which is negative. Sorted it is the
 	// distance from the epoch to now, which is the whole age of the machine and is at least positive.
 	GYRO_CHECK(written->Covered > Duration::zero());
+}
+
+// **The store keeps the end of the window rather than the beginning**, which is the ring's own rule:
+// a snapshot is asked for just after the thing being chased, so the lines worth having are the last
+// ones written rather than the first.
+GYRO_TEST(Recorder, TheLogStoreDropsTheOldest)
+{
+	const ManualClock clock;
+	TraceLogStore store;
+
+	store.Arm(2, clock);
+
+	store.Write("info", "first");
+	store.Write("info", "second");
+	store.Write("warn", "third");
+
+	const std::vector<TraceLogRecord> kept = store.Copy();
+
+	GYRO_REQUIRE_EQ(kept.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(std::string(kept[0].Message.data(), kept[0].Length), std::string{ "second" });
+	GYRO_CHECK_EQ(std::string(kept[1].Message.data(), kept[1].Length), std::string{ "third" });
+	GYRO_CHECK_EQ(std::string{ kept[1].Level }, std::string{ "warn" });
+}
+
+// A message is whatever a caller formatted — a client's own title can be in it — so its length is
+// somebody else's to decide, and the buffer is fixed.
+GYRO_TEST(Recorder, ALongMessageIsCutRatherThanOverrunning)
+{
+	const ManualClock clock;
+	TraceLogStore store;
+
+	store.Arm(4, clock);
+
+	const std::string long_message(TraceMessageLimit + 64, 'x');
+
+	store.Write("info", long_message);
+
+	const std::vector<TraceLogRecord> kept = store.Copy();
+
+	GYRO_REQUIRE_EQ(kept.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(std::size_t{ kept[0].Length }, TraceMessageLimit);
+}
+
+// `--trace-buffer=0` means record nothing, and that has to include the log: a sink armed against a
+// recorder that holds no rings is memory spent on a picture nobody will ever be handed.
+GYRO_TEST(Recorder, AZeroBufferArmsNoLogEither)
+{
+	const ManualClock clock;
+	Recorder recorder{ TracePolicy{ .Bytes = 0 } };
+
+	GYRO_CHECK(recorder.Arm("frame", clock) == nullptr);
+	GYRO_CHECK(recorder.ArmLog(clock) == nullptr);
+}
+
+// The plumbing rather than the encoding: Trace/Perfetto.Test.cpp proves the bytes are shaped right,
+// and what this proves is that what the composition root said reaches them.
+GYRO_TEST(Recorder, ASnapshotCarriesWhatTheRootDescribed)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1'000'000) };
+	Scratch scratch{ "gyro-recorder-identity.pftrace" };
+
+	Recorder recorder{ TracePolicy{ .Bytes = 64 * 1024, .Path = scratch.Path(), .Pid = 4321 } };
+
+	TraceBuffer* const frame = recorder.Arm("frame", clock);
+	TraceLogStore* const log = recorder.ArmLog(clock);
+
+	GYRO_REQUIRE(frame != nullptr && log != nullptr);
+
+	recorder.Join(*frame, 4322);
+
+	TraceRun run;
+	run.CommandLine = { "gyro", "--backend=headless" };
+	run.Facts = { { "backend", "headless" } };
+
+	recorder.Describe(std::move(run));
+	recorder.Note("scheduling", "SCHED_FIFO at 20");
+
+	log->Write("info", "the panel came back");
+
+	{
+		const TraceSpan iteration{ "iteration" };
+
+		clock.Advance(std::chrono::milliseconds{ 4 });
+	}
+
+	GYRO_REQUIRE(recorder.Snapshot(scratch.Path()));
+
+	std::ifstream file{ scratch.Path(), std::ios::binary };
+	const std::string bytes{ std::istreambuf_iterator<char>{ file }, std::istreambuf_iterator<char>{} };
+
+	GYRO_CHECK(bytes.find("backend=headless") != std::string::npos);
+	GYRO_CHECK(bytes.find("scheduling=SCHED_FIFO at 20") != std::string::npos);
+	GYRO_CHECK(bytes.find("--backend=headless") != std::string::npos);
+	GYRO_CHECK(bytes.find("the panel came back") != std::string::npos);
 }

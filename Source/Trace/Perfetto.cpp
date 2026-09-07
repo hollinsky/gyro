@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <format>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -26,13 +27,45 @@ using namespace Perfetto;
 	return ScopeTrackBase + scope;
 }
 
-// What an output's rows are called, and they are the whole of decision 139's vocabulary made legible:
-// one screen's rows are consecutive and they run in the order a frame happens. See Core/Trace.h.
+// What a row is called.
+//
+// **The table Core/Trace.h keeps is consulted first, and everything below it is the fallback.** A row
+// for an output is named by arithmetic because an output is a number; a row for a client or a session
+// is named by whoever created it, because `firefox` is not derivable from anything the ring carries.
+//
+// **A client row nobody named still comes out as `client 3` rather than as nothing.** A track with no
+// descriptor is the one defect Tools/TraceDump.cpp --check exists to report, and a row that is real,
+// has slices on it, and is anonymous is a worse trace than one that admits it does not know the name.
 [[nodiscard]] std::string ScopeName(std::uint16_t scope)
 {
+	if (TraceName recorded{}; ReadTraceScopeName(scope, recorded))
+	{
+		return std::string{ recorded.data() };
+	}
+
 	if (scope == TraceThread)
 	{
 		return "compositor";
+	}
+
+	if (scope >= TraceOutputScopes)
+	{
+		if (scope == TraceInput())
+		{
+			return "input";
+		}
+
+		if (scope == TraceSession())
+		{
+			return "session";
+		}
+
+		if (scope == TraceLog())
+		{
+			return "log";
+		}
+
+		return std::format("client {}", scope - TraceOutputScopes);
 	}
 
 	const std::uint16_t offset = static_cast<std::uint16_t>(scope - 1);
@@ -282,6 +315,38 @@ void AppendPacket(std::vector<std::byte>& into, const ProtoWriter& packet)
 	into.insert(into.end(), bytes.begin(), bytes.end());
 }
 
+// The oldest instant anything in the file is stamped at, which is where the identity instant goes.
+//
+// **At the front of the window rather than at `now`, because `now` is off the right-hand edge.** The
+// snapshot is taken after the newest record in the rings, so an identity stamped when it was written
+// would sit past every slice — a person who scrolls to it finds nothing around it, and a reader that
+// trims to the recorded span may drop it. Each source is already in time order, so this is a
+// comparison per source rather than a scan.
+[[nodiscard]] std::uint64_t
+Front(const TraceIdentity& identity, std::span<const TraceSource> sources, std::span<const TraceLine> logs)
+{
+	std::optional<std::int64_t> oldest;
+
+	const auto consider = [&oldest](std::int64_t stamp) { oldest = oldest ? std::min(*oldest, stamp) : stamp; };
+
+	for (const TraceSource& source : sources)
+	{
+		if (!source.Events.empty())
+		{
+			consider(Monotonic::ToNanoseconds(source.Events.front().Stamp));
+		}
+	}
+
+	if (!logs.empty())
+	{
+		consider(Monotonic::ToNanoseconds(logs.front().Stamp));
+	}
+
+	// A trace with no records at all still says what wrote it, and the anchor is the only instant it
+	// has. Zero where there is no anchor either, which is a test's trace and nobody's timeline.
+	return static_cast<std::uint64_t>(oldest.value_or(identity.Anchor.Monotonic));
+}
+
 void WriteDescriptor(std::vector<std::byte>& into, const ProtoWriter& descriptor)
 {
 	ProtoWriter packet;
@@ -293,7 +358,8 @@ void WriteDescriptor(std::vector<std::byte>& into, const ProtoWriter& descriptor
 
 } // namespace
 
-std::vector<std::byte> EncodeTrace(const TraceIdentity& identity, std::span<const TraceSource> sources)
+std::vector<std::byte>
+EncodeTrace(const TraceIdentity& identity, std::span<const TraceSource> sources, std::span<const TraceLine> logs)
 {
 	std::vector<std::byte> bytes;
 	std::vector<Inventory> inventories;
@@ -320,15 +386,45 @@ std::vector<std::byte> EncodeTrace(const TraceIdentity& identity, std::span<cons
 		boottime.Varint(Snapshot::ClockId, ClockBoottime);
 		boottime.Varint(Snapshot::Timestamp, static_cast<std::uint64_t>(identity.Anchor.Boottime));
 
+		// The wall clock, which merges with nothing and is the one a person reads. Monotonic against
+		// boot-time is what lets this file be concatenated with a system trace; monotonic against
+		// realtime is what lets a slice be lined up with a journal line, a screen recording, or somebody
+		// saying it went wrong at about quarter past.
+		ProtoWriter realtime;
+		realtime.Varint(Snapshot::ClockId, ClockRealtime);
+		realtime.Varint(Snapshot::Timestamp, static_cast<std::uint64_t>(identity.Anchor.Realtime));
+
 		// No `primary_trace_clock`. Declaring one would be this trace telling a reader what the whole
 		// timeline is stamped in, which is a claim it has no standing to make about the system trace it
-		// may have been concatenated with — the pair above is a relation, and a relation composes.
+		// may have been concatenated with — the readings above are relations, and a relation composes.
 		ProtoWriter snapshot;
 		snapshot.Nested(Snapshot::Clocks, monotonic);
 		snapshot.Nested(Snapshot::Clocks, boottime);
+		snapshot.Nested(Snapshot::Clocks, realtime);
 
 		ProtoWriter packet;
 		packet.Nested(Packet::ClockSnapshot, snapshot);
+		packet.Varint(Packet::TrustedSequence, DescriptorSequence);
+
+		AppendPacket(bytes, packet);
+	}
+
+	// What machine this was, which is the half of a three-week-old capture that no slice carries. Its
+	// own packet because that is the message Perfetto has for it — a system trace concatenated in front
+	// of this one writes the same one, and a reader comparing the two is then comparing one field.
+	if (!identity.Machine.Sysname.empty() || !identity.Machine.Release.empty())
+	{
+		ProtoWriter utsname;
+		utsname.Text(Utsname::Sysname, identity.Machine.Sysname);
+		utsname.Text(Utsname::Version, identity.Machine.Version);
+		utsname.Text(Utsname::Release, identity.Machine.Release);
+		utsname.Text(Utsname::Machine, identity.Machine.Machine);
+
+		ProtoWriter system;
+		system.Nested(SystemInfo::Utsname, utsname);
+
+		ProtoWriter packet;
+		packet.Nested(Packet::SystemInfo, system);
 		packet.Varint(Packet::TrustedSequence, DescriptorSequence);
 
 		AppendPacket(bytes, packet);
@@ -338,6 +434,18 @@ std::vector<std::byte> EncodeTrace(const TraceIdentity& identity, std::span<cons
 		ProtoWriter process;
 		process.Signed(ProcessDescriptor::Pid, identity.Pid);
 		process.Text(ProcessDescriptor::Name, identity.Name);
+
+		for (const std::string_view argument : identity.CommandLine)
+		{
+			process.Text(ProcessDescriptor::Cmdline, argument);
+		}
+
+		// `name=value` rather than two fields, because a label is one string and that is the whole of
+		// what the message offers. The annotations below are the spelling a tool reads.
+		for (const TraceFact& fact : identity.Facts)
+		{
+			process.Text(ProcessDescriptor::Labels, std::format("{}={}", fact.Name, fact.Value));
+		}
 
 		ProtoWriter descriptor;
 		descriptor.Varint(Descriptor::Uuid, ProcessTrack);
@@ -397,6 +505,88 @@ std::vector<std::byte> EncodeTrace(const TraceIdentity& identity, std::span<cons
 			track.Nested(Descriptor::Counter, unit);
 
 			WriteDescriptor(bytes, track);
+		}
+	}
+
+	// The log row, which no inventory can have found: a log line comes from the store beside the rings
+	// rather than out of one, so nothing in the pass above has seen the scope it lands on.
+	if (!logs.empty() && std::ranges::find(declared, TraceLog()) == declared.end())
+	{
+		declared.push_back(TraceLog());
+
+		ProtoWriter track;
+		track.Varint(Descriptor::Uuid, ScopeTrack(TraceLog()));
+		track.Varint(Descriptor::ParentUuid, ProcessTrack);
+		track.Text(Descriptor::Name, ScopeName(TraceLog()));
+
+		WriteDescriptor(bytes, track);
+	}
+
+	// What produced this file, and what it said while it was producing it.
+	{
+		ProtoWriter defaults;
+		defaults.Varint(Defaults::TimestampClock, ClockMonotonic);
+
+		ProtoWriter opening;
+		opening.Varint(Packet::TrustedSequence, RunSequence);
+		opening.Varint(Packet::SequenceFlags, StateCleared);
+		opening.Nested(Packet::Defaults, defaults);
+
+		AppendPacket(bytes, opening);
+
+		const std::uint64_t front = Front(identity, sources, logs);
+
+		const auto emit = [&bytes](std::uint64_t stamp, const ProtoWriter& event) {
+			ProtoWriter packet;
+			packet.Varint(Packet::Timestamp, stamp);
+			packet.Varint(Packet::TrustedSequence, RunSequence);
+			packet.Varint(Packet::SequenceFlags, NeedsState);
+			packet.Nested(Packet::TrackEvent, event);
+
+			AppendPacket(bytes, packet);
+		};
+
+		// **One instant carrying every fact rather than one instant each.** They are all true of the
+		// whole run, so a row of them at the same stamp would be a row a person has to click along
+		// reading one word at a time — and Perfetto's argument panel is exactly the table wanted here.
+		if (!identity.Facts.empty() || !identity.CommandLine.empty())
+		{
+			ProtoWriter event;
+			event.Varint(Event::Type, InstantEvent);
+			event.Varint(Event::TrackUuid, ProcessTrack);
+			event.Text(Event::Name, "run");
+
+			for (const TraceFact& fact : identity.Facts)
+			{
+				ProtoWriter note;
+				note.Text(Annotation::Name, fact.Name);
+				note.Text(Annotation::StringValue, fact.Value);
+
+				event.Nested(Event::DebugAnnotations, note);
+			}
+
+			emit(front, event);
+		}
+
+		// **The message is the name and it goes out in full.** Interning a table of log lines would be
+		// a table with one entry per row — every message is different, and most of them are said once.
+		for (const TraceLine& line : logs)
+		{
+			ProtoWriter event;
+			event.Varint(Event::Type, InstantEvent);
+			event.Varint(Event::TrackUuid, ScopeTrack(TraceLog()));
+			event.Text(Event::Name, line.Message);
+
+			if (line.Level != nullptr)
+			{
+				ProtoWriter note;
+				note.Text(Annotation::Name, "level");
+				note.Text(Annotation::StringValue, line.Level);
+
+				event.Nested(Event::DebugAnnotations, note);
+			}
+
+			emit(static_cast<std::uint64_t>(Monotonic::ToNanoseconds(line.Stamp)), event);
 		}
 	}
 

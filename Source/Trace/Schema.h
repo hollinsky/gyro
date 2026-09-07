@@ -14,6 +14,15 @@
 // is written and disagrees the first time a field moves, with no build failure between. One table is
 // what makes the dumper evidence about the file rather than a guess that matches.
 //
+// **Every number below was read out of Perfetto's own `.proto` files rather than remembered.**
+// Verified 2026-09-06 against `google/perfetto` at `main`:
+// `protos/perfetto/trace/trace_packet.proto`, `protos/perfetto/trace/track_event/track_descriptor.proto`,
+// `.../process_descriptor.proto`, `.../thread_descriptor.proto`, `.../debug_annotation.proto`, and
+// `protos/perfetto/common/system_info.proto`. There is no copy of those files in this tree and no
+// generated code to disagree with them, which is exactly why the provenance is written down: the next
+// field somebody adds has to be read the same way, and a number that was recalled rather than read is
+// indistinguishable from a correct one until a person opens the trace and finds a gap.
+//
 // The message each field belongs to is the enclosing struct. Nothing here is a type — these are the
 // numbers, and what they mean is Perfetto's schema rather than gyro's.
 namespace Perfetto
@@ -27,6 +36,7 @@ struct Packet
 	static constexpr std::uint32_t TrackEvent = 11;
 	static constexpr std::uint32_t InternedData = 12;
 	static constexpr std::uint32_t SequenceFlags = 13;
+	static constexpr std::uint32_t SystemInfo = 45;
 	static constexpr std::uint32_t Defaults = 59;
 	static constexpr std::uint32_t TrackDescriptor = 60;
 };
@@ -49,7 +59,15 @@ struct Descriptor
 struct ProcessDescriptor
 {
 	static constexpr std::uint32_t Pid = 1;
+
+	// `cmdline`, repeated: one string per argument rather than one joined string, because Perfetto
+	// prints the first as the process's own name and a joined line would name the process after the
+	// whole invocation.
+	static constexpr std::uint32_t Cmdline = 2;
 	static constexpr std::uint32_t Name = 6;
+
+	// `process_labels`, repeated. What a reader sees against the process without clicking anything.
+	static constexpr std::uint32_t Labels = 8;
 };
 
 struct ThreadDescriptor
@@ -82,7 +100,28 @@ struct Event
 struct Annotation
 {
 	static constexpr std::uint32_t UintValue = 3;
+
+	// `string_value`, which is a different field of the same `oneof` the number above belongs to — so a
+	// record writing both would be a record whose value is whichever the reader happened to parse last.
+	static constexpr std::uint32_t StringValue = 6;
 	static constexpr std::uint32_t Name = 10;
+};
+
+// What machine this ran on, as `uname` reports it. A message of its own rather than four more labels
+// because Perfetto and trace_processor already know these four fields by name, and a system trace
+// concatenated alongside carries the same message — so a reader comparing the two is comparing one
+// field rather than two spellings of it.
+struct SystemInfo
+{
+	static constexpr std::uint32_t Utsname = 1;
+};
+
+struct Utsname
+{
+	static constexpr std::uint32_t Sysname = 1;
+	static constexpr std::uint32_t Version = 2;
+	static constexpr std::uint32_t Release = 3;
+	static constexpr std::uint32_t Machine = 4;
 };
 
 struct Snapshot
@@ -115,6 +154,7 @@ constexpr std::uint64_t StateCleared = 1;
 constexpr std::uint64_t NeedsState = 2;
 
 // BuiltinClock
+constexpr std::uint64_t ClockRealtime = 1;
 constexpr std::uint64_t ClockMonotonic = 3;
 constexpr std::uint64_t ClockBoottime = 6;
 
@@ -128,7 +168,13 @@ constexpr std::uint64_t CounterTrackBase = 0x1000;
 // Descriptors go out on their own packet sequence, so that a source's sequence contains only its own
 // events in timestamp order and its interning state is cleared exactly once at the front of it.
 constexpr std::uint64_t DescriptorSequence = 1;
-constexpr std::uint64_t SourceSequenceBase = 2;
+
+// What the run said about itself: the identity instant and the log lines, neither of which came out of
+// a recorded thread's ring. A sequence of its own rather than the first source's, because a source
+// sequence is one ring's window and these two are not — the identity is stamped once at the oldest
+// record in the file and a log line may have been written by any thread in the process.
+constexpr std::uint64_t RunSequence = 2;
+constexpr std::uint64_t SourceSequenceBase = 3;
 
 // A trace file is a sequence of length-delimited `Trace.packet` fields and nothing else, which is what
 // makes concatenating two of them a valid third.

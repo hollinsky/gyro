@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <bit>
 #include <cerrno>
+#include <cstring>
 #include <fstream>
 #include <span>
+#include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -30,6 +33,68 @@ namespace
 }
 
 } // namespace
+
+void TraceLogStore::Arm(std::size_t records, const IClock& clock)
+{
+	const std::lock_guard held{ m_Lock };
+
+	m_Records.assign(records, TraceLogRecord{});
+	m_Next = 0;
+	m_Held = 0;
+	m_Clock = &clock;
+}
+
+void TraceLogStore::Write(const char* level, std::string_view message) noexcept
+{
+	const std::lock_guard held{ m_Lock };
+
+	if (m_Records.empty() || m_Clock == nullptr)
+	{
+		return;
+	}
+
+	TraceLogRecord& record = m_Records[m_Next];
+
+	record.Stamp = m_Clock->Now();
+	record.Level = level;
+
+	// Truncated rather than overrun, and the cut is at the buffer rather than at the message: a sink is
+	// handed whatever a caller formatted, and a format string with a client's title in it is a message
+	// whose length is somebody else's to decide.
+	const std::size_t kept = std::min(message.size(), TraceMessageLimit);
+
+	std::memcpy(record.Message.data(), message.data(), kept);
+	record.Length = static_cast<std::uint16_t>(kept);
+
+	m_Next = (m_Next + 1) % m_Records.size();
+	m_Held = std::min(m_Held + 1, m_Records.size());
+}
+
+std::vector<TraceLogRecord> TraceLogStore::Copy() const
+{
+	const std::lock_guard held{ m_Lock };
+
+	std::vector<TraceLogRecord> taken;
+
+	if (m_Held == 0)
+	{
+		return taken;
+	}
+
+	taken.reserve(m_Held);
+
+	// Where the oldest one is: the write cursor once the store has wrapped, and the front of it before
+	// that. The same arithmetic either way, since `m_Held` is the count and `m_Next` is one past the
+	// newest.
+	const std::size_t oldest = (m_Next + m_Records.size() - m_Held) % m_Records.size();
+
+	for (std::size_t at = 0; at < m_Held; ++at)
+	{
+		taken.push_back(m_Records[(oldest + at) % m_Records.size()]);
+	}
+
+	return taken;
+}
 
 std::filesystem::path NumberedTrace(const std::filesystem::path& path, std::uint64_t number)
 {
@@ -59,6 +124,37 @@ TraceBuffer* Recorder::Arm(std::string_view name, const IClock& clock)
 	++m_Count;
 
 	return &source.Buffer;
+}
+
+TraceLogStore* Recorder::ArmLog(const IClock& clock)
+{
+	// The same question the rings ask, asked once: a policy that buys no ring buys no log window
+	// either, which is what `--trace-buffer=0` means without a second flag saying so.
+	if (RecordsWithin(m_Policy.Bytes) == 0 || m_Log.IsArmed())
+	{
+		return nullptr;
+	}
+
+	const std::size_t records =
+		std::max<std::size_t>(32, m_Policy.Bytes / TracePolicy::LogShare / sizeof(TraceLogRecord));
+
+	m_Log.Arm(records, clock);
+
+	return &m_Log;
+}
+
+void Recorder::Describe(TraceRun run)
+{
+	const std::lock_guard held{ m_Described };
+
+	m_Run = std::move(run);
+}
+
+void Recorder::Note(std::string_view name, std::string_view value)
+{
+	const std::lock_guard held{ m_Described };
+
+	m_Run.Facts.emplace_back(name, value);
 }
 
 void Recorder::Join(TraceBuffer& buffer, std::int32_t tid) noexcept
@@ -226,11 +322,64 @@ Result<TraceSummary> Recorder::Snapshot(const std::filesystem::path& path)
 		summary.Covered = Elapsed(oldest, newest);
 	}
 
+	// The log store is read here and not in the loop above, because it is not one thread's: whichever
+	// thread logged took the store's lock, and what comes back is already in time order.
+	const std::vector<TraceLogRecord> logged = m_Log.Copy();
+	std::vector<TraceLine> lines;
+
+	lines.reserve(logged.size());
+
+	for (const TraceLogRecord& record : logged)
+	{
+		lines.push_back(
+			TraceLine{ .Stamp = record.Stamp,
+		               .Level = record.Level,
+		               .Message = std::string_view{ record.Message.data(), record.Length } }
+		);
+	}
+
+	// **Copied under the lock rather than viewed through it**, because the frame thread may still be
+	// adding the one fact that is not knowable at startup and a `string_view` onto a vector that grew
+	// is a view onto freed memory.
+	TraceRun run;
+
+	{
+		const std::lock_guard held{ m_Described };
+
+		run = m_Run;
+	}
+
+	std::vector<std::string_view> invocation;
+	std::vector<TraceFact> facts;
+
+	invocation.reserve(run.CommandLine.size());
+	facts.reserve(run.Facts.size());
+
+	for (const std::string& argument : run.CommandLine)
+	{
+		invocation.push_back(argument);
+	}
+
+	for (const auto& [name, value] : run.Facts)
+	{
+		facts.push_back(TraceFact{ .Name = name, .Value = value });
+	}
+
 	// Read here rather than at startup, because what separates the two domains is time spent suspended
 	// and a session that suspended after the anchor was taken would place every record in this file at
-	// the wrong moment of the system trace beside it.
-	const std::vector<std::byte> encoded =
-		EncodeTrace(TraceIdentity{ .Pid = m_Policy.Pid, .Name = "gyro", .Anchor = ReadClockAnchor() }, sources);
+	// the wrong moment of the system trace beside it. Everything beside it *is* read at startup, and
+	// says so: a version and a kernel that changed mid-run would be a different process.
+	const TraceIdentity identity{ .Pid = m_Policy.Pid,
+		                          .Name = "gyro",
+		                          .Anchor = ReadClockAnchor(),
+		                          .CommandLine = invocation,
+		                          .Machine = TraceMachine{ .Sysname = run.Sysname,
+		                                                   .Release = run.Release,
+		                                                   .Version = run.Version,
+		                                                   .Machine = run.Machine },
+		                          .Facts = facts };
+
+	const std::vector<std::byte> encoded = EncodeTrace(identity, sources, lines);
 
 	summary.Bytes = encoded.size();
 

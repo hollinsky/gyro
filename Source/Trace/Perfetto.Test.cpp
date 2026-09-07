@@ -7,8 +7,10 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
+#include "Core/Clock.h"
 #include "Core/Time.h"
 #include "Core/Trace.h"
 #include "Testing/Test.h"
@@ -558,4 +560,310 @@ GYRO_TEST(Perfetto, AnAttributeBindsToTheSliceItImmediatelyFollows)
 	// reattaching to the outer slice that is still open.
 	GYRO_REQUIRE_EQ(arguments.size(), std::size_t{ 1 });
 	GYRO_CHECK_EQ(arguments[0].second, std::uint64_t{ 6 });
+}
+
+// A row whose name is not knowable until it exists — a client is `firefox`, a session is a user — is
+// named through Core/Trace.h's table, and the descriptor is where that name has to arrive. The ring
+// still carries only a row number, so this is the one place the two halves meet.
+GYRO_TEST(Perfetto, ARuntimeNameReachesTheTrackDescriptor)
+{
+	const std::uint16_t client = ClaimTraceClient();
+
+	GYRO_REQUIRE(client != TraceThread);
+
+	NameTraceScope(client, "firefox");
+	NameTraceScope(TraceSession(), "paul");
+
+	const std::vector<TraceEvent> events{ At(1'000, TraceKind::Mark, "attach", 0, client),
+		                                  At(1'100, TraceKind::Mark, "locked", 0, TraceSession()) };
+	const std::array sources{ TraceSource{ .Name = "dispatch", .Events = events } };
+
+	const std::vector<std::byte> trace = EncodeTrace(TraceIdentity{ .Pid = 7 }, sources);
+	const std::vector<std::string> names = DescriptorNames(trace);
+
+	GYRO_CHECK(Names(names, "firefox"));
+	GYRO_CHECK(Names(names, "paul"));
+
+	ForgetTraceScope(TraceSession());
+	ReleaseTraceClient(client);
+}
+
+// A row nobody named still has to come out as something. A track with no descriptor is precisely the
+// defect Tools/TraceDump.cpp --check exists to report, and a client that connected and said nothing
+// about itself is a real row with real slices on it.
+GYRO_TEST(Perfetto, AnUnnamedClientRowStillGetsADescriptor)
+{
+	const std::vector<TraceEvent> events{ At(1'000, TraceKind::Mark, "attach", 0, TraceClient(3)),
+		                                  At(1'100, TraceKind::Mark, "motion", 0, TraceInput()),
+		                                  At(1'200, TraceKind::Mark, "started", 0, TraceLog()) };
+	const std::array sources{ TraceSource{ .Name = "dispatch", .Events = events } };
+
+	const std::vector<std::byte> trace = EncodeTrace(TraceIdentity{ .Pid = 7 }, sources);
+	const std::vector<std::string> names = DescriptorNames(trace);
+
+	GYRO_CHECK(Names(names, "client 3"));
+	GYRO_CHECK(Names(names, "input"));
+	GYRO_CHECK(Names(names, "log"));
+}
+
+namespace
+{
+
+// Every clock the snapshot packet relates, as the pairs a reader uses to place this file's timestamps
+// against somebody else's.
+[[nodiscard]] std::vector<std::pair<std::uint64_t, std::uint64_t>> Clocks(std::span<const std::byte> trace)
+{
+	std::vector<std::pair<std::uint64_t, std::uint64_t>> readings;
+
+	for (const Field& packet : Packets(trace))
+	{
+		const std::optional<Field> snapshot = Find(packet.Bytes, Perfetto::Packet::ClockSnapshot);
+
+		if (!snapshot)
+		{
+			continue;
+		}
+
+		for (const Field& clock : ProtoFindAll(snapshot->Bytes, Perfetto::Snapshot::Clocks))
+		{
+			const std::optional<Field> id = Find(clock.Bytes, Perfetto::Snapshot::ClockId);
+			const std::optional<Field> stamp = Find(clock.Bytes, Perfetto::Snapshot::Timestamp);
+
+			if (id && stamp)
+			{
+				readings.emplace_back(id->Value, stamp->Value);
+			}
+		}
+	}
+
+	return readings;
+}
+
+} // namespace
+
+// Monotonic against boot-time is what lets this file be concatenated with a system trace; monotonic
+// against the wall clock is what lets a slice be lined up with a journal line, a screen recording, or
+// a person saying it stuttered at about quarter past. Both relations are one packet at the front.
+GYRO_TEST(Perfetto, TheClockSnapshotRelatesAllThreeDomains)
+{
+	const std::vector<TraceEvent> events{ At(1'000, TraceKind::Mark, "tick") };
+	const std::array sources{ TraceSource{ .Name = "frame", .Events = events } };
+
+	const TraceIdentity identity{ .Pid = 7,
+		                          .Anchor = ClockAnchor{ .Monotonic = 41'203'000'000'000,
+		                                                 .Boottime = 41'900'000'000'000,
+		                                                 .Realtime = 1'757'000'000'000'000'000 } };
+
+	const std::vector<std::pair<std::uint64_t, std::uint64_t>> readings = Clocks(EncodeTrace(identity, sources));
+
+	GYRO_REQUIRE_EQ(readings.size(), std::size_t{ 3 });
+
+	GYRO_CHECK_EQ(readings[0].first, Perfetto::ClockMonotonic);
+	GYRO_CHECK_EQ(readings[0].second, std::uint64_t{ 41'203'000'000'000 });
+
+	GYRO_CHECK_EQ(readings[1].first, Perfetto::ClockBoottime);
+	GYRO_CHECK_EQ(readings[1].second, std::uint64_t{ 41'900'000'000'000 });
+
+	GYRO_CHECK_EQ(readings[2].first, Perfetto::ClockRealtime);
+	GYRO_CHECK_EQ(readings[2].second, std::uint64_t{ 1'757'000'000'000'000'000 });
+}
+
+namespace
+{
+
+// Every `process_labels` on the process descriptor, which is the half of the identity a person reads
+// without clicking anything.
+[[nodiscard]] std::vector<std::string> Labels(std::span<const std::byte> trace)
+{
+	std::vector<std::string> labels;
+
+	for (const Field& packet : Packets(trace))
+	{
+		const std::optional<Field> descriptor = Find(packet.Bytes, TrackDescriptorField);
+
+		if (!descriptor)
+		{
+			continue;
+		}
+
+		const std::optional<Field> process = Find(descriptor->Bytes, Perfetto::Descriptor::Process);
+
+		if (!process)
+		{
+			continue;
+		}
+
+		for (const Field& label : ProtoFindAll(process->Bytes, Perfetto::ProcessDescriptor::Labels))
+		{
+			labels.emplace_back(reinterpret_cast<const char*>(label.Bytes.data()), label.Bytes.size());
+		}
+	}
+
+	return labels;
+}
+
+// Every instant in the file, as its name and the string annotations hanging off it — which is the
+// other half, and the one a tool reads a key at a time.
+[[nodiscard]] std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::string>>>>
+Instants(std::span<const std::byte> trace)
+{
+	std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::string>>>> found;
+
+	for (const Field& packet : Packets(trace))
+	{
+		const std::optional<Field> event = Find(packet.Bytes, TrackEventField);
+
+		if (!event)
+		{
+			continue;
+		}
+
+		const std::optional<Field> kind = Find(event->Bytes, TypeField);
+		const std::optional<Field> name = Find(event->Bytes, InlineNameField);
+
+		if (!kind || kind->Value != InstantEvent || !name)
+		{
+			continue;
+		}
+
+		std::vector<std::pair<std::string, std::string>> notes;
+
+		for (const Field& annotation : ProtoFindAll(event->Bytes, AnnotationField))
+		{
+			const std::optional<Field> key = Find(annotation.Bytes, AnnotationNameField);
+			const std::optional<Field> value = Find(annotation.Bytes, Perfetto::Annotation::StringValue);
+
+			if (key && value)
+			{
+				notes.emplace_back(
+					std::string{ reinterpret_cast<const char*>(key->Bytes.data()), key->Bytes.size() },
+					std::string{ reinterpret_cast<const char*>(value->Bytes.data()), value->Bytes.size() }
+				);
+			}
+		}
+
+		found.emplace_back(
+			std::string{ reinterpret_cast<const char*>(name->Bytes.data()), name->Bytes.size() }, std::move(notes)
+		);
+	}
+
+	return found;
+}
+
+} // namespace
+
+// A capture three weeks old and off somebody else's machine has to say what produced it, and none of
+// it is in a slice: the build, the kernel, the backend and whether the frame thread actually got
+// real-time priority are facts about the run rather than about anything that happened during it.
+GYRO_TEST(Perfetto, TheIdentitySaysWhatProducedTheTrace)
+{
+	const std::vector<TraceEvent> events{ At(1'000, TraceKind::Mark, "tick") };
+	const std::array sources{ TraceSource{ .Name = "frame", .Events = events } };
+
+	const std::array<std::string_view, 2> invocation{ "gyro", "--backend=headless" };
+	const std::array<TraceFact, 2> facts{ TraceFact{ .Name = "backend", .Value = "headless" },
+		                                  TraceFact{ .Name = "clocksource", .Value = "tsc" } };
+
+	const TraceIdentity identity{ .Pid = 7,
+		                          .Anchor = ClockAnchor{ .Monotonic = 500, .Boottime = 900, .Realtime = 1'000 },
+		                          .CommandLine = invocation,
+		                          .Machine = TraceMachine{ .Sysname = "Linux",
+		                                                   .Release = "7.1.9-200.fc44.x86_64",
+		                                                   .Version = "#1 SMP",
+		                                                   .Machine = "x86_64" },
+		                          .Facts = facts };
+
+	const std::vector<std::byte> trace = EncodeTrace(identity, sources);
+
+	// The invocation, one field per argument.
+	std::vector<std::string> arguments;
+
+	for (const Field& packet : Packets(trace))
+	{
+		const std::optional<Field> descriptor = Find(packet.Bytes, TrackDescriptorField);
+		const std::optional<Field> process =
+			descriptor ? Find(descriptor->Bytes, Perfetto::Descriptor::Process) : std::nullopt;
+
+		if (!process)
+		{
+			continue;
+		}
+
+		for (const Field& argument : ProtoFindAll(process->Bytes, Perfetto::ProcessDescriptor::Cmdline))
+		{
+			arguments.emplace_back(reinterpret_cast<const char*>(argument.Bytes.data()), argument.Bytes.size());
+		}
+	}
+
+	GYRO_REQUIRE_EQ(arguments.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(arguments[1], std::string{ "--backend=headless" });
+
+	const std::vector<std::string> labels = Labels(trace);
+
+	GYRO_REQUIRE_EQ(labels.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(labels[0], std::string{ "backend=headless" });
+	GYRO_CHECK_EQ(labels[1], std::string{ "clocksource=tsc" });
+
+	// The kernel, in the message Perfetto already knows by that name.
+	std::string release;
+
+	for (const Field& packet : Packets(trace))
+	{
+		const std::optional<Field> system = Find(packet.Bytes, Perfetto::Packet::SystemInfo);
+		const std::optional<Field> utsname = system ? Find(system->Bytes, Perfetto::SystemInfo::Utsname) : std::nullopt;
+
+		if (const std::optional<Field> found =
+		        utsname ? Find(utsname->Bytes, Perfetto::Utsname::Release) : std::nullopt;
+		    found)
+		{
+			release.assign(reinterpret_cast<const char*>(found->Bytes.data()), found->Bytes.size());
+		}
+	}
+
+	GYRO_CHECK_EQ(release, std::string{ "7.1.9-200.fc44.x86_64" });
+
+	// And the same facts again as annotations, on one instant rather than one each.
+	// One instant, not one per fact: `tick` above is interned rather than named inline, so what this
+	// finds is the identity and nothing else.
+	const auto instants = Instants(trace);
+
+	GYRO_REQUIRE_EQ(instants.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(instants[0].first, std::string{ "run" });
+	GYRO_REQUIRE_EQ(instants[0].second.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(instants[0].second[1].first, std::string{ "clocksource" });
+	GYRO_CHECK_EQ(instants[0].second[1].second, std::string{ "tsc" });
+}
+
+// A log line and the frame that was on the screen when it was written are the same moment described
+// twice, and until now they were in two files with no shared clock between them.
+GYRO_TEST(Perfetto, ALogLineIsAnInstantOnTheLogRow)
+{
+	const std::vector<TraceEvent> events{ At(1'000, TraceKind::Mark, "tick") };
+	const std::array sources{ TraceSource{ .Name = "frame", .Events = events } };
+
+	const std::array<TraceLine, 2> logs{
+		TraceLine{
+			.Stamp = Monotonic::FromNanoseconds(1'200), .Level = "info", .Message = "hosting clients on wayland-1" },
+		TraceLine{ .Stamp = Monotonic::FromNanoseconds(1'800), .Level = "warn", .Message = "pages are not locked" }
+	};
+
+	const std::vector<std::byte> trace = EncodeTrace(TraceIdentity{ .Pid = 7 }, sources, logs);
+
+	// The row exists and is named, which is what stops `Tools/TraceDump.cpp --check` reporting a track
+	// nothing described.
+	GYRO_CHECK(Names(DescriptorNames(trace), "log"));
+
+	const auto instants = Instants(trace);
+
+	GYRO_REQUIRE_EQ(instants.size(), std::size_t{ 2 });
+
+	// The message is the name, written out in full: interning a table of log lines would be a table
+	// with one entry per row.
+	GYRO_CHECK_EQ(instants[0].first, std::string{ "hosting clients on wayland-1" });
+	GYRO_REQUIRE_EQ(instants[0].second.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(instants[0].second[0].first, std::string{ "level" });
+	GYRO_CHECK_EQ(instants[0].second[0].second, std::string{ "info" });
+
+	GYRO_CHECK_EQ(instants[1].first, std::string{ "pages are not locked" });
+	GYRO_CHECK_EQ(instants[1].second[0].second, std::string{ "warn" });
 }

@@ -60,6 +60,12 @@ struct Annotated
 {
 	std::string Name;
 	std::uint64_t Value = 0;
+
+	// A string annotation is a different field of the same `oneof`, so a record has one or the other
+	// and never both. Kept apart rather than stringified on the way in, because the JSON below has to
+	// quote one and not the other.
+	std::string Text;
+	bool IsText = false;
 };
 
 struct Record
@@ -83,6 +89,12 @@ struct Trace
 	// Interning is per packet sequence and is cleared by `StateCleared`, so a name read against the
 	// wrong sequence is a name belonging to somebody else rather than a name that is missing.
 	std::unordered_map<std::uint64_t, std::unordered_map<std::uint64_t, std::string>> Names;
+
+	// What the run said about itself. Empty is an ordinary answer for a trace a test wrote and a defect
+	// worth naming for one a compositor did — see `Check`.
+	std::vector<std::string> CommandLine;
+	std::vector<std::string> Labels;
+	std::string Kernel;
 
 	std::vector<std::string> Complaints;
 	std::size_t Packets = 0;
@@ -170,6 +182,18 @@ void ReadDescriptor(Trace& trace, std::span<const std::byte> descriptor)
 		if (const std::optional<ProtoField> name = ProtoFind(process->Bytes, ProcessDescriptor::Name); name)
 		{
 			track.Name = ProtoText(*name);
+		}
+
+		// The identity block, which is the answer to *what produced this file* and is the one thing in a
+		// three-week-old capture that no slice carries.
+		for (const ProtoField& argument : ProtoFindAll(process->Bytes, ProcessDescriptor::Cmdline))
+		{
+			trace.CommandLine.emplace_back(ProtoText(argument));
+		}
+
+		for (const ProtoField& label : ProtoFindAll(process->Bytes, ProcessDescriptor::Labels))
+		{
+			trace.Labels.emplace_back(ProtoText(label));
 		}
 	}
 
@@ -275,6 +299,12 @@ void ReadEvent(Trace& trace, std::uint64_t sequence, std::int64_t stamp, std::sp
 			held.Value = value->Value;
 		}
 
+		if (const std::optional<ProtoField> text = ProtoFind(annotation.Bytes, Annotation::StringValue); text)
+		{
+			held.Text = ProtoText(*text);
+			held.IsText = true;
+		}
+
 		record.Annotations.push_back(std::move(held));
 	}
 
@@ -332,6 +362,18 @@ void ReadEvent(Trace& trace, std::uint64_t sequence, std::int64_t stamp, std::sp
 			++trace.Snapshots;
 		}
 
+		if (const std::optional<ProtoField> system = ProtoFind(packet->Bytes, Packet::SystemInfo); system)
+		{
+			if (const std::optional<ProtoField> utsname = ProtoFind(system->Bytes, SystemInfo::Utsname); utsname)
+			{
+				const std::optional<ProtoField> sysname = ProtoFind(utsname->Bytes, Utsname::Sysname);
+				const std::optional<ProtoField> release = ProtoFind(utsname->Bytes, Utsname::Release);
+
+				trace.Kernel = std::string{ sysname ? ProtoText(*sysname) : "" } + " " +
+				               std::string{ release ? ProtoText(*release) : "" };
+			}
+		}
+
 		if (const std::optional<ProtoField> interned = ProtoFind(packet->Bytes, Packet::InternedData); interned)
 		{
 			ReadInterned(trace, sequence, interned->Bytes);
@@ -372,6 +414,26 @@ void ReadEvent(Trace& trace, std::uint64_t sequence, std::int64_t stamp, std::sp
 	if (trace.Packets == 0)
 	{
 		complaints.emplace_back("no trace packets at all");
+	}
+
+	// **A missing identity is a note rather than a complaint, and the reason is who writes traces.** A
+	// module test encodes a handful of events and no run behind them, and a tool that called that
+	// malformed would be a tool nobody could run against the files it is easiest to produce. What the
+	// note buys is the other direction: a capture from a compositor with no identity in it is one
+	// nobody can tie to a build, and reading the note is how a person finds that out before the file is
+	// three weeks old.
+	if (trace.Labels.empty())
+	{
+		notes.emplace_back("no run identity: this file does not say which build, machine or backend wrote it");
+	}
+	else
+	{
+		notes.emplace_back(std::to_string(trace.Labels.size()) + " identity label(s), kernel '" + trace.Kernel + "'");
+	}
+
+	if (trace.CommandLine.empty())
+	{
+		notes.emplace_back("no command line recorded");
 	}
 
 	if (trace.Snapshots == 0)
@@ -458,8 +520,24 @@ void ReadEvent(Trace& trace, std::uint64_t sequence, std::int64_t stamp, std::sp
 		std::unordered_map<std::uint64_t, std::int64_t> oldest;
 		std::unordered_map<std::uint64_t, std::int64_t> newest;
 
+		// **Only the sequences that carry arrows, because only they can hold the other end of one.** A
+		// ring's sequence is a window; the sequence the run's own identity and log lines go out on is
+		// not — it may hold a single record — and folding that into the intersection would collapse the
+		// window to an instant and turn every real missing partner into *the ring had lapped*.
+		std::unordered_map<std::uint64_t, bool> arrows;
+
 		for (const Record& record : trace.Records)
 		{
+			arrows[record.Sequence] = arrows[record.Sequence] || !record.Flows.empty();
+		}
+
+		for (const Record& record : trace.Records)
+		{
+			if (!arrows[record.Sequence])
+			{
+				continue;
+			}
+
 			const auto [at, fresh] = oldest.try_emplace(record.Sequence, record.Stamp);
 
 			at->second = std::min(at->second, record.Stamp);
@@ -650,6 +728,31 @@ void PrintSummary(const Trace& trace)
 		trace.Snapshots
 	);
 
+	// **First, because it is what a person opening an old capture needs before anything else.** Which
+	// build, which machine, which backend and whether the frame thread actually had real-time priority
+	// are the four facts that decide whether the numbers below are worth reading at all.
+	if (!trace.CommandLine.empty())
+	{
+		std::string invocation;
+
+		for (const std::string& argument : trace.CommandLine)
+		{
+			invocation += (invocation.empty() ? "" : " ") + argument;
+		}
+
+		std::printf("\n%s\n", invocation.c_str());
+	}
+
+	if (!trace.Kernel.empty())
+	{
+		std::printf("kernel %s\n", trace.Kernel.c_str());
+	}
+
+	for (const std::string& label : trace.Labels)
+	{
+		std::printf("  %s\n", label.c_str());
+	}
+
 	if (trace.Records.empty())
 	{
 		return;
@@ -763,8 +866,10 @@ void PrintJson(const Trace& trace)
 
 			for (std::size_t at = 0; at < record.Annotations.size(); ++at)
 			{
-				line += (at == 0 ? "" : ",") + quote(record.Annotations[at].Name) + ":" +
-				        std::to_string(record.Annotations[at].Value);
+				const Annotated& note = record.Annotations[at];
+
+				line += (at == 0 ? "" : ",") + quote(note.Name) + ":" +
+				        (note.IsText ? quote(note.Text) : std::to_string(note.Value));
 			}
 
 			line += "}";
