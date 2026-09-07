@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <wayland-server-core.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "Protocol/Sealed.h"
+#include "Protocol/Trace.h"
 
 // What `main_device` and `tranche_target_device` carry is a `dev_t`, and a client memcpys one out of
 // the array by its own `sizeof`. Eight bytes on every Linux this compiles for, and an assertion rather
@@ -227,6 +229,16 @@ void ClientDmabufBuffer::OnTextureReleased() noexcept
 
 	if (Object().IsValid())
 	{
+		// **The borrowed half of `ClientSurface::ReleaseStaged`'s mark, and the informative one.** A
+		// descriptor is never copied, so the client cannot touch these pixels again until this event —
+		// which means the gap from its commit to here is the number of frames gyro kept it out of its own
+		// buffer, and a client that never gets a second one back is a client stalled on gyro.
+		TraceMark(
+			"buffer released",
+			m_Context->TraceRow(Object().WireClient()),
+			TraceTag(wl_resource_get_id(Object().WireResource()))
+		);
+
 		Object().Release();
 	}
 }

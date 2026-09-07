@@ -170,6 +170,20 @@ void ClientXdgToplevel::OnGone()
 	delete this;
 }
 
+void ClientXdgToplevel::OnSetAppId(std::string_view appId)
+{
+	m_AppId = appId;
+
+	// **The program's name goes on this client's trace row and its window's title never does.** A title
+	// is whatever document a person has open and a capture is a file that gets sent to somebody else;
+	// `app_id` names the program and says nothing about what is inside the window. `OnSetTitle` above is
+	// one line away and must stay out of here — Protocol/Trace.h carries the argument.
+	if (m_Surface != nullptr)
+	{
+		m_Surface->Host().NameTraceRow(Object().WireClient(), m_AppId);
+	}
+}
+
 bool ClientXdgToplevel::IsMapped() const noexcept
 {
 	return m_Surface != nullptr && m_Surface->IsMapped();

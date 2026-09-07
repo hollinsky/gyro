@@ -1,7 +1,9 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 #include <span>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -106,6 +108,25 @@ public:
 	[[nodiscard]] SessionId Session(wl_client* client) const noexcept
 	{
 		return m_Server == nullptr ? SessionId::None : m_Server->SessionOf(client);
+	}
+
+	// Which trace row this client's records land on, per [Trace.h](Trace.h). `TraceThread` outside a
+	// host and for a client the server never admitted, which is what every call site passes straight to
+	// `Core/Trace.h` rather than testing.
+	[[nodiscard]] std::uint16_t TraceRow(const wl_client* client) const noexcept
+	{
+		return m_Server == nullptr ? TraceThread : m_Server->TraceRowOf(client);
+	}
+
+	// Say what program is behind a connection, which is what turns its row from `pid 4123` into
+	// `firefox (pid 4123)`. Called from `xdg_toplevel.set_app_id` and from nowhere else — a window's
+	// *title* is document content and never reaches a trace, which [Trace.h](Trace.h) argues.
+	void NameTraceRow(const wl_client* client, std::string_view program) const
+	{
+		if (m_Server != nullptr)
+		{
+			m_Server->NameClient(client, program);
+		}
 	}
 
 	// The session skeleton itself, for the one client that writes to it rather than reading it: a shell

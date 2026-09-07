@@ -1059,6 +1059,7 @@ gyro_add_module(Protocol DISPATCH
 		Subcompositor.Test.cpp
 		Surface.Test.cpp
 		Tier.Test.cpp
+		Trace.Test.cpp
 		Viewporter.Test.cpp
 )
 

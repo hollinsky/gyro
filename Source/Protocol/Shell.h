@@ -139,7 +139,7 @@ public:
 
 	void OnSetTitle(std::string_view title) override { m_Title = title; }
 
-	void OnSetAppId(std::string_view appId) override { m_AppId = appId; }
+	void OnSetAppId(std::string_view appId) override;
 
 	void OnShowWindowMenu(Wayland::Server::WlSeat seat, std::uint32_t serial, std::int32_t x, std::int32_t y) override;
 
@@ -554,6 +554,14 @@ public:
 	// The window in the scene, or null while the surface is unmapped. A test's way of asking whether a
 	// window exists without inferring it from a node count.
 	[[nodiscard]] EntityId Window() const noexcept { return m_Window; }
+
+	// The world this window's requests act on, for the duration of the `Advance` they arrive in.
+	//
+	// **Public for the one party that holds a window and not a context**: an `xdg_toplevel`, which
+	// names its client's trace row when the client says what program it is. Reaching for it that way
+	// rather than giving the toplevel a context of its own keeps one answer per window, which is what
+	// makes a surface destroyed out of order leave nothing stale behind.
+	[[nodiscard]] HostContext& Host() const noexcept { return *m_Context; }
 
 	// The `wl_surface` under this role, or null where the client named something that was not one.
 	// Public because `wl_surface.enter` is the surface's event while the reach that decides it is the

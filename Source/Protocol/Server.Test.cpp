@@ -15,8 +15,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
+#include "Core/Trace.h"
 #include "Testing/Test.h"
 
 // What is worth testing here is the bring-up rather than the protocol: that a socket is actually bound
@@ -248,7 +251,142 @@ struct OfferedListener
 
 	return found;
 }
+
+// The name a trace row is carrying, or empty for a row nothing has named. `Core/Trace.h`'s table is
+// the thing under test here rather than the ring: what a person opening a capture sees for a client is
+// the row descriptor, and a row with no descriptor is a client whose work is on screen and nowhere in
+// the file.
+[[nodiscard]] std::string TraceNameOf(std::uint16_t row)
+{
+	TraceName held{};
+
+	if (!ReadTraceScopeName(row, held))
+	{
+		return {};
+	}
+
+	return std::string{ std::string_view{ held.data() } };
+}
+
+// Every row the client pool has left, held so that a test can watch what admission does with none.
+[[nodiscard]] std::vector<std::uint16_t> DrainTraceRows()
+{
+	std::vector<std::uint16_t> held;
+
+	for (std::size_t attempt = 0; attempt < TracedClients; ++attempt)
+	{
+		const std::uint16_t row = ClaimTraceClient();
+
+		if (row == TraceThread)
+		{
+			break;
+		}
+
+		held.push_back(row);
+	}
+
+	return held;
+}
 } // namespace
+
+GYRO_TEST(Server, AClientGetsARowNamedForItsPid)
+{
+	OfferedListener offered{ "gyro-adopted-5" };
+
+	GYRO_REQUIRE(offered.Socket.IsValid());
+
+	Server server;
+
+	GYRO_REQUIRE(server.Open().has_value());
+	GYRO_REQUIRE(server.Adopt(std::move(offered.Socket), ::getuid(), static_cast<SessionId>(9)).has_value());
+
+	const Fd client = ConnectTo(offered.Path);
+
+	GYRO_REQUIRE(client.IsValid());
+	GYRO_REQUIRE(server.Poll().has_value());
+	GYRO_REQUIRE(server.Clients() == 1);
+
+	wl_client* const admitted = TheOnlyClient(server.Display());
+
+	GYRO_REQUIRE(admitted != nullptr);
+
+	const std::uint16_t row = server.TraceRowOf(admitted);
+
+	// A row of the client pool rather than the dispatch thread's own, which is what keeps four
+	// applications' requests from interleaving into one column nobody can attribute.
+	GYRO_REQUIRE(row != TraceThread);
+
+	// The peer of this connection is the test itself, which is what `SO_PEERCRED` says and therefore
+	// what the row is called. The pid is the join to a system trace, so its absence would be the whole
+	// point of the name missing.
+	GYRO_CHECK(TraceNameOf(row) == "pid " + std::to_string(::getpid()));
+}
+
+GYRO_TEST(Server, AProgramNamesTheRowAndATitleNever)
+{
+	OfferedListener offered{ "gyro-adopted-6" };
+
+	GYRO_REQUIRE(offered.Socket.IsValid());
+
+	Server server;
+
+	GYRO_REQUIRE(server.Open().has_value());
+	GYRO_REQUIRE(server.Adopt(std::move(offered.Socket), ::getuid(), static_cast<SessionId>(10)).has_value());
+
+	const Fd client = ConnectTo(offered.Path);
+
+	GYRO_REQUIRE(client.IsValid());
+	GYRO_REQUIRE(server.Poll().has_value());
+
+	wl_client* const admitted = TheOnlyClient(server.Display());
+
+	GYRO_REQUIRE(admitted != nullptr);
+
+	// What `xdg_toplevel.set_app_id` reaches, and the only door into the name table this module has:
+	// there is no verb here that takes a window's title, which is Protocol/Trace.h's rule made
+	// structural rather than remembered. A capture gets mailed to other people, and a title is the
+	// document somebody had open.
+	server.NameClient(admitted, "com.example.editor");
+
+	const std::string named = TraceNameOf(server.TraceRowOf(admitted));
+
+	GYRO_CHECK(named.starts_with("com.example.editor (pid "));
+	GYRO_CHECK(named.find("Editing Decisions.md") == std::string::npos);
+}
+
+GYRO_TEST(Server, ARowGoesBackWhenItsClientDoes)
+{
+	OfferedListener offered{ "gyro-adopted-7" };
+
+	GYRO_REQUIRE(offered.Socket.IsValid());
+
+	std::uint16_t row = TraceThread;
+
+	{
+		Server server;
+
+		GYRO_REQUIRE(server.Open().has_value());
+		GYRO_REQUIRE(server.Adopt(std::move(offered.Socket), ::getuid(), static_cast<SessionId>(11)).has_value());
+
+		const Fd client = ConnectTo(offered.Path);
+
+		GYRO_REQUIRE(client.IsValid());
+		GYRO_REQUIRE(server.Poll().has_value());
+
+		wl_client* const admitted = TheOnlyClient(server.Display());
+
+		GYRO_REQUIRE(admitted != nullptr);
+
+		row = server.TraceRowOf(admitted);
+
+		GYRO_REQUIRE(row != TraceThread);
+	}
+
+	// **The name goes with the row and that is what stops the row lying.** A row that kept its name
+	// after its client left would label the next application to be handed that slot with the last one's
+	// name, and a person reading down it would read one client where there were two.
+	GYRO_CHECK(TraceNameOf(row).empty());
+}
 
 GYRO_TEST(Server, AClientsConnectionEndsWithTheServer)
 {
@@ -280,6 +418,44 @@ GYRO_TEST(Server, AClientsConnectionEndsWithTheServer)
 	char byte = 0;
 
 	GYRO_CHECK(::recv(client.Get(), &byte, 1, MSG_DONTWAIT) == 0);
+}
+
+GYRO_TEST(Server, AClientIsAdmittedWithNoRowLeftToGiveIt)
+{
+	std::vector<std::uint16_t> held = DrainTraceRows();
+
+	OfferedListener offered{ "gyro-adopted-8" };
+
+	GYRO_REQUIRE(offered.Socket.IsValid());
+
+	Server server;
+
+	GYRO_REQUIRE(server.Open().has_value());
+	GYRO_REQUIRE(server.Adopt(std::move(offered.Socket), ::getuid(), static_cast<SessionId>(12)).has_value());
+
+	const Fd client = ConnectTo(offered.Path);
+
+	GYRO_REQUIRE(client.IsValid());
+	GYRO_REQUIRE(server.Poll().has_value());
+
+	// **The instrument running out is not the compositor failing.** The sixty-fifth client is served
+	// exactly as the first was, and what it loses is a row of its own — its records land on the dispatch
+	// thread's, beside the loop that served them.
+	GYRO_CHECK(server.Clients() == 1);
+
+	wl_client* const admitted = TheOnlyClient(server.Display());
+
+	GYRO_REQUIRE(admitted != nullptr);
+	GYRO_CHECK(server.TraceRowOf(admitted) == TraceThread);
+
+	// And nothing named the dispatch thread's row on the way past, which would have relabelled the whole
+	// compositor's loop with one client's pid.
+	GYRO_CHECK(TraceNameOf(TraceThread).empty());
+
+	for (const std::uint16_t row : held)
+	{
+		ReleaseTraceClient(row);
+	}
 }
 
 GYRO_TEST(Server, AnAdoptedListenerServesClients)

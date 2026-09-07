@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+#include "Protocol/Trace.h"
+
 namespace
 {
 // What says a client has gone, and it is a `new` with no owner on purpose: libwayland's destroy
@@ -52,6 +54,18 @@ void OnClientGone(wl_listener* listener, void* data) noexcept
 	// Out of libwayland's list before the record holding it is freed, which is the one ordering the
 	// intrusive shape obliges.
 	wl_list_remove(&watch->Destroyed.link);
+
+	const auto found = watch->Watched->find(watch->Client);
+
+	if (found != watch->Watched->end())
+	{
+		// **The mark before the release, because the release takes the name off the row.** A
+		// `disconnected` emitted afterwards would land on a row a person reading the file sees as
+		// unnamed, or worse as the next client to be handed that slot.
+		TraceMark("disconnected", found->second.Trace);
+		ReleaseTraceClient(found->second.Trace);
+	}
+
 	watch->Watched->erase(watch->Client);
 
 	delete watch;
@@ -138,12 +152,11 @@ Server::~Server()
 	if (m_Display != nullptr)
 	{
 		// **The clients are ended here as a backstop rather than as the ordering**, because
-		// `wl_display_destroy` leaves every `wl_client` standing — it takes the globals, the sockets and
-		// the loop, and nothing else — so a server that was not torn down through `EndClients` would
-		// otherwise leave each of its clients holding a connection nobody closes. `ClientHost` calls that
-		// verb first, while the clipboards a client's teardown reaches into are still alive, so this walks
-		// an empty list on the path that matters; what it covers is a `Server` standing on its own, which
-		// is every test that builds one.
+		// `wl_display_destroy` leaves every `wl_client` standing and a server that was not torn down
+		// through `EndClients` would otherwise leave each of them holding a connection nobody closes.
+		// `ClientHost` calls that verb first, while the clipboards a client's teardown reaches into are
+		// still alive, so this walks an empty list on the path that matters; what it covers is a `Server`
+		// standing on its own, which is every test that builds one.
 		//
 		// Before the display, so that each `wl_client_destroy` still has the loop its event source is
 		// registered on.
@@ -151,9 +164,7 @@ Server::~Server()
 
 		// The event loop is the display's own and goes with it, which takes every adopted listener's
 		// event source with it too — so nothing below removes one, and the descriptors are closed by the
-		// vector going away afterwards. Every client went through `OnClientGone` above, so `m_Watched` is
-		// empty by the time it is cleared below; clearing it anyway is what covers a display that was
-		// never opened.
+		// vector going away afterwards.
 		wl_display_destroy(m_Display);
 	}
 
@@ -170,6 +181,10 @@ Server::~Server()
 		}
 	}
 
+	// Empty by construction: every client went through `OnClientGone` above, which is where a record is
+	// erased and its trace row given back. Releasing a row here as well would hand the same slot out
+	// twice. Cleared rather than asserted because the one way to reach here with anything left is a
+	// display that was never opened.
 	m_Watched.clear();
 	m_Listeners.clear();
 }
@@ -513,7 +528,25 @@ void Server::Admit(int connection, const Listener& listener) noexcept
 
 	wl_client_add_destroy_listener(client, &watch->Destroyed);
 
-	m_Watched.emplace(client, Admitted{ .Session = listener.Session, .Level = listener.Level });
+	// **A row is claimed once per connection and never per request**, which is what makes a mutex and a
+	// name acceptable here at all: this runs when somebody launches an application, and every record
+	// after it is four stores. An exhausted pool answers `TraceThread` and is not an error — that
+	// client's events land on the dispatch thread's row rather than nowhere.
+	const std::uint16_t row = ClaimTraceClient();
+
+	NameClientTrace(row, {}, static_cast<std::uint32_t>(credentials.pid));
+
+	m_Watched.emplace(
+		client,
+		Admitted{ .Session = listener.Session,
+	              .Level = listener.Level,
+	              .Trace = row,
+	              .Pid = static_cast<std::uint32_t>(credentials.pid) }
+	);
+
+	// Tagged with the pid as well as named with it, so that the connect is findable by searching a
+	// number a person read off `ps` rather than only by scrolling to the right row.
+	TraceMark("connected", row, TraceTag(static_cast<std::uint64_t>(credentials.pid)));
 }
 
 int Server::PollFd() const noexcept
@@ -531,7 +564,18 @@ Result<void> Server::Poll()
 	// Zero timeout is non-blocking: drain what is ready and return. A negative result is the loop
 	// itself faulting rather than a client misbehaving — a client's own fault is answered by ending
 	// that client, inside libwayland, and never reaches here.
-	if (wl_event_loop_dispatch(m_EventLoop, 0) < 0)
+	const int dispatched = wl_event_loop_dispatch(m_EventLoop, 0);
+
+	// **What the clients asked for, sampled on the dispatch thread's own row and on every drain.** The
+	// loop's row already says what woke it and what it did; client traffic was the hole in that, because
+	// the requests are read inside the scene author and nothing above it counts them. A count of content
+	// updates is what a person is actually after — how many windows had something new to show this wake
+	// — and `Protocol` depends on `Core`, so it can say so directly. Rejected: carrying the figure out
+	// through `ISceneAuthor::Advance`, which widens a seam interface every other author would answer
+	// zero on.
+	TraceCount("client commits", static_cast<std::int64_t>(TakeClientCommits()));
+
+	if (dispatched < 0)
 	{
 		return Failure(errno, "dispatching the Wayland event loop");
 	}

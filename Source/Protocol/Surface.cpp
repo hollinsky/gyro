@@ -1,5 +1,7 @@
 #include "Protocol/Surface.h"
 
+#include <wayland-server-core.h>
+
 #include <algorithm>
 #include <cmath>
 #include <utility>
@@ -10,6 +12,7 @@
 #include "Protocol/Presentation.h"
 #include "Protocol/Region.h"
 #include "Protocol/Subcompositor.h"
+#include "Protocol/Trace.h"
 #include "Protocol/Viewporter.h"
 #include "Scene/Commit.h"
 
@@ -33,6 +36,17 @@ void Discard(std::vector<ClientPresentationFeedback*>& held) noexcept
 		feedback->Object().Discarded();
 		feedback->Object().Destroy();
 	}
+}
+
+// The number a record about a surface is tagged with: the object id the client itself named it by.
+//
+// **The client's number rather than gyro's entity id**, because the row this lands on is the client's
+// and the two things a person reads down it — a commit and the release that answers it — are both
+// events the client can find in its own logs. Zero for a stale resource, which `TraceLabel` already
+// spells as *nothing to say*.
+[[nodiscard]] std::uint64_t SurfaceTag(Wayland::Server::WlSurface surface) noexcept
+{
+	return surface.IsValid() ? wl_resource_get_id(surface.WireResource()) : 0;
 }
 
 // A damage rectangle as the wire spells one. Negative extents are clamped away for Region.h's reason:
@@ -372,6 +386,14 @@ void ClientSurface::Present(const SurfacePresentation& shown) noexcept
 
 	due.swap(m_DueCallbacks);
 
+	// One mark for the surface rather than one per callback: what a reader is measuring from here is
+	// when this client was told it could draw again, and a client that asked twice inside one commit was
+	// told once.
+	const std::uint16_t row = TraceRow();
+
+	TraceMark("frame callback", row, TraceTag(SurfaceTag(Object())));
+	TraceCount("callbacks owed", 0, row);
+
 	for (FrameCallback* const callback : due)
 	{
 		// The event and then the destruction, in that order and both from here. `wl_callback.done` is a
@@ -433,6 +455,12 @@ void ClientSurface::PresentFeedback(const SurfacePresentation& shown) noexcept
 
 	due.swap(m_DueFeedback);
 
+	// **Marked where the client is told rather than where the frame landed**, which is the point of
+	// having it on this row: the instant inside the event is the vblank, and the distance between that
+	// and this mark is how long gyro sat on the answer. A media player synchronising audio is reading
+	// exactly that gap.
+	TraceMark("presented", TraceRow(), TraceTag(SurfaceTag(Object())));
+
 	for (ClientPresentationFeedback* const feedback : due)
 	{
 		// **`sync_output` before `presented`, and only where the client bound that output**, which the
@@ -481,6 +509,11 @@ void ClientSurface::ForgetFeedback(const ClientPresentationFeedback& feedback) n
 
 	std::erase_if(m_PendingFeedback, matches);
 	std::erase_if(m_DueFeedback, matches);
+}
+
+std::uint16_t ClientSurface::TraceRow() const noexcept
+{
+	return m_Context->TraceRow(Object().WireClient());
 }
 
 void ClientSurface::Forget(const FrameCallback& callback) noexcept
@@ -661,6 +694,15 @@ Wayland::Server::WlCallbackHandler* ClientSurface::OnGetRelease()
 
 void ClientSurface::OnCommit()
 {
+	// **The client's own frame loop is read off this row, and this is the mark it is read from.** The
+	// gap between the callback that told a client it could draw and the commit that followed is how long
+	// that client took to produce a frame — a figure gyro has no other way of stating, and the one that
+	// separates an application that is late from a compositor that is.
+	const std::uint16_t row = TraceRow();
+
+	TraceMark("commit", row, TraceTag(SurfaceTag(Object())));
+	NoteClientCommit();
+
 	// **Explicit synchronization's four commit-time errors, asked before either path runs.** They are
 	// questions about the pair the client staged rather than about the world, so they are answered where
 	// the pair lives — and answered first, because a client that got them wrong is ended rather than
@@ -684,6 +726,12 @@ void ClientSurface::OnCommit()
 	}
 
 	Apply();
+
+	// **How many frames this surface is waiting to be told about**, which is the one depth a client's
+	// row can carry without gyro counting anything for it: a callback the client asked for became due
+	// at the `Apply` above and is answered when the pixels reach the glass. One at rest, and a plateau
+	// above one is a client drawing faster than gyro is showing it.
+	TraceCount("callbacks owed", static_cast<std::int64_t>(m_DueCallbacks.size()), row);
 }
 
 void ClientSurface::AddChild(ClientSubsurface& child)
@@ -883,6 +931,14 @@ void ClientSurface::ReleaseStaged() noexcept
 {
 	if (m_Attached.has_value() && m_Attached->IsValid())
 	{
+		// **The gap from a commit to this mark is how long gyro held a client's pixels**, and it is the
+		// figure this row is worth the most for after the commit itself: a compositor that holds a buffer
+		// too long forces the client to allocate another one, which is memory and a frame of latency the
+		// client pays for gyro's slowness. A copied buffer goes back inside the commit that brought it
+		// and a borrowed one goes back from `ClientDmabufBuffer` when the watermark clears, so the two
+		// draw as a gap of nothing and a gap of frames — which is the difference, not noise.
+		TraceMark("buffer released", TraceRow(), TraceTag(SurfaceTag(Object())));
+
 		m_Attached->Get().Release();
 	}
 

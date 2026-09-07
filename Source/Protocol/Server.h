@@ -10,7 +10,9 @@
 #include "Core/Fd.h"
 #include "Core/Result.h"
 #include "Core/Session.h"
+#include "Core/Trace.h"
 #include "Protocol/Tier.h"
+#include "Protocol/Trace.h"
 
 struct wl_client;
 struct wl_display;
@@ -234,6 +236,17 @@ public:
 		SessionId Session = SessionId::None;
 
 		Trust Level = Trust::User;
+
+		// The row this client's records land on, claimed as it was admitted and given back as it goes.
+		// `TraceThread` for the sixty-fifth simultaneous client, whose marks then land on the dispatch
+		// thread's own row beside the loop that served them — which is less legible than a row of its own
+		// and much better than a client missing from the picture. See [Trace.h](Trace.h).
+		std::uint16_t Trace = TraceThread;
+
+		// What the kernel said about the process on the other end of the socket, kept for the name its
+		// row carries. It is the join to a system trace and therefore the half of the name worth keeping;
+		// [Trace.h](Trace.h) has why.
+		std::uint32_t Pid = 0;
 	};
 
 	// Which session a client arrived under, or `None` for one that came in on a socket gyro bound
@@ -264,6 +277,42 @@ public:
 		const auto found = m_Watched.find(const_cast<wl_client*>(client));
 
 		return found == m_Watched.end() ? Trust::User : found->second.Level;
+	}
+
+	// Which row a client's trace records belong on, or `TraceThread` for one this server never admitted
+	// — which is every client on a socket `Bind` created, since libwayland accepts those itself and gyro
+	// never sees the connection.
+	//
+	// **A row rather than an absence, for `ClaimTraceClient`'s reason**: a caller that had to test for
+	// *no row* would either branch at every call site or fall silent for a client, and both are worse
+	// than events landing on the dispatch thread's own row.
+	[[nodiscard]] std::uint16_t TraceRowOf(const wl_client* client) const noexcept
+	{
+		// The map is keyed on the pointer libwayland handed out; `TrustOf` above casts the qualifier away
+		// for the same lookup and for the same reason, which is that nothing is read through it.
+		const auto found = m_Watched.find(const_cast<wl_client*>(client));
+
+		return found == m_Watched.end() ? TraceThread : found->second.Trace;
+	}
+
+	// Say what program is behind a connection, which renames its row from `pid 4123` to
+	// `firefox (pid 4123)`.
+	//
+	// **`const`, because what it writes is the trace's name table and not this server's state.** The pid
+	// was recorded at admission and the program is the client's own word for itself, arriving several
+	// round trips later at `xdg_toplevel.set_app_id` — so the row is named twice by construction and
+	// this is the second time. A client this server never admitted is ignored rather than renaming row
+	// zero. [Trace.h](Trace.h) has why the program's name is allowed here and a window's title is not.
+	void NameClient(const wl_client* client, std::string_view program) const
+	{
+		const auto found = m_Watched.find(const_cast<wl_client*>(client));
+
+		if (found == m_Watched.end())
+		{
+			return;
+		}
+
+		NameClientTrace(found->second.Trace, program, found->second.Pid);
 	}
 
 	// How many clients are live across every session. For a test; nothing in the loop asks.

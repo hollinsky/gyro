@@ -504,6 +504,11 @@ private:
 	// Drop a callback from whichever list holds it. Called by the callback itself as it goes away.
 	void Forget(const FrameCallback& callback) noexcept;
 
+	// The trace row this surface's client owns, per [Trace.h](Trace.h). Asked per record rather than
+	// held, because the answer is the connection's and a surface must not be the thing that keeps a row
+	// number alive after the client behind it has gone.
+	[[nodiscard]] std::uint16_t TraceRow() const noexcept;
+
 	// Answer everything the last commit made due with a `presented`. `Present`'s other half, split out
 	// because the two events have different units and different rules about being superseded, and one
 	// function carrying both would be two unrelated derivations under one name.
