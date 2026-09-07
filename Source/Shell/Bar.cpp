@@ -168,6 +168,23 @@ Result<void> Bar::Open(Session& session, Launcher& launcher, std::uint32_t modif
 		return Failure(ENOMEM, "creating the shell's keyboard context");
 	}
 
+	m_Surface = session.Compositor().CreateSurface(m_PixelEvents);
+
+	if (!m_Surface.IsValid())
+	{
+		return Failure(EPROTO, "asking the compositor for a surface");
+	}
+
+	// **One round trip, because gyro answers `create_surface` with a `preferred_buffer_scale` before
+	// the surface has been committed on.** That is what a client sizing its first buffer needs and the
+	// reason the event is sent that early — waiting for the window to map would mean drawing the first
+	// frame of the bar at a guessed scale and redrawing it, which a person sees as the launcher
+	// flickering once on the way up.
+	if (Result<void> settled = session.Roundtrip(); !settled)
+	{
+		return settled;
+	}
+
 	const std::int32_t width = session.Width();
 	const std::int32_t height = session.Height();
 
@@ -183,10 +200,9 @@ Result<void> Bar::Open(Session& session, Launcher& launcher, std::uint32_t modif
 		return opened;
 	}
 
-	m_Surface = session.Compositor().CreateSurface(m_PixelEvents);
 	m_XdgSurface = session.Shell().GetXdgSurface(m_Surface, m_SurfaceEvents);
 
-	if (!m_Surface.IsValid() || !m_XdgSurface.IsValid())
+	if (!m_XdgSurface.IsValid())
 	{
 		return Failure(EPROTO, "asking the compositor for a surface");
 	}
@@ -215,7 +231,13 @@ Result<void> Bar::Open(Session& session, Launcher& launcher, std::uint32_t modif
 
 	// The buffer is drawn at device pixels, so the surface has to say so or gyro would take the buffer
 	// for a surface twice the size on a HiDPI panel.
-	m_Surface.SetBufferScale(session.Scale());
+	//
+	// **Once, and a later change is not acted on**, which is the half of this that is still owed: the
+	// canvas is one `wl_shm` pool allocated at open, so honouring a new scale means reallocating it —
+	// and the size it would be reallocated to is the configure's rather than `wl_output.mode`'s, which
+	// is the commit that gives the bar a cell in logical pixels. Until then a person who moves the
+	// pointer to a differently scaled screen and summons the bar gets the scale it opened at.
+	m_Surface.SetBufferScale(m_PixelEvents.Scale);
 
 	m_Chord = session.Bindings().Claim(static_cast<Wayland::GyroBindingsV1Modifier>(modifiers), keysym, m_ChordEvents);
 

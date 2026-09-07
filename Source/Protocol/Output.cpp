@@ -274,10 +274,19 @@ void SyncEntry(
 	// sitting still on all along, which moves no reach bit at all. Sending it from inside the early
 	// return would leave that window drawing at yesterday's scale until the next time it crossed a
 	// screen boundary.
+	const Scale preferred = PreferredScale(reach, scene.Outputs());
+
+	// **Both events off one value.** `wp_fractional_scale_v1` carries the rational and
+	// `wl_surface.preferred_buffer_scale` its ceiling, and a toolkit that holds both is entitled to
+	// have them agree — computing them apart is how they stop agreeing on the wakeup one of them was
+	// skipped. Each dedupes against what it last sent, so this costs nothing on a surface that has not
+	// moved.
 	if (ClientFractionalScale* const fractional = surface.FractionalScale(); fractional != nullptr)
 	{
-		fractional->Send(PreferredScale(reach, scene.Outputs()));
+		fractional->Send(preferred);
 	}
+
+	surface.SendPreferredBufferScale(preferred);
 
 	const OutputReach entered = surface.Entered();
 

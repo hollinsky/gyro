@@ -443,10 +443,10 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 	GYRO_REQUIRE(compositor != nullptr);
 
 	// The version is a promise about the events gyro sends, not a ceiling on what it can parse.
-	// Version 6 obliges a `preferred_buffer_scale` per surface and there is no output model reaching
-	// this module yet, so a client told 6 would draw at the wrong scale on a HiDPI panel and never be
-	// corrected. See Protocol/Compositor.h.
-	GYRO_CHECK_EQ(compositor->Version, std::uint32_t{ 5 });
+	// Version 6 obliges a `preferred_buffer_scale` per surface, which gyro now sends from the same
+	// output fold `wp_fractional_scale_v1` is sent from. 7 is not taken: `wl_surface.get_release` is a
+	// per-commit release fence and the buffer path does not have one. See Protocol/Compositor.h.
+	GYRO_CHECK_EQ(compositor->Version, std::uint32_t{ 6 });
 
 	const Registry::Global* const shm = bound.Listener.Find(Wayland::WlShm::WireName);
 	GYRO_REQUIRE(shm != nullptr);
@@ -756,9 +756,11 @@ namespace
 {
 // A surface with one committed frame behind it, which is as far as a client can get before there is a
 // role to say the surface is a window at all.
-// A client's `wl_surface`, recording which outputs it has been told it is on. That pair is the whole
-// of what a `wl_surface` receives below version 6, and it is how a toolkit learns what scale to draw
-// at — so a surface that hears nothing lays out at 1x whatever the outputs said when it bound them.
+// A client's `wl_surface`, recording which outputs it has been told it is on and what scale it has
+// been asked to draw at. The enter/leave pair is the whole of what a `wl_surface` receives below
+// version 6, and a toolkit on it learns its scale by folding the outputs itself — so a surface that
+// hears nothing lays out at 1x whatever the outputs said when it bound them. At 6 the compositor does
+// the fold and says the answer, which is what `Scale` collects.
 class SurfaceEvents final : public Wayland::WlSurfaceIgnoring
 {
 public:
@@ -766,8 +768,17 @@ public:
 
 	void OnLeave(Wayland::WlOutput output) override { Left.push_back(output); }
 
+	void OnPreferredBufferScale(std::int32_t factor) override { Scales.push_back(factor); }
+
+	// **Recorded so that a case can assert it never arrives.** gyro advertises version 6 and
+	// deliberately never sends this one — see Protocol/Compositor.h — so an empty vector here is the
+	// assertion rather than an omission.
+	void OnPreferredBufferTransform(Wayland::WlOutputTransform transform) override { Transforms.push_back(transform); }
+
 	std::vector<Wayland::WlOutput> Entered;
 	std::vector<Wayland::WlOutput> Left;
+	std::vector<std::int32_t> Scales;
+	std::vector<Wayland::WlOutputTransform> Transforms;
 };
 
 struct DrawnSurface
@@ -1921,6 +1932,123 @@ GYRO_TEST(ProtocolRoundTrip, AMappedWindowIsToldWhichOutputItIsOn)
 	// rather than against nothing.
 	pair.Turn();
 
+	GYRO_CHECK_EQ(toplevel.Drawn.Events.Entered.size(), std::size_t{ 1 });
+}
+
+GYRO_TEST(ProtocolRoundTrip, ASurfaceIsToldWhatScaleToDrawAtBeforeItHasDrawn)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-buffer-scale" };
+	GYRO_REQUIRE(pair.Opened);
+
+	// A 1x panel with a 2x one beside it, which is the ordinary laptop-plus-monitor desk and the only
+	// arrangement where the two answers below differ.
+	const std::array outputs{
+		SceneOutput{ .Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } },
+		SceneOutput{ .Bounds = { { 1920.0, 0.0 }, { 1920.0, 1080.0 } },
+		             .Density = Scale::FromInteger(2),
+		             .Grid = { 3840, 2160 } },
+	};
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x71 }));
+
+	toplevel.Drawn.Surface.Commit();
+	pair.Turn();
+
+	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
+
+	// **The first buffer of a window is sized before the window is anywhere**, so the answer for a
+	// surface on no output is the densest panel on the machine: one buffer drawn larger than it needed
+	// to be, rather than every window on a HiDPI screen opening soft and popping sharp a frame later.
+	GYRO_REQUIRE_EQ(toplevel.Drawn.Events.Scales.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(toplevel.Drawn.Events.Scales.front(), 2);
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.DamageBuffer(0, 0, Width, Height);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// And corrected the moment the window is somewhere: it landed on the 1x panel, so drawing at 2x
+	// would be four times the pixels for a screen that cannot show them.
+	GYRO_REQUIRE_EQ(toplevel.Drawn.Events.Scales.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(toplevel.Drawn.Events.Scales.back(), 1);
+
+	// Once per change rather than once per iteration. This sweep runs on every dispatch wakeup, which
+	// is input rate while somebody is dragging a window, and an event per wakeup is a toolkit asked to
+	// reallocate its buffers a few hundred times a second.
+	pair.Turn();
+	pair.Turn();
+
+	GYRO_CHECK_EQ(toplevel.Drawn.Events.Scales.size(), std::size_t{ 2 });
+
+	// **And no `preferred_buffer_transform`, ever.** gyro parses `set_buffer_transform` and nothing
+	// downstream reads it, so a client that took a hint to pre-rotate for a monitor stood on end would
+	// hand gyro a buffer gyro then drew unturned. The protocol's default is normal, which is what gyro
+	// actually prefers — see Protocol/Compositor.h.
+	GYRO_CHECK(toplevel.Drawn.Events.Transforms.empty());
+}
+
+GYRO_TEST(ProtocolRoundTrip, AClientBoundBelowSixHearsNoPreferredBufferScale)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-buffer-scale-old" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(2), .Grid = { 3840, 2160 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	// The toolkit that has not been rebuilt since 2023, binding what it was written against. A surface
+	// it makes is capped at the version of the object that made it, so this event has no opcode there —
+	// sending it anyway is a client that ends its own connection on an event it cannot demarshal.
+	const Registry::Global* const advertised = bound.Listener.Find(Wayland::WlCompositor::WireName);
+	GYRO_REQUIRE(advertised != nullptr);
+
+	bound.Compositor = bound.Listener.Object().Bind<Wayland::WlCompositor>(advertised->Name, 5);
+	GYRO_REQUIRE(bound.Compositor.IsValid());
+
+	const Registry::Global* const panel = bound.Listener.Find(Wayland::WlOutput::WireName);
+	GYRO_REQUIRE(panel != nullptr);
+
+	OutputEvents outputEvents;
+	const Wayland::WlOutput output =
+		bound.Listener.Object().Bind<Wayland::WlOutput>(panel->Name, panel->Version, outputEvents);
+	GYRO_REQUIRE(output.IsValid());
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x72 }));
+
+	toplevel.Drawn.Surface.Commit();
+	pair.Turn();
+
+	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.DamageBuffer(0, 0, Width, Height);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_CHECK(toplevel.Drawn.Events.Scales.empty());
+
+	// It hears the same thing every client below 6 has always heard, which is what it folds its own
+	// scale out of.
 	GYRO_CHECK_EQ(toplevel.Drawn.Events.Entered.size(), std::size_t{ 1 });
 }
 

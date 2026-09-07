@@ -1355,10 +1355,14 @@ window that stops redrawing and never starts again on a world that has settled. 
 `Wake::Never()` and means it: nothing falls due at an instant a host chose, and a window's animation
 wakes the loop through the retarget its commit performed.
 
-`Compositor` is the first global: `wl_compositor` at version 5, and the `wl_surface` and `wl_region`
+`Compositor` is the first global: `wl_compositor` at version 6, and the `wl_surface` and `wl_region`
 it mints. The version is a promise about the *events* gyro sends rather than a ceiling on what it
-parses — 6 obliges a `preferred_buffer_scale` per surface and there is no output model reaching this
-module — so the number goes up in the commit that builds the thing it names. `Surface` is the double
+parses — 6 obliges a `preferred_buffer_scale` per surface, which is the integer ceiling of the same
+output fold `wp_fractional_scale_v1` carries exactly, sent from the same place so a toolkit holding
+both never hears two answers — so the number goes up in the commit that builds the thing it names. 6's
+other event, `preferred_buffer_transform`, is deliberately never sent: normal is the protocol's
+default and is genuinely what gyro prefers, because nothing downstream reads the buffer transform a
+client would set in answer to a hint. `Surface` is the double
 buffering, and every request stages: a commit is the only thing that changes what the world sees,
 which is what makes a whole change arrive as one `SceneCommit` with one origin — and it is where an
 attached buffer becomes a texture id, a *new* one per committed frame, because the frame thread may

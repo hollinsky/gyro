@@ -7,6 +7,7 @@
 
 #include "Core/Texture.h"
 #include "Core/Time.h"
+#include "Geometry/Scale.h"
 #include "Geometry/Space.h"
 #include "Protocol/Context.h"
 #include "Protocol/Region.h"
@@ -432,6 +433,30 @@ public:
 	// every client still on `wl_surface.set_buffer_scale`.
 	[[nodiscard]] ClientFractionalScale* FractionalScale() const noexcept { return m_FractionalScale; }
 
+	// Tell the client the integer buffer scale gyro would like this surface drawn at.
+	//
+	// **This is `wp_fractional_scale_v1`'s event for the clients that never asked for one**, and it is
+	// the ceiling of the same rational for `wl_output.scale`'s reason (56): an integer cannot say 1.5,
+	// and a client told 2 and minified reads as slightly soft where a client told 1 and magnified reads
+	// as blurred. Both events are sent from one place off one value, so a toolkit holding both never
+	// hears two different answers about the same surface.
+	//
+	// **Silently nothing below `PreferredBufferScaleVersion`**, which is a client that bound
+	// `wl_compositor` at 5 and is entitled to be left on `wl_output.scale`. It is a check rather than a
+	// fault because the caller sweeps every surface on the machine and cannot know which client made
+	// which.
+	//
+	// Deduplicated against the last value for `ClientFractionalScale::Send`'s reason: this runs on every
+	// dispatch wakeup, which is input rate while somebody is dragging a window, and an event per wakeup
+	// is a toolkit asked to reconsider its buffer size a few hundred times a second.
+	void SendPreferredBufferScale(Scale preferred);
+
+	// What the client was last told, or nothing where it has been told nothing yet — which is both a
+	// surface that has never been swept and a surface whose client bound `wl_compositor` below 6. For
+	// the tests, which is the only place that can see it: on the wire it is an event the client already
+	// has.
+	[[nodiscard]] std::optional<std::int32_t> SentBufferScale() const noexcept { return m_SentBufferScale; }
+
 	// Claim this surface's explicit synchronization. False where a `wp_linux_drm_syncobj_surface_v1`
 	// already has it, which is that protocol's `surface_exists` and is raised by the caller for the
 	// role's reason.
@@ -466,6 +491,14 @@ public:
 	[[nodiscard]] bool HasRole() const noexcept { return m_Role != nullptr; }
 
 	void OnGone() override;
+
+	// **The first `preferred_buffer_scale`, before the client has committed anything.** A surface is
+	// created and sized in the same breath, so waiting for it to be on a screen would put the first
+	// buffer of every window at whatever the toolkit guessed — and `Protocol/Output.h`'s sweep only
+	// reaches surfaces that are already a mapped window or a subsurface of one. It carries the densest
+	// output on the machine, which is `PreferredScale`'s answer for a surface that is on none, and the
+	// sweep corrects it later in this same `Advance` for a window that lands somewhere else.
+	void OnBound() override;
 
 	// The resource is already destroyed when this runs, and `OnGone` follows immediately.
 	void OnDestroy() override {}
@@ -647,6 +680,13 @@ private:
 	// Which outputs this surface has been sent an `enter` for and not a `leave`. Zero is a surface
 	// nobody has told anything, which is where every surface starts and where an unmapped one returns.
 	std::uint32_t m_Entered = 0;
+
+	// The last `preferred_buffer_scale` sent, or nothing before the first. The `optional` is
+	// load-bearing for `ClientFractionalScale::Sent`'s reason inverted: 1 is a perfectly ordinary
+	// preferred scale *and* the protocol's own default, so a client on an unscaled panel would be told
+	// nothing either way — but a client bound below version 6 must be told nothing at all, and this is
+	// what lets a test tell those two apart.
+	std::optional<std::int32_t> m_SentBufferScale;
 
 	// The buffer `wl_surface.attach` staged, if it staged one. **The `optional` is the attach and the
 	// resource inside it is the buffer**, which is not the same question: attaching nothing is a client

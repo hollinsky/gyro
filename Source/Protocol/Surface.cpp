@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "Protocol/Buffer.h"
+#include "Protocol/Compositor.h"
 #include "Protocol/ExplicitSync.h"
 #include "Protocol/Fractional.h"
 #include "Protocol/Presentation.h"
@@ -16,6 +17,7 @@
 #include "Protocol/Trace.h"
 #include "Protocol/Viewporter.h"
 #include "Scene/Commit.h"
+#include "Scene/Store.h"
 
 namespace
 {
@@ -564,6 +566,33 @@ SurfaceShape ClientSurface::ShapeOf(Wayland::Server::WlRegion region)
 void ClientSurface::OnGone()
 {
 	delete this;
+}
+
+void ClientSurface::SendPreferredBufferScale(Scale preferred)
+{
+	if (Object().Version() < PreferredBufferScaleVersion)
+	{
+		return;
+	}
+
+	const std::int32_t factor = preferred.CeilToInteger();
+
+	if (m_SentBufferScale.has_value() && *m_SentBufferScale == factor)
+	{
+		return;
+	}
+
+	m_SentBufferScale = factor;
+
+	Object().PreferredBufferScale(factor);
+}
+
+void ClientSurface::OnBound()
+{
+	if (const SceneStore* const store = m_Context->Store(); store != nullptr)
+	{
+		SendPreferredBufferScale(PreferredScale(0, store->Outputs()));
+	}
 }
 
 void ClientSurface::OnAttach(Wayland::Server::WlBuffer buffer, std::int32_t x, std::int32_t y)

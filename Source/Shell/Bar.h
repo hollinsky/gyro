@@ -96,6 +96,27 @@ private:
 		Bar& m_Bar;
 	};
 
+	// What gyro asks the bar's own surface to be drawn at.
+	//
+	// **The compositor's answer for this surface, rather than the shell's guess from an output.** A bar
+	// on a mixed desk is on whichever screen the pointer was on when it was summoned, and that is a
+	// fact only the compositor has; reading `wl_output.scale` off the first panel announced put the bar
+	// on the laptop's grid whenever a person was working on the monitor beside it. `wl_compositor`
+	// version 6 is what makes the compositor say it instead.
+	class PixelEvents final : public Wayland::WlSurfaceIgnoring
+	{
+	public:
+		void OnPreferredBufferScale(std::int32_t factor) override
+		{
+			if (factor > 0)
+			{
+				Scale = factor;
+			}
+		}
+
+		std::int32_t Scale = 1;
+	};
+
 	class KeyEvents final : public Wayland::WlKeyboardListener
 	{
 	public:
@@ -149,7 +170,7 @@ private:
 	SurfaceEvents m_SurfaceEvents{ *this };
 	WindowEvents m_WindowEvents{ *this };
 	KeyEvents m_KeyEvents{ *this };
-	Wayland::WlSurfaceIgnoring m_PixelEvents;
+	PixelEvents m_PixelEvents;
 	Wayland::WlSurface m_Surface;
 	Wayland::XdgSurface m_XdgSurface;
 	Wayland::XdgToplevel m_Window;

@@ -60,15 +60,14 @@ public:
 
 	[[nodiscard]] Wayland::GyroChromeManagerV1 Chrome() const noexcept { return m_Chrome; }
 
-	// The size and scale of the first output announced, which is what the bar is drawn against.
+	// The size of the first output announced, which is what the bar is drawn against.
 	//
 	// **The first rather than the one the bar lands on**, and the difference is real on a mixed desk:
-	// gyro centres chrome on the output holding the pointer (141) and does not tell the shell which
-	// that was. What the protocol offers instead is `wl_surface.preferred_buffer_scale`, which is
-	// `wl_compositor` version 6 where gyro serves 5 — so this is the stand-in until that lands, and on
-	// a one-panel machine it is exactly right.
-	[[nodiscard]] std::int32_t Scale() const noexcept;
-
+	// gyro centres chrome on the output holding the pointer (141) and does not tell the shell which that
+	// was. The scale half of this is gone — `wl_surface.preferred_buffer_scale` is the compositor
+	// answering it per surface, and [Bar.h](Bar.h) reads it there. The size half is the same stand-in
+	// with no replacement bound yet: what answers it is `xdg_toplevel.configure`, which is the commit
+	// that gives the bar a cell in logical pixels instead of a face picked off a pixel grid.
 	[[nodiscard]] std::int32_t Width() const noexcept;
 
 	[[nodiscard]] std::int32_t Height() const noexcept;

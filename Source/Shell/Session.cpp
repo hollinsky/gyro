@@ -105,7 +105,11 @@ struct Session::Events
 			}
 		}
 
-		void OnScale(std::int32_t factor) override { Scale = factor > 0 ? factor : 1; }
+		// **Nothing, and the emptiness is the point.** `wl_output.scale` is an integer and the panel's
+		// rather than this surface's; what the bar draws at is `wl_surface.preferred_buffer_scale` on
+		// the bar's own surface, which is gyro folding the outputs the bar is actually on. Reading it
+		// here would be a second answer to a question already answered better.
+		void OnScale(std::int32_t) override {}
 
 		void OnName(std::string_view) override {}
 
@@ -115,7 +119,6 @@ struct Session::Events
 
 		std::int32_t Width = 0;
 		std::int32_t Height = 0;
-		std::int32_t Scale = 1;
 	};
 
 	[[nodiscard]] const Advertised* Find(std::string_view interface) const noexcept
@@ -142,11 +145,6 @@ Session::Session() : m_Events{ std::make_unique<Events>() }
 {}
 
 Session::~Session() = default;
-
-std::int32_t Session::Scale() const noexcept
-{
-	return m_Events->Output.Scale;
-}
 
 std::int32_t Session::Width() const noexcept
 {
@@ -267,7 +265,7 @@ Result<void> Session::Open()
 		m_Output = m_Registry.Bind<Wayland::WlOutput>(output->Name, output->Version, m_Events->Output);
 	}
 
-	// The second trip is what makes the output's mode and scale readable: those events are sent in
-	// answer to the bind above, so they are behind a sync that was asked for before it.
+	// The second trip is what makes the output's mode readable: those events are sent in answer to the
+	// bind above, so they are behind a sync that was asked for before it.
 	return Roundtrip();
 }
