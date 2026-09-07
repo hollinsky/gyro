@@ -16,6 +16,7 @@
 #include <string>
 #include <utility>
 
+#include "Core/Trace.h"
 #include "Session/Transport.h"
 
 namespace Session
@@ -30,8 +31,27 @@ constexpr int Backlog = 8;
 // a batch size and not a limit on connections.
 constexpr int ReadyBatch = 16;
 
+// **The session row carries a uid and a session id and nothing else about the person.** Never a
+// username, never a runtime directory, never the path a listener is bound to. A `.pftrace` is a file
+// somebody mails to a person who was not at the machine, and every other way of saying whose session
+// this is says who the user is: a name is a person, and a runtime directory or a socket path is a name
+// with a prefix on it. A uid is a number that means nothing off the machine that allocated it, and it
+// is enough to tell three simultaneous sessions apart, which is the whole job.
+//
+// **Before a session exists the tag is the uid and afterwards it is the session id**, because a mark is
+// tagged with the identity it is about and there is no session id until an offer has been taken. The
+// names carry which of the two it is: a mark beginning `agent` is tagged with a uid and one beginning
+// `session` with a session id. An attribute would be the tidier home for the second number and is not
+// available — Core/Trace.h binds one to the slice open on the row, and this row is marks all the way
+// down.
+
+// The uid on a mark for a peer the kernel would not name, which is Core/Trace.h's *nothing to say* and
+// so prints no uid at all. The cost is that a refusal of an agent genuinely running as root prints the
+// same way, which is a machine with a larger problem than its trace.
+constexpr std::uint32_t UnknownUid = 0;
+
 // Send a refusal and say so. The last thing gyro says on a connection: the caller drops it.
-void Refuse(RawFd socket, int code, const char* reason)
+void Refuse(RawFd socket, std::uint32_t uid, int code, const char* reason)
 {
 	std::array<std::byte, MaxMessageBytes> bytes{};
 	const Refused message{ .Code = static_cast<std::uint32_t>(code), .Text = Reason{ reason } };
@@ -40,6 +60,11 @@ void Refuse(RawFd socket, int code, const char* reason)
 	// Nothing to do about a refusal that could not be sent, and nothing worth logging either: the
 	// connection is being closed, which is the part that matters.
 	const Result<void> sent = Send(socket, std::span<const std::byte>{ bytes }.first(written));
+
+	// **The sentence is the mark's name**, which it can be because every refusal in this file names
+	// itself with a literal — so the timeline says *why* gyro would not take a session rather than
+	// carrying a number a reader has to go and look up in this source file.
+	TraceMark(reason, TraceSession(), TraceTag(uid));
 
 	spdlog::warn("session handover refused: {} ({}){}", reason, code, sent ? "" : ", and the refusal did not send");
 }
@@ -347,6 +372,11 @@ Result<void> SessionControl::AcceptAll()
 			// **Not a failure of the compositor.** A peer that vanished between the poll and the accept
 			// is `ECONNABORTED`, and a process out of descriptors is `EMFILE` — neither is a reason to
 			// stop serving the sessions already established, so the loop ends and the wait comes back.
+			// A machine out of descriptors, or a peer that went away between the poll and the accept.
+			// Worth a mark because it is a session that never started and there is nothing else on any
+			// row to say one was trying to.
+			TraceMark("agent accept failed", TraceSession());
+
 			spdlog::warn("accepting a handover connection failed: {}", Error::FromErrno("accept"));
 
 			return {};
@@ -356,16 +386,21 @@ Result<void> SessionControl::AcceptAll()
 
 		if (!peer)
 		{
-			Refuse(accepted.Borrow(), EACCES, "the kernel would not name the peer");
+			Refuse(accepted.Borrow(), UnknownUid, EACCES, "the kernel would not name the peer");
 
 			continue;
 		}
 
 		const std::uint32_t uid = peer->uid;
 
+		// Before the caps rather than after them, so that a connection gyro immediately refuses still
+		// shows as having arrived: *nothing at all* and *refused* are the two answers a person is trying
+		// to tell apart when a session did not start.
+		TraceMark("agent connected", TraceSession(), TraceTag(uid));
+
 		if (m_Connections.size() >= MaxConnections)
 		{
-			Refuse(accepted.Borrow(), EMFILE, "too many handover connections on this machine");
+			Refuse(accepted.Borrow(), uid, EMFILE, "too many handover connections on this machine");
 
 			continue;
 		}
@@ -379,7 +414,7 @@ Result<void> SessionControl::AcceptAll()
 
 		if (mine >= MaxConnectionsPerUid)
 		{
-			Refuse(accepted.Borrow(), EMFILE, "too many handover connections for this user");
+			Refuse(accepted.Borrow(), uid, EMFILE, "too many handover connections for this user");
 
 			continue;
 		}
@@ -426,7 +461,7 @@ bool SessionControl::Pump(Connection& connection)
 
 		if (received->Truncated)
 		{
-			Refuse(connection.Socket.Borrow(), EMSGSIZE, "the message did not fit");
+			Refuse(connection.Socket.Borrow(), connection.Uid, EMSGSIZE, "the message did not fit");
 
 			return false;
 		}
@@ -449,7 +484,7 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 
 	if (!header)
 	{
-		Refuse(socket, EPROTO, "the message is not one this gyro can read");
+		Refuse(socket, connection.Uid, EPROTO, "the message is not one this gyro can read");
 
 		return false;
 	}
@@ -457,7 +492,7 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 	// A `Welcome` arriving here is a peer that is confused or lying, and neither is a thing to act on.
 	if (!FromAgent(header->Op))
 	{
-		Refuse(socket, EPROTO, "the message travels the other way");
+		Refuse(socket, connection.Uid, EPROTO, "the message travels the other way");
 
 		return false;
 	}
@@ -467,7 +502,7 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 	// in the payload, and this runs before anything has decoded one.
 	if (!CarriesListeners(header->Op) && !attached.empty())
 	{
-		Refuse(socket, EPROTO, "the message carries descriptors its kind never does");
+		Refuse(socket, connection.Uid, EPROTO, "the message carries descriptors its kind never does");
 
 		return false;
 	}
@@ -478,21 +513,21 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 
 		if (!hello)
 		{
-			Refuse(socket, EPROTO, "the greeting is malformed");
+			Refuse(socket, connection.Uid, EPROTO, "the greeting is malformed");
 
 			return false;
 		}
 
 		if (connection.Greeted)
 		{
-			Refuse(socket, EPROTO, "the connection has already been greeted");
+			Refuse(socket, connection.Uid, EPROTO, "the connection has already been greeted");
 
 			return false;
 		}
 
 		if (hello->Version < MinimumHandoverVersion)
 		{
-			Refuse(socket, EPROTO, "the agent speaks a handover version this gyro has dropped");
+			Refuse(socket, connection.Uid, EPROTO, "the agent speaks a handover version this gyro has dropped");
 
 			return false;
 		}
@@ -508,31 +543,37 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 
 		if (const Result<void> sent = Send(socket, std::span<const std::byte>{ bytes }.first(written)); !sent)
 		{
+			// The agent is stuck in `Greeting` from here on and will not say so, because from its side
+			// nothing happened. This mark is the only record that gyro is the end that stopped answering.
+			TraceMark("agent greeting unanswered", TraceSession(), TraceTag(connection.Uid));
+
 			spdlog::warn("answering a handover greeting failed: {}", sent.error());
 
 			return false;
 		}
+
+		TraceMark("agent greeted", TraceSession(), TraceTag(connection.Uid));
 
 		return true;
 	}
 
 	if (!connection.Greeted)
 	{
-		Refuse(socket, EPROTO, "an offer arrived before the greeting");
+		Refuse(socket, connection.Uid, EPROTO, "an offer arrived before the greeting");
 
 		return false;
 	}
 
 	if (connection.Session != SessionId::None)
 	{
-		Refuse(socket, EBUSY, "this connection has already offered a listener");
+		Refuse(socket, connection.Uid, EBUSY, "this connection has already offered a listener");
 
 		return false;
 	}
 
 	if (m_Sessions.contains(connection.Uid))
 	{
-		Refuse(socket, EBUSY, "this user already has a session");
+		Refuse(socket, connection.Uid, EBUSY, "this user already has a session");
 
 		return false;
 	}
@@ -541,7 +582,7 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 
 	if (!offer)
 	{
-		Refuse(socket, EPROTO, "the offer is malformed");
+		Refuse(socket, connection.Uid, EPROTO, "the offer is malformed");
 
 		return false;
 	}
@@ -551,14 +592,14 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 	// ignoring one would leave a socket attached that nobody has a role for.
 	if (!RolesAreWellFormed(offer->Roles))
 	{
-		Refuse(socket, EPROTO, "the offer names listener roles this gyro does not have");
+		Refuse(socket, connection.Uid, EPROTO, "the offer names listener roles this gyro does not have");
 
 		return false;
 	}
 
 	if (attached.size() != ListenersIn(offer->Roles))
 	{
-		Refuse(socket, EPROTO, "the offer carries a different number of listeners than it names");
+		Refuse(socket, connection.Uid, EPROTO, "the offer carries a different number of listeners than it names");
 
 		return false;
 	}
@@ -572,7 +613,7 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 	{
 		if (const Result<void> acceptable = InspectOffer(listener.Borrow(), directory); !acceptable)
 		{
-			Refuse(socket, acceptable.error().Code(), acceptable.error().Sentence());
+			Refuse(socket, connection.Uid, acceptable.error().Code(), acceptable.error().Sentence());
 
 			return false;
 		}
@@ -601,10 +642,22 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 
 	if (const Result<void> sent = Send(socket, std::span<const std::byte>{ bytes }.first(written)); !sent)
 	{
+		// The mirror of the greeting above, one state along: gyro holds the listeners and the agent is
+		// stuck in `Offering` waiting to be told so.
+		TraceMark("session acceptance unanswered", TraceSession(), TraceTag(static_cast<std::uint64_t>(id)));
+
 		spdlog::warn("answering a handover offer failed: {}", sent.error());
 
 		return false;
 	}
+
+	// Two literals rather than one and a flag, because whether a session came with a shell is the first
+	// thing to ask of a session that established and then showed a person nothing.
+	TraceMark(
+		Offers(offer->Roles, ListenerRole::Shell) ? "session established with a shell" : "session established",
+		TraceSession(),
+		TraceTag(static_cast<std::uint64_t>(id))
+	);
 
 	spdlog::info(
 		"session {} established for uid {}{}",
@@ -649,10 +702,19 @@ void SessionControl::Forget(int descriptor)
 
 	if (session == SessionId::None)
 	{
+		// An agent that connected and went away without establishing anything. Nothing else records it —
+		// there is no session to end and no refusal to log — and at boot it is precisely the shape of an
+		// agent that died mid-handshake.
+		TraceMark("agent parted", TraceSession(), TraceTag(uid));
+
 		return;
 	}
 
 	m_Sessions.erase(uid);
+
+	// Before the signal, so that what the observers go on to do is on the timeline after the fact that
+	// caused it rather than interleaved with it.
+	TraceMark("session ended", TraceSession(), TraceTag(static_cast<std::uint64_t>(session)));
 
 	spdlog::info("session {} ended", static_cast<std::uint32_t>(session));
 

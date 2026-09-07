@@ -5,20 +5,26 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <format>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
+#include "Core/Clock.h"
 #include "Core/Fd.h"
 #include "Core/Signal.h"
+#include "Core/Trace.h"
 #include "Session/Handover.h"
 #include "Session/Transport.h"
 #include "Testing/Test.h"
@@ -646,4 +652,235 @@ GYRO_TEST(SessionControl, ARegularFileAtTheControlPathIsRefused)
 	}
 
 	GYRO_CHECK(!SessionControl::Open(path, directory.In("run")).has_value());
+}
+
+namespace
+{
+// A ring, its storage, and what landed on the session row. The buffer holds a span, so the storage has
+// to outlive it — Core/Trace.Test.cpp's shape, kept here rather than shared because a test helper
+// travelling between modules is a dependency edge for the sake of six lines.
+class SessionTrace
+{
+public:
+	SessionTrace() { m_Buffer.Arm(m_Records, m_Clock); }
+
+	~SessionTrace() { EnrollTracing(nullptr); }
+
+	SessionTrace(const SessionTrace&) = delete;
+	SessionTrace& operator=(const SessionTrace&) = delete;
+	SessionTrace(SessionTrace&&) = delete;
+	SessionTrace& operator=(SessionTrace&&) = delete;
+
+	// Recording starts when a test says so rather than in the constructor, so that standing the fixture
+	// up is not on the row the assertions read.
+	void Record() { EnrollTracing(&m_Buffer); }
+
+	void Stop() { EnrollTracing(nullptr); }
+
+	// Every mark on the session row, in the order it was made, with the number the slice carries.
+	[[nodiscard]] std::vector<std::pair<std::string_view, std::uint64_t>> Marks() const
+	{
+		std::array<TraceEvent, 128> events{};
+		const std::size_t count = m_Buffer.Copy(events);
+
+		std::vector<std::pair<std::string_view, std::uint64_t>> marks;
+
+		for (std::size_t index = 0; index < count; ++index)
+		{
+			const TraceEvent& event = events[index];
+
+			if (event.Scope == TraceSession() && event.Kind == TraceKind::Mark)
+			{
+				marks.emplace_back(std::string_view{ event.Name }, event.Payload);
+			}
+		}
+
+		return marks;
+	}
+
+	[[nodiscard]] std::vector<std::string_view> Names() const
+	{
+		std::vector<std::string_view> names;
+
+		for (const auto& [name, payload] : Marks())
+		{
+			names.push_back(name);
+		}
+
+		return names;
+	}
+
+private:
+	ManualClock m_Clock;
+	std::array<TraceRecord, 128> m_Records{};
+	TraceBuffer m_Buffer;
+};
+} // namespace
+
+// **The row has to carry the states and not only the ends**, because the failure it exists to describe
+// is a session that never started: a capture holding `agent connected` and nothing after it says gyro
+// took the connection and never answered, which is the one thing a person staring at a blank screen
+// cannot otherwise tell from a machine where no agent ran at all.
+GYRO_TEST(SessionControl, TheHandshakeIsOnTheSessionRow)
+{
+	Fixture fixture;
+	Peer peer;
+	SessionTrace trace;
+
+	trace.Record();
+
+	GYRO_REQUIRE(fixture.Greet(peer));
+
+	const Fd listener = MakeListener(std::format("{}/wayland-0", fixture.RuntimeDirectory()));
+
+	GYRO_REQUIRE(listener.IsValid());
+	GYRO_REQUIRE(peer.SendMessage(Offer{}, listener.Borrow()));
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+	GYRO_REQUIRE(peer.Answer() == Opcode::Accepted);
+
+	peer.Disconnect();
+
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+
+	trace.Stop();
+
+	const std::vector<std::pair<std::string_view, std::uint64_t>> marks = trace.Marks();
+
+	GYRO_REQUIRE_EQ(marks.size(), std::size_t{ 4 });
+	GYRO_CHECK(marks[0].first == "agent connected");
+	GYRO_CHECK(marks[1].first == "agent greeted");
+	GYRO_CHECK(marks[2].first == "session established");
+	GYRO_CHECK(marks[3].first == "session ended");
+
+	// The tag turns over where the identity does: a uid until an offer has been taken, and the session
+	// id from there on, which is what makes one session's events findable on a row three of them share.
+	GYRO_CHECK_EQ(marks[0].second, std::uint64_t{ ::geteuid() });
+	GYRO_CHECK_EQ(marks[1].second, std::uint64_t{ ::geteuid() });
+	GYRO_CHECK_EQ(marks[2].second, marks[3].second);
+	GYRO_CHECK(marks[2].second != 0);
+}
+
+// A refusal names itself, which is the whole reason the sentence is a literal: these are the
+// security-relevant events, and a row saying only *refused* would need the source open beside it.
+GYRO_TEST(SessionControl, ARefusalIsRecordedWithItsReason)
+{
+	Fixture fixture;
+	Peer peer;
+	SessionTrace trace;
+
+	trace.Record();
+
+	GYRO_REQUIRE(fixture.Greet(peer));
+
+	// A listener bound outside the offering user's runtime directory, which is one of the four
+	// questions `InspectOffer` asks and the one that would otherwise hand somebody else's windows over.
+	const Fd elsewhere = MakeListener(fixture.OutsidePath("wayland-0"));
+
+	GYRO_REQUIRE(elsewhere.IsValid());
+	GYRO_REQUIRE(peer.SendMessage(Offer{}, elsewhere.Borrow()));
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+	GYRO_REQUIRE(peer.Answer() == Opcode::Refused);
+
+	trace.Stop();
+
+	const std::vector<std::string_view> names = trace.Names();
+
+	GYRO_CHECK(
+		std::ranges::find(names, "the offered listener is bound outside the offering user's runtime directory") !=
+		names.end()
+	);
+
+	// And no session was established, so nothing on the row claims one was.
+	GYRO_CHECK(std::ranges::find(names, "session established") == names.end());
+}
+
+// A greeting that never arrives leaves the agent stuck in `Offering`'s predecessor, and the connection
+// going away is the only thing gyro sees. It has to be on the row, or a boot where every agent died
+// halfway is a capture with nothing in it.
+GYRO_TEST(SessionControl, AnAgentThatPartsBeforeOfferingIsRecorded)
+{
+	Fixture fixture;
+	Peer peer;
+	SessionTrace trace;
+
+	trace.Record();
+
+	GYRO_REQUIRE(fixture.Greet(peer));
+
+	peer.Disconnect();
+
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+
+	trace.Stop();
+
+	const std::vector<std::string_view> names = trace.Names();
+
+	GYRO_CHECK(std::ranges::find(names, "agent parted") != names.end());
+	GYRO_CHECK(std::ranges::find(names, "session ended") == names.end());
+}
+
+// **A `.pftrace` gets mailed to somebody who was not at the machine.** A uid is a number on the machine
+// that allocated it; a username is a person, and a runtime directory or a socket path is a username
+// with a prefix. So the row is swept for both, over every branch a session can take: the accept, the
+// greeting, the establishment, four kinds of refusal, and the end.
+GYRO_TEST(SessionControl, NoMarkNamesAUserOrAPath)
+{
+	Fixture fixture;
+	SessionTrace trace;
+
+	trace.Record();
+
+	{
+		Peer established;
+
+		GYRO_REQUIRE(fixture.Greet(established));
+
+		const Fd listener = MakeListener(std::format("{}/wayland-0", fixture.RuntimeDirectory()));
+
+		GYRO_REQUIRE(listener.IsValid());
+		GYRO_REQUIRE(established.SendMessage(Offer{}, listener.Borrow()));
+		GYRO_REQUIRE(fixture.Control().Drain().has_value());
+
+		// Two more refusals over the same control socket: an offer that arrived before the greeting, and
+		// a second session for a uid that already has one.
+		Peer early;
+
+		GYRO_REQUIRE(early.ConnectTo(fixture.ControlPath()));
+		GYRO_REQUIRE(early.SendMessage(Offer{}, listener.Borrow()));
+		GYRO_REQUIRE(fixture.Control().Drain().has_value());
+
+		Peer outside;
+
+		GYRO_REQUIRE(fixture.Greet(outside));
+
+		const Fd elsewhere = MakeListener(fixture.OutsidePath("wayland-1"));
+
+		GYRO_REQUIRE(elsewhere.IsValid());
+		GYRO_REQUIRE(outside.SendMessage(Offer{}, elsewhere.Borrow()));
+		GYRO_REQUIRE(fixture.Control().Drain().has_value());
+	}
+
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+
+	trace.Stop();
+
+	const std::vector<std::string_view> names = trace.Names();
+
+	GYRO_REQUIRE(!names.empty());
+
+	const char* const user = ::getenv("USER");
+
+	for (const std::string_view name : names)
+	{
+		// A path is the thing to look for rather than any particular one: nothing on this row has an
+		// honest reason to hold a separator, so the check does not have to guess which path leaked.
+		GYRO_CHECK(name.find('/') == std::string_view::npos);
+		GYRO_CHECK(name.find(fixture.RuntimeDirectory()) == std::string_view::npos);
+		GYRO_CHECK(name.find("wayland-") == std::string_view::npos);
+
+		if (user != nullptr && *user != '\0')
+		{
+			GYRO_CHECK(name.find(user) == std::string_view::npos);
+		}
+	}
 }
