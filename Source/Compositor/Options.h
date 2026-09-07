@@ -258,6 +258,17 @@ struct Options
 	std::string CaptureDirectory;
 	bool Capture = false;
 
+	// Photograph the first frame of every closing window drawn from its own picture, with no key
+	// pressed. Implies `--capture`, since it writes through the same slabs.
+	//
+	// **A second flag rather than a mode of the one above, because it fires on somebody else's
+	// action.** A screenshot is a moment a person chose and pays for once; this pays the same forced
+	// composite and fence stall every time anything closes, which is a stutter on a desktop somebody is
+	// using and a directory that fills while they work. What it buys is the one frame nobody can press
+	// a key inside: decision 20's copy is drawn on a single frame per exit, and the frame that shows it
+	// is the next one.
+	bool CaptureExits = false;
+
 	// Where `Input/Trigger.h`'s development pipe goes, or empty for a run that has none.
 	//
 	// **Off by default, and it is a security boundary rather than tidiness.** One of the verbs behind
@@ -830,6 +841,21 @@ inline constexpr double MaximumArcminutes = 10.0;
 			if (!value.empty())
 			{
 				options.TracePath = value;
+			}
+
+			continue;
+		}
+
+		if (Detail::Matches(argument, "--capture-exits", value))
+		{
+			// Turns the chord on as well, because it writes through the slabs `--capture` reserves and a
+			// run that had these without that would arm an output with no pixels behind it.
+			options.Capture = true;
+			options.CaptureExits = true;
+
+			if (!value.empty())
+			{
+				options.CaptureDirectory = value;
 			}
 
 			continue;

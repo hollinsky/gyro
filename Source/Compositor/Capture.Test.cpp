@@ -136,6 +136,54 @@ GYRO_TEST(Capture, ArmsOnlyOutputsItHasASlabFor)
 	GYRO_CHECK(!capture.Wanted(1));
 }
 
+// Seam/Capture.h's frame-thread arm, which is one output and not a press.
+GYRO_TEST(Capture, ArmsOneOutputForAnExitWithoutTouchingTheOther)
+{
+	Scratch scratch;
+	PamCapture capture{ scratch.Path(), 2 };
+
+	GYRO_REQUIRE(capture.Open().has_value());
+	GYRO_REQUIRE(capture.Remember(0, Small, Xrgb8).has_value());
+	GYRO_REQUIRE(capture.Remember(1, Small, Xrgb8).has_value());
+
+	// A window closed on one screen owes nothing to the screen beside it, which is the difference from
+	// the chord: a press is about the machine and an exit is about one panel.
+	GYRO_CHECK(capture.RequestOutput(0));
+	GYRO_CHECK(capture.Wanted(0));
+	GYRO_CHECK(!capture.Wanted(1));
+}
+
+GYRO_TEST(Capture, RefusesAnExitArmForAnOutputItHasNoSlabFor)
+{
+	Scratch scratch;
+	PamCapture capture{ scratch.Path(), 2 };
+
+	GYRO_REQUIRE(capture.Open().has_value());
+
+	// Past the end, and inside it but never remembered. Both are the ordinary answer rather than a
+	// fault — the frame that asked has not been forced to do anything yet.
+	GYRO_CHECK(!capture.RequestOutput(0));
+	GYRO_CHECK(!capture.RequestOutput(7));
+}
+
+// The claim the frame loop's `m_ExitOwed` rests on: an exit cannot displace a capture already running,
+// because the file it would land in is named for the press that started it.
+GYRO_TEST(Capture, DropsAnExitArmWhileAPressIsOutstanding)
+{
+	Scratch scratch;
+	PamCapture capture{ scratch.Path(), 1 };
+
+	GYRO_REQUIRE(capture.Open().has_value());
+	GYRO_REQUIRE(capture.Remember(0, Small, Xrgb8).has_value());
+	GYRO_REQUIRE(capture.Request() == 1);
+
+	GYRO_CHECK(!capture.RequestOutput(0));
+
+	// And the reverse, which is the case a person hits by pressing the chord during a fade: the exit
+	// took the slot first and the press finds nothing to arm.
+	GYRO_CHECK(capture.Wanted(0));
+}
+
 GYRO_TEST(Capture, WritesAFileForACompletedReadback)
 {
 	Scratch scratch;

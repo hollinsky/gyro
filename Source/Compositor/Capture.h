@@ -91,6 +91,9 @@ public:
 	// — the answer the chord reports rather than leaving a person pressing a key that does nothing.
 	std::size_t Request() noexcept;
 
+	// Seam/Capture.h's frame-thread arm: one output's slab, and deliberately not the table above it.
+	[[nodiscard]] bool RequestOutput(std::uint32_t output) noexcept override;
+
 	[[nodiscard]] bool Wanted(std::uint32_t output) const noexcept override;
 
 	[[nodiscard]] std::span<std::byte> Reserve(

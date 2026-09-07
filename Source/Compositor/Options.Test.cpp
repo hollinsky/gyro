@@ -562,3 +562,25 @@ GYRO_TEST(Options, AViewingDistanceRidesOnTheOutputItIsAbout)
 	GYRO_CHECK(!Parse({ "--output=2560x1440,144" }));
 	GYRO_CHECK(!Parse({ "--output=2560x1440,depth=8" }));
 }
+
+// The two capture flags share a prefix, and `Detail::Matches` is what keeps that from mattering: the
+// remainder after a name has to be empty or start with `=`, so the shorter flag cannot swallow the
+// longer one whichever order they are tried in. Worth an assertion rather than a comment, because the
+// failure it prevents is silent — `--capture-exits` read as `--capture` with a directory named
+// `-exits` is a run that writes pictures nobody asked for into a file nobody looks in.
+GYRO_TEST(Options, TellsTheTwoCaptureFlagsApart)
+{
+	const Result<Options> chord = Parse({ "--capture" });
+
+	GYRO_REQUIRE(chord.has_value());
+	GYRO_CHECK(chord->Capture);
+	GYRO_CHECK(!chord->CaptureExits);
+
+	// And the longer one turns both on, because it writes through the slabs the shorter one reserves.
+	const Result<Options> exits = Parse({ "--capture-exits" });
+
+	GYRO_REQUIRE(exits.has_value());
+	GYRO_CHECK(exits->Capture);
+	GYRO_CHECK(exits->CaptureExits);
+	GYRO_CHECK_EQ(exits->CaptureDirectory, std::string{ DefaultCaptureDirectory });
+}

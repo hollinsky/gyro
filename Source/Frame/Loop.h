@@ -701,6 +701,21 @@ private:
 	// the reason a quiet machine draws.
 	std::uint64_t m_Drawn = 0;
 
+	// This output took a closing window's picture on its last frame and owes a capture of the first
+	// frame drawn *from* it.
+	//
+	// **One frame late, deliberately, and the lateness is the whole diagnostic.** The frame that fills
+	// the atlas still walks the live window — `Frame/Evaluator.h` has to draw it in order to copy it —
+	// so a capture taken there photographs the window and says nothing about the copy. The frame after
+	// it is the first one where `Replay` runs, and if the picture is empty *that* is the frame it is
+	// empty on. Photographing the wrong one of those two would produce a file that looks correct in
+	// every case, which is the worst thing an instrument can do.
+	bool m_ExitOwed = false;
+
+	// Whether the last frame this output drew was proposing a capture, so that the arm above is the
+	// start of an exit and not every frame of one.
+	bool m_ExitProposing = false;
+
 	// What each target is stale by *over and above* `m_Damage`, which is what makes the two disjoint
 	// questions rather than two spellings of one: `m_Damage` is owed to the glass and decides whether a
 	// frame is wanted, and this is repair owed to an image and decides only how much of it to redraw. A
@@ -775,6 +790,15 @@ public:
 	// composite the entire screen, and reading the target back between the record and the present,
 	// which is the last moment the pixels are provably the ones about to be latched.
 	void Capture(ICaptureSink* sink) noexcept { m_Capture = sink; }
+
+	// Photograph the first frame of every exit drawn from a picture, without anybody pressing anything.
+	//
+	// **Apart from `Capture` rather than folded into it, because it changes what a run costs.** A chord
+	// forces one full composite and one fence stall at a moment a person chose; this does the same on
+	// every window anybody closes, which on a busy desktop is a stall a person can feel and a directory
+	// that fills. Somebody who asked for `--capture` asked for a key that works, and turning that into
+	// a picture per close would be answering a question they did not put.
+	void CaptureExits(bool wanted) noexcept { m_CaptureExits = wanted; }
 
 	// **`--no-planes`: refuse decision 152's partition for the whole run.** The promotion is recomputed
 	// per frame with nothing carried over, so switching it off is a ceiling of zero rather than a mode
@@ -1111,6 +1135,22 @@ private:
 		// what the gate reads. It is below the three gates above it on purpose — those are *can a frame
 		// be made at all*, and a capture that jumped a full commit queue or an unscheduled clock would be
 		// a debug verb rearranging the schedule it was pressed to look at.
+		// **The exit's own request, spent immediately above the ask so that this frame is the one it
+		// arms.** The flag was set on the frame that filled the atlas, so this is the frame after it and
+		// the first that draws from the copy. It is cleared whether or not the arm was taken: a slab
+		// still outstanding from a chord press is a capture already being written, and an exit that
+		// queued itself behind it would land on some later frame of the fade — or on the next window
+		// entirely — under a filename claiming to be this one.
+		if (output.m_ExitOwed)
+		{
+			output.m_ExitOwed = false;
+
+			if (m_Capture != nullptr && m_Capture->RequestOutput(static_cast<std::uint32_t>(index)))
+			{
+				TraceMark("exit capture armed", output.m_Trace);
+			}
+		}
+
 		const bool capturing = m_Capture != nullptr && m_Capture->Wanted(static_cast<std::uint32_t>(index));
 
 		if (capturing)
@@ -1257,6 +1297,20 @@ private:
 		const std::span<const SnapshotCapture> captures = m_Captures.Propose(list.Captures, index);
 
 		TraceCount("captures", static_cast<std::int64_t>(captures.size()), output.m_Trace);
+
+		// **Armed where the exit begins rather than where its picture lands, which is the difference
+		// between an instrument that covers the failure and one that only covers the success.** Keying
+		// this on a confirmed snapshot photographs the exits that worked and nothing else — so a window
+		// that never got a picture, which is the whole reason somebody turned this on, left no file at
+		// all and its absence read as no exit having happened.
+		//
+		// The edge and not the level: a refused capture is re-proposed on every frame of the exit, and
+		// arming on each of them would force a full composite twenty-two times and fill the directory
+		// with one fade.
+		const bool proposing = !captures.empty();
+
+		output.m_ExitOwed = output.m_ExitOwed || (m_CaptureExits && proposing && !output.m_ExitProposing);
+		output.m_ExitProposing = proposing;
 
 		// **A frame that is taking a window's picture is the same clause for the same reason.** The
 		// picture is drawn out of this list, so anything the display engine took is a piece of that
@@ -1575,7 +1629,13 @@ private:
 			// thread's, because whether a picture exists is a fact about one screen's atlas.
 			if (!captures.empty() && submission->Captured == 0)
 			{
-				TraceMark("captures refused", output.m_Trace, TraceTag(captures.size()));
+				// **Tagged with the run's length rather than how many were offered**, which is the one
+				// number that splits a refusal in two. A `Count` of zero is a window that emitted no
+				// items to copy — the walk found nothing to draw, so the picture was empty before the
+				// renderer ever saw it. A `Count` above zero is a run the renderer skipped its whole way
+				// through, which is a question about the items rather than about the window. Those are
+				// opposite ends of the pipe and the mark said neither.
+				TraceMark("captures refused", output.m_Trace, TraceTag(captures[0].Count));
 			}
 
 			// What the record produced, filled into the layer the test was run against rather than a second
@@ -2226,6 +2286,10 @@ private:
 	// Null on every run that was not asked for captures, which is almost all of them — the check is one
 	// predictable branch per output per frame and buys a loop that carries no capture state at all.
 	ICaptureSink* m_Capture = nullptr;
+
+	// See `CaptureExits`. Off unless the command line asked, so an ordinary `--capture` run is exactly
+	// what it was.
+	bool m_CaptureExits = false;
 
 	// Which closing windows have already had their picture taken, per output. The loop holds it rather
 	// than the evaluator because the answer is about submissions and the walk knows nothing of those.

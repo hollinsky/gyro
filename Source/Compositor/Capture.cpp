@@ -297,6 +297,34 @@ std::size_t PamCapture::Request() noexcept
 	return armed;
 }
 
+bool PamCapture::RequestOutput(std::uint32_t output) noexcept
+{
+	if (output >= m_Count)
+	{
+		return false;
+	}
+
+	Output& slot = m_Outputs[output];
+
+	if (slot.Pixels.empty())
+	{
+		return false;
+	}
+
+	// **The last four lines of `Request` and nothing above them, which is the whole of what may cross.**
+	// A press queues buffers, walks `m_Held`, allocates the slabs behind the texture table and signals
+	// the writer, all of it the dispatch thread's; this is one compare-exchange on one word. The
+	// division is not tidiness — `m_Held` is rewritten inside a `wl_surface.commit` and a frame-thread
+	// walk of it would be a read of a vector being reallocated under it.
+	//
+	// So what a run with `--capture-exits` gets is the picture of the frame and not the client buffers
+	// beside it, which is the right half: the question a window that fails to fade poses is what gyro
+	// composited, and the client had already handed its last buffer over before any of this began.
+	Slot expected = Slot::Idle;
+
+	return slot.State.compare_exchange_strong(expected, Slot::Armed, std::memory_order_acq_rel);
+}
+
 bool PamCapture::WantsTexture(TextureId texture) const noexcept
 {
 	if (texture.IsNull())

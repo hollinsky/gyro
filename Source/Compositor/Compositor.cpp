@@ -1544,10 +1544,19 @@ public:
 			}
 
 			m_Loop->Capture(&*m_Capture);
+			m_Loop->CaptureExits(m_Options.CaptureExits);
 
 			spdlog::info(
 				"ctrl+alt+esc s writes a frame and every client's wl_shm buffer to {}", m_Options.CaptureDirectory
 			);
+
+			if (m_Options.CaptureExits)
+			{
+				// Said separately and said at all, because this one fires without anybody asking and a
+				// person who forgot the flag would read the stutter as gyro dropping frames on close —
+				// which is the exact symptom they would then be capturing.
+				spdlog::info("every closing window is photographed on its first frame drawn from a picture");
+			}
 		}
 
 		// Last, because it lays the world out against the modes the backend *achieved* rather than the

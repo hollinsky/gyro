@@ -999,6 +999,12 @@ private:
 	{
 		if (texture.IsNull())
 		{
+			// A surface destroyed with no pixels on it, which is ordinary — and worth a mark anyway,
+			// because from the far end it is indistinguishable from this function not having been
+			// called at all, and those are a client that had already given its buffer up and a
+			// teardown that never reached here.
+			TraceMark("exit abandons nothing", TraceThread);
+
 			return false;
 		}
 
@@ -1011,6 +1017,18 @@ private:
 		{
 			if (!DrawsFrom(root, texture))
 			{
+				// **The one path out of this loop that said nothing, and the traces say it is the one
+				// being taken.** Neither `exit cut` nor `exit reprieved` has ever fired, so every
+				// abandonment walks a retiring subtree that does not draw from the texture being given
+				// up — and the buffer is then retired on the spot rather than held, which leaves decision
+				// 20's copy racing the watermark that reclaims the pixels it wants to copy.
+				//
+				// Tagged with the id being abandoned rather than the root, because what this is about is
+				// the mismatch: a new id is minted per committed frame, so the number here against the
+				// one the node is holding says whether the two ends are naming different commits of the
+				// same window.
+				TraceMark("exit draws from other pixels", TraceThread, TraceTag(texture.Index));
+
 				continue;
 			}
 

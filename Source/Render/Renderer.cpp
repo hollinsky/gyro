@@ -17,6 +17,7 @@
 #include "Core/ColorState.h"
 #include "Core/Result.h"
 #include "Core/Time.h"
+#include "Core/Trace.h"
 #include "Geometry/Region.h"
 #include "Render/GpuClock.h"
 #include "Render/Pipeline.h"
@@ -2049,6 +2050,15 @@ bool VulkanRenderer::Capture(
 
 	VkPipeline bound = VK_NULL_HANDLE;
 
+	// **What actually reached the rectangle, which is not the same as how far the loop got.** Every
+	// skip below is a `continue` over one item, and a run whose items are *all* skipped leaves the
+	// rectangle exactly as `LOAD_OP_CLEAR` left it — transparent. Reporting that as a snapshot is what
+	// `Submission::Captured` forbids in as many words: the caller must not believe a picture that is
+	// not there. It believed one, and what a person saw was a window that vanished on the frame it was
+	// asked to start fading, with the reservation, the record and the confirmation all reporting
+	// success behind it.
+	std::uint32_t drawn = 0;
+
 	for (std::uint32_t index = 0; index < capture.Count; ++index)
 	{
 		const DrawItem item = Relocated(request.Items[capture.First + index], by);
@@ -2075,6 +2085,14 @@ bool VulkanRenderer::Capture(
 
 		if (solid == nullptr && texture == nullptr)
 		{
+			// **Each skip says which one it was, because from outside they are the same picture.** An
+			// item with no content, an item naming no texture, and an item naming one this renderer
+			// cannot find all leave the rectangle exactly as the clear left it — and the three are a
+			// walk that emitted nothing to draw, a node that stopped naming its pixels, and a table that
+			// lost them. Those are three different bugs in three different modules, and the count of
+			// items drawn tells them apart no better than the blank rectangle did.
+			TraceMark("snapshot item has no content", TraceThread, TraceTag(index));
+
 			continue;
 		}
 
@@ -2082,10 +2100,19 @@ bool VulkanRenderer::Capture(
 
 		if (texture != nullptr)
 		{
+			if (texture->Texture.IsNull())
+			{
+				TraceMark("snapshot item names no texture", TraceThread, TraceTag(index));
+
+				continue;
+			}
+
 			image = m_Textures->Find(texture->Texture);
 
 			if (!image.IsValid())
 			{
+				TraceMark("snapshot texture not found", TraceThread, TraceTag(texture->Texture.Index));
+
 				continue;
 			}
 		}
@@ -2137,11 +2164,22 @@ bool VulkanRenderer::Capture(
 
 		vkCmdSetScissor(command, 0, 1, &area);
 		vkCmdDraw(command, 6, 1, 0, 0);
+		++drawn;
 	}
 
 	vkCmdEndRendering(command);
 
-	return true;
+	// **The shadow is not counted and that is deliberate.** `Shade` above draws the lift a window casts,
+	// and a rectangle holding a shadow and no window is the same empty picture with a smudge at its
+	// edge — worse to believe than the plain one, because it puts something on the glass and so reads
+	// as the exit working.
+	//
+	// Refusing here is what `Frame/Capture.h` needs rather than an error: an unconfirmed reservation is
+	// offered again on the next frame, so a picture that could not be taken this time is retried for as
+	// long as the exit runs, and one that never can be leaves the window drawn from its own subtree
+	// exactly as it was before decision 20. The cost of the retry is this function reaching the same
+	// skips and drawing nothing, which is what it just did.
+	return drawn > 0;
 }
 
 void VulkanRenderer::Shade(

@@ -132,6 +132,26 @@ public:
 
 	virtual ~ICaptureSink() = default;
 
+	// Arm this one output from the frame thread, for a capture no person asked for.
+	//
+	// **`Wanted` answers a press and this answers a moment only the frame thread can see.** Decision
+	// 20's picture of a closing window is drawn on exactly one frame per exit, and the frame worth
+	// photographing is the one *after* it — the first drawn from the copy rather than from the window.
+	// That frame is a third of a second wide and arrives whenever somebody closes something, so a
+	// person with a keyboard cannot reliably be inside it, and the chord's own answer is the frame the
+	// key was pressed on. Nothing else on the machine knows the moment has come.
+	//
+	// **It is the output slab alone and never the texture table**, which is what makes it legal here.
+	// The implementation's per-surface entries are filled by the dispatch thread inside a commit and
+	// are not touched again until the frame side has given them all back; arming one of those from
+	// this thread would race that handover. An output's slot is an atomic exchange out of idle and
+	// races nothing, so this is the whole of the request that can cross.
+	//
+	// False where the output has no slab or already owes a capture, both of which are ordinary. The
+	// caller has done nothing to undo — the frame is not forced until `Wanted` says so on the next
+	// pass — so a refusal is a reason to say nothing rather than to retry.
+	[[nodiscard]] virtual bool RequestOutput([[maybe_unused]] std::uint32_t output) noexcept { return false; }
+
 	// Is this output owed a capture?
 	//
 	// **Asked before the partition is assigned**, which is why it is separate from `Reserve`: the
