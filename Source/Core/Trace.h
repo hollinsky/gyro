@@ -1,10 +1,13 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <span>
+#include <string_view>
 
 #include "Core/Clock.h"
 #include "Core/Time.h"
@@ -154,7 +157,219 @@ inline constexpr std::uint16_t TraceLanesPerOutput = static_cast<std::uint16_t>(
 	return TraceLane(output, static_cast<std::uint16_t>(4 + TracedFlights));
 }
 
-inline constexpr std::uint16_t TraceScopes = static_cast<std::uint16_t>(1 + TracedOutputs * TraceLanesPerOutput);
+// Where the output block ends and the rest of the vocabulary begins. Everything below is numbered
+// from here rather than woven into the arithmetic above, because `TraceLane` is what keeps one
+// screen's rows consecutive (144) and a row inserted between two lanes would move every lane after it.
+inline constexpr std::uint16_t TraceOutputScopes = static_cast<std::uint16_t>(1 + TracedOutputs * TraceLanesPerOutput);
+
+// How many connected clients a trace can draw a row for. A row per client rather than one shared
+// `wayland` row: what a person is chasing is a *particular* application being slow to attach, and on
+// one row four clients' requests interleave into a texture nobody can attribute. Sixty-four is an
+// order of magnitude above a real session and costs a few kilobytes of descriptor table.
+inline constexpr std::size_t TracedClients = 64;
+
+// One client's row, and the slot is `ClaimTraceClient`'s rather than anything the protocol counts — a
+// Wayland client has no small dense id, and a row indexed by a file descriptor would be a row that
+// moves when an unrelated connection closes.
+[[nodiscard]] constexpr std::uint16_t TraceClient(std::size_t slot) noexcept
+{
+	const std::size_t clamped = slot < TracedClients ? slot : 0;
+
+	return static_cast<std::uint16_t>(TraceOutputScopes + clamped);
+}
+
+// Where a keystroke or a pointer motion entered the compositor, stamped with the device's own
+// timestamp rather than with the instant gyro read it. One row and not one per device: what is being
+// read here is the gap between a person moving the mouse and the pixels moving, and that gap is one
+// story however many devices could have started it.
+[[nodiscard]] constexpr std::uint16_t TraceInput() noexcept
+{
+	return static_cast<std::uint16_t>(TraceOutputScopes + TracedClients);
+}
+
+// Session lifecycle: an agent connecting, a session being presented on an output, a lock, an unlock.
+// A row of its own because these events belong to no thread's work and to no screen — a session
+// outlives both, and a switch is the one thing a person can point at when the picture changed and
+// nothing they did explains it.
+[[nodiscard]] constexpr std::uint16_t TraceSession() noexcept
+{
+	return static_cast<std::uint16_t>(TraceOutputScopes + TracedClients + 1);
+}
+
+// What gyro logged, on the timeline beside what gyro did. A log line and a trace slice are the same
+// event described twice today, in two files with no shared clock between them, and reconciling them
+// by hand is the tax on every investigation that starts from a message.
+[[nodiscard]] constexpr std::uint16_t TraceLog() noexcept
+{
+	return static_cast<std::uint16_t>(TraceOutputScopes + TracedClients + 2);
+}
+
+inline constexpr std::uint16_t TraceScopes = static_cast<std::uint16_t>(TraceOutputScopes + TracedClients + 3);
+
+// What a row is called when the name is not knowable until it exists.
+//
+// **The ring cannot carry a string, so a row whose name is a runtime value needs a table beside it.**
+// Every other row in this file is named by arithmetic — `output 3 glass` is computed from a number —
+// and the rows above are not: a client is `firefox`, a session belongs to a user. A name in the record
+// would mean either copying bytes on the frame path or storing a pointer whose target the snapshot
+// reads seconds later, and both give up the property the rest of the header is built around. So the
+// record keeps carrying a row number, and the row number is what this table is keyed by.
+//
+// **A fixed buffer per row rather than a `std::string`, which is what keeps the whole header
+// allocation-free.** Naming happens on the dispatch thread, which may allocate — but a table that
+// allocates is a table somebody eventually names a row from inside a frame section, and
+// `Core/DebugAllocator.cpp` would abort in a place with no obvious connection to the call that caused
+// it. Forty-eight bytes a row is thirteen kilobytes for the whole vocabulary, resident under
+// `mlockall` alongside the rings, and a longer name is truncated rather than refused: a truncated
+// `xdg-desktop-porta` still tells a person which row to read.
+//
+// **Written from the dispatch thread and read by the writer thread, under a plain mutex.** This is the
+// one place in the file that takes a lock, and it can: naming is once per client connect and reading
+// is once per snapshot, neither on any deadline. A lock-free spelling would be a second concurrency
+// argument to maintain for the sake of an operation that happens tens of times an hour — and the
+// alternative that needs no lock at all, publishing an immutable table per snapshot, means the
+// dispatch thread allocating and the reader owning a lifetime, which is more machinery for the same
+// answer. `GYRO_SANITIZE=thread` sees a mutex and has nothing to say, which is the point.
+inline constexpr std::size_t TraceNameLimit = 48;
+
+using TraceName = std::array<char, TraceNameLimit>;
+
+namespace Detail
+{
+
+struct ScopeNaming
+{
+	std::mutex Lock;
+
+	// An empty first byte is *no name recorded*, which is what makes a zero-initialized table the
+	// correct starting state and a forgotten row indistinguishable from one never named.
+	std::array<TraceName, TraceScopes> Names{};
+
+	std::array<bool, TracedClients> Claimed{};
+
+	// Where the next claim starts looking, which is the whole of the round-robin. See
+	// `ClaimTraceClient`.
+	std::size_t NextClient = 0;
+};
+
+inline ScopeNaming Naming;
+
+} // namespace Detail
+
+// What to call a row, said by the dispatch thread as it learns it.
+//
+// Dispatch-side only, and it allocates nothing so that being wrong about that is a truncated name
+// rather than an abort. A scope outside the vocabulary is ignored: a caller that computed a row number
+// wrongly should produce no name rather than rename somebody else's row.
+inline void NameTraceScope(std::uint16_t scope, std::string_view name)
+{
+	if (scope >= TraceScopes)
+	{
+		return;
+	}
+
+	const std::size_t kept = std::min(name.size(), TraceNameLimit - 1);
+
+	const std::lock_guard guard{ Detail::Naming.Lock };
+	TraceName& stored = Detail::Naming.Names[scope];
+
+	std::copy_n(name.data(), kept, stored.data());
+	std::fill(stored.begin() + static_cast<std::ptrdiff_t>(kept), stored.end(), '\0');
+}
+
+// The row is no longer about anything, said when what it was named for goes away.
+//
+// **Forgetting is not tidiness, it is the thing that stops a row lying.** A row whose occupant
+// disconnected keeps its name until something replaces it, so a snapshot taken afterwards would label
+// the next occupant's slices with the last one's name — a person reading down that row would read one
+// client where there were two.
+inline void ForgetTraceScope(std::uint16_t scope)
+{
+	if (scope >= TraceScopes)
+	{
+		return;
+	}
+
+	const std::lock_guard guard{ Detail::Naming.Lock };
+	Detail::Naming.Names[scope].fill('\0');
+}
+
+// A row for a client that just connected, or `TraceThread` if there is none left.
+//
+// **Round-robin over the pool rather than last-freed-first, because a row should mean one thing for
+// the whole file a person opens.** `Core/SlotAllocator.h` is the right allocator for entity storage
+// and the wrong one here: it reuses the slot most recently freed, which is warm in cache and which
+// would put two different clients' slices on one row inside a single ring window. Its generations buy
+// nothing either — nothing resolves a row back to a client, so there is no stale id to reject. Cycling
+// the pool instead means a row is only reused after every other row has been. The residual caveat
+// stands and is worth stating: a machine that opens and closes sixty-four connections inside one ring
+// window will still hand a row out twice, and the two clients' slices will be adjacent on it.
+//
+// **Exhaustion is not an error.** The sixty-fifth client gets `TraceThread`, so its events land on the
+// dispatch thread's own row beside the loop that served them — less legible than a row of its own, and
+// strictly better than a client whose work is missing from the picture. Nothing has to be answered for
+// and nothing is refused, which is why this returns a row rather than an optional one.
+[[nodiscard]] inline std::uint16_t ClaimTraceClient()
+{
+	const std::lock_guard guard{ Detail::Naming.Lock };
+
+	for (std::size_t attempt = 0; attempt < TracedClients; ++attempt)
+	{
+		const std::size_t slot = (Detail::Naming.NextClient + attempt) % TracedClients;
+
+		if (Detail::Naming.Claimed[slot])
+		{
+			continue;
+		}
+
+		Detail::Naming.Claimed[slot] = true;
+		Detail::Naming.NextClient = (slot + 1) % TracedClients;
+
+		return TraceClient(slot);
+	}
+
+	return TraceThread;
+}
+
+// The row goes back to the pool and loses its name in the same breath, because the two halves of
+// `ForgetTraceScope`'s argument are one operation: a row handed out again with a name still on it is
+// exactly the misreading that function exists to prevent. `TraceThread` — what an exhausted claim
+// returned — is not a client row and releases nothing.
+inline void ReleaseTraceClient(std::uint16_t scope)
+{
+	if (scope < TraceOutputScopes || scope >= TraceOutputScopes + TracedClients)
+	{
+		return;
+	}
+
+	const std::lock_guard guard{ Detail::Naming.Lock };
+
+	Detail::Naming.Claimed[scope - TraceOutputScopes] = false;
+	Detail::Naming.Names[scope].fill('\0');
+}
+
+// The name a row was given, for the snapshot writer. False is *nothing was recorded*, which the caller
+// answers with the compile-time name it computes — a row with no descriptor at all is the defect
+// `Tools/TraceDump.cpp --check` exists to catch, so an unnamed client row still has to come out as
+// something honest.
+[[nodiscard]] inline bool ReadTraceScopeName(std::uint16_t scope, TraceName& into)
+{
+	if (scope >= TraceScopes)
+	{
+		return false;
+	}
+
+	const std::lock_guard guard{ Detail::Naming.Lock };
+
+	if (Detail::Naming.Names[scope][0] == '\0')
+	{
+		return false;
+	}
+
+	into = Detail::Naming.Names[scope];
+
+	return true;
+}
 
 // Which chain an arrow belongs to.
 //

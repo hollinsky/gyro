@@ -29,7 +29,8 @@ protected:
 	IClock& operator=(const IClock&) = default;
 };
 
-// Two clocks read at one instant, which is the only thing in the process that ever needs two.
+// Three clocks read at one instant, which is the only thing in the process that ever needs more than
+// one.
 //
 // **It exists for one consumer and is useless to any other, which is what keeps decision 57 intact.**
 // A trace gyro writes stamps in this timebase; a system trace stamps in the kernel's boot-time domain,
@@ -37,13 +38,21 @@ protected:
 // once, and relating them requires having read both at the same moment. Nothing else in gyro cares
 // what the other domain says.
 //
+// **The wall clock is here for the reader rather than for any merge.** A trace stamped only in the
+// monotonic domain says a stutter happened 41,203 seconds into the run, which cannot be lined up with
+// a journal line, a screen recording, or a person saying it went wrong at about quarter past. One
+// reading of `CLOCK_REALTIME` in the same window turns every slice in the file into a time of day.
+// Nothing computes with it — it is not a clock anything schedules against, precisely because it steps
+// when NTP says so.
+//
 // **Raw counts rather than `Instant`s, deliberately.** An `Instant` is a value the schedule is
 // entitled to compare against a deadline, and handing one back from a second clock reader is exactly
-// the reachable now decision 57 exists to prevent. These are two integers destined for a file.
+// the reachable now decision 57 exists to prevent. These are three integers destined for a file.
 struct ClockAnchor
 {
 	std::int64_t Monotonic = 0;
 	std::int64_t Boottime = 0;
+	std::int64_t Realtime = 0;
 };
 
 // Read together and as close together as two syscalls can be. The pair is a relation rather than a

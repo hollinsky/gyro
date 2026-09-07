@@ -43,9 +43,13 @@ ClockAnchor ReadClockAnchor() noexcept
 
 	timespec monotonic = {};
 	timespec boottime = {};
+	timespec realtime = {};
 
 	::clock_gettime(CLOCK_MONOTONIC, &monotonic);
 	::clock_gettime(Boottime, &boottime);
+	::clock_gettime(CLOCK_REALTIME, &realtime);
 
-	return ClockAnchor{ .Monotonic = Nanoseconds(monotonic), .Boottime = Nanoseconds(boottime) };
+	return ClockAnchor{ .Monotonic = Nanoseconds(monotonic),
+		                .Boottime = Nanoseconds(boottime),
+		                .Realtime = Nanoseconds(realtime) };
 }

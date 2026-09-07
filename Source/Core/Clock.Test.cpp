@@ -120,3 +120,38 @@ GYRO_TEST(Clock, ManualClockIsReadableWhileItIsDriven)
 	GYRO_CHECK(!wentBackwards.load(std::memory_order_relaxed));
 	GYRO_CHECK_EQ(clock.Now(), Instant{} + 10ms);
 }
+
+// The anchor is what makes a trace readable against anything outside gyro, and each of its three
+// readings buys a different kind of readability: monotonic is what the records are stamped in,
+// boot-time is what a kernel trace is stamped in, and the wall clock is what a person and a journal
+// line are stamped in.
+GYRO_TEST(Clock, TheAnchorReadsThreeDomains)
+{
+	const ClockAnchor anchor = ReadClockAnchor();
+
+	// Monotonic and boot-time both count from boot, so both are large positive offsets and boot-time
+	// is never behind — it counts through suspend where the other does not.
+	GYRO_CHECK(anchor.Monotonic > 1'000'000'000);
+	GYRO_CHECK(anchor.Boottime >= anchor.Monotonic);
+
+	// The wall clock counts from 1970, so it is orders of magnitude larger than an uptime and a reading
+	// in the uptime range would be this field having been filled from the wrong clock. The bound is
+	// 2020, which any machine with a working RTC or any network at all is past.
+	GYRO_CHECK(anchor.Realtime > 1'577'836'800'000'000'000);
+}
+
+// Read together, which is the whole reason the three are one call: the relation is worth nothing if
+// the readings are not of the same moment. Two anchors taken back to back must have moved by the same
+// amount in every domain, which a reading taken outside the window would not.
+GYRO_TEST(Clock, TheAnchorsDomainsAdvanceTogether)
+{
+	const ClockAnchor first = ReadClockAnchor();
+	const ClockAnchor second = ReadClockAnchor();
+
+	const std::int64_t monotonic = second.Monotonic - first.Monotonic;
+	const std::int64_t realtime = second.Realtime - first.Realtime;
+
+	GYRO_CHECK(monotonic >= 0);
+	GYRO_CHECK(realtime - monotonic < 1'000'000);
+	GYRO_CHECK(monotonic - realtime < 1'000'000);
+}

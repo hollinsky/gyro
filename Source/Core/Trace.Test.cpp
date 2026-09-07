@@ -1,8 +1,10 @@
 #include "Core/Trace.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -327,4 +329,206 @@ GYRO_TEST(Trace, ALateMarkKeepsItsMoment)
 	GYRO_CHECK_EQ(into[1].Payload, std::uint64_t{ 12 });
 	GYRO_CHECK_EQ(into[1].Scope, TraceOutput(0));
 	GYRO_CHECK(into[1].Stamp == Monotonic::FromNanoseconds(500));
+}
+
+// The output block's arithmetic is load-bearing and the rows added beside it must not disturb it: one
+// screen's lanes are consecutive (144), so a row wedged between two of them would move every lane
+// after it and a trace taken before the change would be read against the wrong vocabulary.
+GYRO_TEST(Trace, TheRowsAddedBesideTheOutputBlockLeaveItWhereItWas)
+{
+	GYRO_CHECK_EQ(TraceGrid(0), std::uint16_t{ 1 });
+	GYRO_CHECK_EQ(TraceOutput(0), std::uint16_t{ 2 });
+	GYRO_CHECK_EQ(TraceGlass(0), static_cast<std::uint16_t>(TraceLanesPerOutput));
+	GYRO_CHECK_EQ(TraceGrid(1), static_cast<std::uint16_t>(1 + TraceLanesPerOutput));
+
+	GYRO_CHECK(TraceGlass(TracedOutputs - 1) < TraceOutputScopes);
+	GYRO_CHECK_EQ(TraceClient(0), TraceOutputScopes);
+	GYRO_CHECK(TraceClient(TracedClients - 1) < TraceInput());
+	GYRO_CHECK(TraceInput() < TraceSession());
+	GYRO_CHECK(TraceSession() < TraceLog());
+	GYRO_CHECK(TraceLog() < TraceScopes);
+}
+
+// The same claim `EmittingAllocatesNothing` makes, extended to the rows whose names are runtime
+// strings: naming is the dispatch thread's and is allowed to take the lock, but nothing about a named
+// row may follow the name into the frame path. A record still carries a number, and the name is
+// looked up on the writer thread when a snapshot is taken.
+GYRO_TEST(Trace, EmittingToANamedRowAllocatesNothing)
+{
+	const MonotonicClock clock;
+	Ring ring{ 64, clock };
+
+	const std::uint16_t client = ClaimTraceClient();
+	NameTraceScope(client, "firefox");
+	NameTraceScope(TraceSession(), "paul");
+
+	EnrollTracing(&ring.Buffer);
+
+	{
+		const FrameSection guard;
+
+		TraceMark("attached", client);
+		TraceMark("motion", TraceInput());
+		TraceMark("locked", TraceSession());
+		TraceMark("warning", TraceLog());
+	}
+
+	EnrollTracing(nullptr);
+
+	GYRO_CHECK_EQ(ring.Buffer.Written(), std::uint64_t{ 4 });
+
+	ForgetTraceScope(TraceSession());
+	ReleaseTraceClient(client);
+}
+
+// **A row should mean one thing for the whole file a person opens.** Handing the last-freed row back
+// first is what Core/SlotAllocator.h does and is right for entity storage; here it would put two
+// clients' slices on one row inside a single ring window, and a person reading down that row would
+// read one client.
+GYRO_TEST(Trace, AClientRowIsNotHandedOutAgainImmediately)
+{
+	const std::uint16_t first = ClaimTraceClient();
+
+	GYRO_REQUIRE(first != TraceThread);
+
+	ReleaseTraceClient(first);
+
+	const std::uint16_t second = ClaimTraceClient();
+
+	GYRO_REQUIRE(second != TraceThread);
+	GYRO_CHECK(second != first);
+
+	ReleaseTraceClient(second);
+}
+
+// Exhaustion is not an error. A session with more clients than the pool has rows loses the separation,
+// not the events: the extra client's records land on the row of whichever thread served it, which is
+// less legible than a row of its own and strictly better than work missing from the picture.
+GYRO_TEST(Trace, TheClientAfterTheLastRowSharesTheThreadsOwnRow)
+{
+	std::vector<std::uint16_t> claimed;
+
+	for (std::size_t index = 0; index < TracedClients; ++index)
+	{
+		const std::uint16_t row = ClaimTraceClient();
+
+		GYRO_REQUIRE(row != TraceThread);
+		GYRO_REQUIRE(std::ranges::find(claimed, row) == claimed.end());
+
+		claimed.push_back(row);
+	}
+
+	GYRO_CHECK_EQ(ClaimTraceClient(), TraceThread);
+
+	for (const std::uint16_t row : claimed)
+	{
+		ReleaseTraceClient(row);
+	}
+
+	// And the pool is a pool again once the clients that filled it have gone.
+	const std::uint16_t reclaimed = ClaimTraceClient();
+
+	GYRO_CHECK(reclaimed != TraceThread);
+
+	ReleaseTraceClient(reclaimed);
+}
+
+// A row that keeps its old name is the misreading the whole table exists to prevent: the next client
+// on it would be labelled with the last one's name, and every slice under that label would be read as
+// something it is not.
+GYRO_TEST(Trace, AReleasedRowLosesItsName)
+{
+	const std::uint16_t client = ClaimTraceClient();
+
+	GYRO_REQUIRE(client != TraceThread);
+
+	NameTraceScope(client, "firefox");
+
+	TraceName read{};
+
+	GYRO_REQUIRE(ReadTraceScopeName(client, read));
+	GYRO_CHECK_EQ(std::string_view{ read.data() }, std::string_view{ "firefox" });
+
+	ReleaseTraceClient(client);
+
+	GYRO_CHECK(!ReadTraceScopeName(client, read));
+
+	// Cycled back to the same row, which round-robin makes take the whole pool, and it is anonymous
+	// again rather than still being firefox.
+	std::vector<std::uint16_t> claimed;
+	bool reached = false;
+
+	for (std::size_t index = 0; index < TracedClients && !reached; ++index)
+	{
+		const std::uint16_t row = ClaimTraceClient();
+
+		GYRO_REQUIRE(row != TraceThread);
+
+		claimed.push_back(row);
+		reached = row == client;
+	}
+
+	GYRO_REQUIRE(reached);
+	GYRO_CHECK(!ReadTraceScopeName(client, read));
+
+	for (const std::uint16_t row : claimed)
+	{
+		ReleaseTraceClient(row);
+	}
+}
+
+// A name longer than the row holds is cut rather than dropped, because `xdg-desktop-porta` still tells
+// a person which row they are reading and an empty descriptor tells them nothing.
+GYRO_TEST(Trace, ALongNameIsTruncatedRatherThanRefused)
+{
+	const std::string overlong(TraceNameLimit + 20, 'x');
+
+	NameTraceScope(TraceLog(), overlong);
+
+	TraceName read{};
+
+	GYRO_REQUIRE(ReadTraceScopeName(TraceLog(), read));
+	GYRO_CHECK_EQ(std::string_view{ read.data() }.size(), TraceNameLimit - 1);
+
+	ForgetTraceScope(TraceLog());
+
+	GYRO_CHECK(!ReadTraceScopeName(TraceLog(), read));
+}
+
+// Naming happens on the dispatch thread and reading on the writer thread, which is the arrangement
+// this table is for. Under GYRO_SANITIZE=thread the mutex is what makes that a legal pair rather than
+// a race everybody learns to suppress — an instrument excluded from the sanitizer is one nobody runs
+// under it.
+GYRO_TEST(Trace, ARowCanBeNamedWhileTheSnapshotReadsIt)
+{
+	const std::uint16_t client = ClaimTraceClient();
+
+	GYRO_REQUIRE(client != TraceThread);
+
+	std::atomic<bool> stop{ false };
+
+	std::thread writer{ [client, &stop] {
+		TraceName read{};
+
+		while (!stop.load(std::memory_order_relaxed))
+		{
+			// Whatever comes back is one of the two whole names, never half of each.
+			if (ReadTraceScopeName(client, read))
+			{
+				const std::string_view name{ read.data() };
+
+				GYRO_REQUIRE(name == "firefox" || name == "shell");
+			}
+		}
+	} };
+
+	for (int round = 0; round < 10'000; ++round)
+	{
+		NameTraceScope(client, round % 2 == 0 ? "firefox" : "shell");
+	}
+
+	stop.store(true, std::memory_order_relaxed);
+	writer.join();
+
+	ReleaseTraceClient(client);
 }
