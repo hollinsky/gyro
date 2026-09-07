@@ -137,14 +137,23 @@ Server::~Server()
 {
 	if (m_Display != nullptr)
 	{
-		// Destroys the globals, drops every client, and closes the sockets libwayland bound itself. The
-		// event loop is the display's own and goes with it, which takes every adopted listener's event
-		// source with it too — so nothing below removes one, and the descriptors are closed by the
-		// vector going away afterwards.
+		// **The clients are ended here as a backstop rather than as the ordering**, because
+		// `wl_display_destroy` leaves every `wl_client` standing — it takes the globals, the sockets and
+		// the loop, and nothing else — so a server that was not torn down through `EndClients` would
+		// otherwise leave each of its clients holding a connection nobody closes. `ClientHost` calls that
+		// verb first, while the clipboards a client's teardown reaches into are still alive, so this walks
+		// an empty list on the path that matters; what it covers is a `Server` standing on its own, which
+		// is every test that builds one.
 		//
-		// Every client is destroyed in here, so every `OnClientGone` runs, each watch is freed and
-		// `m_Watched` empties on the way through. Clearing it again below is what covers a display that
-		// was never opened.
+		// Before the display, so that each `wl_client_destroy` still has the loop its event source is
+		// registered on.
+		wl_display_destroy_clients(m_Display);
+
+		// The event loop is the display's own and goes with it, which takes every adopted listener's
+		// event source with it too — so nothing below removes one, and the descriptors are closed by the
+		// vector going away afterwards. Every client went through `OnClientGone` above, so `m_Watched` is
+		// empty by the time it is cleared below; clearing it anyway is what covers a display that was
+		// never opened.
 		wl_display_destroy(m_Display);
 	}
 
@@ -347,6 +356,14 @@ Result<void> Server::Watch(Fd socket, std::string path, std::uint32_t uid, Sessi
 	m_Listeners.push_back(std::move(held));
 
 	return {};
+}
+
+void Server::EndClients() noexcept
+{
+	if (m_Display != nullptr)
+	{
+		wl_display_destroy_clients(m_Display);
+	}
 }
 
 void Server::Release(SessionId session) noexcept

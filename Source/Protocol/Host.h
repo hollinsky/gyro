@@ -123,11 +123,25 @@ class ClientHost final : public ISceneAuthor
 public:
 	ClientHost() = default;
 
-	// **The clipboard is torn down here rather than by a member going out of scope**, because its
-	// background fetches and pastes are event sources on the display's own loop — and the display is a
-	// member too. A source outliving its loop is a use-after-free at shutdown rather than a leak, and a
-	// destructor body runs while every member is still alive.
-	~ClientHost() override { m_Data.Close(); }
+	// **The clients go first and the clipboard second, and both are here rather than left to members
+	// going out of scope.** A destructor body runs while every member is still alive, which is the only
+	// point at which either of these is safe.
+	//
+	// Ending the clients is what closes their sockets, and it has to happen while the objects their
+	// teardown reaches into are still standing: a client holding the selection destroys its
+	// `wl_data_source` on the way out, and that tells the session clipboard its owner has gone. Left to
+	// `~Server`, the same call runs after the line below has destroyed the clipboard it would tell — a
+	// dangling read rather than the leak it replaced. This is the order `Release` has always had for a
+	// single session, and the reason it was never the shape at fault.
+	//
+	// The clipboard is torn down explicitly for a related reason: its background fetches and pastes are
+	// event sources on the display's own loop, and the display is a member too. A source outliving its
+	// loop is a use-after-free at shutdown rather than a leak.
+	~ClientHost() override
+	{
+		m_Server.EndClients();
+		m_Data.Close();
+	}
 
 	// The socket clients reach this compositor through, for the log line that tells a person where to
 	// point one.

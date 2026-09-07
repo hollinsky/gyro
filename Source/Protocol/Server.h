@@ -157,6 +157,20 @@ public:
 	// already run, and where every candidate name belongs to a compositor that is still running.
 	[[nodiscard]] Result<void> BindSystem();
 
+	// End every client on this display, whichever listener it arrived on, and leave the display itself
+	// standing.
+	//
+	// **Called by the party that outlives the clipboards rather than by `~Server`**, and that is the
+	// whole reason it is a verb of its own. A client's teardown runs its `wl_data_source`'s destructor,
+	// which tells the session clipboard the selection's owner has gone — so ending clients is only safe
+	// while the clipboard is still there to be told. The destructor cannot promise that: by then the
+	// object holding both this server and the clipboards is partway through its own teardown. Whoever
+	// owns them both calls this first, which is what makes the order a statement rather than a hope, and
+	// it is the same order `Release` has always had.
+	//
+	// Safe before `Open`, and safe twice: the second call walks a list every client has already left.
+	void EndClients() noexcept;
+
 	// Stop serving a session: close its listener, and end every client that arrived on it.
 	//
 	// **Ending the clients is the point rather than tidying up after it.** The connection to the agent

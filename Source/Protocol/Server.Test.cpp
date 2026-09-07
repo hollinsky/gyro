@@ -250,6 +250,38 @@ struct OfferedListener
 }
 } // namespace
 
+GYRO_TEST(Server, AClientsConnectionEndsWithTheServer)
+{
+	OfferedListener offered{ "gyro-adopted-9" };
+
+	GYRO_REQUIRE(offered.Socket.IsValid());
+
+	const Fd client = ConnectTo(offered.Path);
+
+	GYRO_REQUIRE(client.IsValid());
+
+	{
+		Server server;
+
+		GYRO_REQUIRE(server.Open().has_value());
+		GYRO_REQUIRE(server.Adopt(std::move(offered.Socket), ::getuid(), static_cast<SessionId>(13)).has_value());
+		GYRO_REQUIRE(server.Poll().has_value());
+		GYRO_REQUIRE(server.Clients() == 1);
+	}
+
+	// **The only side the promise is observable from**: the map goes with the server and the descriptor
+	// does not, so what says the client was actually ended is its peer reading end of file rather than
+	// blocking on a socket nobody closed. `wl_display_destroy` alone leaves every `wl_client` standing,
+	// and this came back `EAGAIN` for as long as that was the whole of the teardown.
+	//
+	// A bare `Server` is the case the destructor covers. The compositor's own path ends its clients
+	// earlier, in `~ClientHost`, because a client's teardown tells the session clipboard its selection's
+	// owner has gone and the clipboard has to still be there to be told.
+	char byte = 0;
+
+	GYRO_CHECK(::recv(client.Get(), &byte, 1, MSG_DONTWAIT) == 0);
+}
+
 GYRO_TEST(Server, AnAdoptedListenerServesClients)
 {
 	OfferedListener offered{ "gyro-adopted-0" };
