@@ -6,6 +6,7 @@
 
 #include "Testing/Test.h"
 #include "Wayland/Server/ExtForeignToplevelListV1.h"
+#include "Wayland/Server/FractionalScaleV1.h"
 #include "Wayland/Server/GyroBindingsV1.h"
 #include "Wayland/Server/LinuxDmabufV1.h"
 #include "Wayland/Server/LinuxDrmSyncobjV1.h"
@@ -41,6 +42,7 @@ constexpr std::array Advertised{
 	Wayland::Server::WpLinuxDrmSyncobjManagerV1::WireName,
 	Wayland::Server::XdgWmBase::WireName,
 	Wayland::Server::WpViewporter::WireName,
+	Wayland::Server::WpFractionalScaleManagerV1::WireName,
 	Wayland::Server::WpPresentation::WireName,
 	Wayland::Server::WlOutput::WireName,
 	Wayland::Server::WlDataDeviceManager::WireName,

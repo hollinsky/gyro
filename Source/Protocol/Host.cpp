@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <utility>
 
+#include "Protocol/Fractional.h"
 #include "Protocol/Presentation.h"
 #include "Protocol/Shell.h"
 #include "Protocol/Surface.h"
@@ -76,6 +77,20 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 		// output is a window twice as wide and twice as tall as the person asked for. [Viewporter.h]
 		// (Viewporter.h) has the shape of that, and it is Firefox.
 		return Failure(ENOMEM, "advertising wp_viewporter");
+	}
+
+	m_FractionalScaleGlobal =
+		Wayland::Server::WpFractionalScaleManagerV1::Advertise(*display, FractionalScaleVersion, m_FractionalScale);
+
+	if (m_FractionalScaleGlobal == nullptr)
+	{
+		// Fatal for `wl_compositor`'s reason, and the degradation it would otherwise be is the one
+		// decision 56 spends its length on: a client that cannot be told 1.5x is told 2 through
+		// `wl_output.scale`, draws a buffer a third too large, and has it minified onto the panel. That
+		// is legible rather than broken, which is exactly why it must not be allowed to depend on which
+		// allocation succeeded at startup — a machine where half the windows are resampled and half are
+		// not, decided at boot, is a bug report nobody can reproduce.
+		return Failure(ENOMEM, "advertising wp_fractional_scale_manager_v1");
 	}
 
 	m_PresentationGlobal = Wayland::Server::WpPresentation::Advertise(*display, PresentationVersion, m_Presentation);

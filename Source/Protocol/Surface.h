@@ -192,6 +192,7 @@ struct SurfaceState
 class ClientSurface;
 class ClientSubsurface;
 class ClientViewport;
+class ClientFractionalScale;
 
 // What a `wl_surface` becomes when something gives it one.
 //
@@ -416,6 +417,21 @@ public:
 		m_Pending.Viewport.Destination = destination;
 	}
 
+	// Claim who is told this surface's preferred scale. False where a `wp_fractional_scale_v1` already
+	// has it, which is that protocol's `fractional_scale_exists` and is raised by the caller for the
+	// viewport's reason.
+	[[nodiscard]] bool AdoptFractionalScale(ClientFractionalScale& fractional) noexcept;
+
+	// The object is going away. **Nothing is unstaged and nothing lands at the next commit**, which is
+	// where this differs from the viewport: a preferred scale is a suggestion gyro sends rather than
+	// state the client wrote, so destroying the object stops the events and changes nothing about the
+	// surface.
+	void ForgetFractionalScale(const ClientFractionalScale& fractional) noexcept;
+
+	// Who to tell this surface's preferred scale, or null for the surfaces that never asked — which is
+	// every client still on `wl_surface.set_buffer_scale`.
+	[[nodiscard]] ClientFractionalScale* FractionalScale() const noexcept { return m_FractionalScale; }
+
 	// Claim this surface's explicit synchronization. False where a `wp_linux_drm_syncobj_surface_v1`
 	// already has it, which is that protocol's `surface_exists` and is raised by the caller for the
 	// role's reason.
@@ -599,6 +615,10 @@ private:
 	// The `wp_viewport` on this surface, or null for a surface that has never had one. Not owned, and
 	// it lets go through `ForgetViewport` exactly as the role does.
 	ClientViewport* m_Viewport = nullptr;
+
+	// The `wp_fractional_scale_v1` on this surface, or null for one whose client never asked to be told
+	// a scale. Not owned, and it lets go through `ForgetFractionalScale`.
+	ClientFractionalScale* m_FractionalScale = nullptr;
 
 	// Whatever gave this surface a meaning, or null while it has none. Not owned: a role object is a
 	// protocol object of its own with its own lifetime, and it lets go through `ForgetRole`.

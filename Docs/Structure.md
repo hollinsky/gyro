@@ -1370,9 +1370,18 @@ it, both staged into the surface's own state because that is where the protocol 
 It is the global whose absence opened Firefox at twice its size — a toolkit puts its page in a
 subsurface, leaves the buffer scale at 1 on it, and carries the size in the destination alone, so a
 compositor with none reads no size and takes the buffer's own pixel count — and it is what
-`wp_fractional_scale_v1` will rest on, since `set_buffer_scale` is an integer and 1.7 is not. Two
+`wp_fractional_scale_v1` rests on, since `set_buffer_scale` is an integer and 1.7 is not. Two
 errors are deferred to the commit rather than refused at the request, because a client may legally
-describe a source rectangle before attaching the buffer it has to fit inside `Dmabuf` is
+describe a source rectangle before attaching the buffer it has to fit inside.
+
+`Fractional` is `wp_fractional_scale_v1` at version 1 and the other end of that pair: what scale gyro
+would like a window drawn at, in the 120ths `Geometry/Scale.h` has stored since before there was a
+wire to put them on. The value is the maximum density over the outputs the surface reaches — the same
+`Scene/Reach.h` mask `wl_surface.enter` is sent from, folded beside it in `Output.cpp` rather than
+walked again — and a surface that reaches none of them, which is every surface at the moment its
+client creates the object, is told the densest panel on the machine rather than 1x (200). It is the
+first global gyro serves and does not speak as a client, so the two binding lists in
+[CMakeLists.txt](../CMakeLists.txt) diverge here for the first time. `Dmabuf` is
 `zwp_linux_dmabuf_v1` at version 5 and the other way pixels arrive: descriptors rather than bytes,
 which is what makes a window something a panel can scan out at all — every buffer before it was
 copied at commit and refused by the scanout importer by design. It shipped at 3 for two months on

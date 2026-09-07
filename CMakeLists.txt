@@ -744,6 +744,11 @@ gyro_add_bindings(WaylandProtocols
 # separate because they diverge upward from here and only in one direction — fractional scale, cursor
 # shape, text input and the rest are things gyro will serve and will never ask a host for — and
 # because a protocol added to one has no business regenerating the other.
+#
+# **`fractional-scale-v1` is where that divergence stops being hypothetical.** It is the first entry
+# here with no counterpart above, and it is one-directional for the reason the paragraph predicted: a
+# nested output is a client that already knows what scale it is drawing at, because gyro computed it,
+# so asking a host to suggest one would be asking to be told something gyro is the authority on.
 gyro_add_bindings(WaylandServerProtocols
 	SERVER
 	PROTOCOLS
@@ -753,6 +758,7 @@ gyro_add_bindings(WaylandServerProtocols
 		stable/linux-dmabuf/linux-dmabuf-v1
 		staging/linux-drm-syncobj/linux-drm-syncobj-v1
 		stable/viewporter/viewporter
+		staging/fractional-scale/fractional-scale-v1
 		unstable/xdg-decoration/xdg-decoration-unstable-v1
 		staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1
 
@@ -1089,6 +1095,7 @@ gyro_add_module(Protocol DISPATCH
 		ExplicitSync.cpp
 		Floor.cpp
 		Foreign.cpp
+		Fractional.cpp
 		Host.cpp
 		Keymap.cpp
 		Output.cpp
@@ -1116,6 +1123,7 @@ gyro_add_module(Protocol DISPATCH
 		ExplicitSync.Test.cpp
 		Floor.Test.cpp
 		Foreign.Test.cpp
+		Fractional.Test.cpp
 		Host.Test.cpp
 		Positioner.Test.cpp
 		Presentation.Test.cpp

@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "Wayland/Server/ExtForeignToplevelListV1.h"
+#include "Wayland/Server/FractionalScaleV1.h"
 #include "Wayland/Server/GyroBindingsV1.h"
 #include "Wayland/Server/GyroChromeV1.h"
 #include "Wayland/Server/GyroSceneV1.h"
@@ -41,6 +42,7 @@ constexpr std::array Table{
 	std::pair{ Wayland::Server::WpLinuxDrmSyncobjManagerV1::WireName, GlobalTier::Shared },
 	std::pair{ Wayland::Server::XdgWmBase::WireName, GlobalTier::Shared },
 	std::pair{ Wayland::Server::WpViewporter::WireName, GlobalTier::Shared },
+	std::pair{ Wayland::Server::WpFractionalScaleManagerV1::WireName, GlobalTier::Shared },
 	std::pair{ Wayland::Server::WpPresentation::WireName, GlobalTier::Shared },
 
 	// Shared rather than System, and it is the one row worth arguing. A monitor is a fact an

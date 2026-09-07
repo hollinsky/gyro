@@ -1144,7 +1144,11 @@ and the interface is what lets the headless sweep place time at arbitrary phase.
   [decision 76](Decisions.md#76-cadence-authority-follows-predictability-not-foreground) confines to
   the case where a client has stated no cadence, so it is now a fallback's constant rather than the
   mechanism's — how recently a surface must have committed to disqualify its output from early
-  rendering, and decision 56's debounce before a surface's preferred scale is lowered. The timing
+  rendering, and decision 56's debounce before a surface's preferred scale is lowered — which
+  [decision 200](Decisions.md#200-a-surfaces-preferred-scale-is-the-maximum-over-the-outputs-it-reaches-and-a-surface-on-none-of-them-is-told-the-densest-panel)
+  relocates from the fractional-scale protocol to the reach comparison behind it, so that one interval
+  settles `wl_surface.leave` and the preferred scale together rather than letting the two disagree
+  about which screen a window is still on. The timing
   policy's safety margin joins them, and it is the one of these that is measurable rather than
   chosen: it covers the interval between the timer the composition root arms expiring and the first
   instruction of the record, so what sizes it is the wakeup latency of a `SCHED_FIFO` thread on an

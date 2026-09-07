@@ -9,6 +9,7 @@
 
 #include "Protocol/Buffer.h"
 #include "Protocol/ExplicitSync.h"
+#include "Protocol/Fractional.h"
 #include "Protocol/Presentation.h"
 #include "Protocol/Region.h"
 #include "Protocol/Subcompositor.h"
@@ -143,6 +144,31 @@ void ClientSurface::ForgetRole(const SurfaceRole& role) noexcept
 	}
 }
 
+bool ClientSurface::AdoptFractionalScale(ClientFractionalScale& fractional) noexcept
+{
+	if (m_FractionalScale != nullptr)
+	{
+		return false;
+	}
+
+	m_FractionalScale = &fractional;
+
+	return true;
+}
+
+void ClientSurface::ForgetFractionalScale(const ClientFractionalScale& fractional) noexcept
+{
+	if (m_FractionalScale != &fractional)
+	{
+		return;
+	}
+
+	// **Nothing follows, which is the whole difference from `ForgetViewport`.** That one has state to
+	// put back into the pending state because the client wrote it; this object never wrote anything, so
+	// letting go of it is letting go of it.
+	m_FractionalScale = nullptr;
+}
+
 bool ClientSurface::AdoptViewport(ClientViewport& viewport) noexcept
 {
 	if (m_Viewport != nullptr)
@@ -244,6 +270,16 @@ ClientSurface::~ClientSurface()
 		m_Viewport = nullptr;
 
 		viewport->ForgetSurface();
+	}
+
+	// **And the preferred scale, on the viewport's terms and for a weaker reason.** There is no request
+	// on a `wp_fractional_scale_v1` to owe an error to, so all this buys is that a client destroying its
+	// surface and then its scale object does not walk a freed pointer on the way past.
+	if (ClientFractionalScale* const fractional = m_FractionalScale; fractional != nullptr)
+	{
+		m_FractionalScale = nullptr;
+
+		fractional->ForgetSurface();
 	}
 
 	// **And the synchronization object, for the viewport's reason exactly.** A client destroying a

@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "Protocol/Context.h"
+#include "Protocol/Fractional.h"
 #include "Protocol/Shell.h"
 #include "Protocol/Subcompositor.h"
 #include "Protocol/Surface.h"
@@ -267,6 +268,17 @@ void SyncEntry(
 )
 {
 	const OutputReach reach = node.IsNull() ? 0 : Reach(scene, node);
+
+	// **Before the comparison below rather than after it**, because the two questions come apart: a
+	// preferred scale changes when somebody moves the density slider on an output this window has been
+	// sitting still on all along, which moves no reach bit at all. Sending it from inside the early
+	// return would leave that window drawing at yesterday's scale until the next time it crossed a
+	// screen boundary.
+	if (ClientFractionalScale* const fractional = surface.FractionalScale(); fractional != nullptr)
+	{
+		fractional->Send(PreferredScale(reach, scene.Outputs()));
+	}
+
 	const OutputReach entered = surface.Entered();
 
 	if (reach == entered)

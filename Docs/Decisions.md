@@ -16226,3 +16226,58 @@ carried from `Protocol` to the composition root that does not exist yet, so this
 it and login shows a beat of empty session until it lands. Said here rather than discovered later,
 because the correction matters more than the absence: the entry that reads naturally is the one that
 would have been built wrong.
+
+### 200. A surface's preferred scale is the maximum over the outputs it reaches, and a surface on none of them is told the densest panel
+
+`wp_fractional_scale_v1` is served at version 1, and almost all of it was already in the tree:
+[decision 53](#53-scale-is-an-exact-rational-in-120ths) made `Scale` speak the protocol's own 120ths
+so there is no conversion at the wire at all, [decision 56](#56-viewporter-and-fractional-scale-are-the-main-path)
+settled the policy, and [decision 171](#171-a-viewports-destination-is-a-resize-of-the-node-its-source-is-the-texels-sampled)
+landed the viewporter this is inert without. What was missing was the value and who computes it.
+
+**It is the same mask `wl_surface.enter` is sent from, folded a second way.** `Scene/Reach.h` already
+answers *which outputs does this node land on* once per surface per dispatch iteration, and the
+preferred scale is the maximum density over the bits that are set. Nothing new walks the world, and
+the two things a client is told about its screens cannot disagree about which screens those are.
+
+**A surface with an empty reach is told the densest output on the machine rather than 1x.** This is
+the case that matters most and it is the one the protocol says least about: a toolkit creates its
+`wp_fractional_scale_v1` before its first commit, when the surface is on no screen at all, and
+whatever it hears is what it sizes its first buffer at. Answering 1x there is every window on a HiDPI
+panel opening soft and popping sharp a frame later — the pop is the thing a person notices, because
+it happens while they are looking at the window they just asked for. Answering with the densest panel
+costs one buffer drawn larger than it needed to be, on a window that is about to be told the real
+number anyway. That is decision 56's own asymmetry — minification degrades gracefully and
+magnification does not — applied to the moment before there is anything to be asymmetric about, and
+it is the same cheap-side trade `Scene/Reach.h` already takes for a quad it cannot project.
+
+**The first event goes out at `get_fractional_scale` and the correction lands in the same wakeup.**
+Requests are dispatched before `SyncOutputEntry` runs, so a window opening anywhere but the densest
+panel is told twice before it is flushed once — the client never sees the guess.
+
+**Changes are symmetric, and decision 56 asks for them not to be.** That entry promises a scale
+raised the instant a window touches a denser output and lowered only after a debounce, so that
+dragging a window along a monitor boundary is not a reallocation storm inside the client. It is not
+built, and the reason is that it does not belong to this protocol: `wl_surface.enter`/`leave` has the
+same flap and costs the same reallocation — a toolkit picks its buffer scale off either — so a
+debounce here alone would leave gyro with two answers to *has this window left that screen*, and the
+fractional half would settle while the integer half was still oscillating. The place for it is the
+reach comparison in `Protocol/Output.h`, where one interval fixes both, and
+[Open.md](Open.md) carries it there.
+
+**Rejected: a debounce on the fractional scale alone, now.** Honours decision 56 literally and by the
+shortest path, and buys a compositor whose two statements about the same window disagree for the
+length of the interval. The cost of waiting is a client reallocating on a drag it would have
+reallocated on anyway today.
+
+**Rejected: publishing the scale as a column the serializer fills in.** It is a fold over a mask that
+is already computed, on the handful of surfaces a dispatch touched; a column would be per node per
+publication, which is `Scene/Reach.h`'s own argument for being a function rather than a field.
+
+**Rejected: naming the protocol in the client bindings so the round-trip test could read the event.**
+Every other protocol gyro serves is also one a nested output speaks, and this is the first that is
+not — gyro computes the scale a nested output draws at, so asking a host to suggest one would be
+asking to be told something gyro is the authority on. What that costs is that the round trip checks
+the global is advertised at the right version and by the right name, and the value itself is checked
+against the fold directly. Adding a whole client codec to read one `uint` would have made the
+bindings list diverge in the direction the build's own comment says it never should.

@@ -22,6 +22,7 @@
 #include "Protocol/ExplicitSync.h"
 #include "Protocol/Floor.h"
 #include "Protocol/Foreign.h"
+#include "Protocol/Fractional.h"
 #include "Protocol/Output.h"
 #include "Protocol/Presentation.h"
 #include "Protocol/Scene.h"
@@ -346,6 +347,12 @@ private:
 
 	ViewporterGlobal m_Viewporter{ m_Context };
 	wl_global* m_ViewporterGlobal = nullptr;
+
+	// **Beside the viewporter because it is inert without it** (171): what this global asks a client for
+	// is a buffer at 1.5x, and the only channel for saying what such a buffer means is a viewport
+	// destination.
+	FractionalScaleGlobal m_FractionalScale{ m_Context };
+	wl_global* m_FractionalScaleGlobal = nullptr;
 
 	PresentationGlobal m_Presentation{ m_Context };
 	wl_global* m_PresentationGlobal = nullptr;

@@ -504,6 +504,19 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 	// window arrives at its buffer's pixel count. See Protocol/Viewporter.h.
 	GYRO_CHECK_EQ(viewporter->Version, std::uint32_t{ 1 });
 
+	// **Named by its wire string rather than through a generated `WireName`, and that is the point of
+	// checking it here at all.** `wp_fractional_scale_manager_v1` is the first protocol gyro serves and
+	// does not speak as a client — a nested output already knows what scale it is drawing at, because
+	// gyro computed it — so there is no client binding to find it through. What that costs is that
+	// nothing else in the tree would notice the global disappearing, and a client that cannot bind it
+	// falls back to `wl_output.scale`, draws a third too many pixels on a 1.5x panel and has them
+	// minified: legible, and therefore the kind of regression that ships. The string is the contract.
+	const Registry::Global* const fractional = bound.Listener.Find("wp_fractional_scale_manager_v1");
+	GYRO_REQUIRE(fractional != nullptr);
+
+	// One, because the protocol has never been revised.
+	GYRO_CHECK_EQ(fractional->Version, std::uint32_t{ 1 });
+
 	const Registry::Global* const presentation = bound.Listener.Find(Wayland::WpPresentation::WireName);
 	GYRO_REQUIRE(presentation != nullptr);
 
@@ -512,13 +525,14 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 	// Protocol/Presentation.h.
 	GYRO_CHECK_EQ(presentation->Version, std::uint32_t{ 1 });
 
-	// Exactly nine: three a window is built out of, one a toolkit demands before it will look for
+	// Exactly ten: three a window is built out of, one a toolkit demands before it will look for
 	// them, the seat that makes the window typeable, the one that lets a client hand over a buffer a
 	// panel can scan out instead of pixels gyro has to copy, the one that lets it say how the parts of
-	// its own window are stacked, the one that lets it say how big any of them is, and the one that
-	// tells it when what it drew was actually seen — which is also the one whose absence meant gyro
-	// could not be run nested inside gyro.
-	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 9 });
+	// its own window are stacked, the one that lets it say how big any of them is, the one that tells
+	// it when what it drew was actually seen — which is also the one whose absence meant gyro could not
+	// be run nested inside gyro — and the one that asks it for a buffer at 1.5x, which is inert without
+	// the size one and is why the two are counted next to each other.
+	GYRO_CHECK_EQ(bound.Listener.Globals.size(), std::size_t{ 10 });
 }
 
 // What a GTK client actually does with the clipboard global before it has a seat, which is bind it,
