@@ -235,39 +235,15 @@ public:
 	}
 
 	// One `Advance`'s worth of reachability.
-	// Keep a texture alive past the request that gave it up, because a closing window still owes a
-	// picture of it.
 	//
-	// **The precedent is `Scene/Background.h`'s sheet and the reason is identical**: `ITextures::Retire`
-	// promises an id only to the scenes already published, and a scene that has not been walked yet is
-	// not one of them. A wallpaper being replaced holds its image until the last node fading it out has
-	// gone; a window being closed holds its buffer until the frame thread has had one scene in which to
-	// copy it into the exit atlas. Retiring it at the destroy instead would have the copy read memory
-	// the registry handed back on the very step that asked for the copy.
-	void Hold(TextureId texture)
-	{
-		if (!texture.IsNull())
-		{
-			m_Held.push_back(texture);
-		}
-	}
-
-	// Give up everything whose picture is no longer owed. Called at the top of a step, so an id whose
-	// grace ended during the previous serialisation is retired against a scene that has already stopped
-	// naming it.
-	void ReleaseHeld(const SceneStore& scene, ITextures& textures)
-	{
-		std::erase_if(m_Held, [&scene, &textures](TextureId texture) {
-			if (scene.AwaitsSnapshot(texture))
-			{
-				return false;
-			}
-
-			textures.Retire(texture);
-
-			return true;
-		});
-	}
+	// **There was a `Hold` here and it is gone**, which is worth a line because what replaced it is
+	// smaller. A destroyed surface used to park the ids a closing window still needed on this object
+	// and give them back a step later, so that a `Retire` never landed on pixels a fade was being
+	// painted from. That worked only for the one caller that remembered to route through it: the two
+	// commit paths in `Protocol/Surface.cpp` retired straight into the registry, and a client drawing
+	// at sixty frames a second reached one of them microseconds after its window began to close.
+	// `Dispatch/Textures.h` now defers the retirement of a pinned id itself, so there is nothing for a
+	// caller to remember and nothing for this to park.
 
 	class Dispatching
 	{
@@ -306,10 +282,6 @@ private:
 	ISurfaceCapture* m_Capture = nullptr;
 	PopupStack m_Popups;
 	WindowDrag m_Drag;
-
-	// Buffers a destroyed surface gave up while a closing window still owed a picture of them. Empty
-	// on every step but the one or two after somebody closed a window.
-	std::vector<TextureId> m_Held;
 
 	// The mapped toplevels. Borrowed, and each one takes itself out as it unmaps.
 	std::vector<ClientXdgSurface*> m_Windows;

@@ -6,17 +6,25 @@
 #include <array>
 #include <cerrno>
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
+#include "Core/Clock.h"
 #include "Core/Fd.h"
 #include "Core/Texture.h"
 #include "Geometry/Space.h"
+#include "Scene/Commit.h"
+#include "Scene/Entity.h"
+#include "Scene/Serializer.h"
+#include "Scene/Store.h"
 #include "Scene/Textures.h"
 #include "Seam/Allocator.h"
 #include "Seam/Importer.h"
 #include "Seam/Scanout.h"
 #include "Testing/Test.h"
+#include "World/Content.h"
 
 // The minter, checked for the two properties nothing else can check for it: that a texture is on every
 // renderer or on none, and that it is forgotten strictly after the frame thread has moved past every
@@ -258,6 +266,128 @@ GYRO_TEST(DispatchTextures, ARetiredTextureIsForgottenOnlyOnceTheWatermarkHasPas
 	// A watermark *equal* to the seal is the frame thread rendering from the snapshot without it, which
 	// is the first instant nothing in flight can be sampling those pixels.
 	textures.Reclaim(7);
+	GYRO_CHECK(!importer.Holds(*id));
+	GYRO_CHECK_EQ(textures.Live(), 0U);
+	GYRO_CHECK_EQ(textures.Retiring(), 0U);
+}
+
+// **The regression this file exists for now, and the shape that has broken twice.** A person closes a
+// window; it starts fading; the client — which was drawing at sixty frames a second right up to the
+// close, and knows nothing about any of this — lands one more commit forty microseconds later and
+// gives back the buffer the fade is being painted from. Twice that reached the registry through a
+// caller that had not been taught to ask first, and twice the window went blank the instant it was
+// closed. Nobody is asked here any more: `Retire` records the intent, the seal passes the id over
+// while a window that is leaving still names it, and the pixels stay.
+//
+// Driven at the registry and the store with no client and no GPU behind either, because the two call
+// sites that got this wrong were not the mechanism — the mechanism is these two objects and the one
+// question between them.
+GYRO_TEST(DispatchTextures, PixelsAClosingWindowIsDrawnFromOutlastTheCommitThatGivesThemBack)
+{
+	ManualClock clock;
+	SceneStore scene{ clock };
+
+	FakeImporter importer;
+	const std::array<ITextureImporter*, 1> importers{ &importer };
+	TextureRegistry textures{ importers };
+
+	textures.SetExits(scene);
+
+	const Result<TextureId> id = textures.Adopt(Extent(), Stride, Pixels, TextureAlpha::Premultiplied);
+
+	GYRO_REQUIRE(id);
+
+	ImageContent content{};
+
+	content.Texture = *id;
+
+	const std::optional<EntityId> window = scene.CreateImage({}, {}, content);
+
+	GYRO_REQUIRE(window.has_value());
+
+	// The window closes, through the verb a shell's close actually reaches — which is where the pin is
+	// taken, off the pixels the world is holding rather than off anything a surface offers.
+	{
+		SceneCommit commit{ scene, CommitAuthor::Shell };
+
+		GYRO_CHECK(commit.Retire(*window));
+	}
+
+	// The client's next commit, forty microseconds later: no question asked, no knowledge that an exit
+	// exists, just an id being handed back. This is the call that used to end the animation.
+	textures.Retire(*id);
+
+	// Sealed and reclaimed repeatedly, which is a fade's worth of published frames. `Reclaim` runs level
+	// with every sequence sealed so far, so anything the seal had stamped would already be gone.
+	for (std::uint64_t sequence = 1; sequence <= 20; ++sequence)
+	{
+		textures.Seal(sequence);
+		textures.Reclaim(sequence);
+	}
+
+	// Still on the renderer, which is the whole claim: the window has something to fade out with.
+	GYRO_CHECK(importer.Holds(*id));
+	GYRO_CHECK_EQ(textures.Live(), 1U);
+
+	// And still retiring rather than live — the intent was recorded on the first call and nothing since
+	// has had to repeat it.
+	GYRO_CHECK_EQ(textures.Retiring(), 1U);
+}
+
+// The other half, and the one that would otherwise cost a texture per window a person ever closed. The
+// hold has no release call of its own: the sweep that frees a finished exit drops the pair, and the
+// next seal finds no grace and stamps the id like any other.
+GYRO_TEST(DispatchTextures, TheHoldEndsWithTheExitAndTheIdGoesBack)
+{
+	ManualClock clock;
+	SceneStore scene{ clock };
+
+	FakeImporter importer;
+	const std::array<ITextureImporter*, 1> importers{ &importer };
+	TextureRegistry textures{ importers };
+
+	textures.SetExits(scene);
+
+	const Result<TextureId> id = textures.Adopt(Extent(), Stride, Pixels, TextureAlpha::Premultiplied);
+
+	GYRO_REQUIRE(id);
+
+	ImageContent content{};
+
+	content.Texture = *id;
+
+	const std::optional<EntityId> window = scene.CreateImage({}, {}, content);
+
+	GYRO_REQUIRE(window.has_value());
+
+	{
+		SceneCommit commit{ scene, CommitAuthor::Shell };
+
+		GYRO_CHECK(commit.Retire(*window));
+	}
+
+	textures.Retire(*id);
+	textures.Seal(7);
+	textures.Reclaim(7);
+
+	GYRO_CHECK(importer.Holds(*id));
+
+	// Two serialisations, which is what ending an exit takes: the first finds the subtree settled and
+	// frees it, the second finds the root gone and forgets the grace. An uncatalogued close settles at
+	// once, so this is the same two passes a real fade takes at the end of its spring.
+	SceneSerializer serializer;
+
+	serializer.Serialize(scene);
+	serializer.Serialize(scene);
+
+	// Stamped now and not before, and the ordinary watermark rule takes it from here — a watermark short
+	// of the stamp is still the frame thread possibly reading those pixels.
+	textures.Seal(9);
+
+	textures.Reclaim(8);
+	GYRO_CHECK(importer.Holds(*id));
+
+	textures.Reclaim(9);
 	GYRO_CHECK(!importer.Holds(*id));
 	GYRO_CHECK_EQ(textures.Live(), 0U);
 	GYRO_CHECK_EQ(textures.Retiring(), 0U);

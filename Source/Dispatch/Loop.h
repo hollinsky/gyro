@@ -144,6 +144,14 @@ public:
 		// space afterwards would have built the first set of atlases with nowhere to put pixels — and
 		// every window closing until the next hotplug would cut instead of fading.
 		m_Store.SetStorage(m_Textures);
+
+		// **The other direction of the same pair, and the reason a closing window still has pixels.**
+		// The store knows which buffers a window that is leaving is being drawn from; the registry is
+		// where every party that wants to give a buffer back arrives. Introducing them here is what
+		// lets a client go on committing at sixty frames a second while one of its windows fades out
+		// without the fade going blank — and it means no caller of `Retire` has to know exits exist.
+		m_Textures.SetExits(m_Store);
+
 		m_Store.SetOutputs(outputs);
 
 		// **Before the author and not after, which is the whole of what makes it a background.** The

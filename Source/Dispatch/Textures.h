@@ -13,7 +13,9 @@
 #include "Core/Result.h"
 #include "Core/SlotAllocator.h"
 #include "Core/Texture.h"
+#include "Core/Trace.h"
 #include "Geometry/Space.h"
+#include "Scene/Store.h"
 #include "Scene/Textures.h"
 #include "Seam/Allocator.h"
 #include "Seam/Importer.h"
@@ -322,6 +324,15 @@ public:
 	// cover: a renderer keys its table on the whole id, so handing the index back early would put the
 	// old entry and its replacement in that table at once, against a bound `Blit::MaxImages` is only
 	// eight wide.
+	//
+	// **A window that is leaving outranks whoever is giving the id up, and nothing above here has to
+	// know that.** A client redraws at sixty frames a second right up to the moment it closes, so the
+	// commit that lands microseconds after a window starts fading hands back the very buffer the fade
+	// is being painted from — and it hands it back through this verb, in good faith, because from a
+	// surface's own side those pixels really are finished with. Every caller that had to ask first got
+	// asked at one call site and forgotten at two others, and each time the window went blank the
+	// instant it was closed. So the question is asked here, once, where every path already passes:
+	// the intent is recorded and the *stamp* is what waits.
 	void Retire(TextureId id) noexcept override
 	{
 		Held* const held = Find(id);
@@ -331,8 +342,29 @@ public:
 			return;
 		}
 
+		// The counterpart to `Scene/Store.h`'s `exit pixels pinned`, and the mark that says the
+		// override actually fired: a close in which this never appears is one where the pixels were
+		// given up by somebody the pin did not cover.
+		if (!held->Retired && Pinned(id))
+		{
+			TraceMark("exit pixels kept", TraceThread, TraceTag(id.Index));
+		}
+
 		held->Retired = true;
 	}
+
+	// Whose graces outrank a retirement. Borrowed, and null everywhere there is no world — a gym
+	// harness, a test, a renderer probe — where nothing is ever pinned and this reads exactly as it did
+	// before.
+	//
+	// **A pointer to the store rather than a pin count pushed into here**, which is the difference
+	// between a hold that cannot leak and one that can. Pushed pins need an unpin at every place a
+	// grace can end, and a grace ends where a subtree is swept — the one event this object is furthest
+	// from. Asked instead, the release needs no call at all: the step after `ExpireExitGrace` drops the
+	// pair, `Seal` below finds no grace and stamps the id, and the ordinary watermark takes it. A
+	// forgotten edge is then a texture freed a frame late rather than one held for the life of the
+	// process.
+	void SetExits(const SceneStore& scene) noexcept { m_Exits = &scene; }
 
 	// Stamp everything retired since the last call with the sequence about to be published.
 	//
@@ -345,11 +377,17 @@ public:
 	// A publish the ring refuses does not disturb this: the outbox supersedes the pending slot under
 	// the same unconsumed sequence, so the number stays the one that will eventually carry the scene
 	// without these textures in it.
+	//
+	// **A pinned id is passed over, because the claim the stamp makes is false for it.** A stamp says
+	// *no snapshot from here on names this texture*, and a window that is fading out names it in every
+	// snapshot until the fade ends — that is the whole of what the pin means. Skipping the stamp is
+	// therefore not a delay bolted on; it is the sentence staying true. The id is stamped on the first
+	// seal after the exit ends, and `Reclaim` and the watermark are untouched.
 	void Seal(std::uint64_t sequence) noexcept
 	{
 		for (Held& held : m_Held)
 		{
-			if (held.Retired && held.Stamp == 0)
+			if (held.Retired && held.Stamp == 0 && !Pinned(held.Id))
 			{
 				held.Stamp = sequence;
 			}
@@ -670,6 +708,9 @@ private:
 		return {};
 	}
 
+	// Whether a window that is leaving is still drawing from this id.
+	[[nodiscard]] bool Pinned(TextureId id) const noexcept { return m_Exits != nullptr && m_Exits->AwaitsSnapshot(id); }
+
 	[[nodiscard]] Held* Find(TextureId id) noexcept
 	{
 		const std::optional<std::uint32_t> index = m_Ids.IndexOf(id);
@@ -693,6 +734,11 @@ private:
 	// Where an authored image is put so that a display engine can read it. Null on a machine with no
 	// provider that maps what it allocates, which is every one of them until `Promote` finds otherwise.
 	IDmabufAllocator* m_Allocator = nullptr;
+
+	// The world's record of which pixels a closing window is still being drawn from, or null where
+	// there is no world. Borrowed and outlived by nothing here: `Dispatch/Loop.h` owns both and
+	// introduces them.
+	const SceneStore* m_Exits = nullptr;
 
 	SlotAllocator<TextureTag> m_Ids;
 

@@ -268,41 +268,22 @@ ClientSurface::~ClientSurface()
 	{
 		// **The exit that is still drawing from these pixels decides whether they go, and the surface
 		// does not.** Decision 20's copy of a leaving window's last frame is taken on the frame thread,
-		// so the pixels have to outlive the destroy request by at least the frame that copies them —
-		// and this used to be the place that arranged it, by offering the id it was holding and letting
-		// `Scene/Store.h` look for a retiring subtree that drew from it. It never matched once. A
-		// surface mints a new id per committed frame and rotates two, so the id offered here was the
-		// commit after the one the world was drawing; the pixels went back on the spot, the frame
-		// thread's watermark reclaimed them, and every client window vanished at the instant it was
-		// asked to start fading.
-		//
-		// `Scene/Commit.h` pins the right buffers when the retirement is observed, so all this has to do
-		// is ask. Held where an exit still wants the id and given up by `HostContext` on the step after
-		// the last scene that named it; retired here where nothing does, which is the ordinary case and
-		// stays a step shorter.
-		const SceneStore* const scene = m_Context->Store();
-
-		const auto surrender = [this, scene, textures](TextureId content) {
-			if (scene != nullptr && scene->AwaitsSnapshot(content))
-			{
-				m_Context->Hold(content);
-			}
-			else
-			{
-				textures->Retire(content);
-			}
-		};
-
-		surrender(m_Current.Content);
+		// so the pixels have to outlive the destroy request by at least the frame that copies them.
+		// This used to ask first — is a closing window still drawing from this id, and hold it if so —
+		// which was correct here and absent from the two commit paths above, where a client redrawing
+		// right up to the close hands back the same buffers microseconds later. So it is asked once, in
+		// `Dispatch/Textures.h`, where every giving-up passes: retiring a pinned id records the intent
+		// and the pixels stay until the fade ends. Nothing here needs the world any more.
+		textures->Retire(m_Current.Content);
 
 		// **The id a cache is holding, which is a second live name rather than the same one.** A
 		// synchronized subsurface that committed and was never applied has adopted pixels the world has
 		// not seen, and nobody else will ever give that name up. Asked about separately rather than
-		// assumed unwanted: the applied and the cached buffer are the same id often enough that a
-		// blind retire here would take back what the line above just held.
+		// assumed unwanted: the applied and the cached buffer are the same id often enough that
+		// retiring blind would name the same texture twice in one breath.
 		if (m_Pending.Content != m_Current.Content)
 		{
-			surrender(m_Pending.Content);
+			textures->Retire(m_Pending.Content);
 		}
 	}
 

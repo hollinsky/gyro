@@ -162,7 +162,15 @@ public:
 		}
 	}
 
-	void Retire(TextureId id) noexcept override { Retired += id.IsNull() ? 0U : 1U; }
+	void Retire(TextureId id) noexcept override
+	{
+		Retired += id.IsNull() ? 0U : 1U;
+
+		if (!id.IsNull())
+		{
+			LastRetired = id;
+		}
+	}
 
 	std::vector<TextureFormat> Advertised;
 	std::vector<ITextureRelease*> Owed;
@@ -170,6 +178,11 @@ public:
 	std::size_t Planes = 0;
 	std::uint32_t Adopted = 0;
 	std::uint32_t Retired = 0;
+
+	// The last id given up, so a test can ask the *store* whether a window that is leaving still wants
+	// it. That is where the answer lives now: `Dispatch/Textures.h` defers the stamp on a pinned id, and
+	// this stand-in has no watermark to defer against.
+	TextureId LastRetired{};
 	PixelSize<BufferSpace> Size{};
 	std::uint32_t Stride = 0;
 	TextureAlpha Alpha = TextureAlpha::Premultiplied;
@@ -2549,9 +2562,14 @@ GYRO_TEST(ProtocolRoundTrip, AWindowWhoseClientTookItsPixelsStillPlaysItsWholeEx
 	GYRO_CHECK(window->Retiring);
 	GYRO_CHECK(!window->Opacity.IsAtRest());
 
-	// **And the buffer is still the client's own**, because that copy has to read it. Retiring the id
-	// on the destroy would hand it back on the very step that asked for the picture.
-	GYRO_CHECK_EQ(pair.Textures.Retired, std::uint32_t{ 0 });
+	// **The surface gave its id up, and the world is still holding those pixels** — which is the
+	// division that replaced a surface asking permission. A client redraws right up to the close, so the
+	// commit that lands microseconds after a window starts fading hands the same buffer back through a
+	// path that has no idea an exit is running; there is no useful place to ask. So the surface says
+	// *finished with this* and the store says *still drawing from it*, and `Dispatch/Textures.h` takes
+	// the second answer: the id is marked and the stamp that would free the memory waits.
+	GYRO_CHECK_EQ(pair.Textures.Retired, std::uint32_t{ 1 });
+	GYRO_CHECK(pair.Store.AwaitsSnapshot(pair.Textures.LastRetired));
 
 	SceneSerializer serializer;
 
@@ -2563,7 +2581,10 @@ GYRO_TEST(ProtocolRoundTrip, AWindowWhoseClientTookItsPixelsStillPlaysItsWholeEx
 
 		GYRO_REQUIRE(WindowNode(pair.Store) != nullptr);
 		GYRO_CHECK(WindowNode(pair.Store)->Retiring);
-		GYRO_CHECK_EQ(pair.Textures.Retired, std::uint32_t{ 0 });
+
+		// Every frame of the fade, the pixels are still spoken for. This is the check that would have
+		// caught the bug at either of the two call sites that broke it.
+		GYRO_CHECK(pair.Store.AwaitsSnapshot(pair.Textures.LastRetired));
 
 		pair.Clock.Advance(std::chrono::milliseconds{ 16 });
 	}
@@ -2576,13 +2597,16 @@ GYRO_TEST(ProtocolRoundTrip, AWindowWhoseClientTookItsPixelsStillPlaysItsWholeEx
 
 	GYRO_CHECK(WindowNode(pair.Store) == nullptr);
 
-	// **And now the pixels go back.** `HostContext` gives up what it was holding on the first step
-	// after the scene that stopped naming it.
+	// **And now the pixels go back**, because the exit is over and nothing names them any more. There
+	// is no further request and no second retire: the store simply stops answering yes, and the next
+	// seal stamps an id that has been marked retired since the client went away. A hold with no release
+	// call is a hold that cannot be leaked by forgetting to make one.
 	static_cast<void>(serializer.Serialize(pair.Store));
 
 	pair.Turn();
 
 	GYRO_CHECK_EQ(pair.Textures.Retired, std::uint32_t{ 1 });
+	GYRO_CHECK(!pair.Store.AwaitsSnapshot(pair.Textures.LastRetired));
 }
 
 // The whole of what a person does with a keyboard, in the order it happens: bind a seat, be told

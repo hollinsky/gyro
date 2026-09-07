@@ -15955,6 +15955,45 @@ the application breaking. The walk now draws from the picture where there is one
 where there is not, and the renderer confirms a rectangle only when something was actually drawn into
 it. A wrong answer about pixels is then a slower exit instead of an invisible one.
 
+#### The pin outranks `Retire` in the registry, because no call site can be relied on to ask
+
+*(2026-09-06, one round later, from the same bug measured again on a panel.)* Pinning the right
+pixels was necessary and not sufficient: the pin was consulted at the one call site that had been
+taught about it — a `wl_surface` being destroyed — and bypassed by the two that had not. A client
+draws at sixty frames a second right up to the moment it closes, rotating four buffers, and the
+commit that lands forty microseconds after a window starts fading arrives at
+`ClientSurface::TakeContent`, which retires the id it replaced because from a surface's own side
+those pixels really are finished with. `ApplyCached` does the same. The retirement was stamped, the
+watermark passed it, the image was forgotten, and **a person saw a window blink out of existence
+instead of shrinking away — the same symptom as before, from a different line.**
+
+**So the question is asked once, in `Dispatch/Textures.h`, where every party that gives an id up
+already passes.** A stamp means *no snapshot from here on names this texture*, and that sentence is
+simply false for a texture a fading window is being painted from. `Retire` records the intent and
+`Seal` passes a pinned id over; the id is stamped on the first seal after the exit ends, and
+`Reclaim` and the watermark are untouched. What changed is *when the stamp is taken* rather than what
+it means.
+
+**Rejected, and shipped twice: a guard at each call site.** It is the arrangement that failed here,
+and the reason it failed is structural rather than an oversight — the number of places a texture can
+be given up is the number of places a client's buffer can stop being current, and every new one is a
+correct-looking two-line retire written by somebody with no reason to know exits exist. A rule that
+has to be remembered at *n* sites is a rule that holds at *n − 1*.
+
+**Rejected: the store pushing a pin count into the registry.** Symmetrical and leakier. A pushed pin
+needs an unpin wherever a grace can end, which is the subtree sweep — the event the registry is
+furthest from — and a missed unpin holds a client's buffer for the life of the process, one per
+window a person ever closed. Asked instead, the release needs no call at all: `ExpireExitGrace` drops
+the pair, the next seal finds no grace, and the ordinary watermark takes the texture. The failure
+mode of a forgotten edge is then a buffer freed one frame late.
+
+**What this let go of.** `HostContext::Hold`/`ReleaseHeld` parked the ids a destroyed surface could
+not yet give up and handed them back a step later; it was the per-call-site guard's other half and is
+gone, along with the destructor's question. `Protocol/Surface.h` now retires unconditionally, which
+is the honest thing for it to say. `Retire` marks a pinned id as `exit pixels kept`, beside the
+store's `exit pixels pinned` — a close in which the second appears without the first is a give-up the
+pin did not cover.
+
 #### Every instrument on the path measured its own step, so all four were green over a blank screen
 
 *(2026-09-06, from the same bug.)* The rectangle was reserved — true. The picture was recorded and
