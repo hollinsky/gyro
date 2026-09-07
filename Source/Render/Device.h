@@ -188,6 +188,25 @@ struct DeviceDescription
 	// which is the figure a person compares against what the part is supposed to do.
 	bool CountsPipelineStatistics = false;
 
+	// Whether the driver will say how much of the GPU's memory this process is holding and how much it
+	// is currently willing to hand over.
+	//
+	// **`VK_EXT_memory_budget`, and it is the only thing in the trace that can explain a slow frame the
+	// timestamps make look like slow hardware.** A composite whose textures have been paged out draws
+	// exactly the same picture, in exactly the same passes, at exactly the same clock, and takes twice
+	// as long — and on an integrated part, where the budget is a share of the same memory every other
+	// process on the machine is competing for, that happens because somebody opened a browser rather
+	// than because anything gyro did changed. Without the pair a reader has a slow frame and no
+	// candidate; with it the collapse in headroom is visible on the row beside the span.
+	//
+	// **Listed is the capability, the way `StatesModifiers` is rather than the way `ExportsTimeline`
+	// is.** There is no feature to enable and no device creation to fail — what the extension adds is a
+	// structure to chain onto a query gyro already makes — so decision 108's *ask the query* has nowhere
+	// to bite in advance. What answers it instead is the reading: `ReadMemory` reports an invalid
+	// `GpuMemory` where a listed extension comes back with a zero budget, and the counters are simply
+	// absent, which is the same honest nothing Render/GpuClock.h reports for a clock it cannot read.
+	bool ReportsMemoryBudget = false;
+
 	// The primary DRM node's minor number, or -1 where `VK_EXT_physical_device_drm` did not answer.
 	//
 	// **Not a Vulkan concept — it is the bridge from the device Vulkan chose to the sysfs entry the
@@ -294,6 +313,84 @@ struct GpuCalibration
 
 	[[nodiscard]] constexpr bool IsValid() const noexcept { return Host != Instant{}; }
 };
+
+// What the GPU's memory looks like from inside this process: how much of the device-local heap gyro
+// is holding, and how much the driver is currently willing to let it hold.
+//
+// **Two numbers rather than one, because either alone is unreadable.** Usage on its own does not say
+// whether it is a lot — a gigabyte is nothing on a discrete part and everything on a laptop sharing
+// memory with a browser — and a budget on its own does not say how much of it is spoken for. What a
+// person reading a stutter actually asks is *how close was this to being paged out*, and that is the
+// distance between them.
+//
+// **A zero budget is the absence of an answer rather than a heap with nothing in it.** No driver
+// reports a device-local heap it will lend nothing of, so zero is what an extension that is listed and
+// unanswered looks like, and `IsValid` is the one place that reading is made.
+struct GpuMemory
+{
+	std::uint64_t UsageBytes = 0;
+	std::uint64_t BudgetBytes = 0;
+
+	[[nodiscard]] constexpr bool IsValid() const noexcept { return BudgetBytes != 0; }
+
+	// What is left before the driver starts taking memory back, and it is signed on purpose: a process
+	// is permitted to be over its budget, and that is precisely the state a reader is hunting for. An
+	// unsigned difference would wrap it into sixteen exabytes of headroom on the one frame the number
+	// exists to explain.
+	[[nodiscard]] constexpr std::int64_t HeadroomBytes() const noexcept
+	{
+		return static_cast<std::int64_t>(BudgetBytes) - static_cast<std::int64_t>(UsageBytes);
+	}
+};
+
+// Bytes as a counter row reads them. A trace carries an integer and Perfetto draws it without a unit,
+// so a heap in bytes is eleven digits of axis nobody can compare two of by eye; mebibytes is the
+// granularity a texture atlas moves in and the one a person already thinks in. Truncating rather than
+// rounding, in both directions from zero, because the figure is a scale rather than a total.
+[[nodiscard]] constexpr std::int64_t Mebibytes(std::int64_t bytes) noexcept
+{
+	return bytes / (std::int64_t{ 1 } << 20);
+}
+
+// The heap a composite is drawn out of, picked from everything the device reports.
+//
+// **The largest device-local heap, and reporting every heap was the alternative.** A machine has two
+// to four of them — device-local, host-visible, and on a discrete part a small host-visible window into
+// device memory — and a row per heap is four rows a reader has to know the memory model to interpret.
+// Only one of them can evict a texture mid-composite, and it is the big device-local one on every part
+// gyro runs on: integrated devices report a single device-local heap that is system memory, and
+// discrete ones report the board's memory as the largest. Where nothing is device-local — a software
+// device, which has no budget to be over — this reports the invalid reading rather than falling back to
+// a host heap, because a heap the compositor cannot be evicted from answers a question nobody asked.
+[[nodiscard]] constexpr GpuMemory DeviceLocalMemory(
+	const VkPhysicalDeviceMemoryProperties& heaps,
+	const VkPhysicalDeviceMemoryBudgetPropertiesEXT& budget
+) noexcept
+{
+	GpuMemory reading;
+	VkDeviceSize largest = 0;
+
+	const std::uint32_t count =
+		heaps.memoryHeapCount < VK_MAX_MEMORY_HEAPS ? heaps.memoryHeapCount : std::uint32_t{ VK_MAX_MEMORY_HEAPS };
+
+	for (std::uint32_t index = 0; index < count; ++index)
+	{
+		if ((heaps.memoryHeaps[index].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0)
+		{
+			continue;
+		}
+
+		if (heaps.memoryHeaps[index].size <= largest)
+		{
+			continue;
+		}
+
+		largest = heaps.memoryHeaps[index].size;
+		reading = GpuMemory{ .UsageBytes = budget.heapUsage[index], .BudgetBytes = budget.heapBudget[index] };
+	}
+
+	return reading;
+}
 
 // The same conversion with the anchor as one argument, which is how every caller has it.
 [[nodiscard]] constexpr Instant
@@ -698,6 +795,16 @@ public:
 	// because an unreadable clock is a zero rather than an error a caller acts on.
 	[[nodiscard]] GpuClock::Reading ReadClock() noexcept { return m_GpuClock.Read(); }
 
+	// What this process is holding of the GPU's memory and what it is currently allowed to hold, or an
+	// invalid reading where the device does not report it.
+	//
+	// **On the frame thread, and asked only while a trace ring is armed** — the same rule `Calibrate`
+	// is under and for the same reason. Nothing schedules on this: Frame/Budget.h admits a composite on
+	// what it cost and what the clock was, and a `vkGetPhysicalDeviceMemoryProperties2` every frame on a
+	// machine nobody is looking at is a driver call bought for nothing. It allocates nothing and takes
+	// no lock, which is what makes it callable from inside Core/FrameSection.h's guard at all.
+	[[nodiscard]] GpuMemory ReadMemory() const noexcept;
+
 	// A timeline semaphore this device signals, exported as a DRM syncobj descriptor.
 	//
 	// **What it is for is the half of explicit sync the renderer does not already cover.** The acquire
@@ -799,6 +906,13 @@ static_assert(!DeviceDescription{}.ExportsTimeline);
 static_assert(!DeviceDescription{}.CopiesFromHost);
 static_assert(!DeviceDescription{}.CalibratesTimestamps);
 static_assert(!DeviceDescription{}.CountsPipelineStatistics);
+static_assert(!DeviceDescription{}.ReportsMemoryBudget);
+
+// A reading nobody filled in claims no budget, so the renderer emits no memory counters rather than a
+// pair of zeros a reader would have to recognise as *not measured* separately from *nothing left*.
+static_assert(!GpuMemory{}.IsValid());
+static_assert(GpuMemory{ .UsageBytes = 3, .BudgetBytes = 1 }.HeadroomBytes() == -2, "Over budget is a negative");
+static_assert(Mebibytes(-(std::int64_t{ 3 } << 20)) == -3);
 static_assert(!DeviceDescription{}.MeasuresGpuTime(), "A device nobody has described measures nothing");
 static_assert(DeviceDescription{}.TimestampSpan(0, 1000) == Duration::zero());
 

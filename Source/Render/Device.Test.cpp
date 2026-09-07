@@ -332,3 +332,150 @@ GYRO_TEST(Device, AnExportedTimelineMatchesWhatTheHardwareDeviceClaims)
 {
 	CheckTheTimelineMatchesTheClaim("AnExportedTimelineMatchesWhatTheHardwareDeviceClaims", DeviceClass::Hardware);
 }
+
+// The heap selection, which is the whole of what turns `VK_EXT_memory_budget` into two counters and
+// is the only part of it a machine with no GPU can exercise. The structures are filled by hand
+// because that is the honest boundary: everything below this is the driver's answer, and everything
+// above it is arithmetic that must not depend on which driver gave it.
+namespace
+{
+struct Heaps
+{
+	VkPhysicalDeviceMemoryProperties Properties{};
+	VkPhysicalDeviceMemoryBudgetPropertiesEXT Budget{};
+
+	void Add(VkDeviceSize size, VkMemoryHeapFlags flags, VkDeviceSize usage, VkDeviceSize budget) noexcept
+	{
+		const std::uint32_t index = Properties.memoryHeapCount;
+		Properties.memoryHeaps[index] = VkMemoryHeap{ .size = size, .flags = flags };
+		Budget.heapUsage[index] = usage;
+		Budget.heapBudget[index] = budget;
+		++Properties.memoryHeapCount;
+	}
+};
+
+constexpr VkDeviceSize Mib = VkDeviceSize{ 1 } << 20;
+} // namespace
+
+// The ordinary integrated shape: one device-local heap that is system memory, and a host-visible
+// window beside it that no composite is ever evicted from.
+GYRO_TEST(Device, TheMemoryReadingIsTheLargestDeviceLocalHeap)
+{
+	Heaps heaps;
+	heaps.Add(256 * Mib, 0, 200 * Mib, 250 * Mib);
+	heaps.Add(8192 * Mib, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT, 1400 * Mib, 1490 * Mib);
+	heaps.Add(512 * Mib, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT, 4 * Mib, 500 * Mib);
+
+	const GpuMemory reading = DeviceLocalMemory(heaps.Properties, heaps.Budget);
+
+	GYRO_REQUIRE(reading.IsValid());
+	GYRO_CHECK_EQ(reading.UsageBytes, 1400 * Mib);
+	GYRO_CHECK_EQ(reading.BudgetBytes, 1490 * Mib);
+
+	// The figure the counters actually carry: what is left before the driver starts taking memory
+	// back, which is the reading a person hunting a stutter is after.
+	GYRO_CHECK_EQ(Mebibytes(reading.HeadroomBytes()), std::int64_t{ 90 });
+	GYRO_CHECK_EQ(Mebibytes(static_cast<std::int64_t>(reading.UsageBytes)), std::int64_t{ 1400 });
+}
+
+// A process over its budget is the one frame this pair exists to explain, and an unsigned difference
+// would draw it as sixteen exabytes of headroom instead of the eviction it is.
+GYRO_TEST(Device, MemoryHeadroomGoesNegativeOverBudget)
+{
+	Heaps heaps;
+	heaps.Add(8192 * Mib, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT, 1600 * Mib, 1490 * Mib);
+
+	const GpuMemory reading = DeviceLocalMemory(heaps.Properties, heaps.Budget);
+
+	GYRO_REQUIRE(reading.IsValid());
+	GYRO_CHECK_EQ(Mebibytes(reading.HeadroomBytes()), std::int64_t{ -110 });
+}
+
+// A device that reports no device-local heap at all — a software one, which cannot be evicted from —
+// loses the counters rather than falling back to a host heap and answering a question nobody asked.
+GYRO_TEST(Device, AHostOnlyDeviceReportsNoMemoryReading)
+{
+	Heaps heaps;
+	heaps.Add(8192 * Mib, 0, 1400 * Mib, 1490 * Mib);
+
+	GYRO_CHECK(!DeviceLocalMemory(heaps.Properties, heaps.Budget).IsValid());
+}
+
+// The other absence, and the one the extension check produces: a driver that lists
+// `VK_EXT_memory_budget` and then answers with a zero budget is treated as not answering, because a
+// heap the driver will lend nothing of is not a reading a reader could act on.
+GYRO_TEST(Device, AnUnansweredBudgetIsNoMemoryReading)
+{
+	Heaps heaps;
+	heaps.Add(8192 * Mib, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT, 0, 0);
+
+	GYRO_CHECK(!DeviceLocalMemory(heaps.Properties, heaps.Budget).IsValid());
+}
+
+// And the branch above it: a device that never reported the extension answers nothing at all, with no
+// query made. An invalid device is the same path — `ReadMemory` is called from the frame thread and
+// must be safe on a renderer that failed to open.
+GYRO_TEST(Device, AnUnsupportedDeviceReadsNoMemory)
+{
+	const VulkanDevice absent;
+
+	GYRO_CHECK(!absent.Description().ReportsMemoryBudget);
+	GYRO_CHECK(!absent.ReadMemory().IsValid());
+}
+
+// What the machine this runs on actually says, asserted only against what it claimed. A device that
+// reports the extension has to give a budget the usage fits inside; one that does not must give
+// nothing rather than a pair of zeros the trace would draw as a flat line.
+//
+// **Both classes, for `CheckTheTimelineMatchesTheClaim`'s reason and a sharper one.** What the two
+// drivers put in `heapUsage` is not the same quantity — lavapipe reports the machine's memory in use
+// and anv reports what this process has allocated — and the counters are only worth reading on the
+// part that can actually evict a texture, so the hardware run is the one that matters and the
+// software run is what proves the path is safe where it does not.
+namespace
+{
+void CheckTheMemoryReadingMatchesTheClaim(std::string_view test, DeviceClass wanted)
+{
+	std::optional<VulkanDevice> device = Available(test, wanted);
+
+	if (!device)
+	{
+		return;
+	}
+
+	const GpuMemory reading = device->ReadMemory();
+
+	std::println(
+		"  {}: memory budget reported {}, usage {} MiB, headroom {} MiB",
+		device->Description().DeviceName(),
+		device->Description().ReportsMemoryBudget,
+		Mebibytes(static_cast<std::int64_t>(reading.UsageBytes)),
+		Mebibytes(reading.HeadroomBytes())
+	);
+
+	if (!device->Description().ReportsMemoryBudget)
+	{
+		GYRO_CHECK(!reading.IsValid());
+
+		return;
+	}
+
+	// A listed extension is still allowed to answer nothing, which is the reading rather than a
+	// failure — see `DeviceDescription::ReportsMemoryBudget`. What is not allowed is a budget with no
+	// heap behind it.
+	if (reading.IsValid())
+	{
+		GYRO_CHECK(reading.BudgetBytes > 0);
+	}
+}
+} // namespace
+
+GYRO_TEST(Device, TheMemoryReadingMatchesWhatTheSoftwareDeviceClaims)
+{
+	CheckTheMemoryReadingMatchesTheClaim("TheMemoryReadingMatchesWhatTheSoftwareDeviceClaims", DeviceClass::Software);
+}
+
+GYRO_TEST(Device, TheMemoryReadingMatchesWhatTheHardwareDeviceClaims)
+{
+	CheckTheMemoryReadingMatchesTheClaim("TheMemoryReadingMatchesWhatTheHardwareDeviceClaims", DeviceClass::Hardware);
+}

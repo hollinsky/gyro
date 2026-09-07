@@ -279,6 +279,17 @@ private:
 		std::uint32_t ClockMhz = 0;
 		std::uint32_t RequestedMhz = 0;
 
+		// What the GPU's memory looked like when this submission was recorded, and invalid where the
+		// device does not report it or the frame was not being traced.
+		//
+		// **Read beside the submission for the same reason the clock pair is, and it matters more
+		// here.** The figure this exists to explain is a composite that was slow because its textures
+		// had been paged out, and by the time the timestamps resolve two frames later the pressure that
+		// evicted them has usually gone — a reading taken at collection would show a comfortable
+		// headroom against the one span it was supposed to account for. The eviction and the sample
+		// have to be near each other or the pair says nothing.
+		GpuMemory Memory{};
+
 		// Which GPU track this submission's spans belong on, copied off the request for the same
 		// reason as the two fields above: by the time the timestamps resolve, this renderer has drawn
 		// for whichever outputs it serves and cannot be asked which one this was.
@@ -309,6 +320,16 @@ private:
 		std::uint32_t Stamps = 0;
 
 		std::array<const char*, MaxStamps> Names{};
+
+		// How many fragment counts the submission actually wrote, one per span, and zero on a frame that
+		// was not being traced or a device that does not count.
+		//
+		// **It is what keeps a stale count off a fresh frame.** A ring armed between a recording and its
+		// collection would otherwise find the previous traced frame's results still sitting in a pool
+		// this submission never reset, and `vkGetQueryPoolResults` would answer `VK_SUCCESS` with them —
+		// a decomposition of some earlier frame, drawn onto this one, with nothing in the trace to say
+		// so.
+		std::uint32_t Segments = 0;
 	};
 
 	// Where the marks a recording has written so far are counted.
@@ -488,8 +509,10 @@ private:
 	// answer nothing there rather than branching on a capability at every use.
 	VkQueryPool m_Queries = VK_NULL_HANDLE;
 
-	// One pipeline-statistics query per target, wrapping the whole command buffer, of which one
-	// counter is read: fragment shader invocations.
+	// One pipeline-statistics query per span per target, of which one counter is read: fragment shader
+	// invocations. Query `MaxStamps * n + k` counts the fragments span `k` of target `n` drew, and the
+	// spans tile the batch, so their sum is what a single query wrapping the whole command buffer used
+	// to report.
 	//
 	// **It is the only thing that decomposes a composite, and the timestamps cannot.** Everything a
 	// floored frame draws — every shadow, every fill, every window — is inside one render pass with no
@@ -498,6 +521,16 @@ private:
 	// into two answers: divided by the panel's pixels it is how many times gyro drew over the same
 	// pixel, and divided by the span it is the rate the part is achieving, which is the number to hold
 	// against what the part is supposed to do.
+	//
+	// **One per span rather than one for the batch, and it is the same permission the marks have.** A
+	// query begins and ends exactly where a mark is written — at a barrier the composite already had,
+	// outside every render pass instance — so it orders nothing the command buffer was not already
+	// ordering, which is the test decision 140 sets and the reason a query *inside* a pass is still
+	// refused. What it buys is the question the one number could not answer: *two point nine times over*
+	// is a screen redrawn by the composite, by the extract that copies it, and by a blur chain that
+	// reads it four more times, and which of those to argue with is the entire point of measuring.
+	// Nesting a batch-wide query around them is not an option either — Vulkan forbids two active
+	// queries of one type — so the total is the sum, which is exact rather than an approximation.
 	//
 	// Null where the device does not count, and only ever recorded while a trace ring is armed:
 	// Frame/Budget.h has no use for it, so a machine that is not being looked at does not pay for it.

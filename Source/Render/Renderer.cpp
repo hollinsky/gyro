@@ -513,14 +513,15 @@ VulkanRenderer::VulkanRenderer(const IClock& clock, VulkanDevice& device, Vulkan
 	// The overdraw counter, and it is reserved beside the timestamps rather than on demand for the
 	// ordinary reason a frame path allocates nothing: a person asks for a trace when the stutter has
 	// already happened, and a pool created at that moment is a `vkCreateQueryPool` on the `SCHED_FIFO`
-	// thread. One query per target, holding one counter.
+	// thread. One query per span per target, holding one counter, so the pool is the timestamp pool's
+	// shape and is indexed the same way.
 	if (device.Description().CountsPipelineStatistics)
 	{
 		const VkQueryPoolCreateInfo statisticsInfo{ .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
 			                                        .pNext = nullptr,
 			                                        .flags = 0,
 			                                        .queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS,
-			                                        .queryCount = MaxRenderTargets,
+			                                        .queryCount = MaxStamps * MaxRenderTargets,
 			                                        .pipelineStatistics =
 			                                            VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT };
 
@@ -1217,13 +1218,17 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		m_Stamping.Count = 1;
 	}
 
-	// The whole command buffer, begun outside every render pass instance because it spans several of
-	// them. Only while tracing: this counter is nobody's input, and the frame loop must not pay for an
-	// instrument it does not read.
+	// The first span's fragments, begun where the batch-wide query used to be and outside every render
+	// pass instance. Only while tracing: this counter is nobody's input, and the frame loop must not
+	// pay for an instrument it does not read.
+	//
+	// **The whole run is reset here rather than each query before its own span**, because a reset
+	// recorded between two spans is a command inside the batch that the marks did not already require,
+	// and this one is free — it sits beside the timestamp reset, before anything has been drawn.
 	if (m_Statistics != VK_NULL_HANDLE && m_Stamping.Active)
 	{
-		vkCmdResetQueryPool(command, m_Statistics, request.Target, 1);
-		vkCmdBeginQuery(command, m_Statistics, request.Target, 0);
+		vkCmdResetQueryPool(command, m_Statistics, MaxStamps * request.Target, MaxStamps);
+		vkCmdBeginQuery(command, m_Statistics, MaxStamps * request.Target, 0);
 	}
 
 	const std::uint32_t family = m_Device->QueueFamily();
@@ -1508,12 +1513,17 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		&release
 	);
 
-	// After the release barrier rather than before it, so that the span covers everything this
+	// After the release barrier rather than before it, so that the run covers everything this
 	// submission asks the GPU to do — the handback to `VK_QUEUE_FAMILY_FOREIGN_EXT` included, since a
 	// presenter cannot read the target until it has happened.
+	//
+	// The last span's query is the one still open: `Mark` closes each and opens the next, so the count
+	// of marks written is also the count of queries, and the one at `Count - 1` has no mark after it to
+	// close it.
 	if (m_Statistics != VK_NULL_HANDLE && m_Stamping.Active)
 	{
-		vkCmdEndQuery(command, m_Statistics, request.Target);
+		vkCmdEndQuery(command, m_Statistics, MaxStamps * request.Target + m_Stamping.Count - 1);
+		pending.Segments = m_Stamping.Count;
 	}
 
 	// **The closing stamp goes at the end of the run rather than at index one, and it always goes.**
@@ -1605,6 +1615,16 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		const GpuClock::Reading reading = m_Device->ReadClock();
 		pending.ClockMhz = reading.ActualMhz;
 		pending.RequestedMhz = reading.RequestedMhz;
+
+		// **Beside the batch and only while a ring is armed**, which is `Calibrate`'s rule rather than
+		// the clock's. The clock above is read every frame because `GpuCost` carries it and the budget
+		// admits against it; nothing at all reads this, so a machine nobody is looking at must not pay
+		// a driver call per frame for it — decision 140's closing property, that switching the
+		// instrument on cannot move the tier a panel draws at, read in the other direction.
+		if (m_Stamping.Active)
+		{
+			pending.Memory = m_Device->ReadMemory();
+		}
 	}
 
 	// **Decision 108 in five lines.** A device that cannot export a timeline has no descriptor to put
@@ -1929,6 +1949,17 @@ void VulkanRenderer::Mark(VkCommandBuffer command, const char* name) noexcept
 	vkCmdWriteTimestamp(
 		command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_Queries, MaxStamps * m_Stamping.Target + m_Stamping.Count
 	);
+
+	// **The fragment count is cut here too, and it costs what the timestamp costs: nothing.** The
+	// counter has to be closed and reopened at the same instant the span is, or the two decompositions
+	// would not be about the same pieces — and this is a barrier the composite already had, which is the
+	// only place decision 140 lets either of them happen. Span `k` runs from the mark before it to this
+	// one, so what ends here is query `Count - 1` and what opens is query `Count`.
+	if (m_Statistics != VK_NULL_HANDLE)
+	{
+		vkCmdEndQuery(command, m_Statistics, MaxStamps * m_Stamping.Target + m_Stamping.Count - 1);
+		vkCmdBeginQuery(command, m_Statistics, MaxStamps * m_Stamping.Target + m_Stamping.Count, 0);
+	}
 
 	m_Pending[m_Stamping.Target].Names[m_Stamping.Count] = name;
 	++m_Stamping.Count;
@@ -2850,6 +2881,29 @@ void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uin
 	// are the same words and a search finds both.
 	TraceSpanAt("frame", opened, closed, pending.Trace, TraceTag(pending.Frame));
 
+	// **The fragment counts for the whole run, read once and before the spans are emitted**, because
+	// each one is an attribute on the slice it belongs to and an attribute has to be written
+	// immediately after that slice's `Begin`. One `vkGetQueryPoolResults` over the run rather than one
+	// per span: the queries are contiguous by construction, and a call per span would be a driver
+	// round trip per glass panel on the frame thread.
+	std::array<std::uint64_t, MaxStamps> fragments{};
+	const std::uint32_t counts = pending.Segments < pending.Stamps - 1 ? pending.Segments : pending.Stamps - 1;
+
+	// No `VK_QUERY_RESULT_WAIT_BIT`, for `CollectCosts`' reason: the timeline already said the batch
+	// landed. `Segments` of zero is a frame that wrote none — an untraced recording collected after the
+	// ring was armed — and reading the pool then would answer with whichever traced frame last used it.
+	const bool counted = m_Statistics != VK_NULL_HANDLE && counts > 0 &&
+	                     vkGetQueryPoolResults(
+							 m_Device->Handle(),
+							 m_Statistics,
+							 MaxStamps * target,
+							 counts,
+							 counts * sizeof(std::uint64_t),
+							 fragments.data(),
+							 sizeof(std::uint64_t),
+							 VK_QUERY_RESULT_64_BIT
+						 ) == VK_SUCCESS;
+
 	// **Each pass carries its position in the run**, because three siblings called `composite` inside
 	// one parent is still three siblings called `composite`. `composite 0`, `extract 1`, `blur 2`,
 	// `composite 3` reads as the chain it is, and the numbers are the stamp indices the driver actually
@@ -2862,6 +2916,19 @@ void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uin
 		}
 
 		TraceSpanAt(pending.Names[index], at(stamps[index]), at(stamps[index + 1]), pending.Trace, TraceTag(index));
+
+		// **The pass's own fragments, on the pass, and this is what the batch-wide number could not
+		// say.** *Two point nine times over* is a real reading and an unactionable one: the composite,
+		// the extract that copies the screen, and a blur chain that reads it several times more are all
+		// in it, and which of them to argue with is the whole question. An attribute rather than a
+		// counter row because the figure belongs to one slice — a counter would step at every barrier
+		// and draw a sawtooth joining four unrelated quantities into one line — and it is emitted with
+		// the `Begin`'s own instant, which is what binds it to that slice rather than to whatever the
+		// sort puts next.
+		if (counted && index < counts)
+		{
+			TraceAttributeAt("fragments", at(stamps[index]), fragments[index], pending.Trace);
+		}
 	}
 
 	// **What the frame actually cost on the device, beside what it was predicted to cost.** Frame/Loop.h
@@ -2882,31 +2949,47 @@ void VulkanRenderer::Report(const PendingCost& pending, std::span<const std::uin
 	TraceCountAt("clock (MHz)", closed, static_cast<std::int64_t>(pending.ClockMhz), pending.Trace);
 	TraceCountAt("clock requested (MHz)", closed, static_cast<std::int64_t>(pending.RequestedMhz), pending.Trace);
 
-	if (m_Statistics == VK_NULL_HANDLE)
+	// **How close the GPU's memory was to the line, beside the span it might explain.** A composite is
+	// slow because the part is slow, because the clock is low, or because the textures it samples were
+	// paged out and had to come back — and the first two now have rows while the third looked exactly
+	// like the first. On an integrated part the budget is a share of memory every other process is also
+	// asking for, so it moves for reasons nothing else in this trace can see.
+	//
+	// **Usage and headroom rather than usage and budget**, which is the same two facts and one fewer
+	// subtraction for the reader. The budget is the sum of the pair and is nearly flat while a machine
+	// is at rest; what predicts an eviction is the distance to it, and a pair that reads *1400 held, 90
+	// left* says on sight what *1400 held, 1490 allowed* makes a person work out. Headroom is signed
+	// because a process is permitted to be over, and that frame is the one being hunted.
+	if (pending.Memory.IsValid())
+	{
+		TraceCountAt(
+			"gpu memory (MiB)", closed, Mebibytes(static_cast<std::int64_t>(pending.Memory.UsageBytes)), pending.Trace
+		);
+		TraceCountAt("gpu headroom (MiB)", closed, Mebibytes(pending.Memory.HeadroomBytes()), pending.Trace);
+	}
+
+	if (!counted)
 	{
 		return;
 	}
 
-	std::uint64_t fragments = 0;
+	std::uint64_t total = 0;
 
-	if (vkGetQueryPoolResults(
-			m_Device->Handle(),
-			m_Statistics,
-			target,
-			1,
-			sizeof fragments,
-			&fragments,
-			sizeof fragments,
-			VK_QUERY_RESULT_64_BIT
-		) != VK_SUCCESS)
+	for (std::uint32_t index = 0; index < counts; ++index)
 	{
-		return;
+		total += fragments[index];
 	}
 
+	// **The sum of the spans, which is exactly the number one query around the whole batch used to
+	// report.** The spans tile the submission — the first opens where that query opened and the last
+	// closes where it closed — so nothing is double counted and nothing falls between two of them. It
+	// stays a counter rather than becoming an attribute because it is the one figure worth watching
+	// across frames: divided by the panel's pixels it is how many times gyro drew over the same pixel.
+	//
 	// Stamped at the end of the batch rather than at the start, because a counter in Perfetto steps at
 	// the sample and holds until the next one — and what this figure describes is a submission that
 	// has finished, not one that is about to.
-	TraceCountAt("fragments", closed, static_cast<std::int64_t>(fragments), pending.Trace);
+	TraceCountAt("fragments", closed, static_cast<std::int64_t>(total), pending.Trace);
 }
 
 void VulkanRenderer::Destroy() noexcept

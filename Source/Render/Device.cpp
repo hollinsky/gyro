@@ -333,6 +333,12 @@ void Describe(VkPhysicalDevice device, std::uint32_t family, DeviceDescription& 
 	into.TimestampValidBits = QueryTimestampBits(device, family);
 	into.CalibratesTimestamps = QueryCalibration(device);
 	into.CountsPipelineStatistics = QueryPipelineStatistics(device);
+
+	// Listed is the whole of the capability here — the extension carries no feature struct and nothing
+	// about enabling it can fail — so this is `StatesModifiers`' shape rather than `ExportsTimeline`'s.
+	// A driver that lists it and then answers with a zero budget is caught by the reading instead; see
+	// `DeviceDescription::ReportsMemoryBudget`.
+	into.ReportsMemoryBudget = Lists(device, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 	const DrmMinors minors = QueryDrmMinors(device);
 	into.PrimaryMinor = minors.Primary;
 	into.RenderMinor = minors.Render;
@@ -459,7 +465,7 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 	// or calibrate its GPU is explained without reading the driver.
 	spdlog::info(
 		"device: {} ({}), {} timestamp bits at {} ns/tick, calibrates {}, counts fragments {}, exports "
-		"timeline {}, copies from host {}, DRM primary {} render {}",
+		"timeline {}, copies from host {}, reports memory budget {}, DRM primary {} render {}",
 		device.m_Description.Name.data(),
 		device.m_Description.Driver.data(),
 		device.m_Description.TimestampValidBits,
@@ -468,6 +474,7 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 		device.m_Description.CountsPipelineStatistics,
 		device.m_Description.ExportsTimeline,
 		device.m_Description.CopiesFromHost,
+		device.m_Description.ReportsMemoryBudget,
 		device.m_Description.PrimaryMinor,
 		device.m_Description.RenderMinor
 	);
@@ -500,7 +507,7 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 	// The optional one. Asked for only where the capability query said the answer is yes, so that a
 	// driver which advertises the extension and refuses the semaphore does not fail device creation
 	// — decision 108's whole subject, and lavapipe's actual behaviour.
-	std::array<const char*, RequiredExtensions.size() + 4> extensions{};
+	std::array<const char*, RequiredExtensions.size() + 5> extensions{};
 	std::ranges::copy(RequiredExtensions, extensions.begin());
 	std::uint32_t extensionCount = RequiredExtensions.size();
 
@@ -544,6 +551,16 @@ Result<VulkanDevice> VulkanDevice::Open(VulkanDevicePolicy policy)
 	if (device.m_Description.CalibratesTimestamps)
 	{
 		extensions[extensionCount] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
+		++extensionCount;
+	}
+
+	// The fifth, and the second one enabled for an instrument rather than for a picture. It has to be
+	// enabled at creation even though what it adds is a physical-device query: the budget structure is
+	// only promised to be filled for a device that asked for the extension. A driver without it loses
+	// the two memory counters on the GPU row and keeps everything else.
+	if (device.m_Description.ReportsMemoryBudget)
+	{
+		extensions[extensionCount] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
 		++extensionCount;
 	}
 
@@ -1484,6 +1501,31 @@ VulkanDevice::ImportImage(VkExtent2D size, PixelFormat format, const DmabufPlane
 	}
 
 	return image;
+}
+
+GpuMemory VulkanDevice::ReadMemory() const noexcept
+{
+	if (!IsValid() || !m_Description.ReportsMemoryBudget)
+	{
+		return {};
+	}
+
+	// Value-initialised and chained rather than brace-initialised whole, for the reason the feature
+	// structs above are: the budget structure carries two thirty-two element arrays the build's
+	// `-Wmissing-field-initializers` would have this name one by one.
+	VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{};
+	budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+
+	VkPhysicalDeviceMemoryProperties2 properties{};
+	properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+	properties.pNext = &budget;
+
+	// The physical device rather than the logical one, which is why this is `const` and why it is cheap
+	// enough to sit on the frame path at all: no queue, no submission, and on every driver measured a
+	// read of numbers the kernel already keeps.
+	vkGetPhysicalDeviceMemoryProperties2(m_Physical, &properties);
+
+	return DeviceLocalMemory(properties.memoryProperties, budget);
 }
 
 Result<GpuCalibration> VulkanDevice::Calibrate() const
