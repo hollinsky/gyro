@@ -555,15 +555,13 @@ GYRO_TEST(ExitAtlases, WithNoTextureSpaceAtAllNothingIsAskedForAndNothingBreaks)
 	GYRO_CHECK(atlases.IsEmpty());
 }
 
-// A client that destroys the surface under a closing window takes the pixels the exit was going to be
-// drawn from. Decision 20's answer is a compositor-owned copy of the last frame — but the copy is made
-// on the frame thread, so the exit has to survive long enough for one scene carrying both the
-// retirement and the buffer to cross. That scene is what this grants.
-//
-// Ending the exit here instead is what closing a window used to do, and it is why closing one never
-// animated: `Scene/Serializer.h` sweeps finished retirements before it walks, so the window was freed
-// on the same pass it retired and no published scene ever said it was leaving.
-GYRO_TEST(SceneAtlas, AWindowWhosePixelsWentAwayKeepsTheOneSceneItsPictureComesFrom)
+// A client that destroys the surface under a closing window would take the pixels the exit is drawn
+// from with it. Decision 20's answer is a compositor-owned copy of the last frame — but the copy is
+// made on the frame thread, so the pixels have to outlive the destroy request by at least the frame
+// that copies them. Retiring the subtree is what pins them, and it pins the ids the *world* is
+// holding rather than any id a dying surface offers: those were never the same commit, which is why
+// closing a client window vanished instead of fading for as long as this mechanism existed.
+GYRO_TEST(SceneAtlas, RetiringAWindowPinsThePixelsItIsDrawingFrom)
 {
 	ManualClock clock{ Monotonic::FromNanoseconds(1'000'000'000) };
 	SceneStore store{ clock };
@@ -591,11 +589,10 @@ GYRO_TEST(SceneAtlas, AWindowWhosePixelsWentAwayKeepsTheOneSceneItsPictureComesF
 		GYRO_REQUIRE(commit.Fade(*window, 0.0F));
 		GYRO_REQUIRE(commit.Retire(*window));
 		GYRO_REQUIRE(store.Atlases().SlotFor(*window, panel).has_value());
-
-		// True is the pixels still being owed, which is what keeps the caller from giving the id back on
-		// the very step that asked for the picture.
-		GYRO_CHECK(commit.Abandon(pixels));
 	}
+
+	// Nothing was said about `pixels` from outside and nothing needed to be: the retirement found the id
+	// on the node, which is the whole of the fix.
 
 	GYRO_CHECK(store.AwaitsSnapshot(pixels));
 
@@ -630,11 +627,11 @@ GYRO_TEST(SceneAtlas, AWindowWhosePixelsWentAwayKeepsTheOneSceneItsPictureComesF
 	GYRO_CHECK(!store.AwaitsSnapshot(pixels));
 }
 
-// Decision 46 answers a window with no rectangle by cutting rather than fading, and a client that took
-// its pixels away is the same shortfall arriving by a different road: there is nowhere to copy to, so
-// there is nothing to wait for. Holding a scene open for it would fade an empty rectangle, which is
-// worse than the cut and is the thing decision 20 exists to avoid.
-GYRO_TEST(SceneAtlas, AWindowWithNoRectangleIsStillCutWhenItsPixelsGoAway)
+// A window that could not get a rectangle still has its own pixels, and now keeps them: there is no
+// picture to fade from, so the exit is drawn from the subtree for its whole length. That is decision
+// 46's shortfall answered by spending more rather than by cutting, and it is only available because the
+// pixels are pinned — before that, a window with no rectangle had nothing at all and had to cut.
+GYRO_TEST(SceneAtlas, AWindowWithNoRectangleFadesFromItsOwnPixelsInstead)
 {
 	ManualClock clock{ Monotonic::FromNanoseconds(1'000'000'000) };
 	SceneStore store{ clock };
@@ -656,18 +653,129 @@ GYRO_TEST(SceneAtlas, AWindowWithNoRectangleIsStillCutWhenItsPixelsGoAway)
 		GYRO_REQUIRE(commit.Fade(*window, 0.0F));
 		GYRO_REQUIRE(commit.Retire(*window));
 		GYRO_CHECK(store.Atlases().IsEmpty());
-
-		// False is the caller keeping the id, because nothing is going to read it.
-		GYRO_CHECK(!commit.Abandon(pixels));
 	}
 
-	GYRO_CHECK(!store.AwaitsSnapshot(pixels));
+	// Owed anyway, which is the change: the pixels are what the fade is going to be drawn from rather
+	// than what a picture is going to be taken of.
+	GYRO_CHECK(store.AwaitsSnapshot(pixels));
 
 	SceneSerializer serializer;
 
-	// One pass and it is gone, fade and all — the cut is the exit stopping where it was going, which is
-	// the same shape a finished exit has.
+	// The fade runs, and it runs on the window's own buffer. Ending it here instead is what closing a
+	// window used to do, and no published scene ever said it was leaving.
+	static_cast<void>(serializer.Serialize(store));
+
+	GYRO_CHECK(store.IsLive(*window));
+	GYRO_CHECK(store.Find(*window)->Retiring);
+
+	clock.Advance(std::chrono::seconds{ 2 });
+
 	static_cast<void>(serializer.Serialize(store));
 
 	GYRO_CHECK(!store.IsLive(*window));
+
+	static_cast<void>(serializer.Serialize(store));
+
+	GYRO_CHECK(!store.AwaitsSnapshot(pixels));
+}
+
+// **A window is a subtree, and every buffer under it has to survive the exit.** A toplevel with
+// subsurfaces — decorations, a video pane, a menu strip — draws from several client buffers at once,
+// and the old mechanism could hold at most one of them: the grace was keyed on the root and the second
+// arrival was dropped on the floor. What that looks like on screen is a window fading out with its
+// content punched through, which is worse than either fading whole or going at once.
+GYRO_TEST(SceneAtlas, EveryBufferUnderAClosingWindowIsKeptAndNotJustTheFirst)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1'000'000'000) };
+	SceneStore store{ clock };
+
+	const OutputId panel{ 1, 1 };
+	const std::array outputs{ Screen(panel, 0.0, 1) };
+
+	store.SetOutputs(outputs);
+
+	constexpr TextureId frame{ 4, 1 };
+	constexpr TextureId content{ 5, 1 };
+	constexpr TextureId strip{ 6, 1 };
+
+	const auto image = [](TextureId texture) {
+		return ImageContent{ .Texture = texture, .Source = {}, .Frame = {}, .Color = ColorState::Srgb() };
+	};
+
+	const std::optional<EntityId> window =
+		store.CreateImage(store.FirstRoot(), { .Extent = { 300.0F, 200.0F } }, image(frame));
+
+	GYRO_REQUIRE(window.has_value());
+
+	const std::optional<EntityId> pane = store.CreateImage(*window, { .Extent = { 280.0F, 160.0F } }, image(content));
+	const std::optional<EntityId> menu = store.CreateImage(*pane, { .Extent = { 280.0F, 20.0F } }, image(strip));
+
+	GYRO_REQUIRE(pane.has_value());
+	GYRO_REQUIRE(menu.has_value());
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Compositor, store.Now(), Transition::WindowClose };
+
+		GYRO_REQUIRE(commit.Fade(*window, 0.0F));
+		GYRO_REQUIRE(commit.Retire(*window));
+	}
+
+	// All three, to whatever depth they are at — the walk is the subtree the author authored, which is
+	// the same subtree decision 114 retires.
+	GYRO_CHECK(store.AwaitsSnapshot(frame));
+	GYRO_CHECK(store.AwaitsSnapshot(content));
+	GYRO_CHECK(store.AwaitsSnapshot(strip));
+
+	SceneSerializer serializer;
+
+	clock.Advance(std::chrono::seconds{ 2 });
+
+	static_cast<void>(serializer.Serialize(store));
+
+	GYRO_CHECK(!store.IsLive(*window));
+
+	// And they go back together, on the pass after the exit ends. Nothing is stranded: a texture kept
+	// past the window that named it is a leak of a whole client buffer per close.
+	static_cast<void>(serializer.Serialize(store));
+
+	GYRO_CHECK(!store.AwaitsSnapshot(frame));
+	GYRO_CHECK(!store.AwaitsSnapshot(content));
+	GYRO_CHECK(!store.AwaitsSnapshot(strip));
+}
+
+// **The pin is on the pixels the world is drawing, and nothing outside offers them.** The mechanism
+// this replaces asked a dying surface which texture it was holding and went looking for a subtree that
+// drew from it — and a surface mints a new id per committed frame and rotates two, so the id offered
+// was reliably the commit *after* the one on the node. Nothing was ever kept. This is that arithmetic
+// as a test: the world holds the older id, a newer one exists, and only the older is owed.
+GYRO_TEST(SceneAtlas, TheKeptPixelsAreTheOnesTheWorldIsDrawingRatherThanTheLatestCommit)
+{
+	ManualClock clock{ Monotonic::FromNanoseconds(1'000'000'000) };
+	SceneStore store{ clock };
+
+	const OutputId panel{ 1, 1 };
+	const std::array outputs{ Screen(panel, 0.0, 1) };
+
+	store.SetOutputs(outputs);
+
+	constexpr TextureId drawn{ 5, 1 };
+	constexpr TextureId next{ 6, 1 };
+
+	const std::optional<EntityId> window = store.CreateImage(
+		store.FirstRoot(),
+		{ .Extent = { 300.0F, 200.0F } },
+		ImageContent{ .Texture = drawn, .Source = {}, .Frame = {}, .Color = ColorState::Srgb() }
+	);
+
+	GYRO_REQUIRE(window.has_value());
+
+	{
+		SceneCommit commit{ store, CommitAuthor::Compositor, store.Now(), Transition::WindowClose };
+
+		GYRO_REQUIRE(commit.Fade(*window, 0.0F));
+		GYRO_REQUIRE(commit.Retire(*window));
+	}
+
+	GYRO_CHECK(store.AwaitsSnapshot(drawn));
+	GYRO_CHECK(!store.AwaitsSnapshot(next));
 }

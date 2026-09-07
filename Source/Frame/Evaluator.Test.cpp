@@ -2037,6 +2037,53 @@ GYRO_TEST(Evaluator, AClosingWindowWithAPictureIsOneImageAndItsSubtreeIsNotWalke
 	GYRO_CHECK_EQ(list.Captures[0].Count, 1U);
 }
 
+// **The picture is a saving and never a mode**, which is the property that keeps a bad picture from
+// being a blank window. This output says it has drawn reservation 11, and the atlas it drew into is
+// gone — an unplug, a mode change, a device that never had room for one. The window is drawn from its
+// own subtree for the rest of its exit, which it can be because `Scene/Commit.h` pinned those pixels
+// when the retirement was observed. The alternative is what shipped: the walk hands the frame over to
+// a picture that is not there, and a person watches an empty rectangle fade for a third of a second.
+GYRO_TEST(Evaluator, AConfirmedPictureWithNoAtlasBehindItLeavesTheWindowDrawnFromItself)
+{
+	Wire wire;
+
+	std::array nodes{ Container(2, 300.0, 200.0), Image(0, 300.0, 200.0), Image(1, 320.0, 220.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1), Texel(2) };
+	const std::array views{ Placement() };
+
+	ExitSnapshot lost = Reserving(0, 0, 11);
+	lost.Texture = TextureId{};
+
+	const std::array exits{ lost };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const std::array<std::uint32_t, 1> pictured{ 11 };
+
+	EvaluateRequest request = Frame(snapshot);
+	request.Pictured = pictured;
+
+	const DrawList list = evaluator.Evaluate(request);
+
+	// The two nodes that draw, rather than the one item a picture would have been.
+	GYRO_CHECK_EQ(list.Items.size(), std::size_t{ 2 });
+
+	// And nothing is reported, because there is no rectangle to fill: a reservation with no image
+	// behind it is the same absence as no reservation at all, which is what `Scene/Atlas.h` promises
+	// its caller when it says the three ways of having no snapshot read alike.
+	GYRO_CHECK_EQ(list.Captures.size(), std::size_t{ 0 });
+}
+
 // The picture was composited into the target's colour when it was taken, so drawing it back through a
 // conversion would put the window through the same transfer twice — a window changing colour at the
 // instant it starts to leave, which is the one moment somebody is certainly looking at it.

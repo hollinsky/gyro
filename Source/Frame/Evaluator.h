@@ -663,19 +663,28 @@ private:
 		// immediately for a window with nothing under it.
 		const ExitCapture pending = Reserved(node, index, chain, view, runs.Exits, request.Output, m_Count);
 
-		// **The picture exists, so this window is one image and its subtree is not walked.** Decision 20
-		// draws a window leaving the screen from its own copy of its last frame, and this is the frame
-		// that copy is finally for: the client's buffers are gone, its subsurfaces may be gone, and what
-		// is left is a rectangle of the atlas and wherever the exit has moved the window to since. It is
-		// also what makes the exit cost nothing — a fade that re-walked and re-drew a whole window every
-		// frame would be at its most expensive exactly while a person was watching it leave.
+		// **The picture is a saving, not a mode.** Decision 20 draws a window leaving the screen from its
+		// own copy of its last frame, and where that copy exists this window is one image and its
+		// subtree is not walked — which is what makes an exit cost nothing, since a fade that re-walked
+		// and re-drew a whole window every frame would be at its most expensive exactly while a person
+		// was watching it leave.
+		//
+		// **Where it does not draw, the walk goes on and the window is drawn from itself.** A picture
+		// that cannot be placed is a reason to take the slower road, never a reason to put nothing on
+		// the glass: `Scene/Commit.h` pins a closing window's own pixels for the length of its exit
+		// precisely so that road is always open, and a window fading as an empty rectangle is the one
+		// outcome neither decision 20 nor decision 46 ever asked for — 46 would rather it cut.
 		//
 		// **Before the group and before the dressing**, because both are already in the picture: a
 		// group's flattening is what the copy was taken of, and a material was drawn into it. Emitting
 		// either again would put it on twice.
 		if (Pictured(request.Pictured, pending.Reservation))
 		{
-			return Replay(pending, node, chain, view, own, lift, request.Target);
+			if (const Replayed replayed = Replay(pending, node, chain, view, own, lift, request.Target);
+			    replayed != Replayed::Elsewhere)
+			{
+				return replayed == Replayed::Drawn;
+			}
 		}
 
 		// **And the picture stops at the window, so its own shadow is not drawn into it.** The slot is
@@ -978,7 +987,17 @@ private:
 	// forgets a reservation the walk stops naming, so a window that dropped out of the list the frame
 	// after its picture was taken would have its rectangle handed back and then taken again — the copy
 	// repeating for the length of the fade, which is the one thing that memory exists to stop.
-	[[nodiscard]] bool Replay(
+	// What one attempt at drawing from the picture came to. `Elsewhere` is the one the caller acts on:
+	// the picture could not be put anywhere on this screen, so the walk carries on and the window is
+	// drawn from its own subtree instead of being silently left off the frame.
+	enum class Replayed : std::uint8_t
+	{
+		Drawn,
+		Elsewhere,
+		Full
+	};
+
+	[[nodiscard]] Replayed Replay(
 		const ExitCapture& pending,
 		const Node& node,
 		const ComposedTransform& chain,
@@ -991,12 +1010,13 @@ private:
 		const std::optional<Quad> quad = view.Project(chain, node.Extent);
 
 		// Off the target, behind the viewer, or turned away — the same absence every other node answers
-		// with, and a window that is not on this screen owes no items here. The record is not filed
-		// either, which is correct: `Frame/Capture.h` reads the run as *what is still leaving on this
-		// output*, and this is not.
+		// with. The walk is handed back rather than the node being dropped: a picture with nowhere to go
+		// says nothing about the subtree under it, and the ordinary path is the one that decides whether
+		// a node is on this screen. The record is not filed here either, which is correct — that is the
+		// walk's to file once it knows where the run ended.
 		if (!quad)
 		{
-			return true;
+			return Replayed::Elsewhere;
 		}
 
 		DrawItem item{};
@@ -1022,7 +1042,7 @@ private:
 
 		if (at == NoItem)
 		{
-			return false;
+			return Replayed::Full;
 		}
 
 		Accumulate(quad->Bounds());
@@ -1032,7 +1052,7 @@ private:
 
 		File(filed);
 
-		return true;
+		return Replayed::Drawn;
 	}
 
 	// An atlas rectangle as the texels a sampler reads, which is the same rectangle said in the type

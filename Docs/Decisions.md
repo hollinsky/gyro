@@ -2256,6 +2256,10 @@ widening survives unchanged; it is narrower than the word it was written with.
 Blit the last committed frame into a compositor-owned texture. *(Revised 2026-08-16.)* Where that
 texture comes from, and when the blit is recorded, are
 [decision 46](#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early).
+*(Revised 2026-09-06.)* Who keeps the client's pixels alive until the blit is taken is
+[decision 199](#199-a-closing-windows-pixels-are-pinned-by-the-retirement-that-will-draw-them-not-offered-by-the-surface-that-is-going-away),
+which reverses the direction the first mechanism asked the question in — the conclusion here is
+untouched, and for a while nothing implemented it.
 
 **Rejected: holding the client buffer for the length of the exit.** The memory does survive client
 death — dmabuf refcounting handles that correctly — but three problems remain. Surface destruction
@@ -15885,3 +15889,68 @@ a container**, which a restarted shell is not told — it learns its workspaces 
 window is in which, so it cannot redraw a workspace strip without asking every window where it is.
 And **nesting**: a container is a child of the floor and nothing else, which is enough for a
 workspace and is not enough for a grid inside one.
+
+### 199. A closing window's pixels are pinned by the retirement that will draw them, not offered by the surface that is going away
+
+*(Decided 2026-09-06, revising the mechanism under
+[decision 20](#20-exit-animations-use-full-resolution-snapshots) and leaving its conclusion alone.
+Decision 20 says a leaving window is drawn from a compositor-owned copy of its last frame, and
+[decision 46](#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)
+says where that copy lives. Neither says who keeps the client's pixels alive long enough for the copy
+to be taken, and the answer that had been built did not work — not intermittently, never.)*
+
+**The retiring subtree pins every texture it draws from, at the moment the retirement is observed,
+and holds all of them until the exit ends.** `Scene/Commit.h`'s `Retire` already enumerates the
+subtree's coverage and reserves an atlas rectangle at exactly that moment; the pin is the third thing
+it does there, and it is a walk of the same subtree.
+
+**Rejected, and shipped for weeks: the dying surface offering the id it holds.** `Protocol/Surface.h`
+used to pass its current texture to the store on destruction, and the store walked the retiring set
+looking for a subtree that drew from it — reprieving on a match, retiring the pixels on a miss. The
+arithmetic never worked. A surface mints a new texture id per committed frame and keeps two in
+rotation, so the id it holds when its client destroys it is the commit *after* the one the world is
+still drawing; measured over four consecutive closes of a calculator, the pair (offered, held) came
+out (2, 6), (6, 5), (6, 5), (5, 6) — never equal, alternating over a small set, which is double
+buffering. So every close took the miss: the pixels went back on the spot, the frame thread's
+watermark reclaimed them, and the copy decision 20 exists to take read memory the registry had
+already handed out again. **What a person saw was every client window vanishing at the instant it was
+asked to start fading, for the entire life of the feature.** gyro's own shell never destroys its
+surfaces on unmap, so its windows animated correctly and hid the fault for exactly as long as it took
+somebody to close a real application.
+
+**The lesson is smaller than the bug and is why this is worth an entry.** Both ends knew a texture
+id; only one end knew *which* id was on the glass. A mechanism keyed on the side that is going away
+has to guess what the side that stays is holding, and here the guess was wrong every single time. The
+store is the record of what is drawn — asking it to *recognise* pixels somebody else names, when it
+could simply *state* the ones it has, is a question asked backwards.
+
+**One texture per window was also wrong, quietly.** The old grace was keyed on the retirement root
+alone, so the second buffer under a closing window was dropped. A toplevel with subsurfaces —
+decorations, a video pane, a menu strip — draws from several client buffers at once, and had the
+matching ever succeeded the result would have been a window fading out with its content punched
+through. The pin is per (root, texture) and takes the whole subtree.
+
+**Decision 46's cut loses this trigger and keeps the rule.** *A window with nowhere to copy to cuts
+instead of fading* was reached by the same destroy path, and the condition it diagnosed no longer
+exists: a client cannot take a closing window's pixels away, so a window that fails to get an atlas
+rectangle is now drawn from its own subtree for the whole exit rather than cut. That is decision 46's
+own shortfall rule pointed the other way — spend a little more on the rare window rather than break
+the animation — and it is only affordable because the buffer being held belongs to a surface that has
+been destroyed and will never be attached again, which is not the hold decision 20 refuses. The cut
+survives where it is still true, as `FinishRetirement`, reached by atlas exhaustion and by device
+loss, and it is marked there rather than at any one caller.
+
+**Rejected: pinning at the client's last commit instead.** Holding every surface's last buffer
+against the possibility of a close would be a pin with no bound and no event, which is precisely the
+client-controlled memory decision 20 rejects. The retirement is the event, and it is the one moment
+at which the set of pixels a window needs is both finite and known.
+
+#### The picture became a cache rather than a mode, so that getting the above wrong is survivable
+
+`Frame/Evaluator.h` treated a confirmed picture as a baton pass: the subtree was not walked, so a
+picture that turned out to be empty put a fading empty rectangle on screen for the length of an exit.
+That is the one outcome neither decision 20 nor decision 46 ever asked for — 46 would rather the
+window cut, because a cut is a designed failure a person reads as speed and an empty fade is read as
+the application breaking. The walk now draws from the picture where there is one and from the subtree
+where there is not, and the renderer confirms a rectangle only when something was actually drawn into
+it. A wrong answer about pixels is then a slower exit instead of an invisible one.

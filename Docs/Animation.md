@@ -989,6 +989,19 @@ shm holds the upload the compositor already owns. It does cost one piece of mach
 [publication boundary](Architecture.md#the-publication-boundary) — a per-buffer hold released when
 the blit lands, since the consumed-sequence watermark cannot express it.
 
+**What arms that hold is the retirement, not the surface going away.** *(2026-09-06.)* The subtree
+being retired states every texture it draws from at the moment it retires, and the compositor keeps
+all of them until the exit ends. The other direction — a destroyed surface offering the buffer it
+happens to be holding, for the world to recognise — was built first and never once matched: a surface
+rotates buffers, so the id it holds at destruction is the commit after the one on screen, and every
+client window vanished instead of fading. Which pixels a window needs is a fact the world holds and
+the client does not; see [decision 199](Decisions.md#199-a-closing-windows-pixels-are-pinned-by-the-retirement-that-will-draw-them-not-offered-by-the-surface-that-is-going-away).
+
+**And the picture is a saving rather than a switch.** A closing window is drawn from its copy where
+one exists and from its own subtree where one does not, so a copy that is missing or empty costs a
+slower exit instead of a window fading as an empty rectangle — which is worse than the cut below and
+is what a person actually saw.
+
 ### When there is no room
 
 **Older exits finish early**, hard-settling so their rectangles free. In a storm of closing popups

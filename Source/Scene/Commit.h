@@ -347,9 +347,27 @@ public:
 		// phase two is the empty half of this file, and a reservation that waited for it would be one
 		// nothing takes. When close arrives, this moves into it.
 		//
-		// A refusal changes nothing here. There is no snapshot, the exit is drawn from the client's own
-		// pixels for as long as it has them, and whoever finds it has none finishes it — which is what
-		// `Abandon` below already does when a client takes them away.
+		// **A refusal changes nothing here, which it did not used to.** There is no snapshot, so the exit
+		// is drawn from the window's own pixels for its whole length — and the pin below is what makes
+		// that a real fallback rather than a hope, because those pixels can no longer be taken away
+		// mid-exit. Decision 46's *cut instead of fading* is still the answer where a window genuinely
+		// has nothing to draw; it is `FinishRetirement` below, reached by whoever finds that out, and it
+		// is no longer reached by a client destroying a surface, since that no longer takes anything.
+
+		// **The pixels this exit will be drawn from, taken here because here is where they are known.**
+		// Decision 20 draws a leaving window from a compositor-owned copy of its last frame, and the copy
+		// is made on the frame thread — so the client's pixels have to outlive the client by at least the
+		// frame that copies them. Pinning them at the retirement is what makes that unconditional: the
+		// world is holding exactly the buffers the window is drawing right now, and nothing about a
+		// destroy request arriving later can change which those are.
+		//
+		// **It also outranks whatever the dying surface does**, which is the reversal. A surface used to
+		// offer the id it was holding and the store used to go looking for a subtree that drew from it;
+		// the two were never the same commit, so nothing was ever kept and every client window vanished
+		// instead of fading. `Protocol/Surface.h` now simply gives its ids up and asks whether an exit
+		// still wants them.
+		static_cast<void>(m_Scene->HoldExitPixels(id));
+
 		const Coverage cover = Cover(*m_Scene, id);
 
 		// **The first of the four marks an exit that never appeared is diagnosed by, and the only one
@@ -390,19 +408,22 @@ public:
 	// A commit verb for `Retire`'s reason and with `Retire`'s shape — no motion and no origin, since
 	// what it does is take motion away — and refused on anything whose author has not gone away, since
 	// hard-settling a live node would stop a transition somebody is watching.
-	bool FinishRetirement(EntityId id) noexcept { return m_Open && m_Scene->FinishRetirement(id); }
+	bool FinishRetirement(EntityId id) noexcept
+	{
+		if (!m_Open || !m_Scene->FinishRetirement(id))
+		{
+			return false;
+		}
 
-	// The same thing said about pixels rather than about a node: this texture is being given up, so any
-	// exit still drawing from it ends now. `Protocol/Surface.h` is the caller, on destruction, and it
-	// reaches for this rather than the verb above because by then it no longer knows which entity it
-	// drew into — the role that held the id was destroyed one request earlier.
-	//
-	// **True where an exit has been held open instead of ended, and then the pixels are still owed.**
-	// A closing window with a rectangle reserved for it is given one more published scene so that the
-	// frame thread can copy its last frame into that rectangle, which is the only thing that lets the
-	// window go on being drawn after its client stops existing (20). The caller must not give the id up
-	// until this says no — see `SceneStore::Abandon`, which is where the whole of it is argued.
-	bool Abandon(TextureId texture) noexcept { return m_Open && m_Scene->Abandon(texture); }
+		// **The mark that says a window went instead of leaving.** A cut and a fade that finished are
+		// the same shape from every other row — the subtree settles, the sweep frees it, the rectangle
+		// goes back — so without this the one visible difference between a window sliding away and a
+		// window blinking out of existence is invisible in a trace. On the dispatch thread's own row
+		// beside the reservation it is undoing.
+		TraceMark("exit cut", TraceThread, TraceTag(id.Index));
+
+		return true;
+	}
 
 	// What this node accepts of the pointer: the whole of its extent where `shape` is nothing, and the
 	// shape's interior otherwise. See [Scene/Input.h](Input.h) for why the two are not the same absence.

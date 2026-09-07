@@ -390,8 +390,8 @@ public:
 
 	[[nodiscard]] bool IsLive(EntityId id) const noexcept { return m_Ids.IsValid(id); }
 
-	// Whether a texture is still owed to a picture nobody has taken yet, which is the question
-	// `Abandon` answered once and the holder asks again on every step until it is no.
+	// Whether a closing window is still drawing from this texture, which is the question the party
+	// giving the id up asks before it does and again on every step until the answer is no.
 	[[nodiscard]] bool AwaitsSnapshot(TextureId texture) const noexcept
 	{
 		for (const Reprieved& held : m_Grace)
@@ -857,10 +857,29 @@ private:
 	// is no caller that wants that, and a verb that could do it is one that eventually does.
 	//
 	// False for an id that names nothing live, and for one whose author has not gone away.
-	// Whether anything in this subtree is drawn from the given texture. Iteratively, for the reason every
-	// other walk in this file is: the depth is the author's.
-	[[nodiscard]] bool DrawsFrom(EntityId root, TextureId texture) noexcept
+	// Hold every texture this retiring subtree draws from, for as long as its exit runs.
+	//
+	// **What a closing window needs is whatever it is drawing at the moment it closes, and this is the
+	// only place that is known exactly.** The pin used to be taken from the other end: the dying
+	// surface offered the id it was holding and this walked the retiring set looking for a subtree
+	// that drew from it. That never once matched. A surface mints a new id per committed frame and
+	// keeps two in rotation, so the id it offers at destruction is the commit *after* the one the
+	// world is still drawing — measured over four closes of a calculator, the id offered and the id
+	// the node held were never the same number. The pixels were retired on the spot, the watermark
+	// reclaimed them, and the copy decision 20 takes on the frame thread read memory the registry had
+	// already handed back: a window that vanished instead of fading, every time, for every client.
+	//
+	// **Every texture rather than one, because a window is a subtree.** A toplevel with subsurfaces
+	// under it draws from several buffers at once, and holding the root's alone would fade a window
+	// with its decorations or its video pane punched out of it.
+	//
+	// Keyed on the root, so `ExpireExitGrace` drops the whole set when the exit ends, and the count is
+	// returned because a subtree with no pixels at all has nothing to fade — see `Scene/Commit.h`.
+	std::size_t HoldExitPixels(EntityId root)
 	{
+		std::size_t held = 0;
+
+		// Iteratively, for the reason every other walk in this file is: the depth is the author's.
 		m_Work.clear();
 		m_Work.push_back(root);
 
@@ -876,9 +895,9 @@ private:
 				continue;
 			}
 
-			if (const ImageContent* const image = MutableImage(at); image != nullptr && image->Texture == texture)
+			if (const ImageContent* const image = MutableImage(at); image != nullptr && Pin(root, image->Texture))
 			{
-				return true;
+				++held;
 			}
 
 			for (EntityId child = node->FirstChild; !child.IsNull();)
@@ -890,23 +909,7 @@ private:
 			}
 		}
 
-		return false;
-	}
-
-	// Arm a grace for this root, or leave the one it already has alone — a window is one subtree and
-	// its client can destroy several of the surfaces under it, so the second arrival must not reset a
-	// count the first one started.
-	void Reprieve(EntityId root, TextureId texture)
-	{
-		for (const Reprieved& held : m_Grace)
-		{
-			if (held.Root == root)
-			{
-				return;
-			}
-		}
-
-		m_Grace.push_back(Reprieved{ .Root = root, .Texture = texture });
+		return held;
 	}
 
 	bool FinishRetirement(EntityId root) noexcept
@@ -950,22 +953,6 @@ private:
 		return true;
 	}
 
-	// The pixels behind an id have been given up, so any exit still being drawn from them ends now.
-	//
-	// **The texture is the link and the entity is not**, which is what this looked for first and did not
-	// find. A client tears a window down in the order xdg-shell requires — the role objects, then the
-	// `wl_surface` they were given to — so by the time the surface takes its texture away, the role that
-	// knew which entity it drew into is already gone. What survives the whole sequence is the id the
-	// pixels are named by, which the retiring subtree is still holding because that is exactly what
-	// decision 114 keeps it around to draw.
-	//
-	// A walk of the retirements rather than an index, because the retiring set is the deaths in flight —
-	// a handful at the very worst — and this runs when a surface is destroyed rather than per frame. An
-	// index would be a second structure to keep true for a scan that is already shorter than it.
-	//
-	// The whole root is finished rather than the image that named the texture, because the exit is on the
-	// window: decision 111's toplevel animates the container and the pixels hang under it, so settling
-	// the child alone would leave the frame around it fading with nothing inside.
 	// Reserve exit storage for a retiring subtree, per decisions 46 and 190. Reached through
 	// `Scene/Commit.h`, which is where the outputs a node is on can be worked out — `Scene/Reach.h`
 	// holds this store and so cannot be held by it.
@@ -974,87 +961,33 @@ private:
 		return m_Atlases.Reserve(id, reach, bounds);
 	}
 
-	// **A closing window whose picture is owed gets one more scene, and that is the whole of the
-	// grace.** Decision 20 draws a leaving window from a copy of its last frame, and the copy is made
-	// on the frame thread — so an exit that ends the instant its client destroys the surface is one
-	// the frame thread never hears about at all. `Scene/Serializer.h` sweeps finished retirements
-	// before the walk, so the retirement and the destruction land in the same pass and no published
-	// scene ever says this window is leaving. That is why closing a window has never animated: not a
-	// missing fade, but a fade nothing was ever told about.
-	//
-	// So a root with a rectangle reserved for it is held rather than finished. The scenes it goes on
-	// crossing in carry the window, its exit and the pixels still under it: the first of them is what
-	// the frame thread copies the picture out of, and every one after it is a frame of the fade drawn
-	// from that copy. What ends the exit is the exit finishing, the way decision 114 always meant.
-	//
-	// **The caller keeps the pixels for as long as this says so**, which is what `true` means and why
-	// it is worth returning. The id would otherwise be given up during this same step and reclaimed
-	// once the frame thread reached the scene that still names it, which is a window copying itself out
-	// of memory the registry had already handed back.
-	//
-	// A root with no reservation is cut here as it always was: decision 46 answers exhaustion with a
-	// window that cuts instead of fading, and a client that took its pixels away with nowhere to copy
-	// them to is the same case arriving by a different road.
-	bool Abandon(TextureId texture) noexcept
+	// One (root, texture) pair into the grace, or nothing where it is already there. False for a null
+	// texture and for a repeat, so the count `HoldExitPixels` returns is the distinct pixels a window
+	// actually has rather than the nodes it has.
+	bool Pin(EntityId root, TextureId texture)
 	{
 		if (texture.IsNull())
 		{
-			// A surface destroyed with no pixels on it, which is ordinary — and worth a mark anyway,
-			// because from the far end it is indistinguishable from this function not having been
-			// called at all, and those are a client that had already given its buffer up and a
-			// teardown that never reached here.
-			TraceMark("exit abandons nothing", TraceThread);
-
 			return false;
 		}
 
-		bool held = false;
-
-		// A copy, because finishing a retirement is a write and the list is the thing being walked.
-		m_Abandoning.assign(m_Retiring.begin(), m_Retiring.end());
-
-		for (const EntityId root : m_Abandoning)
+		for (const Reprieved& held : m_Grace)
 		{
-			if (!DrawsFrom(root, texture))
+			if (held.Root == root && held.Texture == texture)
 			{
-				// **The one path out of this loop that said nothing, and the traces say it is the one
-				// being taken.** Neither `exit cut` nor `exit reprieved` has ever fired, so every
-				// abandonment walks a retiring subtree that does not draw from the texture being given
-				// up — and the buffer is then retired on the spot rather than held, which leaves decision
-				// 20's copy racing the watermark that reclaims the pixels it wants to copy.
-				//
-				// Tagged with the id being abandoned rather than the root, because what this is about is
-				// the mismatch: a new id is minted per committed frame, so the number here against the
-				// one the node is holding says whether the two ends are naming different commits of the
-				// same window.
-				TraceMark("exit draws from other pixels", TraceThread, TraceTag(texture.Index));
-
-				continue;
+				return false;
 			}
-
-			// **The second mark, and the one that names the moment an exit dies of its client rather than
-			// of its animation.** A window that reaches here with no rectangle is hard-settled on the
-			// spot, so its fade ends in the same step it began and no published scene ever carries a
-			// frame of it — which on screen is a window that vanishes, and in every row of the trace is
-			// a window that was never there. Read against `exit reserved` a moment earlier, the pair
-			// says whether the reservation was refused or whether the client simply arrived first.
-			if (!m_Atlases.Holds(root))
-			{
-				TraceMark("exit cut", TraceThread, TraceTag(root.Index));
-
-				static_cast<void>(FinishRetirement(root));
-
-				continue;
-			}
-
-			TraceMark("exit reprieved", TraceThread, TraceTag(root.Index));
-
-			Reprieve(root, texture);
-
-			held = true;
 		}
 
-		return held;
+		// **The one number the old mechanism got wrong, said out loud.** What used to be traced here was
+		// the id a dying surface offered; this is the id the world is actually drawing. A trace in which
+		// the two differ is the whole of the bug, and a trace in which this fires at all is the first
+		// evidence a closing window's pixels were ever kept.
+		TraceMark("exit pixels pinned", TraceThread, TraceTag(texture.Index));
+
+		m_Grace.push_back(Reprieved{ .Root = root, .Texture = texture });
+
+		return true;
 	}
 
 	// Forget the graces whose exits have ended, which is the whole of what ending one takes.
@@ -1443,14 +1376,9 @@ private:
 
 	std::vector<EntityId> m_Retiring;
 
-	// The retirement roots being asked about, held apart from `m_Retiring` because `Abandon` writes
-	// through the list it is walking. A member rather than a local for `m_Work`'s reason: it is reused
-	// across surface destructions rather than allocated per one.
-	std::vector<EntityId> m_Abandoning;
-
-	// A retirement holding a scene open until its picture can be taken, and the pixels it is holding
-	// them with. One entry per closing window whose client destroyed the surface under it, which is at
-	// most the windows one burst of client teardown takes down at once.
+	// A retirement and one texture it is still drawing from — one entry per pair, because a window is a
+	// subtree and a toplevel with subsurfaces under it draws from several buffers at once. The whole
+	// set for a root is taken when the retirement is observed and dropped when the exit ends.
 	struct Reprieved
 	{
 		EntityId Root;
