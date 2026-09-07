@@ -133,7 +133,7 @@ the dependency graph and the thread partition.
 | `Publication` | portable | both | The data waist: `Snapshot`, `Ring`, `Return`, with `Reader/` frame-side and `Publisher/` dispatch-side |
 | `Scene` | portable | dispatch | What writes a node: the entity store, the serializer, the settle thresholds, focus, the cursor, the background, the commit scope, and the return drain |
 | `Gym` | portable | dispatch | The scenes gyro authors for itself with no protocol behind them — the instrument for looking at what the compositor actually draws |
-| `Session` | platform | dispatch | The listener handover: how gyro learns a session exists, a session offered whole over a world-writable control socket |
+| `Session` | platform | dispatch | The listener handover: how gyro learns a session exists, a session offered whole over a world-writable control socket — and the machine peer beside it, which root holds and assigns screens through |
 | `Protocol` | platform | dispatch | gyro's Wayland server and the author with clients behind it: the globals, xdg-shell, the seat, the floor, the clipboard, and gyro's own three protocols |
 | `Input` | platform | dispatch | Where a keystroke comes from: libinput behind `IInput`, the `Ctrl+Alt+Esc` chord and `Alt+Tab`, and the external trigger fifo |
 | `Dispatch` | portable | dispatch | The dispatch thread's iteration — collect, retarget, serialise, publish, answer when to come back — and the texture minter |

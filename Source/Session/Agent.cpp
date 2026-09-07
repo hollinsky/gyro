@@ -123,7 +123,7 @@ bool SessionAgent::Handle(std::span<const std::byte> message)
 
 	// An agent receiving a `Hello` or an `Offer` is a peer that is confused or lying, and the control
 	// socket is world-writable — so this is the same check gyro makes, made for the same reason.
-	if (FromAgent(header->Op))
+	if (FromPeer(header->Op))
 	{
 		spdlog::warn("a handover message travelling the wrong way arrived on the control connection");
 

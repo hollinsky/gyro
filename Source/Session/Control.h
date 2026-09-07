@@ -153,6 +153,22 @@ public:
 	// reason the agent holds it open rather than offering and exiting.
 	Signal<SessionId> Ended;
 
+	// What the machine peer has asked for, as it asked for it. Emitted once per `Assign`; the party
+	// that observes it owns whether it can be satisfied yet, and answers by calling `Satisfied` below.
+	Signal<MachineRequest> Requested;
+
+	// Whether a machine peer is connected, which is what says gyro is no longer entitled to place a
+	// session itself.
+	//
+	// **A query rather than a signal, because its consumer is already asking.** The composition root
+	// reads it where it would otherwise have placed a session, which is the only moment the answer
+	// changes anything — and a signal would be a second copy of a fact this object already holds.
+	[[nodiscard]] bool HasMachine() const noexcept { return m_Machine >= 0; }
+
+	// Tell the machine peer a request has been satisfied. Does nothing where there is no longer one,
+	// which is the ordinary end of a login agent that was restarted mid-request.
+	void Satisfied(const MachineRequest& request) noexcept;
+
 	// How many agents are connected. For a test; nothing in the loop asks.
 	[[nodiscard]] std::size_t Connections() const noexcept { return m_Connections.size(); }
 
@@ -175,6 +191,11 @@ private:
 
 		// Non-null once this connection's offer was accepted.
 		SessionId Session = SessionId::None;
+
+		// Whether this connection claimed the machine role. **Exclusive with `Session` above**: a
+		// connection offers a session or runs the machine, and refusing the second claim is what keeps
+		// *whose session is this* and *who may move it* from ever being the same connection.
+		bool Machine = false;
 	};
 
 	[[nodiscard]] Result<void> AcceptAll();
@@ -204,6 +225,14 @@ private:
 	std::unordered_map<std::uint32_t, SessionId> m_Sessions;
 
 	std::vector<AcceptedOffer> m_Offered;
+
+	// The machine peer's descriptor, or negative for a machine nobody is running.
+	//
+	// **One at a time, and the second claim is refused rather than taking over.** Two parties assigning
+	// outputs is two parties deciding who is on the screen, and the loser would find its own requests
+	// silently undone; a refusal makes a login agent started twice a failure to start rather than a
+	// machine that flickers between two opinions.
+	int m_Machine = -1;
 
 	// Counts up and never recycles. A session id outlives the session in a log line and in whatever
 	// held one, and reuse would make two of those the same session to anything comparing them.

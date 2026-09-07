@@ -202,10 +202,14 @@ reference shell — the bar and its canvas — and it exists so that the things 
 [decision 51](Decisions.md#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) have somewhere
 to be written that is not this process.
 
-The tree builds three programs from these modules: `gyro` itself, `gyro-session` — the per-session
+The tree builds four programs from these modules: `gyro` itself, `gyro-session` — the per-session
 agent that creates the listeners and hands them over, whose code is `Source/Agent/` over the ABI in
-`Session` — and `gyro-shell`. Only the first links the module graph above; the other two link the
-handful of modules that are portable enough to be a client's.
+`Session` — `gyro-control`, the machine peer by hand from `Source/Control/`, and `gyro-shell`. Only
+the first links the module graph above; the others link the handful of modules that are portable
+enough to be a client's. `gyro-control` is the login agent's conversation with gyro with the
+authentication removed, it is what makes assignment exercisable before that agent exists, and it is
+deliberately not installed — a second party entitled to assign screens would make a deployment
+ambiguous about which one is in charge.
 
 Portable means what [decision 6](Decisions.md#6-no-macos-port-development-continues-over-ssh) means:
 ISO C++ and POSIX, no Linux-only or platform-stack headers, so the tests build and run on a machine
@@ -1310,6 +1314,18 @@ What
 it does not do is adopt: the listener leaves through a verb rather than a signal, because a
 broadcast can never transfer a resource (Core/Fd.h), and the party that takes it is `Protocol` (22,
 126, 165)
+
+`Control` serves a second kind of connection beside the agents, and `Machine` is its far end. A peer
+may *claim the machine* and then say which user's session belongs on which screen; gyro grants that to
+uid 0 and nothing else, because assignment is the verb locking is built out of and a peer that could
+reach it could put a session onto a locked panel (202). The claim is an explicit message rather than
+something inferred from the first assignment, since gyro places sessions itself until somebody is
+entitled to and the moment it learns that has to precede the first session arriving. A request names a
+*uid* — one user, one session (44), and the login agent knows the uid it authenticated while the
+session id went to the agent it forked — and a connector name, or no name at all meaning every output.
+gyro holds what it cannot satisfy yet, which is the ordinary case at boot, and answers when the screen
+actually moves rather than when the message arrived. Neither end resolves anything: a uid is not a
+session here and a connector is not an output, because only the composition root sees both.
 
 ### Protocol
 

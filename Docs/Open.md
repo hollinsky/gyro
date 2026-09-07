@@ -519,6 +519,15 @@ and the interface is what lets the headless sweep place time at arbitrary phase.
   system-tier control connection is cleaner. Decision 59 takes the former because it exists already;
   the latter separates "the machine" from "a session that happens to be permanent", which may matter
   more once the System-tier listener below is designed.
+
+  **Answered: neither. The machine is a connection root holds on the socket that already exists.**
+  *(2026-09-06, by [decision 202](Decisions.md#202-the-machine-is-a-second-kind-of-control-connection-held-by-root-and-it-states-a-request-gyro-satisfies-when-it-can).)*
+  Decision 59's three reasons for the greeter's agent are all equally true of the login agent, and one
+  thing separates them: the greeter takes keystrokes from whoever is standing at the machine, and
+  assignment is what locking is built out of. So the peer is root, checked by the `SO_PEERCRED` the
+  control socket already reads, and a second socket was rejected as a weaker gate than the one being
+  made. **What is still open is the suspend half**, which that decision has crossing this connection —
+  it is now the login agent's connection rather than the greeter agent's, and nothing is built.
 - **The idle CI assertion.** Decision 58 makes "no timer armed when nothing is animating"
   falsifiable and therefore testable, but a static scene in a headless harness is not obviously the
   same static scene a real desktop presents — a clock in the shell's panel ticks once a second
@@ -751,6 +760,13 @@ and the interface is what lets the headless sweep place time at arbitrary phase.
   43's locking. Configuration — mode, scale, position — and session assignment have to be separate
   operations with separate reachability, and only the login agent may perform the latter. The split
   is not yet expressed anywhere.
+
+  **The assignment half is now expressed, and it is not a global at all.** *(2026-09-06, by
+  [decision 202](Decisions.md#202-the-machine-is-a-second-kind-of-control-connection-held-by-root-and-it-states-a-request-gyro-satisfies-when-it-can).)*
+  It is a message on the control socket that only a root connection may send, so it is unreachable
+  from any client at any tier rather than reachable from a privileged one — which is a stronger split
+  than this entry asked for. What is unchanged is the other half: output *configuration* is still
+  owed a design, and putting it in the System tier is still the plan.
 - **The System tier needs its own listener.** Also surfaced alongside decision 44. Trust level is
   per connection, connection identity comes from the listener (decision 23), so trust is a property
   of the listener — which means a `System` connection cannot arrive through the ordinary per-user
@@ -867,6 +883,36 @@ and the interface is what lets the headless sweep place time at arbitrary phase.
   counts as presented, which client is authoritative when chrome is several clients, and what
   happens when a shell never presents at all are all unspecified — and the last is the one that
   matters, since the answer cannot be "the output never arrives".
+
+  **The first of those is now answered, and the answer is that "presented" was the wrong word.**
+  *(Narrowed 2026-09-06 by [decision 202](Decisions.md#202-the-machine-is-a-second-kind-of-control-connection-held-by-root-and-it-states-a-request-gyro-satisfies-when-it-can).)*
+  A session on no output is not composited — decision 21 gives it no frame callbacks and
+  `Protocol/Floor.h` does not place its windows — so a session waiting to be shown can never present,
+  and a gate on presentation would never open. What is wanted is that **the shell has committed a
+  buffer**, which is knowable for an unshown session and is what makes the reassignment not a blank.
+  Two things are still open and both are as this entry left them: which client is authoritative once a
+  shell is several of them, and what happens when one never draws at all. On the last, the shape that
+  falls out of decision 202 is that the request simply waits and the greeter holds the screen, which is
+  a machine that stays at a login prompt rather than one whose output never arrives — but nothing is
+  built either way, so it is a proposal rather than an answer.
+
+  **Nothing is built and login shows a beat of empty session until it is.** The mechanism it needs is a
+  fact carried from `Protocol` to the composition root that does not exist: gyro's client host knows a
+  surface committed, and nothing tells the root that a *session* now has something to draw.
+- **The machine peer cannot enumerate outputs.** Decision 202 has a login agent naming a screen by its
+  connector — `eDP-1`, `DP-7` — or naming none at all and meaning every one of them, and `Managing`
+  carries no list of what the machine has. So a peer that wants to place two people on two monitors has
+  to learn the names from somewhere that is not gyro, and a name that matches nothing waits for ever
+  rather than being refused. The reason it is not a field is that it cannot be one: an enumeration that
+  stays true is a message now and an event on every hotplug, which is a channel with an ordering
+  problem against the assignment it is meant to inform. Wants designing alongside output
+  *configuration*, which has the same shape and the same audience.
+- **Lock and unlock are not reachable by the machine peer.** Decision 202 puts assignment on the
+  control socket and stops there, so the only thing that locks a screen is the development chord and
+  the only thing it can lock to is gyro's own scene. The verbs exist on the store and the messages
+  append cleanly; what is missing is a greeter session to lock *to*, which is the login agent's half.
+  Worth doing together with it rather than before, since a lock message with nothing behind it cannot
+  be exercised.
 - **Per-output wallpapers.** Users set different backgrounds per monitor, and decision 51's cache is
   written and read before the shell exists, when no per-output intent has been expressed. Keying the
   cache per output also means identifying outputs across boots from EDID, which is unreliable with

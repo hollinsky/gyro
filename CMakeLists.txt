@@ -1041,6 +1041,7 @@ gyro_add_module(Session DISPATCH
 		Child.cpp
 		Control.cpp
 		Listener.cpp
+		Machine.cpp
 		Options.cpp
 		Transport.cpp
 	TESTS
@@ -1049,6 +1050,7 @@ gyro_add_module(Session DISPATCH
 		Control.Test.cpp
 		Handover.Test.cpp
 		Listener.Test.cpp
+		Machine.Test.cpp
 		Options.Test.cpp
 )
 
@@ -1420,6 +1422,26 @@ add_executable(gyro-session
 	Source/Agent/Main.cpp
 )
 target_link_libraries(gyro-session
+	PRIVATE
+		Core
+		Session
+		spdlog::spdlog
+)
+
+# The machine peer by hand, and the fourth binary — built, and deliberately not installed.
+#
+# **It is the login agent's conversation with gyro, with the authentication taken out.**
+# Docs/Architecture.md#the-login-agent is a privileged process that runs PAM, forks, `setuid`s and then
+# says who goes on which screen; only the last of those is here. What that buys is the same thing
+# `gyro-autologin@.service` buys one layer up — the sequence that stays is the sequence being
+# exercised — and it is what makes the machine peer testable at all on a machine with one user.
+#
+# Not installed, because a second party entitled to assign screens would make a deployment ambiguous
+# about which one is in charge. It leaves when there is a login agent to replace it.
+add_executable(gyro-control
+	Source/Control/Main.cpp
+)
+target_link_libraries(gyro-control
 	PRIVATE
 		Core
 		Session

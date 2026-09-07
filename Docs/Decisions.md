@@ -16129,3 +16129,100 @@ behaviour.
 with a different intent: a consumer that must not miss anything releases fast enough that it never
 does, and one that cannot keep up misses frames rather than slowing the compositor down. Whether a
 recorder is owed anything stronger than that is a question for the first one, not for this entry.
+
+### 202. The machine is a second kind of control connection, held by root, and it states a request gyro satisfies when it can
+
+*(Decided 2026-09-06, building the half of the login agent that talks to gyro.
+[Decision 24](#24-the-listener-is-handed-to-gyro-not-created-by-it) has a session agent offering a
+listener, and [decision 43](#43-lock-and-greeter-are-one-ui-locking-is-an-output-reassignment) has
+somebody moving a screen from one session to another. Nothing said who the somebody is, and
+`Compositor.cpp` has been placing sessions by a stand-in rule — the first to arrive gets every screen
+— with a comment saying it leaves when something is entitled to place one.)*
+
+**A connection to `/run/gyro/control` may claim the machine, gyro grants that to uid 0 and to nothing
+else, and a machine peer states which user's session belongs on which screen.** Four opcodes:
+`Manage` / `Managing` to claim it, `Assign` / `Assigned` to ask and to be told it happened.
+
+**root, and not the greeter's session agent.**
+[Decision 59](#59-suspend-is-a-handshake-on-the-control-connection-resume-is-a-modeset) chose the
+greeter's agent as the machine-level peer, on three grounds: it is persistent, it exists from boot,
+and it already holds a connection whose closing means something. Every one of those is true of the
+login agent, which is root because PAM, `setuid`, and creating a runtime directory all require it —
+and which [Architecture.md](Architecture.md#the-login-agent) already names as the only party that may
+assign an output. So the argument that picked the greeter's agent does not distinguish the two, and
+one thing does: **the greeter is the most exposed process on the machine.** It takes keystrokes at a
+login prompt from whoever is standing there. Assignment is the verb locking is built out of, so a
+greeter that could assign could put a session onto a locked panel, and somebody's desktop is readable
+without authenticating. root is the one uid that could already do that by other means, which is
+exactly why granting it costs nothing. This answers
+[Open.md](Open.md)'s *whether the greeter's agent is the right machine-level peer at all* with no.
+
+**Rejected: a separate System-tier control socket**, the other candidate in that entry. It is a
+second path with the same `SO_PEERCRED` check on it, and the thing that separates the two roles is a
+uid the kernel already reports on the socket that exists. What a second socket would buy is a
+filesystem permission as a second gate, which is a weaker check than the one already being made.
+
+**The claim is explicit, and it closes a race that would be visible.** gyro places a session itself
+only while nobody is entitled to, and it has to stop the moment somebody is — otherwise the greeter
+lands on the panel by the stand-in rule a moment before the login agent places it deliberately, and
+the screen jumps at the one seam
+[Experience.md](Experience.md#one-continuous-image) promises there is not one at. Inferring the role
+from the first `Assign` would leave exactly that window open. It also keeps the two roles apart for
+the one uid that could hold either: *root offering a session* must not silently become *root running
+the machine*.
+
+**A uid names the session, which is [decision 44](#44-a-session-is-a-user-identity-is-the-uid) spent
+rather than worked around.** The party that would otherwise need a session id is the login agent,
+which authenticated a person and forked an agent for them but never saw the `Accepted` naming the
+session — that answer went to the agent. Naming the user removes a correlation step that would have
+needed a channel between two processes with no other reason to have one. It also makes the request
+expressible *before* the session exists, which is what a login agent actually does: it forks an agent
+and says where that person goes, and the two race by construction.
+
+**So a request is held rather than refused, and it is consumed when it is satisfied.** gyro keeps
+what it has been asked for, applies it when that user has a session, answers `Assigned`, and forgets.
+`Assigned` is therefore *the screen moved* rather than *the message arrived*, which is the only fact
+the peer can act on.
+
+**Rejected: a standing policy gyro keeps enforcing.** It is the shape the word *assignment* suggests,
+and it puts a screen back on somebody's session when they log in again hours later because of a
+sentence the login agent said at boot — a machine acting on an intention nobody still holds.
+
+**An output is named by its connector, or by nothing at all.** `OutputId` is generational and is
+never spoken outside gyro (44): it changes when a monitor is unplugged and the next one takes the
+slot, so a peer holding one would be addressing a display that is physically no longer there. A
+connector name is the kernel's, it is what `--output=eDP-1:1920x1080` already spells, and it survives
+gyro restarting — which the peer must, since it reconnects and re-states what it wanted. **The empty
+name is every output**, and it is the ordinary case rather than a wildcard: a machine with one panel
+is the machine gyro boots on, and a login agent that had to name a connector could not place a
+greeter without first discovering one.
+
+**A locked output is passed over rather than assigned, and it is the one refusal.** A screen held
+behind a lock is somebody's; fading it to a session that was merely asked for would unlock it for a
+person who never authenticated, which is decision 43's whole argument. The request waits, and nothing
+in this build unlocks a screen except the person whose it is.
+
+#### What is not built, and one of the three is a correction
+
+**Lock and unlock are not on the wire.** They are the same verb on the store with a different
+argument and they are reachable from the development chord, so what is missing is a peer entitled to
+ask — and there is nothing to lock *to* until a greeter session exists. Opcodes append, so this costs
+nothing to defer.
+
+**The peer cannot enumerate outputs.** `Managing` carries no list, because telling it would mean a
+message now and an event on every hotplug, which is a channel with an ordering problem rather than a
+field. Until it exists a peer places by the empty name, or by a name it got from somewhere that is
+not gyro.
+
+**The session-ready gate is absent, and [decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism)'s
+phrasing for it is circular.** That entry wants an output held until the incoming session's shell has
+*presented*, so that login does not assemble in visible stages. A session on no output is not
+composited at all — [decision 21](#21-many-sessions-connected-one-presented-locally) gives it no
+frame callbacks and `Protocol/Floor.h` does not even place its windows — so a session waiting to be
+shown can never present, and a gate on presentation would never open. The gate that is actually
+wanted is **the shell has committed a buffer**: gyro has pixels it could draw. That is knowable for an
+unshown session and it is the thing that makes the reassignment not a blank. Building it needs a fact
+carried from `Protocol` to the composition root that does not exist yet, so this entry ships without
+it and login shows a beat of empty session until it lands. Said here rather than discovered later,
+because the correction matters more than the absence: the entry that reads naturally is the one that
+would have been built wrong.

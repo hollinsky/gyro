@@ -159,21 +159,39 @@ enum class Opcode : std::uint16_t
 	// gyro to agent, in answer to `Offer`. The session exists from here.
 	Accepted = 4,
 
-	// gyro to agent, in answer to anything gyro will not do. The connection closes after it.
+	// gyro to peer, in answer to anything gyro will not do. The connection closes after it.
 	Refused = 5,
+
+	// Peer to gyro: *I am the machine.* Claims the machine role for this connection, which is what
+	// makes the four below reachable on it.
+	Manage = 6,
+
+	// gyro to peer, in answer to `Manage`. The connection is the machine peer from here.
+	Managing = 7,
+
+	// Machine peer to gyro: *show this user's session here.*
+	Assign = 8,
+
+	// gyro to machine peer: *it is on the screen.* Sent when the request is satisfied rather than when
+	// it arrives, which may be much later or never.
+	Assigned = 9,
 };
 
 [[nodiscard]] constexpr bool IsOpcode(std::uint16_t value) noexcept
 {
-	return value >= static_cast<std::uint16_t>(Opcode::Hello) && value <= static_cast<std::uint16_t>(Opcode::Refused);
+	return value >= static_cast<std::uint16_t>(Opcode::Hello) && value <= static_cast<std::uint16_t>(Opcode::Assigned);
 }
 
 // Which end sends it. Checked on arrival at both ends, so that a message travelling the wrong way is
 // refused by the frame rather than by whatever the handler happened to do with it — gyro receiving a
 // `Welcome` is a peer that is confused or lying, and neither is a thing to act on.
-[[nodiscard]] constexpr bool FromAgent(Opcode op) noexcept
+//
+// **`FromPeer` rather than `FromAgent`, because there are two kinds of peer now.** A session agent
+// offers a session; the machine peer assigns one to a screen. What this question is actually about is
+// the direction a message travels, and that never depended on which kind was at the far end.
+[[nodiscard]] constexpr bool FromPeer(Opcode op) noexcept
 {
-	return op == Opcode::Hello || op == Opcode::Offer;
+	return op == Opcode::Hello || op == Opcode::Offer || op == Opcode::Manage || op == Opcode::Assign;
 }
 
 // Whether descriptors ride with it, which is `Offer` and nothing else.
@@ -349,6 +367,120 @@ public:
 private:
 	std::array<char, Capacity> m_Text{};
 };
+
+// Which outputs a machine peer means, as the kernel's name for a connector — `eDP-1`, `DP-7`,
+// `HDMI-A-1` — or empty for every output there is.
+//
+// **A connector name rather than an output identity, because an identity gyro minted could not be
+// spoken.** `Core/Handle.h`'s `OutputId` is generational and is deliberately never named outside gyro
+// (44): it changes when a monitor is unplugged and the next one takes the slot, so a peer holding one
+// would be addressing a display that is physically no longer there. A connector name is the kernel's,
+// it is what `--output=eDP-1:1920x1080` already spells, and it survives gyro restarting — which the
+// machine peer must, since it reconnects and re-states what it wanted.
+//
+// **Empty means every output, and it is the ordinary case rather than a wildcard.** A machine with one
+// panel is the machine gyro boots on, and a login agent that had to name its connector could not place
+// a greeter without first discovering one — which is a mechanism that does not exist
+// (Docs/Open.md, *the machine peer cannot enumerate outputs*). So the request that needs no knowledge
+// is the one that costs nothing to write.
+//
+// **Constructed through a factory that refuses, rather than truncating like `Reason`.** A truncated
+// sentence is still the sentence; a truncated connector name is a *different screen*, or more usually
+// none, and the difference between refusing to send and sending something that will not match is
+// which end reports it. Nothing on Linux names a connector anywhere near this long, so the refusal is
+// a bug in the caller rather than a limit anybody meets.
+class ConnectorName
+{
+public:
+	static constexpr std::size_t Capacity = 32;
+
+	constexpr ConnectorName() noexcept = default;
+
+	// The name, or nothing where it will not fit or holds a byte a connector name never does. Empty is
+	// accepted and is *every output*.
+	[[nodiscard]] static constexpr std::optional<ConnectorName> From(std::string_view text) noexcept
+	{
+		if (text.size() > Capacity)
+		{
+			return std::nullopt;
+		}
+
+		ConnectorName name;
+
+		for (std::size_t index = 0; index < text.size(); ++index)
+		{
+			const char letter = text[index];
+
+			// Printable and not a space, which is every connector name the kernel produces and is
+			// checked because this arrives from another process: a log line is a thing terminal escapes
+			// are read out of, and Reason above sanitises for the same reason one field over.
+			if (letter <= ' ' || letter > '~')
+			{
+				return std::nullopt;
+			}
+
+			name.m_Text[index] = letter;
+		}
+
+		return name;
+	}
+
+	// The name, up to the first NUL. Empty is every output.
+	[[nodiscard]] constexpr std::string_view Text() const noexcept
+	{
+		std::size_t length = 0;
+
+		while (length < Capacity && m_Text[length] != '\0')
+		{
+			++length;
+		}
+
+		return std::string_view{ m_Text.data(), length };
+	}
+
+	// Whether this names every output rather than one of them.
+	[[nodiscard]] constexpr bool IsEveryOutput() const noexcept { return m_Text[0] == '\0'; }
+
+	// The bytes, NUL-padded to `Capacity`. `Encode` writes them whole; everything else wants `Text`.
+	[[nodiscard]] constexpr std::span<const char, Capacity> Bytes() const noexcept
+	{
+		return std::span<const char, Capacity>{ m_Text };
+	}
+
+	friend constexpr bool operator==(const ConnectorName&, const ConnectorName&) noexcept = default;
+
+private:
+	std::array<char, Capacity> m_Text{};
+};
+
+// A connector name as it arrived, or nothing where the bytes are not one.
+//
+// **Decoding is stricter than `Reason`'s and the asymmetry is deliberate.** A sentence is read by a
+// person, so anything unprintable becomes a `?` and the message still reads; a name is compared
+// against the connectors gyro has, so bytes that could never be one are a peer speaking a dialect
+// this build does not have. Interior NULs are refused for the same reason: a field that decoded to
+// one name and encoded back as another would make the echo in `Assigned` a lie.
+[[nodiscard]] inline std::optional<ConnectorName> DecodeConnector(std::span<const std::byte> field) noexcept
+{
+	std::array<char, ConnectorName::Capacity> raw{};
+	std::memcpy(raw.data(), field.data(), ConnectorName::Capacity);
+
+	const std::string_view padded{ raw.data(), ConnectorName::Capacity };
+	const std::size_t length = padded.find('\0');
+	const std::string_view text = length == std::string_view::npos ? padded : padded.substr(0, length);
+
+	// Everything after the name must be padding. A byte beyond the terminator is a sender that packed
+	// the field differently, and taking the prefix would be guessing at what it meant.
+	for (std::size_t index = text.size(); index < ConnectorName::Capacity; ++index)
+	{
+		if (raw[index] != '\0')
+		{
+			return std::nullopt;
+		}
+	}
+
+	return ConnectorName::From(text);
+}
 
 // Agent to gyro: *I speak this version.* First on the connection and once.
 struct Hello
@@ -556,6 +688,203 @@ struct Refused
 	}
 };
 
+// Peer to gyro: *I am the machine.* Claims the machine role for this connection.
+//
+// **An explicit claim rather than a uid gyro could have inferred, and it closes a race that would be
+// visible on the screen.** gyro places sessions itself while nobody is entitled to
+// (`Compositor.cpp`'s `ShowSession`), and it must stop the moment somebody is — otherwise the greeter
+// lands on a panel by gyro's stand-in rule a moment before the login agent places it deliberately,
+// which is a flash at the one seam Docs/Experience.md#one-continuous-image promises there is not one
+// at. The claim is where gyro learns to stop, and inferring the role from the first `Assign` would
+// leave exactly that window open.
+//
+// It also keeps the two roles apart for a peer that could hold either. root has a session like anybody
+// else, and *root offering a session* must not silently become *root running the machine*.
+//
+// **No payload.** What the peer may do is decided by gyro's table rather than negotiated, so there is
+// nothing here to ask for; the version that governs the message was settled by `Hello`.
+struct Manage
+{
+	static constexpr Opcode Op = Opcode::Manage;
+	static constexpr std::size_t PayloadBytes = 0;
+
+	[[nodiscard]] std::size_t Encode(std::span<std::byte> into) const noexcept
+	{
+		return WriteHeader(into, Op, PayloadBytes);
+	}
+
+	[[nodiscard]] static std::optional<Manage> Decode(std::span<const std::byte> message) noexcept
+	{
+		if (!IsMessage(message, Op, PayloadBytes))
+		{
+			return std::nullopt;
+		}
+
+		return Manage{};
+	}
+};
+
+// gyro to peer: *you are the machine.*
+//
+// **It carries no list of outputs, which is the one thing a peer will want and cannot have yet.**
+// Telling it would mean an enumeration that stays true — a message now and an event on every hotplug
+// — and that is a channel with an ordering problem rather than a field. Until it exists a peer places
+// by `ConnectorName`'s empty name, which needs no knowledge, or by a name it got from somewhere that
+// is not gyro. Docs/Open.md carries it.
+struct Managing
+{
+	static constexpr Opcode Op = Opcode::Managing;
+	static constexpr std::size_t PayloadBytes = 0;
+
+	[[nodiscard]] std::size_t Encode(std::span<std::byte> into) const noexcept
+	{
+		return WriteHeader(into, Op, PayloadBytes);
+	}
+
+	[[nodiscard]] static std::optional<Managing> Decode(std::span<const std::byte> message) noexcept
+	{
+		if (!IsMessage(message, Op, PayloadBytes))
+		{
+			return std::nullopt;
+		}
+
+		return Managing{};
+	}
+};
+
+// What a machine peer asked for: a user's session, on some outputs or on all of them.
+//
+// **The pair both messages below carry, named once because it is one fact.** `Assign` states it and
+// `Assigned` echoes it, and the two ends each hand it to something internal — gyro to the composition
+// root, the peer to whatever is waiting for a login to land. A struct per message would make those
+// four names for one thing.
+//
+// **Deliberately not resolved to a session or an output.** Neither resolution can be made where this
+// is decoded: gyro's sessions are keyed by uid and its outputs belong to the world, and only the
+// composition root sees both.
+struct MachineRequest
+{
+	std::uint32_t Uid = 0;
+
+	ConnectorName Connector;
+
+	friend constexpr bool operator==(const MachineRequest&, const MachineRequest&) noexcept = default;
+};
+
+// Machine peer to gyro: *show this user's session on these outputs.*
+//
+// **A uid rather than a session id, which is decision 44 spent rather than worked around.** A user has
+// at most one session, so a uid names it completely — and the party that would otherwise need a
+// session id is the login agent, which authenticated a person and forked an agent for them but never
+// saw the `Accepted` that named the session, because that answer went to the agent. Naming the user
+// removes a correlation step that would have needed a channel of its own between two processes that
+// have no reason to have one.
+//
+// It also makes the request expressible *before* the session exists, which is what a login agent
+// actually does: it forks an agent and says where that person goes, and the two race by construction.
+// A message that named a session could only be sent after the race was won.
+//
+// **A request rather than a standing policy, and it is consumed when it is satisfied.** gyro holds one
+// per output — the uid it is waiting for — applies it when that user has a session, answers
+// `Assigned`, and forgets. The alternative, a rule gyro keeps enforcing, would put a screen back on
+// somebody's session when they logged in again hours later because of a sentence the login agent said
+// at boot, which is a machine acting on an intention nobody still holds.
+struct Assign
+{
+	static constexpr Opcode Op = Opcode::Assign;
+	static constexpr std::size_t PayloadBytes = 4 + ConnectorName::Capacity;
+
+	// The user whose session is wanted. **Never `SessionId`**: see above.
+	std::uint32_t Uid = 0;
+
+	// Which outputs, or every one of them.
+	ConnectorName Connector;
+
+	[[nodiscard]] std::size_t Encode(std::span<std::byte> into) const noexcept
+	{
+		const std::size_t total = WriteHeader(into, Op, PayloadBytes);
+
+		if (total != 0)
+		{
+			StoreWord(into, HeaderBytes, Uid);
+			std::memcpy(into.data() + HeaderBytes + 4, Connector.Bytes().data(), ConnectorName::Capacity);
+		}
+
+		return total;
+	}
+
+	[[nodiscard]] static std::optional<Assign> Decode(std::span<const std::byte> message) noexcept
+	{
+		if (!IsMessage(message, Op, PayloadBytes))
+		{
+			return std::nullopt;
+		}
+
+		const std::optional<ConnectorName> connector =
+			DecodeConnector(message.subspan(HeaderBytes + 4, ConnectorName::Capacity));
+
+		if (!connector)
+		{
+			return std::nullopt;
+		}
+
+		return Assign{ .Uid = LoadWord(message, HeaderBytes), .Connector = *connector };
+	}
+};
+
+// gyro to machine peer: *that user's session is on those screens.*
+//
+// **Sent when the request is satisfied rather than when it is received, and that is the whole value of
+// the message.** A request names a user who may have no session yet, so *accepted* and *done* are far
+// apart in time and only the second is a fact the peer can act on — it is what says the greeter may be
+// told the login went through, and it is the only thing that distinguishes a session that arrived from
+// one that never will.
+//
+// **It echoes the request rather than describing the screen**, so that a peer with several outstanding
+// can tell which one landed. Naming what actually happened would mean naming outputs gyro resolved an
+// empty connector into, which is the enumeration `Managing` does not have.
+struct Assigned
+{
+	static constexpr Opcode Op = Opcode::Assigned;
+	static constexpr std::size_t PayloadBytes = 4 + ConnectorName::Capacity;
+
+	std::uint32_t Uid = 0;
+
+	ConnectorName Connector;
+
+	[[nodiscard]] std::size_t Encode(std::span<std::byte> into) const noexcept
+	{
+		const std::size_t total = WriteHeader(into, Op, PayloadBytes);
+
+		if (total != 0)
+		{
+			StoreWord(into, HeaderBytes, Uid);
+			std::memcpy(into.data() + HeaderBytes + 4, Connector.Bytes().data(), ConnectorName::Capacity);
+		}
+
+		return total;
+	}
+
+	[[nodiscard]] static std::optional<Assigned> Decode(std::span<const std::byte> message) noexcept
+	{
+		if (!IsMessage(message, Op, PayloadBytes))
+		{
+			return std::nullopt;
+		}
+
+		const std::optional<ConnectorName> connector =
+			DecodeConnector(message.subspan(HeaderBytes + 4, ConnectorName::Capacity));
+
+		if (!connector)
+		{
+			return std::nullopt;
+		}
+
+		return Assigned{ .Uid = LoadWord(message, HeaderBytes), .Connector = *connector };
+	}
+};
+
 static_assert(MinimumHandoverVersion <= HandoverVersion);
 static_assert(HeaderBytes + Refused::PayloadBytes <= MaxMessageBytes);
+static_assert(HeaderBytes + Assign::PayloadBytes <= MaxMessageBytes);
 } // namespace Session

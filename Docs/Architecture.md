@@ -2513,6 +2513,43 @@ What the shape obliges:
   against and no agent whose going away ends it. See
   [decision 165](Decisions.md#165-gyro-accepts-on-an-offered-listener-itself-a-session-ends-by-the-socket-closing-and-the-uid-is-checked-before-a-client-exists).
 
+### The machine peer
+
+**A second kind of connection on the same control socket: it offers no session and says instead which
+user's session belongs on which screen.** gyro grants it to uid 0 and to nothing else, checked by the
+`SO_PEERCRED` the socket already reads, and one connection holds it at a time.
+
+The party at the far end is the login agent below, which is root anyway. What decides the uid is not
+convenience: assignment is the verb [locking](#locking) is built out of, so a peer that could assign
+could put a session onto a locked panel and read somebody's desktop without authenticating. root could
+already do that by other means, which is exactly why it is the only uid that may.
+
+- **The claim is a message rather than something inferred.** gyro places a session itself only while
+  nobody is entitled to — the composition root hands a screen to the first session that arrives — and
+  it stops the moment a peer claims the machine. Inferring the role from the first assignment would
+  leave the greeter landing on a panel a moment before the agent placed it deliberately.
+- **A request names a *user*, not a session.** A user has at most one session
+  ([decision 44](Decisions.md#44-a-session-is-a-user-identity-is-the-uid)), and the login agent knows
+  the uid it authenticated while the session id went to the agent it forked. It also lets the request
+  be made before the session exists, which is what a login agent does.
+- **gyro holds a request it cannot satisfy yet and answers when it lands.** *Accepted* and *done* are
+  far apart in time — the user may not have logged in — and only the second is a fact the peer can act
+  on. A satisfied request is then forgotten rather than kept as a rule.
+- **A screen is named by its connector, or by nothing, which means every screen.** An `OutputId` is
+  generational and never leaves gyro; a connector name is the kernel's and survives a restart. There
+  is no way for a peer to ask what outputs exist, so the empty name is what a login agent uses on the
+  machine it has not surveyed.
+- **A locked output is passed over.** The request waits rather than unlocking a screen for somebody
+  who never authenticated.
+
+[Decision 202](Decisions.md#202-the-machine-is-a-second-kind-of-control-connection-held-by-root-and-it-states-a-request-gyro-satisfies-when-it-can)
+has the argument, what it rejected, and the three things it does not build: lock and unlock over the
+wire, output enumeration, and the [session-ready gate](#an-output-waits-for-its-sessions-shell) — whose
+usual phrasing that entry corrects, since a session waiting to be shown can never *present*.
+
+`gyro-control` is this half by hand and is the development stand-in for the agent below. It is built
+and not installed.
+
 ### The login agent
 
 Structurally a display manager with the compositor removed: a PAM conversation over a socket, plus
@@ -2526,8 +2563,9 @@ systemd (pid 1)
      · DRM master by first-open, input via udev rules
      · binds /run/gyro/control          the offer socket
   └─ gyro-login.service           uid root
+     · claims the machine on /run/gyro/control      the machine peer above
      · fork → setuid(greeter) → session agent → binds a listener, offers it
-     · gyro assigns the local output to the greeter session
+     · asks gyro for the greeter's uid; gyro shows it when the session arrives
 
    greeter ──credentials──▶ login agent          never through gyro
                              · PAM conversation in a forked child

@@ -40,8 +40,8 @@ constexpr int ReadyBatch = 16;
 //
 // **Before a session exists the tag is the uid and afterwards it is the session id**, because a mark is
 // tagged with the identity it is about and there is no session id until an offer has been taken. The
-// names carry which of the two it is: a mark beginning `agent` is tagged with a uid and one beginning
-// `session` with a session id. An attribute would be the tidier home for the second number and is not
+// names carry which of the two it is: a mark beginning `agent` or `machine` is tagged with a uid and
+// one beginning `session` with a session id. An attribute would be the tidier home for the second number and is not
 // available — Core/Trace.h binds one to the slice open on the row, and this row is marks all the way
 // down.
 
@@ -490,7 +490,7 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 	}
 
 	// A `Welcome` arriving here is a peer that is confused or lying, and neither is a thing to act on.
-	if (!FromAgent(header->Op))
+	if (!FromPeer(header->Op))
 	{
 		Refuse(socket, connection.Uid, EPROTO, "the message travels the other way");
 
@@ -559,7 +559,124 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 
 	if (!connection.Greeted)
 	{
-		Refuse(socket, connection.Uid, EPROTO, "an offer arrived before the greeting");
+		Refuse(socket, connection.Uid, EPROTO, "a message arrived before the greeting");
+
+		return false;
+	}
+
+	if (header->Op == Opcode::Manage)
+	{
+		if (!Manage::Decode(message))
+		{
+			Refuse(socket, connection.Uid, EPROTO, "the machine claim is malformed");
+
+			return false;
+		}
+
+		// **root and nothing else, and the argument is what the capability would otherwise buy.**
+		// Assignment moves a screen from one person's session to another's, which is the verb decision
+		// 43 builds locking out of — so a uid that could reach it could put its own session on a locked
+		// panel and be looking at somebody's desktop without authenticating. root is the one uid that
+		// could already do that by other means, so granting it this adds nothing it did not have; any
+		// other uid granted it would be a bypass with a message behind it. Docs/Architecture.md#the-login-agent
+		// is why the party at the far end is root anyway: PAM, `setuid` and creating a runtime directory
+		// all require it.
+		if (connection.Uid != 0)
+		{
+			Refuse(socket, connection.Uid, EACCES, "only root may run the machine");
+
+			return false;
+		}
+
+		if (connection.Session != SessionId::None)
+		{
+			Refuse(socket, connection.Uid, EBUSY, "this connection has offered a session");
+
+			return false;
+		}
+
+		if (connection.Machine)
+		{
+			Refuse(socket, connection.Uid, EBUSY, "this connection is already the machine");
+
+			return false;
+		}
+
+		if (m_Machine >= 0)
+		{
+			Refuse(socket, connection.Uid, EBUSY, "another connection is already the machine");
+
+			return false;
+		}
+
+		std::array<std::byte, MaxMessageBytes> bytes{};
+		const std::size_t written = Managing{}.Encode(bytes);
+
+		if (const Result<void> sent = Send(socket, std::span<const std::byte>{ bytes }.first(written)); !sent)
+		{
+			// The mirror of the greeting's: the peer is waiting to be told it may assign anything, and
+			// from its side nothing happened. Not recorded as the machine, because it is about to be
+			// dropped and a claim gyro cannot answer is one it has not granted.
+			TraceMark("machine claim unanswered", TraceSession(), TraceTag(connection.Uid));
+
+			spdlog::warn("answering a machine claim failed: {}", sent.error());
+
+			return false;
+		}
+
+		connection.Machine = true;
+		m_Machine = socket.Value;
+
+		TraceMark("machine claimed", TraceSession(), TraceTag(connection.Uid));
+
+		spdlog::info("the machine is being run by uid {}", connection.Uid);
+
+		return true;
+	}
+
+	if (header->Op == Opcode::Assign)
+	{
+		// **The claim is what makes this reachable, and the check is here rather than on the uid.** A
+		// root connection that has not claimed the machine is one that might be about to offer a
+		// session, and a request arriving on it is a peer that has skipped a step rather than one that
+		// is entitled — saying so is what keeps the two roles from blurring for the one uid that could
+		// hold either.
+		if (!connection.Machine)
+		{
+			Refuse(socket, connection.Uid, EACCES, "this connection has not claimed the machine");
+
+			return false;
+		}
+
+		const std::optional<Assign> assign = Assign::Decode(message);
+
+		if (!assign)
+		{
+			Refuse(socket, connection.Uid, EPROTO, "the assignment is malformed");
+
+			return false;
+		}
+
+		// **Emitted rather than acted on, and nothing is answered here.** Whether a user has a session
+		// and whether gyro has a screen by that name are both questions for the composition root, and
+		// the answer may be *not yet* for as long as the machine runs — so `Assigned` is sent by
+		// whoever satisfies it, through `Satisfied` below.
+		TraceMark("machine assigned", TraceSession(), TraceTag(assign->Uid));
+
+		spdlog::info(
+			"the machine asks for uid {} on {}",
+			assign->Uid,
+			assign->Connector.IsEveryOutput() ? "every output" : assign->Connector.Text()
+		);
+
+		Requested.Emit(MachineRequest{ .Uid = assign->Uid, .Connector = assign->Connector });
+
+		return true;
+	}
+
+	if (connection.Machine)
+	{
+		Refuse(socket, connection.Uid, EBUSY, "this connection runs the machine");
 
 		return false;
 	}
@@ -669,6 +786,37 @@ bool SessionControl::Handle(Connection& connection, std::span<const std::byte> m
 	return true;
 }
 
+void SessionControl::Satisfied(const MachineRequest& request) noexcept
+{
+	if (m_Machine < 0)
+	{
+		return;
+	}
+
+	const auto found = m_Connections.find(m_Machine);
+
+	if (found == m_Connections.end())
+	{
+		return;
+	}
+
+	std::array<std::byte, MaxMessageBytes> bytes{};
+	const std::size_t written = Assigned{ .Uid = request.Uid, .Connector = request.Connector }.Encode(bytes);
+
+	// **A send that fails is not a request that failed.** The screen has already moved, which is the
+	// fact the peer was waiting for; what is lost is its notification, and the connection is about to
+	// be dropped by the next `Pump` in any case. Saying so here rather than tearing anything down keeps
+	// the world and the wire from disagreeing about what happened.
+	if (const Result<void> sent =
+	        Send(found->second.Socket.Borrow(), std::span<const std::byte>{ bytes }.first(written));
+	    !sent)
+	{
+		TraceMark("machine assignment unanswered", TraceSession(), TraceTag(request.Uid));
+
+		spdlog::warn("telling the machine an assignment landed failed: {}", sent.error());
+	}
+}
+
 std::optional<AcceptedOffer> SessionControl::TakeOffer() noexcept
 {
 	if (m_Offered.empty())
@@ -693,12 +841,32 @@ void SessionControl::Forget(int descriptor)
 
 	const std::uint32_t uid = found->second.Uid;
 	const SessionId session = found->second.Session;
+	const bool machine = found->second.Machine;
 
 	// Removed before the close so that the descriptor is out of the set while it is still a descriptor.
 	// Closing would do it, and doing it here is what keeps the two orderings from ever differing.
 	::epoll_ctl(m_Epoll.Get(), EPOLL_CTL_DEL, descriptor, nullptr);
 
 	m_Connections.erase(found);
+
+	// **The machine going away puts gyro back in charge of placement rather than freezing the screen
+	// where it was.** A login agent that crashed is restarted by the service manager and re-states what
+	// it wanted; between the two there is nobody entitled to move a screen, and gyro's own stand-in is
+	// what keeps a session arriving in that window from landing nowhere at all.
+	//
+	// Ahead of the two below and returning, because a machine connection never offered a session:
+	// *parted without establishing anything* would be a second and misleading account of the same
+	// event.
+	if (machine)
+	{
+		m_Machine = -1;
+
+		TraceMark("machine parted", TraceSession(), TraceTag(uid));
+
+		spdlog::info("the machine peer went away");
+
+		return;
+	}
 
 	if (session == SessionId::None)
 	{

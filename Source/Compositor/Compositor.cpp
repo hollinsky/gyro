@@ -2732,8 +2732,144 @@ private:
 				continue;
 			}
 
+			// **The uid is kept because the machine peer names a user and gyro mints a session.** Decision
+			// 44 makes the two interchangeable — a user has at most one session — but only `Session/Control.h`
+			// sees the uid and only this root sees the outputs, so the correspondence has to be written down
+			// on the side that has both.
+			m_Users.push_back(SessionUser{ .Uid = offer->Uid, .Id = id });
+
 			ShowSession(id);
 		}
+
+		ApplyRequests();
+	}
+
+	// Which session belongs to a user, or none where that user has none.
+	[[nodiscard]] SessionId SessionOf(std::uint32_t uid) const noexcept
+	{
+		for (const SessionUser& held : m_Users)
+		{
+			if (held.Uid == uid)
+			{
+				return held.Id;
+			}
+		}
+
+		return SessionId::None;
+	}
+
+	// The machine peer has asked for a user's session on some screens. Recorded rather than acted on,
+	// because the user may have no session yet — which is the ordinary case rather than an error, a
+	// login agent forking an agent and saying where that person goes being two things that race by
+	// construction.
+	//
+	// **A request with the same connector replaces the one it supersedes.** The login agent states where
+	// a screen should be twice in a session's life — the greeter at boot and the person at login — and
+	// the second is not a second opinion to be reconciled with the first, it is the first being over.
+	void OnRequested(Session::MachineRequest request)
+	{
+		std::erase_if(m_Requests, [&request](const Session::MachineRequest& held) {
+			return held.Connector == request.Connector;
+		});
+
+		// SPEC: how many requests may be outstanding. A request is consumed when it is satisfied and
+		// replaced by name before that, so this is only reachable by a peer naming users who never log
+		// in — which is root, and therefore a bound for tidiness rather than a defence. Sized past one
+		// per output so that a machine cannot run out of room for the screens it has.
+		constexpr std::size_t MaxRequests = MaxOutputs + 4;
+
+		if (m_Requests.size() >= MaxRequests)
+		{
+			spdlog::warn("the machine has more outstanding assignments than gyro will hold; dropping the oldest");
+
+			m_Requests.erase(m_Requests.begin());
+		}
+
+		m_Requests.push_back(request);
+
+		ApplyRequests();
+	}
+
+	// Put every request that can now be satisfied onto the screens it named, and forget it.
+	//
+	// **A request is consumed rather than kept as a standing rule.** A rule gyro went on enforcing would
+	// put a screen back on somebody's session when they logged in again hours later, because of a
+	// sentence the login agent said at boot — a machine acting on an intention nobody still holds.
+	//
+	// **A locked output is passed over rather than assigned**, and it is the one refusal here. A screen
+	// held behind a lock is somebody's, and fading it to a session that was merely asked for would
+	// unlock it for a person who never authenticated — decision 43's whole argument. The request waits,
+	// which is honest: nothing in this build can unlock a screen except the person whose it is.
+	void ApplyRequests()
+	{
+		if (m_Dispatch == nullptr || m_Control == nullptr || m_Requests.empty())
+		{
+			return;
+		}
+
+		SceneStore& store = m_Dispatch->Store();
+		const Instant now = m_Clock.Now();
+
+		std::erase_if(m_Requests, [&](const Session::MachineRequest& request) {
+			const SessionId session = SessionOf(request.Uid);
+
+			if (session == SessionId::None)
+			{
+				return false;
+			}
+
+			bool placed = false;
+
+			for (std::size_t index = 0; index < store.Outputs().size(); ++index)
+			{
+				const SceneOutput& output = store.Outputs()[index];
+
+				if (!Names(request.Connector, index) || output.Locked != SessionId::None)
+				{
+					continue;
+				}
+
+				// Decision 188's cross-fade, which is what a person sees as their desktop resolving over
+				// the background rather than replacing it in one frame. `FadeOutputSession` is idempotent
+				// where the session is already there, so a request restated after a gyro restart lands as
+				// nothing happening.
+				store.FadeOutputSession(output.Id, session, Motion::Standard, now);
+
+				placed = true;
+			}
+
+			// Nothing matched, so the request waits: a user with no screen yet, or a name this machine
+			// does not have. **Waiting rather than being refused is the same answer in both cases**, and
+			// it has to be — a connector arrives on a hotplug and a session arrives on a login, so a
+			// refusal would be gyro claiming to know that neither is coming.
+			if (!placed)
+			{
+				return false;
+			}
+
+			// **A request satisfied on some of the screens it named is satisfied.** Only a locked output
+			// is passed over, and a locked screen is not gyro's to give away — when it is unlocked it goes
+			// back to the person it was held for rather than to whoever asked for it meanwhile. It cannot
+			// arise yet in any case: the only thing that locks a screen locks all of them.
+
+			spdlog::info(
+				"uid {} is session {} and is now on {}",
+				request.Uid,
+				static_cast<std::uint32_t>(session),
+				request.Connector.IsEveryOutput() ? "every output" : request.Connector.Text()
+			);
+
+			m_Control->Satisfied(request);
+
+			return true;
+		});
+	}
+
+	// Whether a request names the output at this index. An empty name is every output, which is the
+	// request a login agent can make without having discovered anything about the machine.
+	[[nodiscard]] bool Names(const Session::ConnectorName& connector, std::size_t index) const noexcept
+	{
+		return connector.IsEveryOutput() || (index < m_Count && m_Panels[index].Connector == connector.Text());
 	}
 
 	// Lock every screen with somebody on it, or give back every screen this locked.
@@ -2811,6 +2947,17 @@ private:
 			return;
 		}
 
+		// **gyro places a session only while nobody is entitled to**, which is the whole of what the
+		// machine claim buys and is why it is a claim rather than something inferred from the first
+		// request. With a login agent connected, a session landing on a screen because it happened to
+		// arrive first is a screen moving for a reason nobody chose — and at boot it is the greeter
+		// appearing on the panel a moment before the agent places it deliberately, which is a flash at
+		// the one seam Docs/Experience.md#one-continuous-image promises there is not one at.
+		if (m_Control != nullptr && m_Control->HasMachine())
+		{
+			return;
+		}
+
 		SceneStore& store = m_Dispatch->Store();
 
 		for (std::size_t index = 0; index < store.Outputs().size(); ++index)
@@ -2832,6 +2979,11 @@ private:
 	// holds the connection open rather than offering and exiting.
 	void OnSessionEnded(SessionId session)
 	{
+		// Before anything else, so that a request naming this user cannot be satisfied by a session that
+		// has already gone. The uid may well be back — logging out and in again is one person — and what
+		// must not survive is the correspondence to *this* session.
+		std::erase_if(m_Users, [session](const SessionUser& held) { return held.Id == session; });
+
 		// Silent on the way through: Session/Control.h says the session ended, and this is what that
 		// costs the world rather than a second announcement of the same fact.
 		if (m_Clients != nullptr && m_Dispatch != nullptr)
@@ -3124,6 +3276,7 @@ private:
 
 				m_Control = std::move(*control);
 				m_SessionEnded.ConnectTo<&Compositor::OnSessionEnded>(m_Control->Ended, *this);
+				m_MachineRequested.ConnectTo<&Compositor::OnRequested>(m_Control->Requested, *this);
 
 				spdlog::info(
 					"taking every listener from a session agent on {}; no Wayland socket is bound until one offers "
@@ -3768,6 +3921,23 @@ private:
 	std::unique_ptr<Session::SessionControl> m_Control;
 
 	Connection<SessionId> m_SessionEnded;
+
+	Connection<Session::MachineRequest> m_MachineRequested;
+
+	// Which user each live session belongs to. **A list rather than a map, and it is sized by the number
+	// of people logged in at once**, which is one on nearly every machine and three on a bad day — so a
+	// linear scan is the whole of what a lookup costs and a hash would be a container for the sake of
+	// having one.
+	struct SessionUser
+	{
+		std::uint32_t Uid = 0;
+		SessionId Id = SessionId::None;
+	};
+
+	std::vector<SessionUser> m_Users;
+
+	// What the machine peer has asked for and gyro has not yet been able to do.
+	std::vector<Session::MachineRequest> m_Requests;
 
 	// The device set, the compositor's own keys, and the connection between them. Declared beside the
 	// host rather than with the backend because both are the dispatch thread's, and destroyed before

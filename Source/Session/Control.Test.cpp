@@ -191,6 +191,14 @@ struct EndWatcher
 	void Observe(SessionId id) { Ended.push_back(id); }
 };
 
+// What the machine peer has asked for, which crosses the same way and for the same reason.
+struct RequestWatcher
+{
+	std::vector<MachineRequest> Requested;
+
+	void Observe(MachineRequest request) { Requested.push_back(request); }
+};
+
 // Everything a test needs standing up: a control socket, a runtime root with this user's directory
 // under it, and the uid the kernel will report for every connection made here.
 class Fixture
@@ -208,12 +216,15 @@ public:
 		{
 			m_Control = std::move(*opened);
 			m_Link.ConnectTo<&EndWatcher::Observe>(m_Control->Ended, m_Watcher);
+			m_RequestLink.ConnectTo<&RequestWatcher::Observe>(m_Control->Requested, m_Requests);
 		}
 	}
 
 	[[nodiscard]] SessionControl& Control() const noexcept { return *m_Control; }
 
 	[[nodiscard]] EndWatcher& Watcher() noexcept { return m_Watcher; }
+
+	[[nodiscard]] RequestWatcher& Requests() noexcept { return m_Requests; }
 
 	[[nodiscard]] std::string ControlPath() const { return m_Directory.In("control"); }
 
@@ -240,6 +251,9 @@ private:
 	std::unique_ptr<SessionControl> m_Control;
 	EndWatcher m_Watcher;
 	Connection<SessionId> m_Link;
+
+	RequestWatcher m_Requests;
+	Connection<MachineRequest> m_RequestLink;
 };
 } // namespace
 
@@ -883,4 +897,121 @@ GYRO_TEST(SessionControl, NoMarkNamesAUserOrAPath)
 			GYRO_CHECK(name.find(user) == std::string_view::npos);
 		}
 	}
+}
+
+// The machine peer, which is the other kind of connection this socket serves. It offers no session and
+// says instead which user's session belongs on which screen.
+//
+// **This is the first check in this file the uid actually decides**, and it is worth saying out loud
+// beside the note at the top. A session offer is same-uid by construction here, so `SO_PEERCRED` never
+// refuses one; the machine claim requires root, and a test binary is almost never root — so the
+// refusal below is exercised on every ordinary run, and the grant is exercised only where somebody
+// runs the suite as root. Both are asserted, by asking the kernel which case this is rather than by
+// pretending it is one of them.
+GYRO_TEST(SessionControl, OnlyRootMayRunTheMachine)
+{
+	Fixture fixture;
+	Peer peer;
+
+	GYRO_REQUIRE(fixture.Greet(peer));
+	GYRO_REQUIRE(peer.SendMessage(Manage{}));
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+
+	if (::geteuid() == 0)
+	{
+		GYRO_CHECK(peer.Answer() == Opcode::Managing);
+		GYRO_CHECK(fixture.Control().HasMachine());
+
+		return;
+	}
+
+	GYRO_REQUIRE(peer.Answer() == Opcode::Refused);
+
+	const std::optional<Refused> refused = peer.Refusal();
+
+	GYRO_REQUIRE(refused.has_value());
+	GYRO_CHECK_EQ(refused->Code, std::uint32_t{ EACCES });
+	GYRO_CHECK(!fixture.Control().HasMachine());
+}
+
+// Nobody is running the machine until somebody claims it, which is what tells the composition root it
+// is still the party placing sessions.
+GYRO_TEST(SessionControl, NobodyRunsTheMachineUntilItIsClaimed)
+{
+	Fixture fixture;
+	Peer peer;
+
+	GYRO_CHECK(!fixture.Control().HasMachine());
+	GYRO_REQUIRE(fixture.Greet(peer));
+	GYRO_CHECK(!fixture.Control().HasMachine());
+}
+
+// An assignment on a connection that has not claimed the machine is refused before the uid is
+// consulted, so the two roles stay apart for the one uid that could hold either.
+GYRO_TEST(SessionControl, AssigningWithoutTheMachineIsRefused)
+{
+	Fixture fixture;
+	Peer peer;
+
+	GYRO_REQUIRE(fixture.Greet(peer));
+	GYRO_REQUIRE(peer.SendMessage(Assign{ .Uid = 1000, .Connector = {} }));
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+	GYRO_REQUIRE(peer.Answer() == Opcode::Refused);
+
+	const std::optional<Refused> refused = peer.Refusal();
+
+	GYRO_REQUIRE(refused.has_value());
+	GYRO_CHECK_EQ(refused->Code, std::uint32_t{ EACCES });
+	GYRO_CHECK(fixture.Requests().Requested.empty());
+}
+
+// The greeting settles the version before anything else is read, and a claim is not an exception to
+// that — the version is what says how the next message is encoded.
+GYRO_TEST(SessionControl, ClaimingTheMachineBeforeTheGreetingIsRefused)
+{
+	Fixture fixture;
+	Peer peer;
+
+	GYRO_REQUIRE(peer.ConnectTo(fixture.ControlPath()));
+	GYRO_REQUIRE(peer.SendMessage(Manage{}));
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+	GYRO_REQUIRE(peer.Answer() == Opcode::Refused);
+
+	const std::optional<Refused> refused = peer.Refusal();
+
+	GYRO_REQUIRE(refused.has_value());
+	GYRO_CHECK_EQ(refused->Code, std::uint32_t{ EPROTO });
+}
+
+// A claim carrying a descriptor is refused by the frame, which is the rule that only an offer ever
+// carries one — and it is what stops a peer filling the file table of the process that must not die.
+GYRO_TEST(SessionControl, AClaimCarryingADescriptorIsRefused)
+{
+	Fixture fixture;
+	Peer peer;
+
+	GYRO_REQUIRE(fixture.Greet(peer));
+
+	const Fd listener = MakeListener(std::format("{}/wayland-0", fixture.RuntimeDirectory()));
+
+	GYRO_REQUIRE(listener.IsValid());
+	GYRO_REQUIRE(peer.SendMessage(Manage{}, listener.Borrow()));
+	GYRO_REQUIRE(fixture.Control().Drain().has_value());
+	GYRO_REQUIRE(peer.Answer() == Opcode::Refused);
+
+	const std::optional<Refused> refused = peer.Refusal();
+
+	GYRO_REQUIRE(refused.has_value());
+	GYRO_CHECK_EQ(refused->Code, std::uint32_t{ EPROTO });
+}
+
+// Answering a request nobody is waiting for does nothing, which is the ordinary end of a login agent
+// restarted between asking and being answered.
+GYRO_TEST(SessionControl, SatisfyingARequestWithNoMachineIsSilent)
+{
+	Fixture fixture;
+
+	fixture.Control().Satisfied(MachineRequest{ .Uid = 1000, .Connector = {} });
+
+	GYRO_CHECK(!fixture.Control().HasMachine());
 }

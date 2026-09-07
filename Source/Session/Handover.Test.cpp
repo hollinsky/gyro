@@ -31,6 +31,21 @@ constexpr std::array<std::byte, 8> HelloBytes{
 	std::byte{ 0x01 }, std::byte{ 0x00 }, std::byte{ 0x00 }, std::byte{ 0x00 },
 };
 
+// `Manage` and `Managing`, laid out by hand. A header and nothing after it.
+constexpr std::array<std::byte, 4> ManageBytes{
+	std::byte{ 0x06 },
+	std::byte{ 0x00 },
+	std::byte{ 0x00 },
+	std::byte{ 0x00 },
+};
+
+constexpr std::array<std::byte, 4> ManagingBytes{
+	std::byte{ 0x07 },
+	std::byte{ 0x00 },
+	std::byte{ 0x00 },
+	std::byte{ 0x00 },
+};
+
 // Somewhere for a message to be written, sized as either end sizes its receive buffer.
 using Datagram = std::array<std::byte, MaxMessageBytes>;
 } // namespace
@@ -77,9 +92,13 @@ GYRO_TEST(Handover, UnknownOpcodeIsRefused)
 
 	GYRO_CHECK(!ReadHeader(unknown).has_value());
 	GYRO_CHECK(!IsOpcode(0));
-	GYRO_CHECK(!IsOpcode(6));
+
+	// One past the last one this build has a name for. **It moves every time an opcode is added**, which
+	// is the point of writing it rather than a constant: a value that has shipped may never mean
+	// anything else, so the boundary is the only part of this question that is allowed to move.
+	GYRO_CHECK(!IsOpcode(10));
 	GYRO_CHECK(IsOpcode(static_cast<std::uint16_t>(Opcode::Hello)));
-	GYRO_CHECK(IsOpcode(static_cast<std::uint16_t>(Opcode::Refused)));
+	GYRO_CHECK(IsOpcode(static_cast<std::uint16_t>(Opcode::Assigned)));
 }
 
 // Longer than the buffer either end reads into. The socket would have truncated it and set MSG_TRUNC;
@@ -246,11 +265,146 @@ GYRO_TEST(Handover, ReasonKeepsOnlyPrintableAscii)
 // so they are checked here beside the layout.
 GYRO_TEST(Handover, DirectionIsPartOfTheMessage)
 {
-	GYRO_CHECK(FromAgent(Opcode::Hello));
-	GYRO_CHECK(FromAgent(Opcode::Offer));
-	GYRO_CHECK(!FromAgent(Opcode::Welcome));
-	GYRO_CHECK(!FromAgent(Opcode::Accepted));
-	GYRO_CHECK(!FromAgent(Opcode::Refused));
+	GYRO_CHECK(FromPeer(Opcode::Hello));
+	GYRO_CHECK(FromPeer(Opcode::Offer));
+	GYRO_CHECK(FromPeer(Opcode::Manage));
+	GYRO_CHECK(FromPeer(Opcode::Assign));
+	GYRO_CHECK(!FromPeer(Opcode::Welcome));
+	GYRO_CHECK(!FromPeer(Opcode::Accepted));
+	GYRO_CHECK(!FromPeer(Opcode::Refused));
+	GYRO_CHECK(!FromPeer(Opcode::Managing));
+	GYRO_CHECK(!FromPeer(Opcode::Assigned));
+}
+
+// The machine peer's half of the ABI, checked the same way and for the same reason: these are the
+// values a release is diffed at, and never reusing one is the whole content of calling this an ABI.
+GYRO_TEST(Handover, TheMachineOpcodesAreTheValuesTheyShipped)
+{
+	GYRO_CHECK_EQ(static_cast<std::uint16_t>(Opcode::Manage), std::uint16_t{ 6 });
+	GYRO_CHECK_EQ(static_cast<std::uint16_t>(Opcode::Managing), std::uint16_t{ 7 });
+	GYRO_CHECK_EQ(static_cast<std::uint16_t>(Opcode::Assign), std::uint16_t{ 8 });
+	GYRO_CHECK_EQ(static_cast<std::uint16_t>(Opcode::Assigned), std::uint16_t{ 9 });
+
+	GYRO_CHECK(IsOpcode(9));
+	GYRO_CHECK(!IsOpcode(10));
+	GYRO_CHECK(!IsOpcode(0));
+}
+
+GYRO_TEST(Handover, ClaimingTheMachinePacksToItsLayout)
+{
+	Datagram bytes{};
+
+	// An opcode and a length, and nothing after them: what the peer may do is gyro's table rather than
+	// anything negotiated here.
+	GYRO_REQUIRE_EQ(Manage{}.Encode(bytes), std::size_t{ 4 });
+	GYRO_CHECK_EQ(bytes[0], std::byte{ 0x06 });
+	GYRO_CHECK_EQ(bytes[2], std::byte{ 0x00 });
+
+	GYRO_REQUIRE_EQ(Managing{}.Encode(bytes), std::size_t{ 4 });
+	GYRO_CHECK_EQ(bytes[0], std::byte{ 0x07 });
+
+	GYRO_CHECK(Manage::Decode(std::span<const std::byte>{ ManageBytes }).has_value());
+	GYRO_CHECK(Managing::Decode(std::span<const std::byte>{ ManagingBytes }).has_value());
+
+	// A payload where the message has none is a peer speaking a dialect this build does not.
+	GYRO_CHECK(!Manage::Decode(HelloBytes));
+}
+
+GYRO_TEST(Handover, AnAssignmentPacksToItsLayout)
+{
+	Datagram bytes{};
+	const std::optional<ConnectorName> connector = ConnectorName::From("eDP-1");
+
+	GYRO_REQUIRE(connector.has_value());
+
+	const Assign assign{ .Uid = 1000, .Connector = *connector };
+
+	GYRO_REQUIRE_EQ(assign.Encode(bytes), std::size_t{ 4 + 4 + ConnectorName::Capacity });
+	GYRO_CHECK_EQ(bytes[0], std::byte{ 0x08 });
+	GYRO_CHECK_EQ(bytes[2], std::byte{ 0x24 });
+	GYRO_CHECK_EQ(bytes[4], std::byte{ 0xE8 });
+	GYRO_CHECK_EQ(bytes[5], std::byte{ 0x03 });
+	GYRO_CHECK_EQ(bytes[8], std::byte{ 'e' });
+
+	// **Padding rather than a length**, which is what makes the field diffable: every byte past the
+	// name is NUL, so two builds cannot disagree about where the name ends.
+	GYRO_CHECK_EQ(bytes[8 + 5], std::byte{ 0x00 });
+	GYRO_CHECK_EQ(bytes[8 + ConnectorName::Capacity - 1], std::byte{ 0x00 });
+
+	const std::optional<Assign> read = Assign::Decode(std::span<const std::byte>{ bytes }.first(40));
+
+	GYRO_REQUIRE(read.has_value());
+	GYRO_CHECK_EQ(read->Uid, std::uint32_t{ 1000 });
+	GYRO_CHECK(read->Connector.Text() == "eDP-1");
+}
+
+GYRO_TEST(Handover, AnAnsweredAssignmentEchoesTheRequest)
+{
+	Datagram bytes{};
+	const std::optional<ConnectorName> connector = ConnectorName::From("DP-7");
+
+	GYRO_REQUIRE(connector.has_value());
+	GYRO_REQUIRE_EQ(Assigned{ .Uid = 42, .Connector = *connector }.Encode(bytes), std::size_t{ 40 });
+	GYRO_CHECK_EQ(bytes[0], std::byte{ 0x09 });
+
+	const std::optional<Assigned> read = Assigned::Decode(std::span<const std::byte>{ bytes }.first(40));
+
+	GYRO_REQUIRE(read.has_value());
+	GYRO_CHECK_EQ(read->Uid, std::uint32_t{ 42 });
+	GYRO_CHECK(read->Connector.Text() == "DP-7");
+}
+
+// The empty name is every output, which is the request a login agent can make without first having
+// discovered anything about the machine.
+GYRO_TEST(Handover, AnEmptyConnectorIsEveryOutput)
+{
+	const std::optional<ConnectorName> empty = ConnectorName::From("");
+
+	GYRO_REQUIRE(empty.has_value());
+	GYRO_CHECK(empty->IsEveryOutput());
+	GYRO_CHECK(empty->Text().empty());
+	GYRO_CHECK(ConnectorName{}.IsEveryOutput());
+
+	const std::optional<ConnectorName> named = ConnectorName::From("eDP-1");
+
+	GYRO_REQUIRE(named.has_value());
+	GYRO_CHECK(!named->IsEveryOutput());
+}
+
+// **Refused rather than truncated, which is where this differs from `Reason` on purpose.** A cut
+// sentence is still the sentence; a cut connector name is a different screen or none, and the sender
+// is the end that can still tell the difference.
+GYRO_TEST(Handover, AConnectorNameThatWillNotFitIsRefused)
+{
+	GYRO_CHECK(ConnectorName::From(std::string(ConnectorName::Capacity, 'x')).has_value());
+	GYRO_CHECK(!ConnectorName::From(std::string(ConnectorName::Capacity + 1, 'x')).has_value());
+}
+
+// Bytes no connector name has are a peer speaking something else, and a log line is a thing terminal
+// escapes are read out of.
+GYRO_TEST(Handover, AConnectorNameHoldsOnlyWhatAConnectorIsCalled)
+{
+	GYRO_CHECK(!ConnectorName::From("eDP 1").has_value());
+	GYRO_CHECK(!ConnectorName::From(std::string_view{ "clear\x1b[2J" }).has_value());
+	GYRO_CHECK(!ConnectorName::From(std::string_view{ "eDP\0001", 5 }).has_value());
+}
+
+// A field whose padding is not padding would make the echo in `Assigned` a lie: it would decode to one
+// name and encode back as another.
+GYRO_TEST(Handover, AConnectorFieldIsRefusedWhereItsPaddingIsNot)
+{
+	std::array<std::byte, ConnectorName::Capacity> field{};
+	field[0] = std::byte{ 'e' };
+	field[2] = std::byte{ 'x' };
+
+	GYRO_CHECK(!DecodeConnector(field).has_value());
+
+	field[2] = std::byte{ 0x00 };
+
+	const std::optional<ConnectorName> read = DecodeConnector(field);
+
+	GYRO_REQUIRE(read.has_value());
+	GYRO_CHECK(read->Text() == "e");
 }
 
 GYRO_TEST(Handover, OnlyAnOfferCarriesADescriptor)
@@ -273,8 +427,12 @@ GYRO_TEST(Handover, EncodeRefusesABufferItWouldOverrun)
 	GYRO_CHECK_EQ(Welcome{}.Encode(cramped), std::size_t{ 0 });
 	GYRO_CHECK_EQ(Refused{}.Encode(cramped), std::size_t{ 0 });
 	GYRO_CHECK_EQ(Offer{}.Encode(cramped), std::size_t{ 0 });
+	GYRO_CHECK_EQ(Assign{}.Encode(cramped), std::size_t{ 0 });
+	GYRO_CHECK_EQ(Assigned{}.Encode(cramped), std::size_t{ 0 });
 
 	std::array<std::byte, HeaderBytes - 1> tiny{};
 
 	GYRO_CHECK_EQ(Offer{}.Encode(tiny), std::size_t{ 0 });
+	GYRO_CHECK_EQ(Manage{}.Encode(tiny), std::size_t{ 0 });
+	GYRO_CHECK_EQ(Managing{}.Encode(tiny), std::size_t{ 0 });
 }
