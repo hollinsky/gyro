@@ -19,6 +19,7 @@
 #include "Testing/Test.h"
 #include "World/Content.h"
 #include "World/Exit.h"
+#include "World/Material.h"
 #include "World/Node.h"
 #include "World/Root.h"
 
@@ -2195,4 +2196,118 @@ GYRO_TEST(Evaluator, AWindowIsOnlyDrawnFromAPictureItsOwnReservationNames)
 
 	GYRO_REQUIRE(drawn != nullptr);
 	GYRO_CHECK_EQ(drawn->Texture, TextureId{ 1, 1 });
+}
+
+// A blur is a blur *of what is behind*, so it is no more the window's own pixels than its shadow is —
+// and the renderer refuses to draw one into an atlas rectangle for exactly that reason, since the
+// target there is empty and the blur would be of nothing. What a person saw when the picture simply
+// went without it was a run bar whose glass vanished on the frame it began to fade, leaving its labels
+// hanging in the air. So the composite casts it again, over whatever is actually behind the window.
+GYRO_TEST(Evaluator, AWindowDrawnFromItsPictureCastsTheGlassThePictureCouldNotHold)
+{
+	Wire wire;
+
+	std::array nodes{ Container(1, 300.0, 200.0), Image(0, 300.0, 200.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Dress = Material::Glass;
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const std::array<std::uint32_t, 1> pictured{ 11 };
+
+	EvaluateRequest request = Frame(snapshot);
+	request.Pictured = pictured;
+
+	const DrawList list = evaluator.Evaluate(request);
+
+	// One item, carrying both: the material draws behind the item's own content, so the glass lands
+	// under the pixels that were painted on it rather than over them.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Dress, Material::Glass);
+	GYRO_CHECK(AsTexture(list.Items[0]) != nullptr);
+}
+
+// The window on the frame its copy is taken is drawn live and dressed as it always was, so the test
+// above is measuring the replay rather than an evaluator that started dressing every closing window.
+GYRO_TEST(Evaluator, TheFrameThatTakesThePictureDressesTheWindowAsBefore)
+{
+	Wire wire;
+
+	std::array nodes{ Container(1, 300.0, 200.0), Image(0, 300.0, 200.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Dress = Material::Glass;
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// The dressed container and the image under it, in that order, with the material on the container
+	// — which is the run the renderer takes the picture from and skips the material inside.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(list.Items[0].Dress, Material::Glass);
+	GYRO_CHECK_EQ(list.Items[1].Dress, Material::None);
+}
+
+// A window that declared a group is met before the group takes its dressing, so the replay carries the
+// same material it would have. Without that the one window most likely to be dressed — a shell panel
+// fading as a flattened whole — is the one that loses its glass.
+GYRO_TEST(Evaluator, AGroupedClosingWindowsGlassIsCastFromItsPictureToo)
+{
+	Wire wire;
+
+	std::array nodes{ Container(1, 300.0, 200.0), Image(0, 300.0, 200.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Flags |= Node::Group;
+	nodes[0].Dress = Material::Smoke;
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const std::array<std::uint32_t, 1> pictured{ 11 };
+
+	EvaluateRequest request = Frame(snapshot);
+	request.Pictured = pictured;
+
+	const DrawList list = evaluator.Evaluate(request);
+
+	// The picture *is* the flattened result, so there is no group item left to draw it through — one
+	// image with the material on it, exactly as the ungrouped case.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(list.Items[0].Dress, Material::Smoke);
+	GYRO_CHECK(AsTexture(list.Items[0]) != nullptr);
 }

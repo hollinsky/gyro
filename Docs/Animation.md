@@ -997,6 +997,17 @@ rotates buffers, so the id it holds at destruction is the commit after the one o
 client window vanished instead of fading. Which pixels a window needs is a fact the world holds and
 the client does not; see [decision 199](Decisions.md#199-a-closing-windows-pixels-are-pinned-by-the-retirement-that-will-draw-them-not-offered-by-the-surface-that-is-going-away).
 
+**The picture holds what is intrinsic to the window, and everything contextual is recomputed live.**
+*(2026-09-06.)* Pixels a client painted are the window; anything that is a function of where the window
+is, or of what is behind it, is not. The window's own shadow is left out of the copy and cast fresh
+each frame against the quad the exit has moved to, so it animates with the window instead of being an
+image that scales along with it. Its blur is left out for a harder reason — a gather reads the target
+it is drawn onto, and the target while the copy is being taken is an empty rectangle in an atlas — and
+is cast over the real composite for the same result: a run bar that is fading out still shows the
+desktop through it, and still updates when something moves back there. Before that, a panel kept its
+colour and lost its glass at the instant it began to leave, which is the one moment somebody is
+certainly watching it.
+
 **And the picture is a saving rather than a switch.** A closing window is drawn from its copy where
 one exists and from its own subtree where one does not, so a copy that is missing or empty costs a
 slower exit instead of a window fading as an empty rectangle — which is worse than the cut below and

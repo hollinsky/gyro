@@ -2094,15 +2094,21 @@ bool VulkanRenderer::Capture(
 	{
 		const DrawItem item = Relocated(request.Items[capture.First + index], by);
 
-		// **A gathering material is not drawn into a snapshot, and what it leaves behind is its tint.**
-		// A material reads the target it is being drawn onto — decision 104 fixes that as *the target as
-		// of before the item began* — and the target here is an empty rectangle in an atlas rather than
-		// the screen, so a blur taken through it would be a blur of nothing. What is owed is a chain run
-		// against the composite before the window is lifted off it, which is decision 60's offscreen
-		// pointed the other way and is not built. Until it is, a closing panel keeps its colour and
-		// loses its blur at the instant it starts to leave.
+		// **A gathering material is not drawn into a snapshot, and it is left to the composite rather
+		// than lost.** A material reads the target it is being drawn onto — decision 104 fixes that as
+		// *the target as of before the item began* — and the target here is an empty rectangle in an
+		// atlas rather than the screen, so a blur taken through it would be a blur of nothing. What a
+		// blur is of is *what is behind the window*, which is context rather than the window's own
+		// pixels, so `Frame/Evaluator.h` casts it fresh over the real composite on every frame of the
+		// exit — the same treatment the shadow already gets, and for the same reason.
+		//
+		// **Marked, because from outside this is the skip that looks like the bug.** A panel whose
+		// rectangle holds its glyphs and nothing else is what a person saw before the composite recast
+		// the glass, and it is what they would see again if the two halves ever stopped agreeing.
 		if (item.Dress != Material::None && Facts(item.Dress).Gathering)
 		{
+			TraceMark("snapshot dressing left to the composite", TraceThread, TraceTag(index));
+
 			continue;
 		}
 

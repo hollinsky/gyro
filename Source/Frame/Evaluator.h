@@ -24,6 +24,7 @@
 #include "Seam/Renderer.h"
 #include "World/Content.h"
 #include "World/Exit.h"
+#include "World/Material.h"
 #include "World/Node.h"
 #include "World/Root.h"
 // See Docs/Architecture.md#the-frame-loop and decisions 82, 86, 88, 90, 92, 93, 94, and 95.
@@ -675,12 +676,14 @@ private:
 		// precisely so that road is always open, and a window fading as an empty rectangle is the one
 		// outcome neither decision 20 nor decision 46 ever asked for — 46 would rather it cut.
 		//
-		// **Before the group and before the dressing**, because both are already in the picture: a
-		// group's flattening is what the copy was taken of, and a material was drawn into it. Emitting
-		// either again would put it on twice.
+		// **Before the group and before the dressing**, because the group's flattening is what the copy
+		// was taken of — emitting it again would put it on twice — and because the dressing is `Replay`'s
+		// to decide rather than this branch's: a pointwise material is in the picture and a gathering one
+		// never can be. The node's own material is still in hand here, which is why the branch is above
+		// the group rather than below it: a group takes the dressing with it a few lines down.
 		if (Pictured(request.Pictured, pending.Reservation))
 		{
-			if (const Replayed replayed = Replay(pending, node, chain, view, own, lift, request.Target);
+			if (const Replayed replayed = Replay(pending, node, chain, view, own, dress, lift, request.Target);
 			    replayed != Replayed::Elsewhere)
 			{
 				return replayed == Replayed::Drawn;
@@ -978,10 +981,26 @@ private:
 	// window's transform put the window on *this* frame, so the picture follows the animation the way
 	// the live window would have.
 	//
-	// **The shadow is cast here rather than being in the picture**, which is the other half of what the
-	// snapshot deliberately left out: a shadow is this height applied to this quad, and the quad is the
-	// one above. Casting it fresh is what keeps decision 105's promise that a shadow animates with its
-	// window instead of being an image that scales along with it.
+	// **The picture holds what is intrinsic to the window, and everything contextual is cast fresh
+	// against the quad above.** That is the rule, and it is worth stating once rather than being
+	// rediscovered per dressing: pixels a client painted are the window, and anything that is a
+	// function of *where the window is* or *what is behind it* is not. Two things meet it so far.
+	//
+	// **The shadow, which is a height applied to a quad.** Baking it would make it an image that scales
+	// along with the window, where decision 105 promises a shadow that animates with it — so a window
+	// shrinking as it leaves would carry a shrinking shadow instead of one cast from where it now is.
+	//
+	// **The gathering material, which is a blur of what is behind.** A gather reads the target it is
+	// drawn onto (117), and the target while a picture is being taken is an empty atlas rectangle — so
+	// the renderer refuses it there, correctly, and the panel would otherwise arrive on screen with its
+	// colour and no blur. That is a run bar losing its glass at the instant it starts to leave, which is
+	// exactly the frame a person is watching. Cast here, over the real composite, a bar that is fading
+	// still shows the desktop through it and still updates if something moves back there.
+	//
+	// **A pointwise material is not recast, and the asymmetry is the whole of why the test is on the
+	// kind.** Nothing refused it when the picture was taken, so it is already in those pixels; drawing
+	// it again would put the tint on twice, darkening a panel over the length of its own exit. The set
+	// is empty today (103) and this is what the third material inherits without having to ask.
 	//
 	// **The record is still filed, and a filed record is what keeps the reservation.** `Frame/Capture.h`
 	// forgets a reservation the walk stops naming, so a window that dropped out of the list the frame
@@ -1003,6 +1022,7 @@ private:
 		const ComposedTransform& chain,
 		const OutputView& view,
 		float opacity,
+		Material dress,
 		Shadow lift,
 		ColorState target
 	)
@@ -1026,6 +1046,13 @@ private:
 		item.Opacity = opacity;
 		item.Lift = lift;
 		item.Color = target;
+
+		// The gathering half of the dressing and nothing else, for the reason above. One item carries
+		// both it and the picture, which is also the order the composite needs: a renderer draws an
+		// item's material behind the item's own content, so the glass lands under the pixels that were
+		// painted on it rather than over them.
+		item.Dress = IsGathering(dress) ? dress : Material::None;
+
 		const Rect<BufferSpace> texels = Texels(pending.Slot);
 
 		item.Content = DrawTexture{ .Texture = pending.Into, .Source = texels };
