@@ -1,0 +1,24 @@
+# Starting gyro the moment a card node appears, which is what makes it a boot service rather than a
+# login one.
+#
+# Docs/Architecture.md#boot-and-the-display-lifetime: gyro waits on a DRM device with its driver's
+# firmware loaded and on `/dev/input/*` with udev rules applied, and on nothing else — no D-Bus, no
+# network, no user, no VT, no `XDG_RUNTIME_DIR`. A unit ordered after a target would be waiting for
+# things it does not need, and the wait is visible: it is the interval in which the firmware's logo is
+# still on the glass and nothing has continued it.
+#
+# **This file is not installed by default, and that is the point of it being a separate file.** The
+# three rules beside it grant device access and are safe on any machine — they are what a development
+# run uses. This one commits the machine: `SYSTEMD_WANTS` is a runtime dependency of the *device*, so
+# gyro starts as soon as the card is there whatever the default target is, and `gyro.service`
+# conflicts with `display-manager.service`. On a machine that still boots to gdm, installing this is
+# how you stop booting to gdm.
+#
+#     sudo cmake --install build --component Boot
+#
+# **Rejected: `SYSTEMD_ALIAS` making gyro.service the display manager.** That is the conventional
+# hook and it is the wrong shape twice — it orders gyro behind everything `graphical.target` waits
+# for, and it describes gyro as a thing that manages logins, which is the login agent's job at a
+# privilege gyro refuses to hold (decision 22).
+
+SUBSYSTEM=="drm", KERNEL=="card*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="gyro.service"

@@ -1454,3 +1454,92 @@ target_link_libraries(IntegrationTests
 		Threads::Threads
 )
 add_test(NAME Integration COMMAND IntegrationTests)
+
+
+# Installation: the three binaries, and the files that make the first of them a boot service.
+#
+# **`Deploy/` is the unit of the answer rather than the unit files being scattered**, because the
+# pieces are only correct together. The udev rules name a group the sysusers file creates, the service
+# runs as the user that file creates, and those rules are what give that user a display and a
+# keyboard — so a machine missing any one of them fails as *gyro will not start*, with the reason
+# three files away. `Docs/Architecture.md#privilege` is the table this directory implements.
+#
+# **Not a `CPack` configuration.** What a distribution package additionally needs is a spec file, a
+# changelog and a signing key, none of which belong in a build system, and every packaging format
+# consumes `DESTDIR` over a plain `install()` already. `cmake --install` is the whole of what is owed.
+
+include(GNUInstallDirs)
+
+# **Three directories the prefix does not answer**, as cache variables because a distribution
+# packager's answers are not a person's installing over their own machine.
+#
+# **Relative, so they follow the prefix rather than freezing one.** An absolute default computed from
+# `CMAKE_INSTALL_PREFIX` here looks equivalent and is not: `cmake --install --prefix` rewrites only
+# the relative destinations, so the binaries would move and these would stay, and one command would
+# land an install in two prefixes at once. A packager wanting a path off the prefix entirely sets an
+# absolute value, which `install()` honours.
+#
+# The defaults are right for `--prefix=/usr`, which is the only prefix that fully works: systemd does
+# search `/usr/local/lib/systemd/system`, but **udev does not search `/usr/local/lib/udev/rules.d`** —
+# its path is `/usr/lib/udev/rules.d`, `/run/udev/rules.d` and `/etc/udev/rules.d`, and nothing else.
+# So a `/usr/local` install puts the rules where nothing reads them and the failure is a compositor
+# that cannot open a card node. Set `GYRO_UDEV_RULES_DIR` rather than discovering that.
+set(GYRO_SYSTEMD_UNIT_DIR "lib/systemd/system"
+	CACHE PATH "Where system unit files go, under the prefix unless absolute")
+set(GYRO_SYSUSERS_DIR "lib/sysusers.d"
+	CACHE PATH "Where systemd-sysusers declarations go, under the prefix unless absolute")
+set(GYRO_UDEV_RULES_DIR "lib/udev/rules.d"
+	CACHE PATH "Where udev rules go; udev searches /usr/lib/udev/rules.d and never /usr/local")
+
+# The unit is configured rather than copied because `ExecStart` must be absolute, and a unit naming
+# the wrong path fails as `203/EXEC` — which says nothing about the prefix having been the cause.
+set(GYRO_BINDIR "${CMAKE_INSTALL_FULL_BINDIR}")
+configure_file(
+	${CMAKE_CURRENT_SOURCE_DIR}/Deploy/gyro.service.in
+	${CMAKE_CURRENT_BINARY_DIR}/Generated/gyro.service
+	@ONLY
+)
+
+# Which makes the prefix a configure-time choice, and this is what says so before anything is written
+# rather than after half of it is. See CMake/CheckInstallPrefix.cmake.in for what it costs to find
+# out later.
+configure_file(
+	${CMAKE_CURRENT_SOURCE_DIR}/CMake/CheckInstallPrefix.cmake.in
+	${CMAKE_CURRENT_BINARY_DIR}/Generated/CheckInstallPrefix.cmake
+	@ONLY
+)
+install(SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/Generated/CheckInstallPrefix.cmake)
+
+install(TARGETS gyro gyro-session gyro-shell
+	RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/Generated/gyro.service
+	DESTINATION ${GYRO_SYSTEMD_UNIT_DIR}
+)
+install(FILES Deploy/gyro.target
+	DESTINATION ${GYRO_SYSTEMD_UNIT_DIR}
+)
+install(FILES Deploy/gyro-sysusers.conf
+	DESTINATION ${GYRO_SYSUSERS_DIR}
+	RENAME gyro.conf
+)
+install(FILES
+		Deploy/70-gyro-drm.rules
+		Deploy/70-gyro-input.rules
+		Deploy/70-gyro-gpu-freq.rules
+	DESTINATION ${GYRO_UDEV_RULES_DIR}
+)
+
+# **The one file that changes what the machine boots into, and all that separates it from the three
+# above is that it is not installed by default.** `SYSTEMD_WANTS` is a dependency of the *device*, so
+# it starts gyro whatever the default target is, and `gyro.service` conflicts with
+# `display-manager.service` — on a machine that still boots to gdm, installing this is how it stops.
+# The rules above only grant device access and are what a development run wants; this one is a
+# decision, and it is spelled as a second command so that it is made rather than inherited.
+#
+#     sudo cmake --install build --component Boot
+install(FILES Deploy/71-gyro-boot.rules
+	DESTINATION ${GYRO_UDEV_RULES_DIR}
+	COMPONENT Boot
+	EXCLUDE_FROM_ALL
+)

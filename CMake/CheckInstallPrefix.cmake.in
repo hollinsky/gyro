@@ -1,0 +1,25 @@
+# The install-time half of a decision that was taken at configure time.
+#
+# `gyro.service` carries an absolute `ExecStart`, because systemd requires one — so the prefix is
+# baked into a file by `configure_file` and cannot follow a prefix chosen later, the way every
+# destination in `install()` does. `cmake --install --prefix=/usr` on a tree configured for the
+# default therefore puts the binaries in `/usr/bin` and a unit beside them naming `/usr/local/bin`,
+# with nothing on the terminal to say so.
+#
+# **What that costs is why this file exists.** The failure is `203/EXEC` at the first boot after the
+# machine was switched to `gyro.target`, which is a machine with no display manager, no VT
+# (decision 37) and no compositor — so the thing that reports it is a serial console or another
+# machine. Refusing here is the same trade the build's other checks make: a discipline that fails
+# where somebody is looking rather than where it is expensive.
+#
+# Configured from `CMake/CheckInstallPrefix.cmake.in`. `@` is the configure-time answer and `${}` is
+# the install-time one, which is the whole of how this file compares them.
+
+if(NOT CMAKE_INSTALL_PREFIX STREQUAL "@CMAKE_INSTALL_PREFIX@")
+	message(FATAL_ERROR
+		"gyro.service names @GYRO_BINDIR@/gyro, which was fixed when this tree was configured with "
+		"CMAKE_INSTALL_PREFIX=@CMAKE_INSTALL_PREFIX@. Installing under ${CMAKE_INSTALL_PREFIX} would put "
+		"the binaries somewhere that unit does not name, and the first boot would fail as 203/EXEC on a "
+		"machine with no console to read it from. Reconfigure with "
+		"-DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX} rather than passing --prefix to the install.")
+endif()

@@ -2395,6 +2395,10 @@ gyro runs as a dedicated unprivileged uid, with exactly one capability:
 | DRM master                  | implicit on opening a device with no current master          |
 | High-priority GPU queue     | `CAP_SYS_NICE` — the one capability, see below               |
 
+`Deploy/` is that table as files — `gyro.service` for the two rlimits, `gyro-sysusers.conf` for the
+uid, and three udev rules for the devices — and `Deploy/71-gyro-boot.rules` is the udev-triggered
+start named above, kept out of the default install because it is what changes the machine's boot.
+
 DRM master deserves a note. `drmSetMaster()` requires `CAP_SYS_ADMIN`, which is effectively root and
 would defeat the exercise — but it is not needed. Opening a DRM device that has no current master
 confers master implicitly, and since gyro uses no VTs and never hands off, it takes master once at

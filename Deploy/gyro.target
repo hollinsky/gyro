@@ -1,0 +1,27 @@
+# The state of a machine gyro owns the display of.
+#
+#     sudo systemctl isolate gyro.target       # now
+#     sudo systemctl set-default gyro.target   # and on every boot
+#
+# **A target rather than an alias of `display-manager.service`.** Aliasing is the conventional hook
+# and it is wrong in two ways at once: it orders the compositor after everything `graphical.target`
+# waits for, which is the opposite of what Docs/Architecture.md#boot-and-the-display-lifetime asks
+# for, and it files gyro under a name that means *the thing that manages logins* — which is the login
+# agent's job, at a privilege gyro refuses to hold (decision 22).
+#
+# **This subsumes the `gyro-dev.target` hand-written on both development machines**, which is this
+# file with `Wants=seatd.service` on one of them. That line is retired: decision 145 found there is
+# no seat to take, because device access is the udev rules and DRM master is first-open, so nothing
+# exists that gyro would be asking a session broker for.
+#
+# `multi-user.target` rather than `basic.target`, because the machine still wants everything a server
+# wants — networking, logging, `systemd-logind` for the `pam_systemd` a login agent's PAM stack will
+# run. gyro's own independence from logind is gyro's alone; the deployment around it still has one.
+
+[Unit]
+Description=gyro
+Requires=multi-user.target
+After=multi-user.target
+Conflicts=display-manager.service
+Wants=gyro.service
+AllowIsolate=yes

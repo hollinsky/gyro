@@ -1,0 +1,16 @@
+# The keyboards, mice, touchpads and touchscreens, reached through libinput's udev backend.
+#
+# **`event*` rather than a named set, because the enumeration is the point.** gyro opens what
+# libinput's udev backend hands it, and Docs/Architecture.md names that backend as what makes a
+# keyboard plugged in after boot work — so a rule that enumerated devices would be a rule that has to
+# be edited every time somebody plugs something in.
+#
+# `open_restricted` is a plain `open` (Source/Input/Devices.cpp), which is what this rule is for: the
+# alternative is libinput's other arrangement, where a session manager opens the device and passes
+# the descriptor, and that is the dependency decision 145 spent its argument removing.
+#
+# **With no VT, the keyboard is the last way into a wedged machine**, so this rule is also what
+# `sysrq` is a backstop for — see Docs/Architecture.md#dependencies. gyro holding these devices does
+# not take `SysRq` away, because the kernel reads it ahead of any userspace consumer.
+
+SUBSYSTEM=="input", KERNEL=="event*", GROUP="gyro", MODE="0660"

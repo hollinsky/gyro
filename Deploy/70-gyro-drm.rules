@@ -1,0 +1,17 @@
+# The card node, which is the display and DRM master both.
+#
+# Decision 145 takes master by opening a node that has none — `drmSetMaster` wants `CAP_SYS_ADMIN`
+# and is not needed — so the whole of gyro's claim on the display is that this rule let it call
+# `open`. There is no seatd, no logind and no device pause and resume behind it, because on a machine
+# with no VTs nothing exists that could take master away.
+#
+# **`card*` rather than a connector or a driver**, because the node gyro opens first is whichever one
+# the firmware left behind: `simpledrm`'s before the real driver has bound, and the real driver's
+# after. Docs/Architecture.md#rendering-devices has device migration happening on every boot for that
+# reason, so a rule that named a driver would grant the second device and not the first.
+#
+# The render node is not here. `renderD128` is 0666 from the distribution and clients reach the GPU
+# through it without gyro's cooperation, which is the sharpest half of decision 22's argument for
+# taking `CAP_SYS_NICE`.
+
+SUBSYSTEM=="drm", KERNEL=="card*", GROUP="gyro", MODE="0660"

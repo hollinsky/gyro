@@ -1,0 +1,92 @@
+# gyro as a system service, which is nearly all removals.
+#
+# Docs/Architecture.md#boot-and-the-display-lifetime is what this file transcribes: the dependencies
+# are a DRM device and udev rules, and everything a display manager's unit normally carries — a bus,
+# a seat, a VT, a session — is absent because decisions 37, 44 and 145 removed the thing that wanted
+# it. What is left is two rlimits, a uid, and a working directory.
+#
+# **Every property here ran on coachz before it was written down**, as the `systemd-run` line in
+# `Machines/coachz.md`: DRM master by first-open, `SCHED_FIFO` 50 on the frame thread, 555 MB locked,
+# and `/run/gyro/control` bound 0666 as `gyro:gyro`.
+#
+# **What is missing is missing because it is not built**, and is named here rather than discovered by
+# somebody wondering why the unit is so short:
+#
+# - `Type=notify` and `FDSTORE=1` want `sd_notify`, which gyro does not send. Decision 49 rests the
+#   whole of "the last frame holds across a restart" on the service manager holding the DRM
+#   descriptor open, and until that datagram exists a restart is a black screen.
+# - `OnFailure=` wants `gyro --console`, which is not a flag yet. Decision 37 has it as the only
+#   local way into a machine whose compositor will not start, since there is no VT to fall back to.
+# - `AmbientCapabilities=CAP_SYS_NICE` waits for `Render` to ask for a high-priority Vulkan queue.
+#   Decision 22 takes that one capability and nothing else, and nothing asks for it today.
+# - The sandboxing set — `ProtectSystem`, `ProtectKernelTunables`, `PrivateDevices` — is deliberately
+#   absent rather than forgotten. gyro writes `/sys/.../min_freq`, reads `/sys/firmware/acpi/bgrt`,
+#   and `dlopen`s whatever ICD the machine has, so the set has to be written against a device list
+#   somebody has actually enumerated. Guessing it produces a compositor that starts everywhere except
+#   the machine it was needed on.
+
+[Unit]
+Description=gyro compositor
+
+# **The display has exactly one writer, so a second one is refused rather than ordered against.**
+# Master is first-open (decision 145) and gyro never hands off, so a display manager already holding
+# the card is not something gyro can wait out — `Drm/Device.cpp` says "another process is DRM master
+# of" and stops. `After=` is what makes the conflict a handover rather than a race when both are
+# queued in one transaction.
+Conflicts=display-manager.service
+After=display-manager.service
+
+# **A crash loop is worse than a crash**, which is decision 49's argument and is specific: the fd
+# store means the last frame is still on the glass, so a gyro that dies on every client's reconnect
+# leaves a machine that looks like it is working and answers nothing. The burst is what turns that
+# into a stopped unit. It is supposed to fall through to `gyro --console`; see the note above.
+StartLimitIntervalSec=30
+StartLimitBurst=5
+
+[Service]
+# Decision 22: a dedicated unprivileged uid, with device access from the udev rules beside this file.
+User=gyro
+Group=gyro
+
+# The two rlimits that stand in for two capabilities, which is the whole of that decision's
+# mechanism. 50 is `RealTimePolicy::Priority` — below the kernel's threaded IRQ handlers, because
+# gyro outranking the interrupt that delivers its own vblank is a priority inversion with the
+# hardware. `--priority=N` above this number is refused by the kernel rather than by gyro.
+LimitRTPRIO=50
+LimitMEMLOCK=infinity
+
+# `/run/gyro`, holding the control socket that session agents offer their listeners on. gyro `chmod`s
+# the socket itself to 0666 and `SO_PEERCRED` is what makes that safe (Session/Control.h); the
+# directory is gyro's own, and 0755 is what lets another uid reach through it to the socket.
+RuntimeDirectory=gyro
+
+# **Where a trace lands, which is the only reason this is set.** `--trace`, `--dump` and `--capture`
+# all default to paths relative to the working directory, and `SIGUSR1` writes a numbered snapshot
+# into it at any moment — so a service without one writes gyro's own diagnostics into `/`.
+StateDirectory=gyro
+WorkingDirectory=/var/lib/gyro
+
+# `--backend=drm` rather than `auto`, because a boot service must not take a silent default: `auto`
+# reads `WAYLAND_DISPLAY` and falls back, and both of those are answers to a question a person at a
+# terminal is asking. `--control` is the listener handover (decision 24) and is what makes this run
+# refuse to bind a Wayland socket of its own.
+#
+# A background, a second output, a trace: those go in a drop-in rather than here, since they are this
+# machine's rather than every machine's.
+#
+#     systemctl edit gyro.service
+#     [Service]
+#     Environment=GYRO_OPTIONS=--background=/usr/share/gyro/background.pam
+ExecStart=@GYRO_BINDIR@/gyro --backend=drm --control $GYRO_OPTIONS
+
+Restart=on-failure
+RestartSec=1
+
+# gyro dying takes every client belonging to every user on the machine (decision 27), which makes it
+# a poor thing for the kernel to reach for first. Not `-1000`: gyro leaking should end in gyro dying,
+# rather than in the machine dying around it.
+OOMScoreAdjust=-900
+
+# No `[Install]` section, deliberately. `gyro.target` wants this unit, so the deliberate act is
+# choosing that target — one decision rather than an enable that does nothing without an isolate and
+# an isolate that shows a black screen without an enable.

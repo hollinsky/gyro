@@ -2048,6 +2048,16 @@ it is gyro's own protocol documents — `gyro-bindings-v1`, `gyro-chrome-v1` and
 searched by `gyro_add_bindings` ahead of wayland-scanner's and wayland-protocols' `pkgdatadir`s, because a
 first-party document is not subject to what a distribution shipped.
 
+`Deploy/` is the other thing in the tree that is not compiled: the unit files, the sysusers
+declaration and the udev rules that make gyro a boot service rather than a program somebody runs.
+They are one directory because they are only correct together — the rules name a group the sysusers
+file creates, the service runs as the user it creates, and those rules are what give that user a
+display and a keyboard, so a machine missing one of them fails as *gyro will not start* with the
+reason three files away. `Docs/Architecture.md#privilege` is the table it implements, and
+`CMakeLists.txt`'s install rules are where it is wired up. `71-gyro-boot.rules` is separate from the
+other three and is not installed by default, because it is the file that decides what the machine
+boots into rather than what a development run may open.
+
 `Tools/Build.sh` is the odd one out and is not a probe: it is the build itself, serialised, and it
 is a shell script because the thing being protected is a `flock` around a `ninja` that any number of
 agents may reach for at once. Everything in this repository is built through it.

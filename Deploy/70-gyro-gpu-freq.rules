@@ -1,0 +1,32 @@
+# The one sysfs attribute gyro writes: the GPU's minimum clock.
+#
+# Decision 142 has gyro state the frame deadline to the driver where the driver listens and command
+# the frequency floor where it does not — a GPU that idles down between frames and takes three frames
+# to climb back is a composite that misses, and what a person sees is a window that stutters for the
+# first moments of every interaction. `Render/GpuFloor.cpp` reads the floor, restores it on the way
+# out, and treats an unwritable node as *run and say so* rather than as a failure, so a machine
+# without this rule works and drops frames it did not have to.
+#
+# **`RUN+=` rather than `GROUP=`, because these are attributes and not device nodes.** udev's
+# ownership fields apply to what it creates in `/dev`, and none of the three paths below is in
+# `/dev` — so the group has to be set by a program, which is the one place in this directory where
+# that is true.
+#
+# The three families are the three `GpuFloor::Resolve` knows, and each is guarded by its own `TEST`
+# so that a machine spawns nothing for a node it does not have. i915 carries both the legacy
+# attribute and the per-`gt` one and a kernel that moved one moved the other, so both are granted.
+
+SUBSYSTEM=="drm", KERNEL=="card*", TEST=="/sys%p/gt_min_freq_mhz", \
+	RUN+="/usr/bin/chgrp gyro /sys%p/gt_min_freq_mhz", RUN+="/usr/bin/chmod 0664 /sys%p/gt_min_freq_mhz"
+
+SUBSYSTEM=="drm", KERNEL=="card*", TEST=="/sys%p/gt/gt0/rps_min_freq_mhz", \
+	RUN+="/usr/bin/chgrp gyro /sys%p/gt/gt0/rps_min_freq_mhz", RUN+="/usr/bin/chmod 0664 /sys%p/gt/gt0/rps_min_freq_mhz"
+
+SUBSYSTEM=="drm", KERNEL=="card*", TEST=="/sys%p/device/tile0/gt0/freq0/min_freq", \
+	RUN+="/usr/bin/chgrp gyro /sys%p/device/tile0/gt0/freq0/min_freq", RUN+="/usr/bin/chmod 0664 /sys%p/device/tile0/gt0/freq0/min_freq"
+
+# msm, where the GPU is a platform device beside the display controller rather than under it, so the
+# node is found by scanning `/sys/class/devfreq` rather than by walking down from the DRM device —
+# which is `GpuClock::MsmDevfreqDirectory` and is why this rule matches a different subsystem.
+SUBSYSTEM=="devfreq", KERNEL=="*.gpu", TEST=="/sys%p/min_freq", \
+	RUN+="/usr/bin/chgrp gyro /sys%p/min_freq", RUN+="/usr/bin/chmod 0664 /sys%p/min_freq"

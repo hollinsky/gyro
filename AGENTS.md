@@ -151,8 +151,9 @@ the dependency graph and the thread partition.
 | `Integration` | portable | — | The tests that name two modules no module may |
 | `Testing` | portable | — | The hand-rolled harness and every test binary's `main()` (9) |
 
-`Source/Main.cpp` is a thin entry point, `Tools/` holds the probes and the trace dumper, and
-`Protocols/` holds gyro's own protocol XML — all in
+`Source/Main.cpp` is a thin entry point, `Tools/` holds the probes and the trace dumper,
+`Protocols/` holds gyro's own protocol XML, and `Deploy/` holds the units, udev rules and sysusers
+declaration that make gyro a boot service — all in
 [Structure.md](Docs/Structure.md#tools-and-the-rest-of-the-tree). **`Tools/Build.sh` is not one of
 them**: it is the build itself, serialised behind a `flock`, and Working model above is why that
 matters.
