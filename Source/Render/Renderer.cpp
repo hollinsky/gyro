@@ -1372,6 +1372,13 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 		// extracts, which is the property decision 60's backdrop rule already assumes. It is also
 		// cheaper on the axis the old comment cared about — a pipeline bind per item instead of one
 		// per item per rectangle, against a scissor set per rectangle, and a scissor is the cheap one.
+
+		// Whether this record has already said that an item named pixels this renderer cannot find. One
+		// mark per composite rather than one per item: a table that lost a texture has usually lost it
+		// for every item drawing from it, and a window's worth of identical records would bury the row
+		// they are read on.
+		bool lost = false;
+
 		for (const DrawItem& item : request.Items)
 		{
 			const bool gathering = item.Dress != Material::None && Facts(item.Dress).Gathering;
@@ -1415,12 +1422,26 @@ Result<Submission> VulkanRenderer::Record(const RecordRequest& request)
 			{
 				image = m_Textures->Find(texture->Texture);
 
-				// Core/Texture.h's answer, and the only silent skip in this loop: a client destroyed
-				// the buffer while a published snapshot still named it, which resolves to nothing
-				// rather than to whatever took the slot. Drawing a black rectangle instead would put
-				// a hole in the screen for a condition the dispatch thread has already handled.
+				// Core/Texture.h's answer: a client destroyed the buffer while a published snapshot
+				// still named it, which resolves to nothing rather than to whatever took the slot.
+				// Drawing a black rectangle instead would put a hole in the screen for a condition the
+				// dispatch thread has already handled.
+				//
+				// **It is still skipped and it is no longer silent.** For a frame or two after a
+				// destroy this is ordinary and nobody sees it; for the length of an exit it is a
+				// window that is present in every instrument along the path and absent from the glass,
+				// which is the failure this whole area was rebuilt around. The snapshot pass below
+				// names each of its own skips for that reason and this one said nothing, so the
+				// ordinary composite was the half a person could not see into.
 				if (!image.IsValid())
 				{
+					if (!lost)
+					{
+						lost = true;
+
+						TraceMark("composite texture not found", TraceThread, TraceTag(texture->Texture.Index));
+					}
+
 					continue;
 				}
 			}

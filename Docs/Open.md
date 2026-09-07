@@ -1979,3 +1979,31 @@ table in `Seam/Dressing.h` rather than a word on the wire.
 loses the whole frame, so this and everything else decision 187 made possible is visible only nested or
 on DRM. That is decision 79's floor doing what it says, and it is worth naming here because it is now
 the first thing between a person and the picture this protocol exists to produce.
+
+## An exit that is drawing nothing is named and not ended, because the cut is on the other thread
+
+`Frame/Evaluator.h` now counts the closing windows that put no items on a screen and marks the first
+frame of each on the trace ring as `exit draws nothing`. What
+[decision 46](Decisions.md#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)
+actually asks for at that moment is the window's exit to *end* — a cut is a designed failure a person
+reads as speed, and an empty rectangle fading for a third of a second is read as the application
+breaking — and the count does not end anything.
+
+The obstacle is a thread boundary rather than a policy. `FinishRetirement` is a dispatch verb over an
+`EntityId`; the detection is on the frame thread and the only name it holds is a reservation count,
+which is the number
+[decision 46](Decisions.md#46-exit-snapshots-come-from-a-pre-reserved-per-output-atlas-exhaustion-finishes-exits-early)
+mints precisely so that the two sides need not agree on identity. Closing it means a run of
+reservations in `Publication/Return.h`'s `FrameReport` — a record whose padding is spelled because
+[decision 49](Decisions.md#49-the-restart-boundary-is-made-cheap-where-it-can-be-and-stated-where-it-cannot)
+holds open dispatch becoming a process — a merge rule for it beside the presented run's, and a reverse
+lookup on the dispatch side from a reservation to the entity holding it, which nothing keeps today.
+That is three new pieces of machinery on the boundary
+[decision 83](Decisions.md#83-dispatchs-publication-is-an-event-source) and
+[decision 147](Decisions.md#147-the-return-channels-doorbell-is-the-frame-threads-and-it-rings-only-where-a-client-is-waiting)
+were careful about, to act on a condition that is a defect rather than a load.
+
+**What would settle it is one occurrence.** The mark exists so that the next empty exit is visible in
+a trace instead of taking five rounds of instrumentation to find, and the shape of what produced it is
+what says whether the answer is the return channel, a repair further up, or an assertion that fails
+the build. Building the channel first would be choosing the mechanism before the case.

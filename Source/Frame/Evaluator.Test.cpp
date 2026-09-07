@@ -2311,3 +2311,222 @@ GYRO_TEST(Evaluator, AGroupedClosingWindowsGlassIsCastFromItsPictureToo)
 	GYRO_CHECK_EQ(list.Items[0].Dress, Material::Smoke);
 	GYRO_CHECK(AsTexture(list.Items[0]) != nullptr);
 }
+
+// **A retiring subtree is drawable at every moment of its exit.** Nothing above asserts that, and the
+// bug that produced these tests is why it has to be asserted separately: the rectangle was reserved,
+// the picture was recorded and confirmed, the run was emitted every frame and the GPU shaded the quad
+// — four instruments, all reporting their own step complete, over a window that put no pixels on the
+// screen for 372 ms. Each of them asked *did I finish my part*. These ask the only question a person
+// can see the answer to, which is whether the window that is leaving is on the glass at all.
+//
+// The counter is the walk's, because the walk is the only party that can answer it: a closing window
+// is a run of items, and whether that run is empty is a fact about a preorder scan in flight. It is
+// zero on a healthy frame and every test below that is not about a defect says so out loud.
+
+// The floor case, and the guard against the whole thing being a false-positive generator. An earlier
+// attempt at this trigger fired on ordinary zero-extent containers and two `Scene/Serializer` tests
+// caught it, so the predicate is narrowed to a window the far side actually reserved a rectangle for
+// on *this* output — which a container nobody is closing never gets.
+GYRO_TEST(Evaluator, AnOrdinarySceneWithNothingClosingIsNeverBlank)
+{
+	Wire wire;
+
+	std::array nodes{
+		Container(3, 100.0, 100.0), Image(0, 100.0, 100.0), Container(0, 0.0, 0.0), Image(1, 800.0, 0.0)
+	};
+
+	const std::array images{ Texel(1), Texel(2) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_CHECK_EQ(list.Items.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(evaluator.Blank(), 0U);
+}
+
+// The defect the invariant exists to name. This is `AClosingWindowWithNothingLeftToDrawIsNotReported`
+// asked from the other end: not reporting the capture is right and is not enough, because a screen
+// with no exits reported on it and a screen with an exit that drew nothing are the same list of items
+// to everything downstream — which is precisely how a window fading over an empty rectangle stayed
+// invisible in four separate instruments.
+GYRO_TEST(Evaluator, AClosingWindowWithNothingLeftToDrawIsBlank)
+{
+	Wire wire;
+
+	std::array nodes{ Container(0, 10.0, 10.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 7) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	GYRO_CHECK(list.Items.empty());
+	GYRO_CHECK_EQ(evaluator.Blank(), 1U);
+
+	// And it stays counted for as long as it is true, because the count is what the frame is: the
+	// window is invisible on this frame and on the next one and on every frame of the exit. Only the
+	// trace record is once, and that is a property of the ring rather than of the invariant.
+	static_cast<void>(evaluator.Evaluate(Frame(snapshot)));
+
+	GYRO_CHECK_EQ(evaluator.Blank(), 1U);
+}
+
+// **The regression test.** A closing window whose pixels are unavailable mid-exit must not produce a
+// frame that draws nothing. The picture is confirmed and the atlas behind it is gone — an unplug, a
+// mode change, a device that never had room — which before decision 199 handed the frame to a picture
+// that was not there and left a person watching an empty rectangle fade for a third of a second.
+//
+// It bites where the rule is: let a reservation whose atlas is gone still count as a picture — take
+// the null-image test out of `Reserved` — and this fails with one item where there are two, which on
+// screen is a window drawn out of a rectangle that holds nothing.
+GYRO_TEST(Evaluator, AClosingWindowDrawnFromItsOwnSubtreeIsNotBlank)
+{
+	Wire wire;
+
+	std::array nodes{ Container(2, 300.0, 200.0), Image(0, 300.0, 200.0), Image(1, 320.0, 220.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1), Texel(2) };
+	const std::array views{ Placement() };
+
+	// The reservation this output was given, and the atlas it named is no longer there.
+	ExitSnapshot lost = Reserving(0, 0, 11);
+	lost.Texture = TextureId{};
+
+	const std::array exits{ lost };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	const std::array<std::uint32_t, 1> pictured{ 11 };
+
+	EvaluateRequest request = Frame(snapshot);
+	request.Pictured = pictured;
+
+	const DrawList list = evaluator.Evaluate(request);
+
+	// The window is on the screen, drawn from the pixels `Scene/Commit.h` pinned when it retired.
+	GYRO_CHECK_EQ(list.Items.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(evaluator.Blank(), 0U);
+}
+
+// The ordinary exit, both halves of it: the frame that walks the window to take its picture, and every
+// frame after it that draws the picture back. Neither is blank, and a change that broke either would
+// be a window that vanished at one of the two instants a person is certainly watching it.
+GYRO_TEST(Evaluator, AClosingWindowDrawnFromItsPictureIsNotBlank)
+{
+	Wire wire;
+
+	std::array nodes{ Container(1, 300.0, 200.0), Image(0, 300.0, 200.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+
+	const std::array images{ Texel(1) };
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	GYRO_CHECK_EQ(evaluator.Evaluate(Frame(snapshot)).Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(evaluator.Blank(), 0U);
+
+	const std::array<std::uint32_t, 1> pictured{ 11 };
+
+	EvaluateRequest request = Frame(snapshot);
+	request.Pictured = pictured;
+
+	GYRO_CHECK_EQ(evaluator.Evaluate(request).Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(evaluator.Blank(), 0U);
+}
+
+// A closing window that names no content of its own and still draws: a glass panel is a dressing over
+// whatever is behind it, which World/Node.h already makes a reason to emit an item. Anything on the
+// glass is enough — the invariant is about pixels a person can see, never about node kinds — and the
+// window this is really about is the run bar, which is a container with a material and nothing else.
+GYRO_TEST(Evaluator, AClosingPanelThatIsOnlyItsDressingIsNotBlank)
+{
+	Wire wire;
+
+	std::array nodes{ Container(0, 300.0, 200.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Dress = Material::Smoke;
+	nodes[0].Exit = 0;
+
+	const std::array views{ Placement() };
+	const std::array exits{ Reserving(0, 0, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	GYRO_CHECK_EQ(evaluator.Evaluate(Frame(snapshot)).Items.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(evaluator.Blank(), 0U);
+}
+
+// A window closing on the monitor next door draws nothing here and is right to. The reservation is per
+// output (46), so this screen never had one to be disappointed by — without that, every exit on a
+// two-monitor desk would report itself invisible on the monitor it was never on.
+GYRO_TEST(Evaluator, AWindowClosingOnAnotherOutputIsNotBlankOnThisOne)
+{
+	Wire wire;
+
+	std::array nodes{ Container(0, 10.0, 10.0) };
+	nodes[0].Extent = { 100.0F, 60.0F };
+	nodes[0].Exit = 0;
+
+	const std::array views{ Placement(), Placement() };
+	const std::array exits{ Reserving(0, 1, 11) };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+	wire.PutExits(std::span<const ExitSnapshot>{ exits });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	SceneEvaluator evaluator{ clock };
+
+	static_cast<void>(evaluator.Evaluate(On(snapshot, 0)));
+
+	GYRO_CHECK_EQ(evaluator.Blank(), 0U);
+
+	// And on the screen it *is* closing on, it is exactly as blank as it looks.
+	static_cast<void>(evaluator.Evaluate(On(snapshot, 1)));
+
+	GYRO_CHECK_EQ(evaluator.Blank(), 1U);
+}

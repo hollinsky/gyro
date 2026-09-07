@@ -14,6 +14,7 @@
 #include "Core/ColorState.h"
 #include "Core/Session.h"
 #include "Core/Time.h"
+#include "Core/Trace.h"
 #include "Frame/Admission.h"
 #include "Frame/Projection.h"
 #include "Geometry/AxisTransform.h"
@@ -241,6 +242,8 @@ public:
 
 		m_Count = 0;
 		m_CaptureCount = 0;
+		m_Output = request.Output;
+		m_Blank = 0;
 		m_Moving = false;
 		m_Truncated = false;
 
@@ -265,6 +268,17 @@ public:
 	// where that is reported — but the sweep and a log line both want to know that a scene was too
 	// large for the figure above rather than that a subtree went missing on its own.
 	[[nodiscard]] bool Truncated() const noexcept { return m_Truncated; }
+
+	// **How many windows were leaving this screen and put nothing on it.** The one property every other
+	// instrument along this path fails to state: a rectangle can be reserved, a picture recorded, a run
+	// emitted and a quad shaded, every one of them reporting success, over a window a person cannot see.
+	// That is what shipped, and it is why each stage asking *did I complete my step* was not enough.
+	//
+	// Zero on every healthy frame, closing windows or not. Any other number is a defect rather than a
+	// degradation: a fade that is not a fade *of* anything is the one outcome neither decision 20 nor
+	// decision 46 ever asked for, and 46 would rather the window cut. `Blanked` below is what counts it
+	// and why it cannot fire on a window that is drawing correctly.
+	[[nodiscard]] std::uint32_t Blank() const noexcept { return m_Blank; }
 
 private:
 	// No item, in the slots below. The arena is far shorter than this, so the sentinel costs no
@@ -1163,16 +1177,39 @@ private:
 		return {};
 	}
 
-	// File one closing window's run, now that the walk knows where it ends.
+	// File one closing window's run, now that the walk knows where it ends — and answer, for this one
+	// window on this one frame, the question every stage of an exit used to answer about itself.
 	//
 	// **A window that emitted nothing is not reported**, and the difference matters on screen: a
 	// reported run of no items would clear its rectangle to nothing, mark the reservation filled, and
 	// leave the window fading from an empty rectangle for the length of its exit. Not reporting it
 	// means the window cuts, which is the picture decision 46 already accepts, and means the snapshot
 	// is taken on the first frame the window does draw something.
+	//
+	// **It is also the moment the invariant is decidable, which is why the counting is here.** A
+	// closing window is a run of items and the run's end is a fact about a walk in flight, so this is
+	// the first instant anything knows whether the window contributed to the frame at all. Nothing
+	// downstream can recover it: the capture is dropped, so the loop sees a screen with no exits on it
+	// rather than an exit that drew nothing.
 	void File(const ExitCapture& pending) noexcept
 	{
-		if (pending.Reservation == 0 || m_Count <= pending.First || m_CaptureCount == m_Captures.size())
+		// Not a window that is leaving. Nothing else in this function has an opinion about it.
+		if (pending.Reservation == 0)
+		{
+			return;
+		}
+
+		if (m_Count <= pending.First)
+		{
+			Blanked(pending.Reservation);
+
+			return;
+		}
+
+		// Past the sixteen of `MaxExitCaptures` the window is still drawing — it is only its *picture*
+		// that waits a frame, which is what that figure's own paragraph says. Not a blank exit, and
+		// counting it as one would put a mark on the trace every time somebody closed a folder.
+		if (m_CaptureCount == m_Captures.size())
 		{
 			return;
 		}
@@ -1180,6 +1217,47 @@ private:
 		m_Captures[m_CaptureCount] = pending;
 		m_Captures[m_CaptureCount].Count = static_cast<std::uint32_t>(m_Count - pending.First);
 		++m_CaptureCount;
+	}
+
+	// A window that is leaving this screen and drew nothing on it.
+	//
+	// **The predicate is narrow on purpose, and both halves of it are load-bearing.** A non-zero
+	// reservation is not *a node with the exit flag*: `Reserved` above hands one back only where the
+	// far side measured this subtree a real rectangle in *this* output's atlas and where the window's
+	// own quad projects onto this screen. So a zero-extent container gets no reservation, a window on
+	// another monitor gets none here, and a window carried off the edge of the glass by its own exit
+	// gets none either — which is what the earlier attempt at this trigger fired on, and what two
+	// `Scene/Serializer` tests caught it doing. The second half is the walk's own arithmetic: the run
+	// opened at `First` before a single item of the window was emitted, so `m_Count` not having moved
+	// is the whole subtree — the node, its dressing, its shadow, every surface under it — declining to
+	// draw. A window with one pixel of content anywhere in it fails this test.
+	//
+	// **Marked once per exit rather than once per frame.** A third of a second of fade is twenty-odd
+	// frames, and a record per frame would bury the exit marks it is meant to be read beside. The
+	// ring is per output because a reservation is per output; it is a ring rather than a set with a
+	// forget pass because reservation counts never repeat (46), so the worst an overwritten entry can
+	// cost is a second mark about the same defect.
+	//
+	// **What it does not do is end the exit**, which is what decision 46 would actually rather happen —
+	// a cut is a deliberate failure a person reads as speed, where an empty fade reads as the
+	// application breaking. `FinishRetirement` is dispatch's verb and this is the frame thread, so the
+	// cut needs the return channel to carry a reservation back (83, 147) and dispatch to turn it into
+	// the entity that owns it. Carried in Docs/Open.md rather than half-built here.
+	void Blanked(std::uint32_t reservation) noexcept
+	{
+		++m_Blank;
+
+		if (m_Output >= m_Complained.size() || m_Complained[m_Output].Holds(reservation))
+		{
+			return;
+		}
+
+		m_Complained[m_Output].Remember(reservation);
+
+		// One of the exit family — `exit reserved`, `exit unreachable`, `exit cut`, `exit ended` — and
+		// the one that says the exit is running and is invisible. Tagged with the reservation rather
+		// than the entity, because the reservation is the only name this side of the waist holds.
+		TraceMark("exit draws nothing", TraceThread, TraceTag(reservation));
 	}
 
 	void Accumulate(Rect<DeviceSpace> bounds) noexcept
@@ -1330,6 +1408,44 @@ private:
 	std::size_t m_Depth = 0;
 
 	std::array<Memory, MaxOutputs> m_Seen{};
+
+	// Which exits this output has already said were drawing nothing, so that a defect lasting the
+	// length of a fade is one record on the ring rather than one per frame of it. Zero-initialised and
+	// a reservation is never zero, so a fresh ring holds nothing.
+	struct Complained
+	{
+		std::array<std::uint32_t, MaxExitCaptures> Reservations{};
+		std::size_t Next = 0;
+
+		[[nodiscard]] bool Holds(std::uint32_t reservation) const noexcept
+		{
+			for (const std::uint32_t seen : Reservations)
+			{
+				if (seen == reservation)
+				{
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		void Remember(std::uint32_t reservation) noexcept
+		{
+			Reservations[Next] = reservation;
+			Next = (Next + 1) % Reservations.size();
+		}
+	};
+
+	std::array<Complained, MaxOutputs> m_Complained{};
+
+	// Which output the walk in progress is for, so that the ring above is the right one. Past the end
+	// until the first evaluation, which makes a mark impossible rather than misfiled.
+	std::size_t m_Output = MaxOutputs;
+
+	// How many closing windows this evaluation found nothing to draw for. Reported rather than acted
+	// on, for the reason `Blanked` gives.
+	std::uint32_t m_Blank = 0;
 
 	bool m_Moving = false;
 	bool m_Truncated = false;

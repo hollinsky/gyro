@@ -15954,3 +15954,37 @@ window cut, because a cut is a designed failure a person reads as speed and an e
 the application breaking. The walk now draws from the picture where there is one and from the subtree
 where there is not, and the renderer confirms a rectangle only when something was actually drawn into
 it. A wrong answer about pixels is then a slower exit instead of an invisible one.
+
+#### Every instrument on the path measured its own step, so all four were green over a blank screen
+
+*(2026-09-06, from the same bug.)* The rectangle was reserved — true. The picture was recorded and
+confirmed — true, and the renderer had drawn zero items into it. The run was emitted every frame —
+true. The GPU shaded the quad — true. Four independent instruments, each reporting *I completed my
+step*, over a window putting nothing on the glass for 372 ms, and it took five rounds of adding more
+of the same kind before one of them was asked a different question.
+
+**So the walk now states the property instead: a retiring subtree is drawable at every moment of its
+exit.** `SceneEvaluator::Blank()` counts the closing windows that emitted no items, and the first
+frame of each says so once on the trace ring as `exit draws nothing`. It is deliberately not a count
+of steps completed — a version asserting that the reservation succeeded, or that the record was
+submitted, is the same mistake in a new place.
+
+**The predicate is narrow because a noisy invariant is worse than none.** It fires only where the far
+side measured this subtree a real rectangle in *this* output's atlas and the window's own quad lands
+on this screen, which excludes a zero-extent container, a window on another monitor, and a window
+carried off the glass by its own exit — the last of which is what an earlier attempt at this trigger
+fired on, caught by two `Scene/Serializer` tests. After the pin above, the remaining ways to reach it
+are all defects: a pin that failed to hold, or a scene that stopped naming the window's pixels.
+
+**The other half is that a skip which draws nothing may not be the quiet branch.** The composite's
+item loop dropped an item whose texture the renderer's table could not find without a word, which is
+exactly how the original fault stayed invisible on the path a person was actually watching; it is now
+`composite texture not found`, once per record. The snapshot pass names each of its own skips for the
+same reason.
+
+**Deferred: ending the exit rather than only naming it**, which is what decision 46 would actually
+rather happen. `FinishRetirement` is dispatch's verb and the detection is the frame thread's, so the
+cut needs a reservation carried back over `Publication/Return.h` and a lookup dispatch does not keep.
+Carried in [Open.md](Open.md) with what it would take, and left unbuilt on purpose: the mark exists so
+that the next empty exit is one trace rather than five rounds of instrumentation, and what produced it
+is what should choose the mechanism.
