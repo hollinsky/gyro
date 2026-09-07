@@ -216,8 +216,14 @@ void HostOutputs::Sync(wl_display& display, std::span<const SceneOutput> outputs
 
 	for (const SceneOutput& output : outputs)
 	{
+		// **A held entry may have been taken already, and skipping those is what makes this loop safe.**
+		// The match below moves the pointer into `ordered`, which leaves an empty slot behind in
+		// `m_Outputs` — so on the second output and every one after it this predicate runs over holes,
+		// and dereferencing one is a null read on the dispatch thread. It only ever bit a machine with
+		// two displays *and* a session adopted, which is why it survived: a development run has one
+		// output, and the two-output runs had no agent offering a listener.
 		const auto found = std::ranges::find_if(m_Outputs, [&output](const std::unique_ptr<HostOutput>& held) {
-			return held->Id() == output.Id;
+			return held != nullptr && held->Id() == output.Id;
 		});
 
 		if (found != m_Outputs.end())
