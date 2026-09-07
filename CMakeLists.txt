@@ -1493,12 +1493,25 @@ set(GYRO_SYSUSERS_DIR "lib/sysusers.d"
 set(GYRO_UDEV_RULES_DIR "lib/udev/rules.d"
 	CACHE PATH "Where udev rules go; udev searches /usr/lib/udev/rules.d and never /usr/local")
 
+# PAM's vendor directory, which is `/usr/lib/pam.d` where the library was built with one and nowhere
+# at all where it was not. Fedora 44 has it and ships `polkit-1`, `systemd-run0` and `systemd-user`
+# into it; the admin's override stays `/etc/pam.d`, which is what makes shipping here the same choice
+# as shipping units to `/usr/lib/systemd/system`. A distribution whose PAM has no vendor directory
+# sets this to an absolute `/etc/pam.d`.
+set(GYRO_PAM_DIR "lib/pam.d"
+	CACHE PATH "Where PAM stacks go; /etc/pam.d where the library has no vendor directory")
+
 # The unit is configured rather than copied because `ExecStart` must be absolute, and a unit naming
 # the wrong path fails as `203/EXEC` — which says nothing about the prefix having been the cause.
 set(GYRO_BINDIR "${CMAKE_INSTALL_FULL_BINDIR}")
 configure_file(
 	${CMAKE_CURRENT_SOURCE_DIR}/Deploy/gyro.service.in
 	${CMAKE_CURRENT_BINARY_DIR}/Generated/gyro.service
+	@ONLY
+)
+configure_file(
+	${CMAKE_CURRENT_SOURCE_DIR}/Deploy/gyro-autologin@.service.in
+	${CMAKE_CURRENT_BINARY_DIR}/Generated/gyro-autologin@.service
 	@ONLY
 )
 
@@ -1518,8 +1531,18 @@ install(TARGETS gyro gyro-session gyro-shell
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/Generated/gyro.service
 	DESTINATION ${GYRO_SYSTEMD_UNIT_DIR}
 )
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/Generated/gyro-autologin@.service
+	DESTINATION ${GYRO_SYSTEMD_UNIT_DIR}
+)
 install(FILES Deploy/gyro.target
 	DESTINATION ${GYRO_SYSTEMD_UNIT_DIR}
+)
+
+# The stack the unit above names. Installed beside it rather than enabled by it: an instance is
+# enabled per user, and until somebody does that this file is read by nothing.
+install(FILES Deploy/gyro-autologin.pam
+	DESTINATION ${GYRO_PAM_DIR}
+	RENAME gyro-autologin
 )
 install(FILES Deploy/gyro-sysusers.conf
 	DESTINATION ${GYRO_SYSUSERS_DIR}

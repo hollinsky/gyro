@@ -1,0 +1,45 @@
+#%PAM-1.0
+#
+# The PAM stack `gyro-autologin@.service` runs, and the file that says out loud that nobody is being
+# authenticated.
+#
+# **Modelled on `gdm-autologin`, which is the same problem already solved.** systemd's `PAMName=`
+# never calls `pam_authenticate` — it runs `account`, `setcred` and `open_session` — so the `auth`
+# lines below exist to state the policy rather than to be reached: a machine running this unit is one
+# that anybody with physical access is logged into.
+#
+# **What is actually wanted from this file is one line**, and it is in `system-auth`:
+# `pam_systemd.so` creates `XDG_RUNTIME_DIR`, registers a logind session, and starts the user's
+# `systemd --user`. The agent binds its listener inside that directory and gyro checks that an offered
+# listener is inside the one belonging to the uid the kernel reported (`Session/Control.h`), so this
+# is what makes a handover across the uid boundary possible at all. Everything else here is the
+# ordinary furniture of being logged in.
+#
+# **This file is distribution-shaped and a packager is expected to replace it.** `system-auth` and
+# `postlogin` are authselect's names, so this is a Fedora and RHEL stack; Debian's equivalents are the
+# `common-*` files. Every display manager's PAM configuration is patched per distribution for the same
+# reason, and there is no portable spelling to reach for instead.
+
+# No authentication. See above.
+auth       sufficient  pam_permit.so
+
+# `/run/nologin` still refuses the session, which is why the unit is ordered after
+# `systemd-user-sessions.service` rather than trusting this to pass at boot.
+account    required    pam_nologin.so
+account    include     system-auth
+
+password   include     system-auth
+
+# SELinux context around the session, prefixed so that a machine without the module loads the file
+# rather than failing it. Fedora has it and gyro is developed there; the `-` is for everywhere else.
+-session   required    pam_selinux.so close
+
+# The audit login uid, which is what makes this a login rather than a process that happens to have a
+# uid. **Not in tension with decision 44**, which rejected `/proc/<pid>/sessionid` as gyro's *identity*
+# — gyro names a session by uid and reads this never. Setting it is for the machine's audit trail.
+session    required    pam_loginuid.so
+
+-session   required    pam_selinux.so open
+session    optional    pam_keyinit.so force revoke
+session    include     system-auth
+session    include     postlogin

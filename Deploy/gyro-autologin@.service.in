@@ -1,0 +1,95 @@
+# One user logged in at boot with nothing asked of them, which is the stand-in for a greeter.
+#
+# **This is the login agent's job done by the service manager, and it is temporary.**
+# Docs/Architecture.md#the-login-agent has a privileged process that runs a PAM conversation, forks,
+# `setuid`s, and starts a session agent for whoever authenticated. None of that is built. What this
+# unit does is the same sequence with the conversation removed: systemd runs the PAM stack, forks,
+# `setuid`s, and starts the same agent — so the shape being tested here is the shape that stays, and
+# what replaces it is a greeter in front of the part that is missing rather than a rewrite of the
+# part that is not.
+#
+# **Which makes it the thing that puts two open questions in front of a real machine.**
+# Docs/Open.md asks whether logind accepts a graphical session with no VT on `seat0` — decision 37
+# has no VT to give it — and predicts that `pam_systemd` starts the user manager before any agent has
+# bound a socket, so user units do not inherit `WAYLAND_DISPLAY`. Both are answered by booting this,
+# not by reasoning about it.
+#
+#     sudo systemctl enable gyro-autologin@paul.service
+#
+# **There is no authentication here at all**, and `gyro-autologin.pam` beside this file is where that
+# is spelled out. A machine running this unit is a machine anybody with physical access is logged
+# into, which is the same trade `gdm-autologin` makes and is fine for a development machine and for
+# nothing else.
+#
+# **Not a user unit under `loginctl enable-linger`.** That is the other way to start something for a
+# user at boot and it is the wrong model twice: a lingering manager is not a login, so there is no
+# logind session and no seat behind it, and it would diverge from the login agent rather than
+# rehearse it.
+
+[Unit]
+Description=gyro session for %i
+
+# **Wanted rather than required, because the agent already handles gyro not being there.**
+# `Session/Agent.h` retries the control socket with a backoff measured for exactly this — a machine
+# during boot and a development tree between restarts are the same case — so an agent that starts
+# early waits rather than failing. `After=` still earns its place: gyro's `READY=1` means the control
+# socket is bound and being drained, so ordering after it turns the first offer into a connection
+# rather than into the first retry.
+Wants=gyro.service
+After=gyro.service
+
+# `pam_nologin` refuses a session while `/run/nologin` exists, which is the whole of what this unit is
+# ordered against: the file is removed by `systemd-user-sessions.service`, and starting before it is a
+# unit that fails once at boot and succeeds on the restart.
+After=systemd-user-sessions.service systemd-logind.service
+
+# The rate limit belongs to the unit rather than to the service, which systemd will tell you by
+# ignoring it silently in the wrong section — `systemd-analyze verify` is how that was caught here.
+StartLimitIntervalSec=30
+StartLimitBurst=5
+
+[Service]
+# The user to log in, taken from the instance name — `gyro-autologin@paul.service` is paul. `%i`
+# rather than `%I` because a username that needed unescaping is not one this machine has.
+User=%i
+
+# **The PAM stack, and the reason this is a system unit rather than anything simpler.** `PAMName=`
+# runs `account`, `setcred` and `open_session` as the user, which is what reaches `pam_systemd` — and
+# `pam_systemd` is what creates `XDG_RUNTIME_DIR`, registers a logind session, and starts
+# `systemd --user`. The agent binds its listener inside that runtime directory and gyro checks that it
+# is inside the one belonging to the uid the kernel reported (`Session/Control.h`), so without this
+# line the offer is refused three steps later with nothing saying why.
+#
+# gyro itself needs none of it. Docs/Architecture.md#listener-handover: the residual dependency on
+# logind is `pam_systemd` creating a directory for the *agent*, which is a deployment fact on the
+# user's side of the boundary rather than a coupling on gyro's.
+PAMName=gyro-autologin
+
+# The session's first client is its shell, and `--shell` is what makes it one: the agent binds a
+# second listener, offers it as the socket that carries the run of the session, and starts the command
+# on a connection to it — so the path never enters an environment anything could inherit (decision
+# 189). `--respawn` covers the shell exiting and gyro restarting with one rule.
+#
+# A different shell, or a terminal instead of one, goes in a drop-in rather than here:
+#
+#     systemctl edit gyro-autologin@paul.service
+#     [Service]
+#     ExecStart=
+#     ExecStart=@GYRO_BINDIR@/gyro-session --shell --respawn -- foot
+ExecStart=@GYRO_BINDIR@/gyro-session --shell --respawn -- @GYRO_BINDIR@/gyro-shell
+
+# So that what the shell launches starts where a person would expect it to.
+WorkingDirectory=~
+
+# **A stand-in policy, and Docs/Open.md is where the real one is owed.** *Respawn policy, for the
+# greeter, the shell, and gyro itself* is one problem at three radii and wants one answer; this is the
+# outermost radius given the obvious behaviour and a burst that stops a loop. The agent's own
+# `--respawn` is the inner one, and gyro's `StartLimitBurst` is the third.
+Restart=always
+RestartSec=1
+
+[Install]
+# Enabled per user, because which person a machine logs in is that machine's answer rather than this
+# file's. `gyro.target` is what the machine boots to, so an instance wanted by it starts beside the
+# compositor.
+WantedBy=gyro.target

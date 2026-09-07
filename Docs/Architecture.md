@@ -2544,6 +2544,14 @@ systemd (pid 1)
 The wait is [required](#an-output-waits-for-its-sessions-shell), not an optimization: reassigning as
 soon as the listener arrives puts a blank screen between the greeter and the shell's first frame.
 
+**None of it is built, and `Deploy/gyro-autologin@.service` is what stands in.** The unit logs one
+named user in at boot with nothing asked of them: systemd runs the PAM stack, forks, `setuid`s, and
+starts the same session agent — the diagram above with the conversation cut out, so what a greeter
+adds later is the missing half rather than a different arrangement. What it cannot stand in for is
+everything the greeter's permanence buys: there is no session to reassign an output *to*, so
+[locking](#locking) has nowhere to go, and a machine running it is one anybody with physical access
+is logged into.
+
 **gyro's independence from logind is gyro's alone.** The login agent runs an ordinary PAM stack, and
 `pam_systemd` is in it — which is how `XDG_RUNTIME_DIR`, `systemd --user`, and therefore portals
 and pipewire come to exist at all. The coupling is real; it is simply not on gyro's side of the

@@ -845,6 +845,17 @@ and the interface is what lets the headless sweep place time at arbitrary phase.
   before the session agent binds a socket, so user units do not inherit the variable. The agent must
   import it before starting `graphical-session.target`, and everything graphical must be ordered
   after that target. Decision 24 predicts this bug class; this is its concrete form.
+
+  **Confirmed on a running machine rather than predicted.** *(2026-09-06, bringing up
+  `gyro-autologin@.service`.)* With gyro on the panel, an agent offering, and a shell connected and
+  drawing, `systemctl --user show-environment` has no `WAYLAND_DISPLAY` and `graphical-session.target`
+  is inactive. Nothing is broken today because the agent hands its shell a connected descriptor and
+  the shell is the only client — which is exactly why this wants fixing before there is a second one,
+  since the first symptom will be a portal or a notification daemon that cannot find the display. What
+  is still open is the mechanism: the obvious one is the agent running `systemctl --user
+  import-environment WAYLAND_DISPLAY` and then starting the target, which costs `gyro-session` an
+  `exec` of a program it otherwise has no need of, and wants a flag so a development run does not
+  reach into somebody's user manager.
 - **The session-ready signal.** Decision 51 will not reassign an output until the incoming session's
   shell has presented, and the same signal is what stops login assembling in visible stages. What
   counts as presented, which client is authoritative when chrome is several clients, and what
@@ -875,6 +886,12 @@ and the interface is what lets the headless sweep place time at arbitrary phase.
 - **Whether logind accepts a VT-less graphical session on `seat0` .** The login agent registers
   sessions through `pam_systemd`, and decision 37 has no VTs to give it. Needs testing, not
   assuming.
+
+  **The thing that will test it now exists and has not been run.** *(2026-09-06.)*
+  `Deploy/gyro-autologin@.service` reaches `pam_systemd` through `PAMName=`, so booting a machine into
+  it is the experiment. It has not been performed: it needs root and a machine whose display is free,
+  and the development machine it was written on has neither at once. Until it is run, *gyro works
+  under a session agent started by hand* is what has been shown, and the PAM half is unexercised.
 - **BGRT reproduction.** Scaling and placement from the firmware's mode into gyro's, and what to do
   when the firmware framebuffer and the native mode disagree about aspect ratio. *(Narrowed
   2026-08-22.)* `simpledrm` offers exactly one mode and it is the firmware's
