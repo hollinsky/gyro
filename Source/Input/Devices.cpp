@@ -607,11 +607,18 @@ Result<void> Devices::Drain()
 				// **The device's own timestamp, converted here and nowhere else.** libinput reports
 				// `CLOCK_MONOTONIC` microseconds, which is the domain Core/Time.h's ingest surface is
 				// named for, and this is the one place in the input path entitled to make that judgement.
+				const bool pressed = ::libinput_event_keyboard_get_key_state(key) == LIBINPUT_KEY_STATE_PRESSED;
+				const Instant typed = At(::libinput_event_keyboard_get_time_usec(key));
+
+				// **The kind of key and never which key**, which [Latency.h](Latency.h) argues at length
+				// and which the next person to want a keycode here should read before adding one.
+				m_Latency.Saw(pressed ? InputKey : InputKeyUp, typed);
+
 				Key.Emit(
 					KeyEvent{
 						.Code = ::libinput_event_keyboard_get_key(key),
-						.Pressed = ::libinput_event_keyboard_get_key_state(key) == LIBINPUT_KEY_STATE_PRESSED,
-						.When = At(::libinput_event_keyboard_get_time_usec(key)),
+						.Pressed = pressed,
+						.When = typed,
 						.Device = Identify(event),
 					}
 				);
@@ -630,13 +637,17 @@ Result<void> Devices::Drain()
 				// **Acceleration has already happened, here, per event.** libinput's curve is nonlinear
 				// in velocity, so this is the last place the numbers can be summed without changing what
 				// they mean — `Scene/Pointer.h` does the summing on the far side and says so.
+				const Instant moved = At(::libinput_event_pointer_get_time_usec(motion));
+
+				m_Latency.Saw(InputMotion, moved);
+
 				Motion.Emit(
 					PointerMotion{
 						.DeltaX = ::libinput_event_pointer_get_dx(motion),
 						.DeltaY = ::libinput_event_pointer_get_dy(motion),
 						.UnacceleratedX = ::libinput_event_pointer_get_dx_unaccelerated(motion),
 						.UnacceleratedY = ::libinput_event_pointer_get_dy_unaccelerated(motion),
-						.When = At(::libinput_event_pointer_get_time_usec(motion)),
+						.When = moved,
 						.Device = Identify(event),
 					}
 				);
@@ -648,13 +659,19 @@ Result<void> Devices::Drain()
 			{
 				libinput_event_pointer* const motion = ::libinput_event_get_pointer_event(event);
 
+				const Instant placed = At(::libinput_event_pointer_get_time_usec(motion));
+
+				// The same kind as a displacement, because what is being measured is a pointer moving and
+				// a person cannot tell which event their touchscreen produced.
+				m_Latency.Saw(InputMotion, placed);
+
 				Position.Emit(
 					PointerPosition{
 						// Transformed onto a one-unit-wide area, which is libinput's door for a fraction
 						// of the device rather than the millimetres it otherwise reports.
 						.NormalizedX = ::libinput_event_pointer_get_absolute_x_transformed(motion, 1),
 						.NormalizedY = ::libinput_event_pointer_get_absolute_y_transformed(motion, 1),
-						.When = At(::libinput_event_pointer_get_time_usec(motion)),
+						.When = placed,
 						.Device = Identify(event),
 					}
 				);
@@ -666,11 +683,16 @@ Result<void> Devices::Drain()
 			{
 				libinput_event_pointer* const button = ::libinput_event_get_pointer_event(event);
 
+				const bool down = ::libinput_event_pointer_get_button_state(button) == LIBINPUT_BUTTON_STATE_PRESSED;
+				const Instant clicked = At(::libinput_event_pointer_get_time_usec(button));
+
+				m_Latency.Saw(down ? InputButton : InputButtonUp, clicked);
+
 				Button.Emit(
 					PointerButton{
 						.Code = ::libinput_event_pointer_get_button(button),
-						.Pressed = ::libinput_event_pointer_get_button_state(button) == LIBINPUT_BUTTON_STATE_PRESSED,
-						.When = At(::libinput_event_pointer_get_time_usec(button)),
+						.Pressed = down,
+						.When = clicked,
 						.Device = Identify(event),
 					}
 				);
@@ -691,6 +713,10 @@ Result<void> Devices::Drain()
 
 				const Instant when = At(::libinput_event_pointer_get_time_usec(scroll));
 				const InputDeviceId device = Identify(event);
+
+				// One mark for the physical event rather than one per axis: a diagonal flick leaves here
+				// as two increments and happened once, and the row is about when a person did something.
+				m_Latency.Saw(InputScroll, when);
 
 				// **One event per axis, because that is what the wire carries.** A diagonal two-finger
 				// scroll arrives from libinput as one event with two axes on it and leaves here as two,
@@ -746,6 +772,16 @@ Result<void> Devices::Drain()
 				                         kind == LIBINPUT_EVENT_TOUCH_UP     ? TouchPhase::Up :
 				                                                               TouchPhase::Cancel;
 
+				const Instant touched = At(::libinput_event_touch_get_time_usec(touch));
+
+				m_Latency.Saw(
+					phase == TouchPhase::Down   ? InputTouch :
+					phase == TouchPhase::Motion ? InputTouchMotion :
+					phase == TouchPhase::Up     ? InputTouchUp :
+												  InputTouchCancel,
+					touched
+				);
+
 				Touch.Emit(
 					TouchEvent{
 						.Point = ::libinput_event_touch_get_slot(touch),
@@ -756,7 +792,7 @@ Result<void> Devices::Drain()
 				        // moved.
 						.NormalizedX = positioned ? ::libinput_event_touch_get_x_transformed(touch, 1) : 0.0,
 						.NormalizedY = positioned ? ::libinput_event_touch_get_y_transformed(touch, 1) : 0.0,
-						.When = At(::libinput_event_touch_get_time_usec(touch)),
+						.When = touched,
 						.Device = Identify(event),
 					}
 				);
@@ -774,6 +810,8 @@ Result<void> Devices::Drain()
 				                 ToolPhase::ProximityIn :
 				                 ToolPhase::ProximityOut;
 
+				m_Latency.Saw(InputTool, tool.When);
+
 				Tool.Emit(tool);
 
 				break;
@@ -785,6 +823,8 @@ Result<void> Devices::Drain()
 
 				ToolEvent tool = StateOf(tablet, Identify(event));
 				tool.Phase = ToolPhase::Tip;
+
+				m_Latency.Saw(InputTool, tool.When);
 
 				Tool.Emit(tool);
 
@@ -801,6 +841,8 @@ Result<void> Devices::Drain()
 				tool.ButtonPressed =
 					::libinput_event_tablet_tool_get_button_state(tablet) == LIBINPUT_BUTTON_STATE_PRESSED;
 
+				m_Latency.Saw(InputTool, tool.When);
+
 				Tool.Emit(tool);
 
 				break;
@@ -812,6 +854,8 @@ Result<void> Devices::Drain()
 
 				ToolEvent tool = StateOf(tablet, Identify(event));
 				tool.Phase = ToolPhase::Motion;
+
+				m_Latency.Saw(InputToolMotion, tool.When);
 
 				Tool.Emit(tool);
 
@@ -829,6 +873,10 @@ Result<void> Devices::Drain()
 
 		::libinput_event_destroy(event);
 	}
+
+	// The queue is empty, which is the instant every folded kind's drain edge is measured at and the
+	// only place it can be closed. See [Latency.h](Latency.h) for why a burst is one mark.
+	m_Latency.Drained();
 
 	return {};
 }

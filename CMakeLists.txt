@@ -1151,6 +1151,7 @@ gyro_add_module(Input DISPATCH
 		Trigger.cpp
 	TESTS
 		Chord.Test.cpp
+		Latency.Test.cpp
 		Trigger.Test.cpp
 )
 

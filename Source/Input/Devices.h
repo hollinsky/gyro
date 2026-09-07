@@ -8,6 +8,7 @@
 #include "Core/Fd.h"
 #include "Core/Result.h"
 #include "Core/SlotAllocator.h"
+#include "Input/Latency.h"
 #include "Seam/Input.h"
 
 struct libinput;
@@ -24,9 +25,10 @@ struct udev;
 //
 // **Devices are opened directly, with no session behind them.** `open_restricted` is an `open`, and
 // what makes it succeed is a udev rule rather than a seat manager handing over a descriptor —
-// [decision 145](../../Docs/Decisions.md#145-the-drm-backend-takes-master-by-opening-the-node-and-libdrm-stops-at-the-frame-section) settled the same question for DRM master, and this is
-// that answer applied to the second device class. So there is no pause, no resume, and no revoke: a
-// device gyro can open it keeps until it is unplugged.
+// [decision
+// 145](../../Docs/Decisions.md#145-the-drm-backend-takes-master-by-opening-the-node-and-libdrm-stops-at-the-frame-section)
+// settled the same question for DRM master, and this is that answer applied to the second device class. So there is no
+// pause, no resume, and no revoke: a device gyro can open it keeps until it is unplugged.
 //
 // **The udev backend rather than the path one**, which costs a link against libudev and buys hotplug.
 // libinput links it either way, so nothing new is running on the machine — and a keyboard plugged in
@@ -109,6 +111,11 @@ private:
 	// is answered rather than asserted because a null id is a value every consumer already has to
 	// handle.
 	[[nodiscard]] InputDeviceId Identify(libinput_event* event) const;
+
+	// The two marks a drain leaves on the input row, and the fold that keeps a high-polling mouse from
+	// filling the ring. It is a member rather than a local because the fold spans a whole drain, and it
+	// is the device set's because that is what a drain belongs to. See [Latency.h](Latency.h).
+	InputLatency m_Latency;
 
 	std::string m_Seat;
 };

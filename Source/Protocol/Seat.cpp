@@ -9,12 +9,39 @@
 #include <optional>
 #include <span>
 
+#include "Core/Trace.h"
 #include "Protocol/Floor.h"
 #include "Protocol/Surface.h"
 #include "Scene/Hit.h"
 
 namespace
 {
+// The far edge of the input row, and the last instant gyro is answerable for.
+//
+// **The gap back to the drain mark is gyro's own routing and focus work**, which is the half of input
+// latency this compositor can actually fix. `Input/Latency.h` puts the other two marks down — the
+// device's own timestamp and the moment libinput's queue was read — and from here the existing rows
+// finish the story: the scene change this caused is serialized and published on the dispatch row, the
+// one flow arrow joins that to the frame thread, and the glass row says when it was seen.
+//
+// **The kind of event and never its content.** A keycode in a trace is a keylogger and a `.pftrace` is
+// a file people mail to each other; there is no coordinate here either, because *where* was never the
+// question this row answers. Latency.h has the argument in full, and it is the thing to read before
+// adding "just the keycode for debugging".
+//
+// Marked where the event actually went out to somebody. An event routed onto gyro's own floor, or to a
+// client with no `wl_pointer` bound, has no third mark at all — which is the honest picture: nothing
+// was delivered, and the pair of marks to the left says the compositor spent the time anyway.
+constexpr const char* DeliveredKey = "key delivered";
+constexpr const char* DeliveredKeyUp = "key up delivered";
+constexpr const char* DeliveredButton = "button delivered";
+constexpr const char* DeliveredButtonUp = "button up delivered";
+constexpr const char* DeliveredMotion = "motion delivered";
+constexpr const char* DeliveredScroll = "scroll delivered";
+constexpr const char* DeliveredTouch = "touch delivered";
+constexpr const char* DeliveredTouchMotion = "touch motion delivered";
+constexpr const char* DeliveredTouchUp = "touch up delivered";
+
 // The repeat every desktop ships: twenty-five keys a second after four hundred milliseconds. Not
 // gyro's own numbers and not configurable — Seat.h says why, and a client that disagrees with them
 // repeats on its own schedule anyway, because the repeating is its.
@@ -296,6 +323,8 @@ void SeatGlobal::Key(const KeyEvent& event, bool consumed)
 		std::erase(m_Held, event.Code);
 	}
 
+	bool delivered = false;
+
 	const Wayland::Server::WlSurface surface = FocusedSurface();
 
 	if (!surface.IsValid())
@@ -338,7 +367,14 @@ void SeatGlobal::Key(const KeyEvent& event, bool consumed)
 				event.Pressed ? Wayland::Server::WlKeyboardKeyState::Pressed :
 								Wayland::Server::WlKeyboardKeyState::Released
 			);
+
+			delivered = true;
 		}
+	}
+
+	if (delivered)
+	{
+		TraceMark(event.Pressed ? DeliveredKey : DeliveredKeyUp, TraceInput());
 	}
 
 	m_Modifiers = modifiers;
@@ -591,6 +627,8 @@ void SeatGlobal::Refocus(const PointerTarget& target, Instant now)
 	// the last one would date a motion to a wakeup it did not happen in.
 	const std::uint32_t time = Milliseconds(m_MovedAt.value_or(now));
 
+	bool delivered = false;
+
 	for (ClientPointer* const pointer : m_Pointers)
 	{
 		if (!pointer->BelongsTo(client))
@@ -600,10 +638,17 @@ void SeatGlobal::Refocus(const PointerTarget& target, Instant now)
 
 		pointer->Object().Motion(time, Fixed(target.Local.X), Fixed(target.Local.Y));
 
+		delivered = true;
+
 		if (pointer->Grouped())
 		{
 			pointer->Object().Frame();
 		}
+	}
+
+	if (delivered)
+	{
+		TraceMark(DeliveredMotion, TraceInput());
 	}
 }
 
@@ -697,6 +742,8 @@ void SeatGlobal::Deliver()
 
 	for (const SeatPointerEvent& event : m_Queue)
 	{
+		bool delivered = false;
+
 		if (event.What == SeatPointerEvent::Kind::Button)
 		{
 			const std::uint32_t serial = NextSerial();
@@ -722,6 +769,13 @@ void SeatGlobal::Deliver()
 					event.Pressed.Pressed ? Wayland::Server::WlPointerButtonState::Pressed :
 											Wayland::Server::WlPointerButtonState::Released
 				);
+
+				delivered = true;
+			}
+
+			if (delivered)
+			{
+				TraceMark(event.Pressed.Pressed ? DeliveredButton : DeliveredButtonUp, TraceInput());
 			}
 
 			sent = true;
@@ -773,6 +827,13 @@ void SeatGlobal::Deliver()
 			}
 
 			pointer->Object().Axis(time, axis, Fixed(scroll.Distance));
+
+			delivered = true;
+		}
+
+		if (delivered)
+		{
+			TraceMark(DeliveredScroll, TraceInput());
 		}
 
 		sent = true;
@@ -899,6 +960,8 @@ void SeatGlobal::TouchBegan(SceneStore& scene, const SeatTouchEvent& queued)
 	wl_client* const client = surface.WireClient();
 	const std::uint32_t serial = NextSerial();
 
+	bool delivered = false;
+
 	for (ClientTouch* const touch : m_Touches)
 	{
 		if (touch->BelongsTo(client))
@@ -906,7 +969,14 @@ void SeatGlobal::TouchBegan(SceneStore& scene, const SeatTouchEvent& queued)
 			touch->Object().Down(
 				serial, Milliseconds(queued.Contact.When), surface, point.Wire, Fixed(hit.Local.X), Fixed(hit.Local.Y)
 			);
+
+			delivered = true;
 		}
+	}
+
+	if (delivered)
+	{
+		TraceMark(DeliveredTouch, TraceInput());
 	}
 
 	Framed(client);
@@ -946,12 +1016,21 @@ void SeatGlobal::TouchMoved(const SceneStore& scene, const SeatTouchEvent& queue
 
 	wl_client* const client = surface.WireClient();
 
+	bool delivered = false;
+
 	for (ClientTouch* const touch : m_Touches)
 	{
 		if (touch->BelongsTo(client))
 		{
 			touch->Object().Motion(Milliseconds(queued.Contact.When), point->Wire, Fixed(local->X), Fixed(local->Y));
+
+			delivered = true;
 		}
+	}
+
+	if (delivered)
+	{
+		TraceMark(DeliveredTouchMotion, TraceInput());
 	}
 
 	Framed(client);
@@ -982,12 +1061,21 @@ void SeatGlobal::TouchEnded(const SeatTouchEvent& queued)
 	wl_client* const client = surface.WireClient();
 	const std::uint32_t serial = NextSerial();
 
+	bool delivered = false;
+
 	for (ClientTouch* const touch : m_Touches)
 	{
 		if (touch->BelongsTo(client))
 		{
 			touch->Object().Up(serial, Milliseconds(queued.Contact.When), wire);
+
+			delivered = true;
 		}
+	}
+
+	if (delivered)
+	{
+		TraceMark(DeliveredTouchUp, TraceInput());
 	}
 
 	Framed(client);
