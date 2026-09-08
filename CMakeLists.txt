@@ -719,6 +719,7 @@ gyro_add_bindings(WaylandProtocols
 		stable/linux-dmabuf/linux-dmabuf-v1
 		staging/linux-drm-syncobj/linux-drm-syncobj-v1
 		stable/viewporter/viewporter
+		staging/fractional-scale/fractional-scale-v1
 		unstable/xdg-decoration/xdg-decoration-unstable-v1
 		staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1
 
@@ -738,17 +739,20 @@ gyro_add_bindings(WaylandProtocols
 # two `wl_abort` sites a client can reach. On a compositor with no VTs, reaching one is the screen
 # going black with nothing to switch to.
 #
-# **A second list rather than the same one**, and today it names the same protocols for a reason worth
-# saying out loud: a nested output is a client of a compositor, so what gyro asks a host for and what
-# gyro's own clients ask gyro for are the same vocabulary seen from opposite ends. The lists are
-# separate because they diverge upward from here and only in one direction — fractional scale, cursor
-# shape, text input and the rest are things gyro will serve and will never ask a host for — and
-# because a protocol added to one has no business regenerating the other.
+# **A second list rather than the same one**, and today they overlap almost entirely for a reason
+# worth saying out loud: a nested output is a client of a compositor, so what gyro asks a host for and
+# what gyro's own clients ask gyro for are the same vocabulary seen from opposite ends. The lists are
+# separate because they diverge upward from here — cursor shape, text input and the rest are things
+# gyro will serve and will never ask a host for — and because a protocol added to one has no business
+# regenerating the other.
 #
-# **`fractional-scale-v1` is where that divergence stops being hypothetical.** It is the first entry
-# here with no counterpart above, and it is one-directional for the reason the paragraph predicted: a
-# nested output is a client that already knows what scale it is drawing at, because gyro computed it,
-# so asking a host to suggest one would be asking to be told something gyro is the authority on.
+# **`fractional-scale-v1` is in both, and which client wants it is the surprise.** It is not the
+# nested output: that one already knows what scale it is drawing at, because gyro computed it, so
+# asking a host to suggest one would be asking to be told something gyro is the authority on. It is
+# `gyro-shell`, which is an ordinary client of gyro and has no other way to hear the exact rational —
+# `wl_surface.set_buffer_scale` is an integer, so a shell without this draws its run bar at the
+# ceiling and lets gyro shrink it, and a hairline and a rounded corner are exactly the marks that
+# survive it worst.
 gyro_add_bindings(WaylandServerProtocols
 	SERVER
 	PROTOCOLS

@@ -91,6 +91,10 @@ public:
 	// would be a toolkit asked to reconsider its buffer size a few hundred times a second.
 	void Send(Scale scale);
 
+	// The first `preferred_scale`, sent once the resource behind this object exists. See the definition
+	// for why it cannot be sent from the request that created the object.
+	void OnBound() override;
+
 	// The `wl_surface` went out from under this object. Nothing is unstaged — this object never wrote
 	// any surface state — and nothing further is ever sent.
 	void ForgetSurface() noexcept { m_Surface = nullptr; }

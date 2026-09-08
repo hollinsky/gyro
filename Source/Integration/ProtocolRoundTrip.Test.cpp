@@ -45,6 +45,7 @@
 #include "Scene/Textures.h"
 #include "Testing/Test.h"
 #include "Wayland/ExtForeignToplevelListV1.h"
+#include "Wayland/FractionalScaleV1.h"
 #include "Wayland/GyroBindingsV1.h"
 #include "Wayland/GyroChromeV1.h"
 #include "Wayland/GyroSceneV1.h"
@@ -1996,6 +1997,96 @@ GYRO_TEST(ProtocolRoundTrip, ASurfaceIsToldWhatScaleToDrawAtBeforeItHasDrawn)
 	// hand gyro a buffer gyro then drew unturned. The protocol's default is normal, which is what gyro
 	// actually prefers — see Protocol/Compositor.h.
 	GYRO_CHECK(toplevel.Drawn.Events.Transforms.empty());
+}
+
+// **The exact rational actually reaching a client, which is the assertion that was missing.**
+// `preferred_buffer_scale` above is carried on the `wl_surface`, whose resource exists long before the
+// event is sent; `wp_fractional_scale_v1` is carried on an object the client mints, and the binding
+// layer creates that resource *after* the request handler returns. gyro sent the first event from
+// inside the handler, so it was written to an object that did not exist and went nowhere — and
+// because the send deduped against what it believed it had sent, every later, real one was suppressed
+// too. The protocol delivered nothing at all to a surface on the densest output, which on a
+// one-monitor machine is every surface there is.
+//
+// It shipped because nothing in the tree was a client of this protocol: the client bindings for it
+// did not exist until `gyro-shell` needed them. This test is what that gap costs, paid once.
+GYRO_TEST(ProtocolRoundTrip, AClientHearsTheExactScaleItIsDrawnAt)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-fractional" };
+	GYRO_REQUIRE(pair.Opened);
+
+	// A 1x panel beside a 1.5x one, so the two answers are different and neither is the default a
+	// silent protocol would leave the client sitting at.
+	const std::array outputs{
+		SceneOutput{ .Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } },
+		SceneOutput{ .Bounds = { { 1920.0, 0.0 }, { 1280.0, 720.0 } },
+		             .Density = Scale::FromNumerator(180),
+		             .Grid = { 1920, 1080 } },
+	};
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	const Registry::Global* const manager = bound.Listener.Find(Wayland::WpFractionalScaleManagerV1::WireName);
+	GYRO_REQUIRE(manager != nullptr);
+
+	// One, because `wp_fractional_scale_v1` has never been revised.
+	GYRO_CHECK_EQ(manager->Version, std::uint32_t{ 1 });
+
+	const Wayland::WpFractionalScaleManagerV1 fractional =
+		bound.Listener.Object().Bind<Wayland::WpFractionalScaleManagerV1>(manager->Name, manager->Version);
+	GYRO_REQUIRE(fractional.IsValid());
+
+	Toplevel toplevel;
+	GYRO_REQUIRE(Role(bound, toplevel, std::byte{ 0x5A }));
+
+	// What the client is told, in the protocol's own 120ths.
+	class Preferred final : public Wayland::WpFractionalScaleV1Listener
+	{
+	public:
+		void OnPreferredScale(std::uint32_t scale) override { Scales.push_back(scale); }
+
+		std::vector<std::uint32_t> Scales;
+	};
+
+	Preferred preferred;
+	const Wayland::WpFractionalScaleV1 scale = fractional.GetFractionalScale(toplevel.Drawn.Surface, preferred);
+	GYRO_REQUIRE(scale.IsValid());
+
+	toplevel.Drawn.Surface.Commit();
+	pair.Turn();
+
+	GYRO_REQUIRE(toplevel.SurfaceEvents.Serial != 0);
+
+	// **Told before it has drawn anything**, and told the densest panel because it is on none yet —
+	// the same trade `preferred_buffer_scale` makes, off the same computed value. 180 is 1.5x.
+	GYRO_REQUIRE_EQ(preferred.Scales.size(), std::size_t{ 1 });
+	GYRO_CHECK_EQ(preferred.Scales.front(), std::uint32_t{ 180 });
+
+	toplevel.XdgSurface.AckConfigure(toplevel.SurfaceEvents.Serial);
+	toplevel.Drawn.Surface.Attach(toplevel.Drawn.Buffer, 0, 0);
+	toplevel.Drawn.Surface.DamageBuffer(0, 0, Width, Height);
+	toplevel.Drawn.Surface.Commit();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// And corrected once it is somewhere: the window landed on the 1x panel, so 120 is the exact
+	// rational for the screen it is actually on.
+	GYRO_REQUIRE_EQ(preferred.Scales.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(preferred.Scales.back(), std::uint32_t{ 120 });
+
+	// Once per change rather than once per wakeup, for the reason the buffer-scale sweep gives: this
+	// runs at input rate while somebody drags a window, and an event per wakeup is a toolkit asked to
+	// reallocate a few hundred times a second.
+	pair.Turn();
+	pair.Turn();
+
+	GYRO_CHECK_EQ(preferred.Scales.size(), std::size_t{ 2 });
 }
 
 GYRO_TEST(ProtocolRoundTrip, AClientBoundBelowSixHearsNoPreferredBufferScale)

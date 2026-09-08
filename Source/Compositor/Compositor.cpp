@@ -3301,24 +3301,25 @@ private:
 				}
 			}
 
-			// Nine globals, which is a window a person can use and one thing they will reach for and not
+			// Ten globals, which is a window a person can use and one thing they will reach for and not
 			// find. Said out loud because the alternative is somebody filing the silence as a bug: a copy
 			// whose paste never arrives looks exactly like a compositor that has half died. The clipboard
 			// is named for the same reason it always was — a global that is advertised and does nothing
 			// is the kind of silence somebody would spend an afternoon on.
 			//
 			// **This line is a promise and goes stale the moment one stops being true**, which it has
-			// already done once: it claimed windows could not be moved or resized for two commits after
-			// they could, while somebody was reading the log to work out why a drag did nothing.
+			// now done twice: it claimed windows could not be moved or resized for two commits after they
+			// could, while somebody was reading the log to work out why a drag did nothing, and it went on
+			// denying fractional scale for two commits after `wp_fractional_scale_v1` was being served.
 			spdlog::info(
-				"wl_compositor, wl_subcompositor, wp_viewporter, wl_shm, zwp_linux_dmabuf_v1, xdg_wm_base, "
-				"wp_presentation, wl_data_device_manager and wl_seat are the globals; a window will open with every "
-				"part its toolkit drew separately at the size its client says it is, be placed, redraw against the "
+				"wl_compositor, wl_subcompositor, wp_viewporter, wp_fractional_scale_manager_v1, wl_shm, "
+				"zwp_linux_dmabuf_v1, xdg_wm_base, wp_presentation, wl_data_device_manager and wl_seat are the "
+				"globals; a window will open with every part its toolkit drew separately at the size its client "
+				"says it is, be placed at the exact scale gyro wants it drawn at, redraw against the "
 				"frames that reach the glass and be told when each one was seen, take the keyboard and the pointer, "
 				"come to the front on a click, open and dismiss its menus, be moved and resized by a drag it "
 				"asks for, and copy and paste with the others — with what was copied outliving the application "
-				"that copied it — but nothing can be dragged between windows, there is no middle-click paste, "
-				"and no client is told a scale that is not a whole number"
+				"that copied it — but nothing can be dragged between windows and there is no middle-click paste"
 			);
 
 			author = std::move(*made);

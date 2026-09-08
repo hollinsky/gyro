@@ -59,6 +59,27 @@ void ClientFractionalScale::Send(Scale scale)
 	Object().PreferredScale(static_cast<std::uint32_t>(scale.Numerator()));
 }
 
+void ClientFractionalScale::OnBound()
+{
+	// **The first event goes out here rather than waiting for the surface to be on a screen**, and it
+	// carries the densest output because this surface is on none yet — see `PreferredScale` for the
+	// trade. `SyncOutputEntry` runs later in the same `Advance` and corrects it before the client is
+	// flushed, so a window opening on the densest panel is told once and a window opening elsewhere is
+	// told twice, before it has drawn either time.
+	//
+	// **`OnBound` rather than the request handler that made this object**, which is the whole of the
+	// fix and is not a matter of taste: the binding layer creates the `wl_resource` *after*
+	// `OnGetFractionalScale` returns, so an event sent from in there is written to an object that does
+	// not exist yet and goes nowhere. On its own that would only lose the early send — what made it
+	// silent and total is `Send`'s dedupe, which recorded the scale as sent and then suppressed every
+	// later, real one from `SyncEntry`. The protocol delivered nothing at all to a surface sitting on
+	// the densest output, which on a one-monitor machine is every surface there is.
+	if (const SceneStore* const store = m_Context->Store(); store != nullptr)
+	{
+		Send(PreferredScale(0, store->Outputs()));
+	}
+}
+
 Wayland::Server::WpFractionalScaleV1Handler*
 ClientFractionalScaleManager::OnGetFractionalScale(Wayland::Server::WlSurface surface)
 {
@@ -92,16 +113,8 @@ ClientFractionalScaleManager::OnGetFractionalScale(Wayland::Server::WlSurface su
 		return fractional;
 	}
 
-	// **The first event goes out here rather than waiting for the surface to be on a screen**, and it
-	// carries the densest output because this surface is on none yet — see `PreferredScale` for the
-	// trade. `SyncOutputEntry` runs later in this same `Advance` and corrects it before the client is
-	// flushed, so a window opening on the densest panel is told once and a window opening elsewhere is
-	// told twice, before it has drawn either time.
-	if (const SceneStore* const store = m_Context->Store(); store != nullptr)
-	{
-		fractional->Send(PreferredScale(0, store->Outputs()));
-	}
-
+	// The first event goes out from `OnBound` rather than from here, because here is too early for it
+	// to go anywhere at all — see `ClientFractionalScale::OnBound`.
 	return fractional;
 }
 
