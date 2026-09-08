@@ -29,8 +29,9 @@
   <interface name="gyro_scene_v1" version="1">
     <description summary="where the windows are, said by the shell">
       A shell arranges the windows of its session: it groups them into
-      containers, decides where each one goes, and says what kind of change
-      every batch of that is. The compositor owns what the change looks like.
+      containers, decides where each one goes and how big each one is, says what
+      state each one is in, and says what kind of change every batch of that is.
+      The compositor owns what the change looks like.
 
       That division is the whole of this protocol. A shell may invent any
       arrangement - a grid, a ring, a stack of cards, a fisheye dock - and it may
@@ -51,6 +52,13 @@
       keystroke name the same instant, so the compositor composes their separate
       commits into one gesture, and a commit that arrives a frame late renders
       already in progress by exactly the right amount instead of starting late.
+
+      What an application asks for arrives here as an event rather than being
+      decided by the compositor. Maximizing, restoring, going fullscreen and
+      going away are window management, so a titlebar button and a video player's
+      fullscreen control both end up as a question this shell answers - and a
+      shell that answers none of them says so once, so that no application draws
+      a control that does nothing.
 
       Every object here belongs to a client the compositor has granted the run of
       a session, and an application is never offered this global. A client able
@@ -101,6 +109,41 @@
         away, which is what lets the compositor keep a session usable across a
         shell restart.
       </description>
+    </request>
+
+    <request name="set_capabilities">
+      <description summary="say which window states this shell will honour">
+        Says which of the states below this shell actually implements, so that the
+        applications of this session are told what their window controls may
+        offer. Applies immediately rather than at the next commit: it is not a
+        change to anything on screen, it is a standing statement about what this
+        shell does.
+
+        Until a shell says otherwise it offers nothing, and that is the right
+        default rather than a cautious one. A toolkit that is told a capability
+        exists draws the button for it, and a button that does nothing is worse
+        than an absent one - a person clicks it, the window does not move, and
+        the machine looks broken rather than opinionated. So a session with no
+        shell, or one whose shell has not spoken, gets titlebars with no controls
+        on them, which is exactly what it can do.
+
+        A capability declared here is a promise to answer the matching
+        window_request event. Nothing enforces that and nothing can: a shell that
+        offers maximize and then ignores every request for it produces a dead
+        button by hand. What the compositor can do is never invent the promise on
+        a shell's behalf, and that is what this request is.
+
+        Bits this compositor does not know are ignored rather than being an
+        error, because a capability is a statement about the shell rather than a
+        request of the compositor - a newer shell offering more than this
+        compositor can carry should lose the extra rather than the session.
+
+        There is no window-menu capability, and the omission is deliberate. There
+        is no event here that would forward the request a client sends after it,
+        so offering it would produce precisely the dead button the paragraph
+        above refuses. It arrives with the event, not before it.
+      </description>
+      <arg name="capabilities" type="uint" enum="capability" summary="what this shell offers"/>
     </request>
 
     <request name="get_container">
@@ -176,6 +219,77 @@
       <arg name="z" type="fixed" summary="position within the container"/>
     </request>
 
+    <request name="set_window_size">
+      <description summary="say how big a window should be">
+        Says what size to ask this window to be. Double-buffered: it takes effect
+        at the next commit.
+
+        This is a request to the application rather than a change to the world,
+        and the difference is the whole of why resizing looks the way it does
+        everywhere. The compositor asks; the application draws a buffer at
+        whatever size it can actually be - a terminal rounds to whole character
+        cells, a dialog refuses to go below its own minimum - and the window's
+        extent changes when that buffer arrives and at no other moment. A shell
+        that treats this as a setting will find windows that are not the size it
+        set, and every one of those is an application exercising a right the
+        window protocol gives it.
+
+        Zero in either axis is "pick your own size", which is what every window
+        starts at and what hands a maximized window back its natural size when it
+        is restored. It is not the same as asking for a window of no width.
+
+        A negative width or height is the bad_size error. Zero is meaningful and
+        negative is a shell that has subtracted a panel's height from a screen it
+        got wrong, and clamping it quietly would leave a window at some arbitrary
+        minimum with nothing anywhere naming the disagreement.
+
+        The size is clamped to whatever minimum and maximum the application
+        itself declared, because those arrive from the party being resized and
+        are the one constraint it is entitled to state.
+
+        What this does not do is animate. A window's size follows its
+        application's next buffer, so there is nothing here for a transition to
+        govern - where the window *is* animates, under place_window and the
+        commit's transition, and how big it is arrives. A shell maximizing a
+        window states both in one commit and the compositor starts the travel at
+        once.
+      </description>
+      <arg name="toplevel" type="object" interface="ext_foreign_toplevel_handle_v1" summary="the window"/>
+      <arg name="width" type="int" summary="width in logical pixels, or zero for the window's own"/>
+      <arg name="height" type="int" summary="height in logical pixels, or zero for the window's own"/>
+    </request>
+
+    <request name="set_window_states">
+      <description summary="say what a window is">
+        Says which of the states below this window is in. Double-buffered: it
+        takes effect at the next commit, alongside whatever size and position
+        were stated with it.
+
+        The whole set is stated at once rather than one bit at a time, because
+        that is what the application is told: the state is an array on every
+        configure, so a shell that could set one bit would still be choosing the
+        value of all of them. Sending the set is the honest spelling of what
+        happens on the wire.
+
+        These are declarations, not instructions. Saying a window is maximized
+        does not resize it - set_window_size does that, and a shell that sets the
+        state without the size gets an application that draws its maximized
+        chrome at its old size. The pair is what a maximize is, which is why they
+        share a commit.
+
+        What is here is exactly the states a shell decides. Whether a window has
+        the keyboard, whether it is being resized right now, and whether nobody
+        is looking at it are facts the compositor holds and tells the application
+        itself, and a shell that could set them would be able to give a window a
+        focused titlebar it does not have.
+
+        Bits this compositor does not know are ignored, for set_capabilities'
+        reason.
+      </description>
+      <arg name="toplevel" type="object" interface="ext_foreign_toplevel_handle_v1" summary="the window"/>
+      <arg name="states" type="uint" enum="state" summary="every state this window is in"/>
+    </request>
+
     <request name="commit">
       <description summary="apply everything staged, as one change">
         Applies everything staged since the last commit, as one change of one
@@ -219,6 +333,91 @@
       <arg name="tv_nsec" type="uint" summary="nanoseconds part of the timestamp"/>
     </request>
 
+    <event name="work_area">
+      <description summary="the part of a screen a window should be put in">
+        The rectangle on one screen that ordinary windows belong inside: the
+        output, less whatever chrome has reserved space along its edges.
+
+        Sent once per output when this object is created, and again whenever the
+        rectangle moves - a monitor plugged in or unplugged, a screen
+        rearranged, a panel appearing or changing height. An output this client
+        has not bound as a wl_output cannot be named, so nothing is sent for it
+        until the client binds one, at which point the event it missed arrives.
+
+        The coordinates are in the same space as place_window on a window with no
+        container, which is what makes this directly useful: maximizing a window
+        is placing it at this origin and asking it to be this size.
+
+        Why the compositor holds this rather than the shell working it out: the
+        panel reserving the space and the shell placing the windows are separate
+        processes, and they should stay that way - a bug in a status bar should
+        not take window management with it. The compositor is the only party that
+        sees both, so it does the arithmetic and says the answer once.
+
+        This is also what a window is told it has room for when it opens, so an
+        application picks its first size against the same rectangle a shell would
+        maximize it into. An application that opens underneath the panel is what
+        happens when those two disagree.
+
+        A fullscreen window deliberately ignores this and covers the whole
+        output. That is what fullscreen means, and it is why the two states are
+        not the same request with a different number.
+      </description>
+      <arg name="output" type="object" interface="wl_output" summary="the screen"/>
+      <arg name="x" type="int" summary="left edge"/>
+      <arg name="y" type="int" summary="top edge"/>
+      <arg name="width" type="int" summary="width in logical pixels"/>
+      <arg name="height" type="int" summary="height in logical pixels"/>
+    </event>
+
+    <event name="window_request">
+      <description summary="an application asked for a window state">
+        An application has asked to be maximized, restored, fullscreened or
+        minimized. It is asking this shell, because deciding is window
+        management and the compositor does not do that.
+
+        This is what makes a titlebar's buttons and a video player's fullscreen
+        control work at all. An application that asks and hears nothing is not an
+        application that has been refused - it is one still waiting, holding its
+        own transition open. That is the failure this event exists to prevent,
+        and its shape is a browser whose fullscreen button does nothing at all:
+        the page's own fullscreen event never fires, and a person clicking the
+        control on a video sees the frame they were already looking at.
+
+        So a shell that has declared a capability owes an answer to every request
+        for it. The answer is set_window_states with the new set, and
+        set_window_size beside it, on a commit. Refusing is an answer too, and it
+        is spelled by stating the states the window already has - the
+        application then reads the state it asked for as absent and puts its own
+        interface back.
+
+        Only the client holding placement is told, since it is the only one that
+        could answer. A request that reaches nobody - no shell, or one that never
+        claimed placement - is answered by the compositor with the window exactly
+        as it is, which is the same refusal spelled by the only party left to
+        spell it.
+
+        The output is the screen the application would prefer to be fullscreen
+        on, and it is null for every other request and for a client with no
+        preference. It is a preference rather than an instruction: which screen a
+        window is on is placement, and placement is this shell's.
+
+        The timestamp is when the compositor received the request, on
+        CLOCK_MONOTONIC, in the encoding commit reads. Echo it back on the commit
+        that answers, so the window starts moving from the moment the person
+        clicked rather than from the moment the answer was worked out. It is not
+        the instant of the click itself - no application says when it was clicked
+        - and it is the earliest moment anything here knows about.
+      </description>
+      <arg name="toplevel" type="object" interface="ext_foreign_toplevel_handle_v1" summary="the window"/>
+      <arg name="action" type="uint" enum="action" summary="what it asked for"/>
+      <arg name="output" type="object" interface="wl_output" allow-null="true"
+           summary="the screen it would prefer, for fullscreen, or null"/>
+      <arg name="tv_sec_hi" type="uint" summary="high 32 bits of the seconds part of the timestamp"/>
+      <arg name="tv_sec_lo" type="uint" summary="low 32 bits of the seconds part of the timestamp"/>
+      <arg name="tv_nsec" type="uint" summary="nanoseconds part of the timestamp"/>
+    </event>
+
     <enum name="transition">
       <description summary="the kinds of change the compositor knows how to draw">
         A closed set, and it grows by the compositor learning a new kind of
@@ -238,10 +437,55 @@
       <entry name="background_change" value="8" summary="the desktop behind everything changing"/>
     </enum>
 
+    <enum name="state" bitfield="true">
+      <description summary="what a window is, as far as its application is concerned">
+        The states a shell decides and an application is told about. Absent from
+        this list, and deliberately: whether a window has the keyboard, whether
+        it is being resized at this instant, and whether nobody is looking at it.
+        Those are the compositor's own facts about a window, and a shell able to
+        set them could give a window a focused titlebar it does not have.
+
+        Minimized is not here either, and the reason is that the window protocol
+        has no such state - there is nothing to tell an application and no way
+        for it to observe the result. A shell minimizes a window by putting it
+        somewhere nobody is looking, which is a container it has hidden.
+      </description>
+      <entry name="maximized" value="1" summary="filling the work area"/>
+      <entry name="fullscreen" value="2" summary="filling the whole output, over everything"/>
+      <entry name="tiled_left" value="4" summary="its left edge is against something"/>
+      <entry name="tiled_right" value="8" summary="its right edge is against something"/>
+      <entry name="tiled_top" value="16" summary="its top edge is against something"/>
+      <entry name="tiled_bottom" value="32" summary="its bottom edge is against something"/>
+    </enum>
+
+    <enum name="capability" bitfield="true">
+      <description summary="what a shell offers">
+        What an application may show a control for. See set_capabilities: a
+        capability is a promise to answer the matching window_request.
+      </description>
+      <entry name="maximize" value="1" summary="this shell answers maximize and unmaximize"/>
+      <entry name="minimize" value="2" summary="this shell answers minimize"/>
+      <entry name="fullscreen" value="4" summary="this shell answers fullscreen and unfullscreen"/>
+    </enum>
+
+    <enum name="action">
+      <description summary="what an application asked for">
+        Not a bitfield: an application asks for one thing at a time, and a
+        request to be maximized and unmaximized at once is not a thing it can
+        mean.
+      </description>
+      <entry name="maximize" value="1" summary="fill the work area"/>
+      <entry name="unmaximize" value="2" summary="go back to what it was"/>
+      <entry name="fullscreen" value="3" summary="fill the screen"/>
+      <entry name="unfullscreen" value="4" summary="stop filling the screen"/>
+      <entry name="minimize" value="5" summary="go away without closing"/>
+    </enum>
+
     <enum name="error">
       <entry name="placement_taken" value="0" summary="another client is already placing this session's windows"/>
       <entry name="bad_name" value="1" summary="the container name is empty or too long"/>
       <entry name="bad_transition" value="2" summary="the transition is not one this compositor knows"/>
+      <entry name="bad_size" value="3" summary="a window size had a negative width or height"/>
     </enum>
   </interface>
 

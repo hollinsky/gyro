@@ -78,6 +78,14 @@ public:
 	// resource whose display was unplugged answers `release` and nothing else.
 	void Forget() noexcept { m_Output = nullptr; }
 
+	// The output this resource names, or null once it has been unplugged.
+	//
+	// **The one path that goes from a client's own `wl_output` back to the screen it means**: an
+	// application asking to be fullscreen names an output in its id space, and the shell that has to
+	// answer holds a different resource for the same display. Nothing but the object behind both can
+	// join them.
+	[[nodiscard]] HostOutput* Host() const noexcept { return m_Output; }
+
 private:
 	HostOutput* m_Output = nullptr;
 };

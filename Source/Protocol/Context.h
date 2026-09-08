@@ -22,6 +22,9 @@ struct wl_client;
 
 class ClientSurface;
 class ClientXdgSurface;
+class ForeignToplevelGlobal;
+class HostOutputs;
+class SceneManager;
 
 // What a request handler may reach, and only while a dispatch is running.
 //
@@ -194,6 +197,36 @@ public:
 
 	[[nodiscard]] std::span<ClientXdgSurface* const> Windows() const noexcept { return m_Windows; }
 
+	// The shells, which is every client that has bound `gyro_scene_v1` rather than every client that
+	// arranges anything — one of them holds placement and the rest are a screen recorder or a settings
+	// panel that bound the global because the tier let them (198).
+	//
+	// **Here for the windows' reason**: the question asked of it is *who places this session's windows*,
+	// which spans every connection in a session, and a per-connection list could only answer it for the
+	// client doing the asking. Borrowed, and each registers itself as it binds and takes itself out as
+	// it goes.
+	void Add(SceneManager& scene) { m_Scenes.push_back(&scene); }
+
+	void Remove(SceneManager& scene) noexcept { std::erase(m_Scenes, &scene); }
+
+	[[nodiscard]] std::span<SceneManager* const> Scenes() const noexcept { return m_Scenes; }
+
+	// The window enumeration, for the one path that has to go the other way along it: telling a shell
+	// that an application asked to be fullscreen names the window by the handle *that shell* holds, and
+	// nothing but the global knows which resource that is in which client's id space.
+	[[nodiscard]] ForeignToplevelGlobal* Foreign() const noexcept { return m_Foreign; }
+
+	// The advertised outputs, for the two answers that are per screen rather than per window: what part
+	// of a display a window belongs inside, and which `wl_output` resource names it to a given client.
+	[[nodiscard]] const HostOutputs* Outputs() const noexcept { return m_Outputs; }
+
+	// Wired once when the host opens; both outlive every client.
+	void SetGlobals(ForeignToplevelGlobal& foreign, const HostOutputs& outputs) noexcept
+	{
+		m_Foreign = &foreign;
+		m_Outputs = &outputs;
+	}
+
 	// The surface behind an entity, for the one direction nothing else can travel.
 	//
 	// **The return leg arrives as an entity and a `wl_surface.frame` callback lives on a surface**, and
@@ -285,6 +318,13 @@ private:
 
 	// The mapped toplevels. Borrowed, and each one takes itself out as it unmaps.
 	std::vector<ClientXdgSurface*> m_Windows;
+
+	// The bound `gyro_scene_v1` objects. Borrowed, and each takes itself out as it goes.
+	std::vector<SceneManager*> m_Scenes;
+
+	// Not owned; the host holds both, and neither is ever null after `Open`.
+	ForeignToplevelGlobal* m_Foreign = nullptr;
+	const HostOutputs* m_Outputs = nullptr;
 
 	// The mapped windows, keyed by the entity their pixels are. Borrowed pointers: a surface unbinds
 	// itself as it unmaps and again as it goes away, so nothing here outlives what it names.

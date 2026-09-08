@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <vector>
 
 #include "Core/Clock.h"
 #include "Protocol/Context.h"
 #include "Protocol/Floor.h"
 #include "Protocol/Foreign.h"
+#include "Protocol/Output.h"
 #include "Protocol/Shell.h"
 #include "Scene/Commit.h"
 #include "Scene/Store.h"
@@ -132,6 +134,11 @@ void ClientContainer::Apply(SceneCommit& commit)
 
 void SceneManager::OnGone()
 {
+	if (m_Context != nullptr)
+	{
+		m_Context->Remove(*this);
+	}
+
 	// **The claim goes back and the containers stay**, which is the asymmetry decision 141 turns on: a
 	// shell exiting must leave the session's arrangement exactly as it was and must leave gyro able to
 	// keep serving it, so the Floorplanner comes back and not one window moves.
@@ -151,6 +158,163 @@ void SceneManager::OnGone()
 	}
 
 	delete this;
+}
+
+void SceneManager::OnBound()
+{
+	if (m_Context == nullptr)
+	{
+		return;
+	}
+
+	if (const HostOutputs* const outputs = m_Context->Outputs(); outputs != nullptr)
+	{
+		SendWorkAreas(*outputs);
+	}
+}
+
+void SceneManager::OnSetCapabilities(Wayland::Server::GyroSceneV1Capability capabilities)
+{
+	// **Applied immediately rather than at the next commit**, and the reason is what a commit is for: a
+	// commit exists so that everything a person watches move starts together, and this moves nothing. It
+	// is a standing statement about the shell — *these are the controls I answer for* — which reaches a
+	// client on its next configure through `SyncWindows` rather than as a change to the world.
+	m_Capabilities = CapabilitiesOf(capabilities);
+}
+
+void SceneManager::OnSetWindowSize(
+	Wayland::Server::ExtForeignToplevelHandleV1 toplevel,
+	std::int32_t width,
+	std::int32_t height
+)
+{
+	auto* const handle = static_cast<ForeignToplevelHandle*>(toplevel.Implementation());
+
+	// Silently ignored for a window that has already gone, per `OnPlaceWindow`: the `closed` event and
+	// this request cross on the wire, and ending the shell over an application quitting would make every
+	// exit a chance to take the desktop down.
+	if (handle == nullptr || handle->IsClosed())
+	{
+		return;
+	}
+
+	// **A negative size is refused where zero is not.** Zero is the protocol's own *pick your own size*
+	// and is what hands a window back its natural size when it stops being maximised; a negative one is
+	// a shell that has subtracted a panel's height from a screen it got wrong, and quietly clamping it
+	// would leave a window at some arbitrary minimum with nothing naming the disagreement.
+	if (width < 0 || height < 0)
+	{
+		Object().PostError(
+			Wayland::Server::GyroSceneV1Error::BadSize, "gyro_scene_v1.set_window_size with a negative extent"
+		);
+
+		return;
+	}
+
+	Staged(handle->Window()).Size = PixelSize<SurfaceSpace>{ width, height };
+}
+
+void SceneManager::OnSetWindowStates(
+	Wayland::Server::ExtForeignToplevelHandleV1 toplevel,
+	Wayland::Server::GyroSceneV1State states
+)
+{
+	auto* const handle = static_cast<ForeignToplevelHandle*>(toplevel.Implementation());
+
+	if (handle == nullptr || handle->IsClosed())
+	{
+		return;
+	}
+
+	Staged(handle->Window()).States = StatesOf(states);
+}
+
+SceneManager::Arrangement& SceneManager::Staged(EntityId window)
+{
+	const auto found = std::find_if(m_Arrangements.begin(), m_Arrangements.end(), [window](const Arrangement& held) {
+		return held.Window == window;
+	});
+
+	if (found != m_Arrangements.end())
+	{
+		return *found;
+	}
+
+	m_Arrangements.push_back(Arrangement{ .Window = window, .Size = std::nullopt, .States = std::nullopt });
+
+	return m_Arrangements.back();
+}
+
+void SceneManager::SendWorkAreas(const HostOutputs& outputs)
+{
+	wl_client* const client = Object().IsValid() ? Object().WireClient() : nullptr;
+
+	if (client == nullptr)
+	{
+		return;
+	}
+
+	// **Taken rather than read, and each match is consumed**, which is `HostOutputs::Sync`'s own shape
+	// one file over and is there for the same reason: an `OutputId` is minted by whatever configured the
+	// display, so two outputs a caller built without one compare equal — and a keyed lookup would then
+	// answer with the first screen's rectangle for the second and re-send it every iteration for as long
+	// as the machine ran. Consuming the entry makes the duplicate case pair up in order instead.
+	std::vector<Reported> previous = std::move(m_WorkAreas);
+
+	std::vector<Reported> reported;
+	reported.reserve(outputs.All().size());
+
+	for (const std::unique_ptr<HostOutput>& output : outputs.All())
+	{
+		const Rect<GlobalSpace> area = WorkArea(output->Facts());
+
+		const auto before = std::find_if(previous.begin(), previous.end(), [&output](const Reported& held) {
+			return held.Output == output->Id();
+		});
+
+		if (before != previous.end())
+		{
+			const bool unchanged = before->Area == area;
+
+			previous.erase(before);
+
+			if (unchanged)
+			{
+				reported.push_back(Reported{ .Output = output->Id(), .Area = area });
+
+				continue;
+			}
+		}
+
+		// **An output this client has not bound stays owed rather than being dropped**, which is
+		// `SyncOutputEntry`'s rule for an `enter` with nothing to name and is right for the same reason:
+		// the event carries a `wl_output` object, and a shell that walks the registry a moment later has
+		// to hear about the screen it missed. Leaving the entry out of `reported` is what makes the next
+		// walk try again.
+		const Wayland::Server::WlOutput object = output->ResourceFor(*client);
+
+		if (!object.IsValid())
+		{
+			continue;
+		}
+
+		// Truncated rather than rounded, for `ClientXdgSurface::RefreshRoom`'s reason: this is a ceiling
+		// on how much room a window has, and rounding up recommends a window half a pixel wider than the
+		// screen it is on.
+		Object().WorkArea(
+			object,
+			static_cast<std::int32_t>(area.Origin.X),
+			static_cast<std::int32_t>(area.Origin.Y),
+			static_cast<std::int32_t>(area.Extent.Width),
+			static_cast<std::int32_t>(area.Extent.Height)
+		);
+
+		reported.push_back(Reported{ .Output = output->Id(), .Area = area });
+	}
+
+	// Whatever is left in `previous` is a monitor that has gone, and it goes with it: the walk is over
+	// the outputs that exist, so an entry nothing matched no longer has a screen to be about.
+	m_WorkAreas = std::move(reported);
 }
 
 void SceneManager::OnClaimPlacement()
@@ -293,6 +457,7 @@ void SceneManager::OnCommit(
 	if (scene == nullptr || floors == nullptr || client == nullptr)
 	{
 		m_Placements.clear();
+		m_Arrangements.clear();
 
 		return;
 	}
@@ -373,7 +538,40 @@ void SceneManager::OnCommit(
 		window->MarkPlaced();
 	}
 
+	// **The sizes and the states, and neither of them is inside the transaction above.** What a shell
+	// says here is a request to the *application* rather than a write to the world: the size goes out in
+	// a configure and the window's extent changes when the client's next buffer arrives, which is the
+	// round trip decision 166 says a resize already is and does not remove. So there is nothing here for
+	// a commit scope to hold and nothing for the transition to govern — where the window is animates,
+	// how big it is arrives, and a maximise states both in one batch so the travel starts at once.
+	//
+	// **The configure itself is owed rather than sent**, which is `SyncWindows`' comparison doing the
+	// work: this writes what the shell said, and the walk at the end of the iteration turns whatever
+	// disagrees with what was last sent into one configure per window. A shell that moves forty windows
+	// onto a workspace therefore costs each of them one configure rather than one per request it sent.
+	for (const Arrangement& arrangement : m_Arrangements)
+	{
+		ClientXdgSurface* const window = WindowFor(*m_Context, arrangement.Window);
+		ClientXdgToplevel* const toplevel = window == nullptr ? nullptr : window->Toplevel();
+
+		if (toplevel == nullptr)
+		{
+			continue;
+		}
+
+		if (arrangement.Size.has_value())
+		{
+			toplevel->SetWanted(*arrangement.Size);
+		}
+
+		if (arrangement.States.has_value())
+		{
+			toplevel->Declare(*arrangement.States);
+		}
+	}
+
 	m_Placements.clear();
+	m_Arrangements.clear();
 }
 
 void SceneManager::Remove(ClientContainer& container) noexcept
@@ -391,5 +589,165 @@ Wayland::Server::GyroSceneV1Handler* SceneGlobal::OnBind(wl_client& client, std:
 	(void)client;
 	(void)version;
 
-	return new SceneManager{ *m_Context };
+	auto* const manager = new SceneManager{ *m_Context };
+
+	// Registered before `OnBound` runs, because the walk that answers *who places this session's
+	// windows* is over this list and a shell claiming placement inside its own bind would otherwise be
+	// invisible to it for one iteration.
+	m_Context->Add(*manager);
+
+	return manager;
+}
+
+WindowStates StatesOf(Wayland::Server::GyroSceneV1State states) noexcept
+{
+	using State = Wayland::Server::GyroSceneV1State;
+
+	return WindowStates{ .Maximized = Any(states & State::Maximized),
+		                 .Fullscreen = Any(states & State::Fullscreen),
+		                 .TiledLeft = Any(states & State::TiledLeft),
+		                 .TiledRight = Any(states & State::TiledRight),
+		                 .TiledTop = Any(states & State::TiledTop),
+		                 .TiledBottom = Any(states & State::TiledBottom) };
+}
+
+WindowCapabilities CapabilitiesOf(Wayland::Server::GyroSceneV1Capability capabilities) noexcept
+{
+	using Capability = Wayland::Server::GyroSceneV1Capability;
+
+	return WindowCapabilities{ .Maximize = Any(capabilities & Capability::Maximize),
+		                       .Minimize = Any(capabilities & Capability::Minimize),
+		                       .Fullscreen = Any(capabilities & Capability::Fullscreen) };
+}
+
+Rect<GlobalSpace> WorkArea(const SceneOutput& output) noexcept
+{
+	// The whole screen, because nothing can reserve any of it yet. See the header: this is the seam the
+	// keepout lands on rather than an arithmetic that has been left out, and having the three callers
+	// ask one question is what stops them drifting apart before there is anything to subtract.
+	return output.Bounds;
+}
+
+SceneManager* PlacerFor(const HostContext& context, SessionId session) noexcept
+{
+	for (SceneManager* const manager : context.Scenes())
+	{
+		if (!manager->IsPlacing() || !manager->Object().IsValid())
+		{
+			continue;
+		}
+
+		if (context.Session(manager->Object().WireClient()) == session)
+		{
+			return manager;
+		}
+	}
+
+	return nullptr;
+}
+
+WindowCapabilities CapabilitiesFor(const HostContext& context, const ClientXdgSurface& window)
+{
+	wl_client* const client = window.Object().IsValid() ? window.Object().WireClient() : nullptr;
+
+	if (client == nullptr)
+	{
+		return {};
+	}
+
+	const SceneManager* const placer = PlacerFor(context, context.Session(client));
+
+	return placer == nullptr ? WindowCapabilities{} : placer->Capabilities();
+}
+
+bool ForwardWindowRequest(
+	HostContext& context,
+	const ClientXdgSurface& window,
+	Wayland::Server::GyroSceneV1Action action,
+	Wayland::Server::WlOutput preferred
+)
+{
+	const SceneStore* const scene = context.Store();
+	ForeignToplevelGlobal* const foreign = context.Foreign();
+	wl_client* const client = window.Object().IsValid() ? window.Object().WireClient() : nullptr;
+
+	// **An unmapped window is refused here rather than being forwarded and dropped.** A client is
+	// entitled to ask before its first buffer — a browser started fullscreen does — and there is no
+	// entity for the shell to be told about yet, so the answer is the configure the caller sends: the
+	// state it asked for is absent, and it asks again once it is on screen.
+	if (scene == nullptr || foreign == nullptr || client == nullptr || !window.IsMapped())
+	{
+		return false;
+	}
+
+	SceneManager* const placer = PlacerFor(context, context.Session(client));
+
+	if (placer == nullptr || !placer->Object().IsValid())
+	{
+		return false;
+	}
+
+	wl_client* const shell = placer->Object().WireClient();
+
+	if (shell == nullptr)
+	{
+		return false;
+	}
+
+	const Wayland::Server::ExtForeignToplevelHandleV1 handle = foreign->HandleFor(*shell, window.Window());
+
+	if (!handle.IsValid())
+	{
+		return false;
+	}
+
+	// **The output preference crosses id spaces and has to be translated.** The application named a
+	// `wl_output` of its own, and the shell holds a different resource for the same display; sending the
+	// application's id to the shell would name whatever object happens to sit at that number in the
+	// shell's space, which is a type confusion rather than a wrong monitor. An output the shell has not
+	// bound comes back invalid, which is the null the protocol already allows for a client with no
+	// preference — the shell then chooses the screen, which was its job anyway.
+	Wayland::Server::WlOutput named;
+
+	if (preferred.IsValid())
+	{
+		if (auto* const bound = static_cast<ClientOutput*>(preferred.Implementation()); bound != nullptr)
+		{
+			if (const HostOutput* const host = bound->Host(); host != nullptr)
+			{
+				named = host->ResourceFor(*shell);
+			}
+		}
+	}
+
+	// **The arrival of the request rather than the instant a person clicked**, which no application
+	// tells anybody: this is the earliest moment anything in this process knows about, and a shell that
+	// echoes it back on the commit answering starts the window moving from here instead of from
+	// whenever the answer was worked out. One dispatch iteration of lag rather than two.
+	const auto nanoseconds = static_cast<std::uint64_t>(Monotonic::ToNanoseconds(scene->Now()));
+	const std::uint64_t seconds = nanoseconds / 1'000'000'000U;
+
+	placer->Object().WindowRequest(
+		handle,
+		action,
+		named,
+		static_cast<std::uint32_t>(seconds >> 32U),
+		static_cast<std::uint32_t>(seconds & 0xffffffffU),
+		static_cast<std::uint32_t>(nanoseconds % 1'000'000'000U)
+	);
+
+	return true;
+}
+
+void SyncWorkAreas(const HostContext& context, const HostOutputs& outputs)
+{
+	// Over a copy for `ForeignToplevelGlobal::Sync`'s reason: an event is a wire write, and a client
+	// whose connection has already failed is torn down inside libwayland — which destroys its resources
+	// and so edits this list underneath the walk.
+	const std::vector<SceneManager*> scenes{ context.Scenes().begin(), context.Scenes().end() };
+
+	for (SceneManager* const manager : scenes)
+	{
+		manager->SendWorkAreas(outputs);
+	}
 }

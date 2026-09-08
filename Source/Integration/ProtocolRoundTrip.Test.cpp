@@ -459,12 +459,15 @@ GYRO_TEST(ProtocolRoundTrip, TheRegistryCarriesTheGlobalsAToolkitLooksFor)
 	const Registry::Global* const shell = bound.Listener.Find(Wayland::XdgWmBase::WireName);
 	GYRO_REQUIRE(shell != nullptr);
 
-	// Version 4 for `wl_compositor`'s reason: it owes a `configure_bounds`, and that event is what stops
-	// a toolkit sizing every window against `wl_output.scale` — which on a fractionally scaled panel is
-	// the ceiling of the real scale and so a screen a third narrower than the one the world is on. 5 is
-	// not taken: a client told 5 and sent no `wm_capabilities` is entitled to assume it has maximise,
-	// minimise, fullscreen and the window menu, which is a titlebar of buttons that do nothing.
-	GYRO_CHECK_EQ(shell->Version, std::uint32_t{ 4 });
+	// Version 5 for `wl_compositor`'s reason: 4 owes a `configure_bounds`, which is what stops a toolkit
+	// sizing every window against `wl_output.scale` — on a fractionally scaled panel that is the ceiling
+	// of the real scale and so a screen a third narrower than the one the world is on — and 5 owes a
+	// `wm_capabilities`. The objection to 5 was that a client told 5 and sent nothing is entitled to
+	// assume it has maximise, minimise, fullscreen and the window menu, which is a titlebar of buttons
+	// that do nothing; the answer is that a shell now says which of them it implements and gyro sends
+	// exactly that, empty included. 6 would owe `xdg_toplevel.configure` a `suspended` state, and
+	// nothing tracks whether anybody is looking at a window.
+	GYRO_CHECK_EQ(shell->Version, std::uint32_t{ 5 });
 
 	const Registry::Global* const data = bound.Listener.Find(Wayland::WlDataDeviceManager::WireName);
 	GYRO_REQUIRE(data != nullptr);
@@ -1083,6 +1086,31 @@ public:
 		}
 	}
 
+	// Decoded for `OnConfigure`'s reason, and counted as well: the empty set is a real answer — it is
+	// what a session with no shell is told — and a test that only looked at the contents could not tell
+	// it from the event never having arrived, which is the whole difference version 5 turns on.
+	void OnWmCapabilities(std::span<const std::byte> capabilities) override
+	{
+		++Offered;
+
+		Capabilities.clear();
+
+		for (std::size_t at = 0; at + sizeof(std::uint32_t) <= capabilities.size(); at += sizeof(std::uint32_t))
+		{
+			std::uint32_t value = 0;
+
+			std::memcpy(&value, capabilities.data() + at, sizeof(value));
+
+			Capabilities.push_back(static_cast<Wayland::XdgToplevelWmCapabilities>(value));
+		}
+	}
+
+	void OnConfigureBounds(std::int32_t width, std::int32_t height) override
+	{
+		BoundsWidth = width;
+		BoundsHeight = height;
+	}
+
 	void OnClose() override { ++Closed; }
 
 	[[nodiscard]] bool Has(Wayland::XdgToplevelState state) const noexcept
@@ -1090,10 +1118,19 @@ public:
 		return std::find(States.begin(), States.end(), state) != States.end();
 	}
 
+	[[nodiscard]] bool Offers(Wayland::XdgToplevelWmCapabilities capability) const noexcept
+	{
+		return std::find(Capabilities.begin(), Capabilities.end(), capability) != Capabilities.end();
+	}
+
 	std::int32_t Width = -1;
 	std::int32_t Height = -1;
+	std::int32_t BoundsWidth = -1;
+	std::int32_t BoundsHeight = -1;
 	std::vector<Wayland::XdgToplevelState> States;
+	std::vector<Wayland::XdgToplevelWmCapabilities> Capabilities;
 	std::uint32_t Configured = 0;
+	std::uint32_t Offered = 0;
 	std::uint32_t Closed = 0;
 };
 
@@ -7095,9 +7132,66 @@ public:
 	std::uint32_t States = 0;
 };
 
+// What the compositor tells a shell: where its windows may go on each screen, and what the
+// applications have asked for.
+class SceneEvents final : public Wayland::GyroSceneV1Listener
+{
+public:
+	struct Area
+	{
+		Wayland::WlOutput Output;
+		std::int32_t X = 0;
+		std::int32_t Y = 0;
+		std::int32_t Width = 0;
+		std::int32_t Height = 0;
+	};
+
+	struct Asked
+	{
+		Wayland::ExtForeignToplevelHandleV1 Window;
+		Wayland::GyroSceneV1Action Action{};
+		Wayland::WlOutput Output;
+		std::uint64_t Nanoseconds = 0;
+	};
+
+	void OnWorkArea(
+		Wayland::WlOutput output,
+		std::int32_t x,
+		std::int32_t y,
+		std::int32_t width,
+		std::int32_t height
+	) override
+	{
+		Areas.push_back(Area{ .Output = output, .X = x, .Y = y, .Width = width, .Height = height });
+	}
+
+	void OnWindowRequest(
+		Wayland::ExtForeignToplevelHandleV1 toplevel,
+		Wayland::GyroSceneV1Action action,
+		Wayland::WlOutput output,
+		std::uint32_t tvSecHi,
+		std::uint32_t tvSecLo,
+		std::uint32_t tvNsec
+	) override
+	{
+		const auto seconds = (static_cast<std::uint64_t>(tvSecHi) << 32U) | static_cast<std::uint64_t>(tvSecLo);
+
+		Requests.push_back(
+			Asked{ .Window = toplevel,
+		           .Action = action,
+		           .Output = output,
+		           .Nanoseconds = (seconds * 1'000'000'000U) + tvNsec }
+		);
+	}
+
+	std::vector<Area> Areas;
+	std::vector<Asked> Requests;
+};
+
 // A shell's side of the scene: the manager, and the containers it has been handed.
 struct Arrangement
 {
+	SceneEvents Events;
 	Wayland::GyroSceneV1 Scene;
 	std::vector<std::unique_ptr<ContainerEvents>> Listeners;
 	std::vector<Wayland::GyroContainerV1> Containers;
@@ -7112,7 +7206,7 @@ struct Arrangement
 		return false;
 	}
 
-	shell.Scene = bound.Listener.Object().Bind<Wayland::GyroSceneV1>(global->Name, global->Version);
+	shell.Scene = bound.Listener.Object().Bind<Wayland::GyroSceneV1>(global->Name, global->Version, shell.Events);
 
 	return shell.Scene.IsValid();
 }
@@ -7562,4 +7656,299 @@ GYRO_TEST(ProtocolRoundTrip, RemovingAWorkspaceHandsItsWindowsBackToTheFloor)
 
 	GYRO_REQUIRE_EQ(fresh.States, std::uint32_t{ 1 });
 	GYRO_CHECK_EQ(fresh.X.ToDouble(), 640.0);
+}
+
+// The other direction of the same seam: an application asking for a window state, the shell deciding,
+// and the answer arriving back at the application as a configure. Decision 51 lets this round trip
+// where a resize may not — a maximise animates compositor-side while the client's pixels catch up, so
+// the felt latency is when the motion starts rather than when the application has redrawn.
+
+GYRO_TEST(ProtocolRoundTrip, AnApplicationsMaximiseIsAskedOfTheShellAndTheShellsAnswerReachesIt)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-scene-maximise", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Arrangement shell;
+	GYRO_REQUIRE(BindScene(bound, shell));
+
+	ForeignListEvents windows;
+	const Wayland::ExtForeignToplevelListV1 list = BindForeign(bound, windows);
+	GYRO_REQUIRE(list.IsValid());
+
+	shell.Scene.ClaimPlacement();
+	shell.Scene.SetCapabilities(Wayland::GyroSceneV1Capability::Maximize);
+
+	pair.Turn();
+
+	Toplevel window;
+	GYRO_REQUIRE(Show(pair, bound, window, std::byte{ 0x50 }));
+
+	GYRO_REQUIRE_EQ(windows.Objects.size(), std::size_t{ 1 });
+
+	shell.Scene.PlaceWindow(
+		windows.Objects.front(),
+		Wayland::GyroContainerV1{},
+		Wire::Fixed::FromDouble(120.0),
+		Wire::Fixed::FromDouble(80.0),
+		Wire::Fixed::FromDouble(0.0)
+	);
+
+	Commit(shell, pair, Wayland::GyroSceneV1Transition::WindowOpen);
+
+	pair.Turn();
+
+	// **The control the application is allowed to draw is the one the shell said it answers for.** This
+	// is the whole of why version 5 is safe to advertise: a client told 5 and sent nothing assumes it
+	// has all four, so the set has to be stated, and stating it is what a shell declaring itself does.
+	GYRO_CHECK(window.WindowEvents.Offers(Wayland::XdgToplevelWmCapabilities::Maximize));
+	GYRO_CHECK(!window.WindowEvents.Offers(Wayland::XdgToplevelWmCapabilities::Fullscreen));
+
+	const std::uint32_t before = window.WindowEvents.Configured;
+
+	window.Window.SetMaximized();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// The shell is asked, and it is asked about the window it already knows by the handle it already
+	// holds — this protocol mints no second name for a window.
+	GYRO_REQUIRE_EQ(shell.Events.Requests.size(), std::size_t{ 1 });
+	GYRO_CHECK(shell.Events.Requests.front().Action == Wayland::GyroSceneV1Action::Maximize);
+	GYRO_CHECK(shell.Events.Requests.front().Window.Id() == windows.Objects.front().Id());
+
+	// **And nothing has been said back to the application yet**, which is the deliberate half. Answering
+	// now and again when the shell replies would be two configures with two serials saying opposite
+	// things, which a toolkit shows as its own chrome flickering out and back.
+	GYRO_CHECK_EQ(window.WindowEvents.Configured, before);
+	GYRO_CHECK(!window.WindowEvents.Has(Wayland::XdgToplevelState::Maximized));
+
+	// The shell answers with all three in one batch: where the window goes, how big it is, and what it
+	// now is. The position animates under the transition and the size is a request the application
+	// answers with its next buffer.
+	shell.Scene.SetWindowSize(windows.Objects.front(), 1920, 1080);
+	shell.Scene.SetWindowStates(windows.Objects.front(), Wayland::GyroSceneV1State::Maximized);
+	shell.Scene.PlaceWindow(
+		windows.Objects.front(),
+		Wayland::GyroContainerV1{},
+		Wire::Fixed::FromDouble(0.0),
+		Wire::Fixed::FromDouble(0.0),
+		Wire::Fixed::FromDouble(0.0)
+	);
+
+	Commit(shell, pair, Wayland::GyroSceneV1Transition::MatchedMove);
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	GYRO_CHECK(window.WindowEvents.Configured > before);
+	GYRO_CHECK(window.WindowEvents.Has(Wayland::XdgToplevelState::Maximized));
+	GYRO_CHECK_EQ(window.WindowEvents.Width, 1920);
+	GYRO_CHECK_EQ(window.WindowEvents.Height, 1080);
+
+	// **And the capability set was not repeated**, which matters because a resize configures once per
+	// frame of the drag: a variable-length array on every one of those would put wire traffic on the
+	// interaction a person judges hardest, to restate something that moves when a shell connects and at
+	// no other time.
+	GYRO_CHECK_EQ(window.WindowEvents.Offered, std::uint32_t{ 1 });
+
+	// **The travel started at the commit and does not wait for the application to redraw**, which is
+	// what makes a maximise feel immediate when the same round trip in a resize does not: the window is
+	// already moving while its pixels are still the old size.
+	const Entity* const node = WindowNode(pair.Store);
+	GYRO_REQUIRE(node != nullptr);
+	GYRO_CHECK(!node->Translation.IsAtRest());
+	GYRO_CHECK_EQ(node->Translation.Model().X, 0.0);
+
+	// And restoring it: the state goes and the size goes back to the application's own, which is what
+	// zero means rather than a window of no width.
+	shell.Scene.SetWindowSize(windows.Objects.front(), 0, 0);
+	shell.Scene.SetWindowStates(windows.Objects.front(), Wayland::GyroSceneV1State{});
+
+	Commit(shell, pair, Wayland::GyroSceneV1Transition::MatchedMove);
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_CHECK(!window.WindowEvents.Has(Wayland::XdgToplevelState::Maximized));
+	GYRO_CHECK_EQ(window.WindowEvents.Width, 0);
+}
+
+GYRO_TEST(ProtocolRoundTrip, WithNoShellAnApplicationIsToldItHasNoControlsAndIsAnsweredAnyway)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-scene-noshell" };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel window;
+	GYRO_REQUIRE(Show(pair, bound, window, std::byte{ 0x51 }));
+
+	// **The empty set said out loud**, which is the case that made version 5 unsafe before there was a
+	// shell to answer: silence here entitles a toolkit to draw all four controls, and every one of them
+	// would do nothing. A person on a machine with no shell now sees a titlebar with no buttons rather
+	// than one with four dead ones.
+	GYRO_CHECK(window.WindowEvents.Offered > 0);
+	GYRO_CHECK(window.WindowEvents.Capabilities.empty());
+
+	const std::uint32_t before = window.WindowEvents.Configured;
+
+	window.Window.SetMaximized();
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// **Refused, and refusing is still an answer.** The protocol permits the state not to change and
+	// does not permit silence — a client that asked and heard nothing is one still waiting, which is a
+	// browser holding its own fullscreen transition open forever and a person clicking a video's
+	// control and seeing the frame they were already looking at.
+	GYRO_CHECK(window.WindowEvents.Configured > before);
+	GYRO_CHECK(!window.WindowEvents.Has(Wayland::XdgToplevelState::Maximized));
+}
+
+GYRO_TEST(ProtocolRoundTrip, AShellIsToldWhatPartOfEachScreenItsWindowsBelongIn)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-scene-workarea", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{
+		SceneOutput{ .Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } },
+		SceneOutput{
+			.Bounds = { { 1920.0, 0.0 }, { 1280.0, 720.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1280, 720 } }
+	};
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	// **The screens have to be bound before any of them can be named**, which is not a detail of the
+	// test: the event carries a `wl_output`, and a shell that has not walked the registry has no object
+	// for gyro to put in it. What is owed stays owed until it does, which is `wl_surface.enter`'s rule
+	// for the same absence.
+	std::vector<std::unique_ptr<OutputEvents>> screens;
+	std::vector<Wayland::WlOutput> bindings;
+
+	for (const Registry::Global& global : bound.Listener.Globals)
+	{
+		if (global.Interface != Wayland::WlOutput::WireName)
+		{
+			continue;
+		}
+
+		screens.push_back(std::make_unique<OutputEvents>());
+		bindings.push_back(
+			bound.Listener.Object().Bind<Wayland::WlOutput>(global.Name, global.Version, *screens.back())
+		);
+	}
+
+	GYRO_REQUIRE_EQ(bindings.size(), std::size_t{ 2 });
+
+	Arrangement shell;
+	GYRO_REQUIRE(BindScene(bound, shell));
+
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// One per screen, in the coordinates `place_window` is stated in — so maximising a window is
+	// placing it at this origin and asking it to be this size, with no arithmetic of the shell's own
+	// between the two.
+	GYRO_REQUIRE_EQ(shell.Events.Areas.size(), std::size_t{ 2 });
+
+	GYRO_CHECK_EQ(shell.Events.Areas.front().X, 0);
+	GYRO_CHECK_EQ(shell.Events.Areas.front().Width, 1920);
+	GYRO_CHECK_EQ(shell.Events.Areas.front().Height, 1080);
+
+	GYRO_CHECK_EQ(shell.Events.Areas.back().X, 1920);
+	GYRO_CHECK_EQ(shell.Events.Areas.back().Width, 1280);
+
+	// **Nothing is re-sent for a screen that has not moved**, which is what keeps this off the cost of
+	// every wakeup: the walk runs per iteration and compares, exactly as the window enumeration beside
+	// it does.
+	pair.Turn();
+	pair.Turn();
+
+	GYRO_CHECK_EQ(shell.Events.Areas.size(), std::size_t{ 2 });
+
+	// And a monitor unplugged is the rest moving, which is the one thing that does re-send.
+	const std::array remaining{ SceneOutput{
+		.Bounds = { {}, { 2560.0, 1440.0 } }, .Density = Scale::FromInteger(1), .Grid = { 2560, 1440 } } };
+	pair.Store.SetOutputs(remaining);
+
+	pair.Turn();
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+	GYRO_REQUIRE_EQ(shell.Events.Areas.size(), std::size_t{ 3 });
+	GYRO_CHECK_EQ(shell.Events.Areas.back().Width, 2560);
+}
+
+GYRO_TEST(ProtocolRoundTrip, AShellThatGoesAwayTakesItsWindowsControlsWithIt)
+{
+	GYRO_REQUIRE(!g_RuntimeDir.Path.empty());
+
+	Pair pair{ "gyro-roundtrip-scene-controls", Trust::System };
+	GYRO_REQUIRE(pair.Opened);
+
+	const std::array outputs{ SceneOutput{
+		.Bounds = { {}, { 1920.0, 1080.0 } }, .Density = Scale::FromInteger(1), .Grid = { 1920, 1080 } } };
+	pair.Store.SetOutputs(outputs);
+
+	BoundCompositor bound;
+	GYRO_REQUIRE(Bind(pair, bound));
+
+	Toplevel window;
+	GYRO_REQUIRE(Show(pair, bound, window, std::byte{ 0x52 }));
+
+	GYRO_CHECK(window.WindowEvents.Capabilities.empty());
+
+	{
+		Arrangement shell;
+		GYRO_REQUIRE(BindScene(bound, shell));
+
+		shell.Scene.ClaimPlacement();
+		shell.Scene.SetCapabilities(
+			Wayland::GyroSceneV1Capability::Maximize | Wayland::GyroSceneV1Capability::Fullscreen
+		);
+
+		pair.Turn();
+		pair.Turn();
+
+		GYRO_CHECK(!pair.Client.Fault().has_value());
+		GYRO_CHECK(window.WindowEvents.Offers(Wayland::XdgToplevelWmCapabilities::Maximize));
+		GYRO_CHECK(window.WindowEvents.Offers(Wayland::XdgToplevelWmCapabilities::Fullscreen));
+		GYRO_CHECK(!window.WindowEvents.Offers(Wayland::XdgToplevelWmCapabilities::Minimize));
+
+		shell.Scene.Destroy();
+	}
+
+	pair.Turn();
+	pair.Turn();
+
+	GYRO_CHECK(!pair.Client.Fault().has_value());
+
+	// **The controls go when the shell does, rather than staying on screen and doing nothing.** A shell
+	// that has crashed answers no maximise, so a person is told so by the buttons leaving rather than by
+	// clicking one and watching nothing happen until it comes back.
+	GYRO_CHECK(window.WindowEvents.Capabilities.empty());
 }

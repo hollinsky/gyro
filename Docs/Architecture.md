@@ -2862,7 +2862,10 @@ above every window of its session, out of the window list, out of the walk, and 
 so before it every client's window was `Material::None` for the whole of a run and the material system
 had no caller but a gym. What it cannot yet say is *where*: a chrome surface is placed by the
 Floorplanner like any window, which is what a launcher wants and is not what a panel wants, and
-[Open.md](Open.md) carries the anchoring and the exclusive zone that are missing.
+[Open.md](Open.md) carries the anchoring and the exclusive zone that are missing. The *consumer* of
+that exclusive zone now exists — gyro folds keepouts into a per-output work area and tells the shell,
+the windows and the popups the same rectangle (203) — so what is left open is the half that lets a
+panel put anything into the fold.
 
 **And what it can now do is arrange the windows.** `gyro_scene_v1` is the third verb and the one the
 first two were prerequisites for: a shell declares a container by a name it mints, puts windows into
@@ -2887,6 +2890,20 @@ Four things about it are worth stating here because they are the shape of the wh
   transition is deliberately not consulted for it.
 - **A window is named by its `ext_foreign_toplevel_handle_v1`**, the same object a shell already
   learns about windows through, rather than by a second handle that could go stale independently.
+
+**And what it can now do is answer the window's own buttons.** A client asking to be maximised,
+restored, fullscreened or minimised is asking *window management*, so gyro forwards the request to
+whoever holds placement and sends back whatever that client answers — a size and a state set, on a
+commit, with the position travelling under the transition beside them. A shell says once which of
+those it answers for, and gyro tells every window of that session exactly that set and no more, so a
+titlebar draws the controls that work and no others. A session with no shell is told the empty set,
+which is why a machine with no desktop on it now shows fewer dead buttons rather than more.
+[Decision 203](Decisions.md#203-a-window-state-is-the-shells-to-decide-and-the-compositors-only-job-is-to-ask-to-say-what-room-there-is-and-to-send-the-answer)
+has the argument, and the part of it worth carrying here is that **gyro holds the rectangle a
+maximised window belongs in** — the screen less whatever chrome has reserved. The panel reserving the
+space and the shell placing the windows are separate clients on purpose, so neither sees both halves;
+gyro does the subtraction once and tells the shell, the window that is sizing its first frame, and the
+menu that must not open under the bar. Nothing reserves anything yet, so today it is the whole screen.
 
 What is not there is the gesture, which needs a driven channel on the authoring side and a recognizer
 in `Input` before a request for one would mean anything, and decision 95's reference node, which is
@@ -2916,7 +2933,9 @@ the subsystem it belongs to:
 - **Discrete state changes may round trip.** Maximize, tile, move-to-workspace, and placement of a
   new window all animate compositor-side while the client's pixels catch up, so the felt latency is
   when the animation starts, not when the client renders. A hop costs one frame against no
-  reference.
+  reference. This is built: a client's `set_maximized` reaches the shell as a question and the
+  shell's answer reaches the client as a configure, with the window already travelling by the time
+  the application has redrawn (203).
 
 Swipe is the case that tests the rule hardest, because a gesture scrubbing a transition looks like
 it needs a per-event channel and turns out not to. The shell binds a gesture to a named transition

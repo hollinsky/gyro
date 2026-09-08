@@ -19,6 +19,11 @@ Result<void> ClientHost::Open(SceneStore& scene, ITextures& textures)
 	// will import and which device to allocate them on. See the dmabuf global below.
 	m_Context.SetFloors(m_Floors, m_Server);
 
+	// The two globals that answer a question about somebody *else's* objects: which handle names a
+	// window in a shell's own id space, and which `wl_output` names a screen in it. Both outlive every
+	// client, which is what lets a request handler reach across a connection at all.
+	m_Context.SetGlobals(m_Foreign, m_Outputs);
+
 	// **A run that binds its own socket authors one floor now; a run under the handover authors one per
 	// session, when that session's listener is adopted.** The two are the same object doing the same
 	// job and not a branch in the world: a client on a socket gyro bound belongs to no session, and a
@@ -457,6 +462,12 @@ Wake ClientHost::Advance(SceneStore& scene, ITextures& textures, Instant now)
 	// machine with no shell, which is every machine today: there are no lists bound, and the walk is over
 	// an empty vector.
 	m_Foreign.Sync();
+
+	// **And what part of each screen a shell's windows belong in.** Beside the enumeration because it is
+	// the same kind of walk and costs the same nothing on a machine with no shell: an output moving, a
+	// monitor arriving and a shell binding its `wl_output` late are all a comparison against what each
+	// client was last told, and there is no signal from any of them to keep in step.
+	SyncWorkAreas(m_Context, m_Outputs);
 
 	return Wake::Never();
 }

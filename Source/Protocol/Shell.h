@@ -13,6 +13,7 @@
 #include "Protocol/Positioner.h"
 #include "Protocol/Seat.h"
 #include "Protocol/Surface.h"
+#include "Wayland/Server/GyroSceneV1.h"
 #include "Wayland/Server/Wayland.h"
 #include "Wayland/Server/Weak.h"
 #include "Wayland/Server/XdgShell.h"
@@ -42,11 +43,20 @@
 // again (141) and became worth something the day a person could drag one, which is the same decision
 // (51) that made this whole file grow gestures.
 //
-// **5 is not taken and the reason is unchanged**: a client told 5 and sent no `wm_capabilities` is
-// entitled to assume it has maximise, minimise, fullscreen and the window menu, which is a titlebar
-// full of buttons that do nothing. Version 2's tiled states cost nothing — they are states gyro may
-// send and does not — and came along with the rest. Every toolkit binds this at whatever version it
-// finds.
+// **5 is taken now, and what changed is not this file: it is that there is somebody to answer.** The
+// objection was never to the event. It was that a client told 5 and sent no `wm_capabilities` is
+// entitled to assume it has maximise, minimise, fullscreen and the window menu, and gyro had an answer
+// to none of them — so the number bought a titlebar full of buttons that do nothing.
+// `gyro_scene_v1.set_capabilities` is the answer arriving: a shell says which of them it implements,
+// gyro sends exactly that set, and a window whose session has no shell is sent an *empty* one. The
+// empty set is the case that was unreachable at version 4 and is the default here, so a run with no
+// shell now shows a person fewer dead controls rather than more. The window menu is not among them,
+// because nothing forwards the request that follows it — see `OnShowWindowMenu`.
+//
+// **Version 2's tiled states have a writer now as well.** They cost nothing when they were states gyro
+// might send and never did; a shell that tiles sets them through the same request the maximised state
+// arrives on, and a toolkit reads them to drop the border it would otherwise draw against its
+// neighbour. Every toolkit binds this at whatever version it finds.
 //
 // **The whole of the mapping protocol is here because the whole of it is one state machine.** A
 // client gets an `xdg_surface`, gets an `xdg_toplevel` or an `xdg_popup` from it, commits with *no*
@@ -58,7 +68,42 @@
 // in front of them.
 
 // The advertised version. See above before raising it.
-inline constexpr std::uint32_t ShellVersion = 4;
+inline constexpr std::uint32_t ShellVersion = 5;
+
+// What a shell has said a window *is*: the half of `xdg_toplevel`'s state array that is window
+// management rather than something gyro knows about the window itself.
+//
+// **`activated`, `resizing` and `suspended` are deliberately not here, and the omission is decision
+// 51's line drawn through one array.** Those three are gyro's own answers — who has the keyboard
+// (149), whose edge the pointer is holding (166), and whether anybody is looking at all — and a shell
+// able to write them could give a window a live titlebar it has not got, which is a person typing into
+// the window that looks focused and watching the characters go somewhere else.
+struct WindowStates
+{
+	bool Maximized = false;
+	bool Fullscreen = false;
+	bool TiledLeft = false;
+	bool TiledRight = false;
+	bool TiledTop = false;
+	bool TiledBottom = false;
+
+	[[nodiscard]] bool operator==(const WindowStates&) const noexcept = default;
+};
+
+// What a shell has said it will answer, and therefore which controls a client's titlebar may offer.
+//
+// **The window menu is absent because nothing forwards the request behind it.** A capability is a
+// promise to answer, and a capability nobody can be asked for is exactly the dead control the
+// `wm_capabilities` event exists to prevent — so it arrives with the event that carries it and not
+// before.
+struct WindowCapabilities
+{
+	bool Maximize = false;
+	bool Minimize = false;
+	bool Fullscreen = false;
+
+	[[nodiscard]] bool operator==(const WindowCapabilities&) const noexcept = default;
+};
 
 class ClientChrome;
 class ClientXdgSurface;
@@ -152,26 +197,41 @@ public:
 
 	void OnSetMinSize(std::int32_t width, std::int32_t height) override;
 
-	// **The four state requests gyro declines, and declining them is still an answer.** Maximise and
-	// fullscreen are window management a shell owns (51), so gyro's policy is that the state does not
-	// change — which the protocol permits in as many words: *whether the client is actually put into a
-	// fullscreen state is subject to compositor policies*. What it does not permit is silence. The same
-	// paragraph opens *the compositor will respond by emitting a configure event*, and a client that
-	// asked and heard nothing is not a client that learned it was refused: it is one still waiting.
+	// **The four state requests, which are now a question asked of the shell rather than a policy gyro
+	// holds.** Maximise and fullscreen are window management a shell owns (51), and until
+	// `gyro_scene_v1` grew a way to say so there was nobody to ask — so gyro's answer was that the state
+	// does not change, which the protocol permits in as many words: *whether the client is actually put
+	// into a fullscreen state is subject to compositor policies*. What it has never permitted is
+	// silence. The same paragraph opens *the compositor will respond by emitting a configure event*, and
+	// a client that asked and heard nothing is not a client that learned it was refused: it is one still
+	// waiting.
 	//
 	// **What that cost was a browser whose fullscreen button did nothing at all.** Firefox asks, holds
 	// its transition open for the configure that says what it got, and never completes it — so the
 	// page's own `fullscreenchange` never fires and a person clicking the control on a video sees the
-	// frame they were already looking at. The window not growing is the policy; the button being dead
-	// is the bug, and only the second one is visible to them.
+	// frame they were already looking at. The window not growing was the policy; the button being dead
+	// was the bug, and only the second one was ever visible to them.
 	//
-	// So each of these answers with the window exactly as it is. `ClientXdgSurface::Configure` sends the
-	// current size and states under a fresh serial, which is precisely *you asked, and here is what you
-	// have* — and a toolkit reads the absent state and puts its own UI back.
+	// **So each of these is offered to the session's shell first, and answered here only where nobody
+	// took it.** `ForwardWindowRequest` ([Scene.h](Scene.h)) sends `gyro_scene_v1.window_request` to
+	// whichever client holds placement and returns whether it went anywhere; a shell answers with a size
+	// and a state set on a commit, arriving back through `SetWanted` and `SetStates` below. With no
+	// shell, no claim, or no window list for the shell to have named this window in, the old answer
+	// stands and `AnswerUnchanged` sends the window exactly as it is — which is *you asked, and here is
+	// what you have*, and is what puts a toolkit's own UI back.
 	//
-	// **`set_minimized` is the one that stays silent, and the protocol is why**: it is the request with
-	// no state to carry back and no way to observe the result, so there is nothing a configure could
-	// say. A client is told in the interface description that it cannot know.
+	// **A forwarded request is answered late or not at all, and that is deliberate.** Sending a refusal
+	// now and the shell's answer a frame later would be two configures with two serials saying opposite
+	// things, which a toolkit shows as its fullscreen chrome flickering out and back. A shell that
+	// declared a capability and then ignores the request has produced a dead control by hand, which is
+	// the same shape as a shell that claims placement and never places (198) and is refused the same
+	// way: loudly, by the thing a person can see, rather than by gyro second-guessing it.
+	//
+	// **`set_minimized` is forwarded and never answered here, and the protocol is why**: it is the
+	// request with no state to carry back and no way to observe the result, so there is nothing a
+	// configure could say and nothing to say it about. A shell hears it and puts the window somewhere
+	// nobody is looking; with no shell it does nothing at all, which is what a client is told in the
+	// interface description to expect.
 	void OnSetMaximized() override;
 
 	void OnUnsetMaximized() override;
@@ -180,7 +240,7 @@ public:
 
 	void OnUnsetFullscreen() override;
 
-	void OnSetMinimized() override {}
+	void OnSetMinimized() override;
 
 	// Whether the client has been told it has the keyboard, which is the whole of what makes a toolkit
 	// draw its titlebar live rather than grey.
@@ -213,6 +273,62 @@ public:
 
 		return changed;
 	}
+
+	// What the shell says this window is, held for `m_Activated`'s reason and read the same way: the
+	// fact is the shell's last commit and this is the last thing sent, so a configure goes out exactly
+	// where the two disagree.
+	bool SetStates(WindowStates states) noexcept
+	{
+		const bool changed = states != m_States;
+
+		m_States = states;
+
+		return changed;
+	}
+
+	[[nodiscard]] const WindowStates& States() const noexcept { return m_States; }
+
+	// What the shell says it will answer, which becomes the `wm_capabilities` event.
+	//
+	// **Answers whether a configure is owed, and separately records that the event is**, which the other
+	// three comparisons here do not have to do: a configure carries the size and the states every time,
+	// and this is an array sent only when it moves. The two come apart on the first configure of every
+	// window, which happens before this has ever been called and still has to carry the set.
+	//
+	// **That first send is the whole of why version 5 is safe.** A client told 5 and sent no
+	// capabilities is entitled to assume it has all four, so an empty set has to be said out loud rather
+	// than left unsaid — and empty is exactly what a session with no shell has. `m_CapabilitiesOwed`
+	// starts true because no comparison on the value can tell *nothing to offer* from *not yet spoken*.
+	bool SetCapabilities(WindowCapabilities capabilities) noexcept
+	{
+		const bool changed = capabilities != m_Capabilities;
+
+		m_Capabilities = capabilities;
+		m_CapabilitiesOwed = m_CapabilitiesOwed || changed;
+
+		return changed;
+	}
+
+	// The size the shell has asked this window to be, or nothing where it has not asked. **Held apart
+	// from `m_Size`, which is the last size *sent*:** this is the standing request, re-offered on every
+	// walk, so a window whose client has since raised its own minimum is re-clamped against the new one
+	// rather than left at a size that client has already refused.
+	//
+	// **Cleared when a resize begins**, because the pointer is the other author of this number and two
+	// standing answers would fight once per iteration — a person dragging a maximised window's corner
+	// would watch it snap back to the shell's last word on every frame of the drag.
+	void SetWanted(std::optional<PixelSize<SurfaceSpace>> wanted) noexcept { m_Wanted = wanted; }
+
+	[[nodiscard]] const std::optional<PixelSize<SurfaceSpace>>& Wanted() const noexcept { return m_Wanted; }
+
+	// The states the shell has declared this window to be in, which is the same pair as `SetWanted` and
+	// `m_Size`: this is what was *said*, `SetStates` above is what was sent, and the walk turns the
+	// disagreement into a configure. One author rather than two here — the pointer never writes a state
+	// — so the split buys only that a shell's commit and the configure answering it are separate steps,
+	// which is what keeps one commit from producing a configure per window it touched *and* the walk's.
+	void Declare(WindowStates states) noexcept { m_Declared = states; }
+
+	[[nodiscard]] const WindowStates& Declared() const noexcept { return m_Declared; }
 
 	// The size the next configure will carry, clamped to what the client itself declared it can be.
 	//
@@ -267,7 +383,11 @@ public:
 
 	// Send `xdg_toplevel.configure` with the size and the states this window is in. No arguments,
 	// because both are this object's: the `xdg_surface` decides *when* and the toplevel decides *what*.
-	void Configure() const;
+	//
+	// **Not `const`, and the one thing it writes is why**: `wm_capabilities` records that it has gone
+	// out at all, because the empty set is a real answer that no comparison on the value can tell apart
+	// from never having spoken.
+	void Configure();
 
 	// The staged minimum and maximum arriving in the world, called by the `xdg_surface` from the commit
 	// that carries them — they are double buffered like everything else a client says, so a toolkit
@@ -275,11 +395,16 @@ public:
 	void ApplyBounds();
 
 private:
-	// The answer the four declined state requests share: configure with what this window already is.
+	// The answer a state request gets where no shell took it: configure with what this window already
+	// is.
 	//
 	// Gated on the surface still being there for `OnMove`'s reason — an `xdg_surface` destroyed out of
 	// order leaves this object alive with nothing behind it.
 	void AnswerUnchanged();
+
+	// Offer a state request to the session's shell, and answer it here where nobody took it. `answer`
+	// is false for `set_minimized` alone, which has nothing a configure could say.
+	void Ask(Wayland::Server::GyroSceneV1Action action, Wayland::Server::WlOutput preferred, bool answer);
 
 	ClientXdgSurface* m_Surface = nullptr;
 
@@ -288,6 +413,21 @@ private:
 
 	bool m_Activated = false;
 	bool m_Resizing = false;
+
+	// What the shell last said this window is, and what it last said it would answer for — both of them
+	// the last thing *sent*, per the accessors above.
+	WindowStates m_States{};
+	WindowCapabilities m_Capabilities{};
+
+	// Whether `wm_capabilities` still has to go out. True to begin with, so the first configure of every
+	// window carries the set — see `SetCapabilities`: the empty set is a real answer and is
+	// indistinguishable from silence without this.
+	bool m_CapabilitiesOwed = true;
+
+	// The size and the states the shell is standing on. Not `m_Size` and `m_States`, which are what was
+	// sent.
+	std::optional<PixelSize<SurfaceSpace>> m_Wanted;
+	WindowStates m_Declared{};
 
 	// What the last configure said, so that a comparison rather than a signal decides whether one is
 	// owed — the same shape `m_Activated` has.
@@ -629,6 +769,8 @@ public:
 	bool SetActivated(bool activated) noexcept;
 	bool SetResizing(bool resizing) noexcept;
 	bool SetSize(PixelSize<SurfaceSpace> size) noexcept;
+	bool SetStates(WindowStates states) noexcept;
+	bool SetCapabilities(WindowCapabilities capabilities) noexcept;
 
 	// The fourth, and the one whose argument is the world's rather than the caller's: it reads the
 	// screen this window is on rather than being told. Answers whether the room changed, which is a

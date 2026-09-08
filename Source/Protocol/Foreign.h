@@ -173,11 +173,16 @@ public:
 	// The global went first, which is the compositor shutting down rather than anything a client did.
 	void Forget() noexcept { m_Global = nullptr; }
 
-private:
 	// The handle this list already has for a window, or null — closed handles never match, per
 	// `ForeignToplevelHandle::IsClosed`.
+	//
+	// **Public because the traffic now runs both ways.** This protocol was read-only when it landed, so
+	// the only caller was the walk beside it; a shell being told that an application asked to be
+	// fullscreen (`gyro_scene_v1.window_request`) has to name the window in the shell's own id space,
+	// and this is the only thing that knows what that name is.
 	[[nodiscard]] ForeignToplevelHandle* HandleFor(EntityId window) const noexcept;
 
+private:
 	ForeignToplevelGlobal* m_Global = nullptr;
 	HostContext* m_Context = nullptr;
 
@@ -207,6 +212,17 @@ public:
 	// A list came or went. Borrowed pointers, and the list deregisters itself from `OnGone`.
 	void Add(ForeignToplevelList& list);
 	void Remove(ForeignToplevelList& list) noexcept;
+
+	// One window's handle in one client's id space, or an invalid resource where that client has not
+	// bound this protocol, has stopped listening, or never heard about this window because it belongs
+	// to another session.
+	//
+	// **The invalid answer is a real case rather than a defensive one.** `gyro_scene_v1` and this are
+	// separate globals bound separately, and a client is entitled to take the first without the second —
+	// so a shell that arranges windows without enumerating them cannot be told which window asked for
+	// anything, and the caller answers the application itself instead of leaving it waiting.
+	[[nodiscard]] Wayland::Server::ExtForeignToplevelHandleV1
+	HandleFor(const wl_client& client, EntityId window) const noexcept;
 
 private:
 	HostContext* m_Context = nullptr;

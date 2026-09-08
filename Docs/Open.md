@@ -2029,6 +2029,17 @@ give to the shell — except that the shell cannot enforce it against windows it
 all of them while the Floorplanner is the placer. So the second half probably waits for a shell that
 declares a placement model at all, and the first half could land tomorrow.
 
+**The second half now has everything but the declaration.** *(Narrowed 2026-09-07 by
+[decision 203](Decisions.md#203-a-window-state-is-the-shells-to-decide-and-the-compositors-only-job-is-to-ask-to-say-what-room-there-is-and-to-send-the-answer).)*
+A shell declares a placement model (198) and is told a **work area** per screen — the output less
+whatever chrome has reserved — which is the same rectangle a window is told it has room for and the
+same one a menu is kept inside. So the constraint is enforced against every window on the machine
+after all, by the party that places them, and the three consumers can no longer disagree because they
+read one number. What is still missing is the *only* thing that can put anything into the fold: a way
+for a chrome surface to say which edge it is on and how much room to keep. `WorkArea` in
+[Protocol/Scene.h](../Source/Protocol/Scene.h) is where that lands, and until it does the work area is
+the whole screen and every one of those callers is asking the right question of an empty subtraction.
+
 What it costs today is that the only chrome worth writing is chrome that wants the middle of the
 screen. A dock, a status bar and a notification stack are all unwritable, and the workaround — a
 full-screen transparent surface with the panel painted at the top of it — is worse than nothing: it

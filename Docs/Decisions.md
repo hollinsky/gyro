@@ -16281,3 +16281,146 @@ asking to be told something gyro is the authority on. What that costs is that th
 the global is advertised at the right version and by the right name, and the value itself is checked
 against the fold directly. Adding a whole client codec to read one `uint` would have made the
 bindings list diverge in the direction the build's own comment says it never should.
+
+
+### 203. A window state is the shell's to decide, and the compositor's only job is to ask, to say what room there is, and to send the answer
+
+*(Decided 2026-09-07, extending
+[decision 198](#198-a-shell-says-where-the-windows-are-and-never-how-they-get-there-a-commit-names-a-transition-and-there-is-no-way-to-name-none)'s
+protocol in the direction it was always going to have to go, and retiring the policy
+[Protocol/Shell.h](../Source/Protocol/Shell.h) held because there was nobody to ask.
+[Decision 51](#51-the-shell-is-a-per-session-client-gyro-owns-mechanism) named maximize as the case
+that may round trip when it was written; this is that sentence built.)*
+
+**`set_maximized`, `set_fullscreen` and `set_minimized` are forwarded to the client holding
+placement, which answers with a size and a state set on a commit. A shell says once which of them it
+answers for, and gyro tells every window of that session exactly that. Gyro holds the rectangle a
+maximized window belongs in and tells all three parties who need it the same number.**
+
+#### What was wrong was not the policy but the silence
+
+Gyro's answer to `set_maximized` was that the state does not change, which the protocol permits in as
+many words — *whether the client is actually put into a fullscreen state is subject to compositor
+policies*. What it does not permit is saying nothing, and the same paragraph opens *the compositor
+will respond by emitting a configure event*. That half was already right: a request that changed
+nothing was answered with a configure carrying the window exactly as it is, because a client that
+asked and heard nothing is not one that learned it was refused — it is one still waiting, which is
+Firefox holding its own fullscreen transition open forever.
+
+So the defect this entry fixes is not that the window did not grow. It is that **there was no window
+management on this machine at all**, and every titlebar on it was drawing controls that led nowhere.
+`xdg_wm_base` was advertised at 4 rather than 5 for exactly that reason: a client told 5 and sent no
+`wm_capabilities` assumes it has maximise, minimise, fullscreen and the window menu. That objection
+was never to the event, and it dissolves the moment somebody can answer — a shell states its set, and
+a session with no shell is sent the *empty* set out loud. Version 5 therefore makes a machine with no
+shell show a person **fewer** dead controls than version 4 did, which is the opposite of what the
+entry refusing it predicted.
+
+#### The states split where decision 51 splits, and the array is where you can see it
+
+`xdg_toplevel`'s state array has nine entries and three owners. `activated` is
+[decision 149](#149-focus-is-state-the-world-holds-and-the-seat-compares-against-it-rather-than-being-told)'s
+— who has the keyboard. `resizing` is
+[decision 166](#166-a-resize-is-a-request-the-client-owns-the-extent-gyro-owns-the-anchor)'s — whose
+edge the pointer is holding. `suspended` is nobody's yet. The remaining six — maximized, fullscreen
+and the four tiled edges — are what a shell decides, and they are exactly what `gyro_scene_v1` now
+carries. A shell that could write the first three could light the titlebar of a window a person is
+not typing into, which is the failure the split exists to make unreachable.
+
+The set is stated whole rather than one bit at a time, because the whole set is what the client is
+told on every configure — a shell that could set one bit would still be choosing the value of all of
+them, and sending the set is the honest spelling of what happens on the wire.
+
+#### A size is a request to the application, not a write to the world
+
+Decision 166 is worth re-reading before this is argued with, because it is easy to remember it as
+*gyro moves the edge and the pixels catch up*, which is not what it says. `set_window_size` produces
+a size in a configure; the window's extent changes when the client commits a buffer and at no other
+moment. A terminal that rounds to whole character cells will not be the size it was asked for, and
+that is the application exercising a right the protocol gives it.
+
+**What animates is where the window is**, which is `place_window` under the commit's transition and
+starts the instant the shell commits. That is what decision 51 means by maximize being the opposite
+of resize: the felt latency is when the *motion* starts, not when the application has redrawn. So a
+maximise is one commit stating three things — a position that travels, a size that is asked for, and
+a state that is declared.
+
+**Scaling the client's old pixels into the growing rectangle is deliberately not done here.** It is
+the thing that would make the size appear to animate too, and decision 166 rejected it for a resize
+on the grounds that every frame of every drag would be blurred text. The maximize case is genuinely
+different — one motion, a sharp buffer at the end — so the rejection does not carry over
+automatically, and it is left open below rather than assumed either way.
+
+#### The work area is arithmetic only the compositor can do
+
+The rectangle an ordinary window belongs inside — the screen, less whatever chrome has reserved along
+its edges — has three consumers that must agree: `xdg_toplevel.configure_bounds`, which is what an
+application sizes its first window against; the popup constraint rectangle, which is what keeps a menu
+from opening under a panel; and the shell, which needs it to know what maximizing means. Gyro was
+already deriving the first two from the whole output.
+
+**This is mechanism rather than policy, and the reason is the process split.** The panel reserving the
+space and the shell placing the windows are separate clients on purpose — a bug in a status bar should
+not take window management with it (51) — so neither can see both halves. Gyro sees both, does the
+subtraction once, and says the answer. The alternative, the policy client declaring the work area
+itself, asks the one process that does not know how tall the bar is.
+
+**The fold is empty today**, because `gyro_chrome_v1` still cannot say *along the top edge* or how much
+room to keep (187, and [Open.md](Open.md) carries it). What landing the seam now buys is that the three
+callers stop deriving the number separately, which is the only way they could ever have disagreed —
+and an application opening underneath a panel is precisely what that disagreement looks like.
+
+**Fullscreen ignores it and covers the whole output.** That is what the state means, and it is why the
+two are not one request with a different number. The panel is still painted in front, since the chrome
+root is always ahead of the floor (187) — so a shell granting fullscreen hides its own panel on that
+output. That is the shell's act rather than gyro's: gyro inventing a fullscreen layer above chrome
+would reintroduce exactly the *what does top mean* question decision 187 refused layer-shell over. It
+also leaves one opaque surface on the output, which is the arrangement direct scanout wants.
+
+#### Rejected
+
+**Rejected: gyro answers maximize itself from a declared work area.** No round trip, and it hard-codes
+floating-window semantics into the system layer — a tiling shell's maximize is a monocle layout, not a
+window filling the screen. That is decision 51's category error arriving through a side door.
+
+**Rejected: the policy client declares the work area.** One fewer thing for gyro to hold, and the
+policy client is not the panel client and cannot know the height.
+
+**Rejected: refusing now and letting the shell's answer arrive later.** It keeps the *never be silent*
+rule literally, and it sends two configures with two serials saying opposite things — which a toolkit
+shows as its fullscreen chrome flickering out and back on every click. A forwarded request is answered
+by the shell or not at all, which is the same bargain decision 198 already strikes for placement: a
+shell that claims and then does nothing produces a visible failure rather than gyro second-guessing it.
+
+**Rejected: a window-menu capability.** It is the fourth thing `wm_capabilities` can offer, and there
+is no event forwarding the `show_window_menu` that follows it — so offering it would manufacture
+exactly the dead control this entry is about. It arrives with the event or not at all.
+
+**Rejected: a `gyro_scene_v1` version bump.** Nothing has shipped and every consumer is in this
+repository, so the requests were added to version 1.
+
+#### Consequences
+
+`gyro_scene_v1` gains `set_capabilities`, `set_window_size` and `set_window_states`, the `work_area`
+and `window_request` events, three enumerations and a `bad_size` error. `xdg_wm_base` goes to 5.
+`ClientXdgToplevel` gains the states, the capabilities and the shell's standing size — each of them
+held as *what was last sent*, so the walk that already turns a focus change into a configure turns
+these into the same one, and a shell moving forty windows costs each of them one configure rather than
+one per request. `HostContext` gains the bound scene objects, because *who places this session's
+windows* is a question that spans connections and no per-connection list can answer it.
+
+**A resize takes the size back from the shell.** The pointer and the shell are two authors of one
+number, so `xdg_toplevel.resize` clears the shell's standing size — otherwise a person dragging a
+maximised window's corner would watch it snap back to the shell's last word on every frame.
+
+**A shell that dies takes the controls and leaves the arrangement.** The capabilities go empty, so the
+buttons leave rather than staying on screen and doing nothing; the states and sizes stay, because they
+are what the window *is* and decision 141 makes a crash cost the chrome and not the arrangement.
+
+**What is open.** Whether a maximise should stretch the old buffer while the new one is drawn, above.
+The keepout that makes the work area anything other than the whole screen, which is
+`gyro_chrome_v1`'s. The corner radius going to zero when a window is fullscreen or tiled edge to edge
+(96), which now has the state to read and still has no carrier on the node
+([decision 105](#105-relief-is-one-scalar-the-corner-radius-and-the-shadow-move-together)'s relief is
+not built). And whether a maximised window may be dragged or resized at all, which is a constraint
+decision 51 has the shell declaring and there is still no way to declare.

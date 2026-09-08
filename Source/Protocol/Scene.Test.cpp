@@ -68,3 +68,68 @@ GYRO_TEST(Scene, EveryTransitionTheCatalogHasIsOneAShellCanNameExceptTheOneItMay
 
 	GYRO_CHECK_EQ(nameable, TransitionCount - 1);
 }
+
+GYRO_TEST(Scene, TheWireStatesAreTheOnesAShellDecidesAndNoneOfTheOnesGyroDoes)
+{
+	using State = Wayland::Server::GyroSceneV1State;
+
+	// Each bit on its own, because the failure a combined check would miss is two entries mapped to one
+	// field — a shell tiling a window to the left and getting a window told it is maximised.
+	GYRO_CHECK(StatesOf(State::Maximized) == WindowStates{ .Maximized = true });
+	GYRO_CHECK(StatesOf(State::Fullscreen) == WindowStates{ .Fullscreen = true });
+	GYRO_CHECK(StatesOf(State::TiledLeft) == WindowStates{ .TiledLeft = true });
+	GYRO_CHECK(StatesOf(State::TiledRight) == WindowStates{ .TiledRight = true });
+	GYRO_CHECK(StatesOf(State::TiledTop) == WindowStates{ .TiledTop = true });
+	GYRO_CHECK(StatesOf(State::TiledBottom) == WindowStates{ .TiledBottom = true });
+
+	// A set rather than one bit, which is what a shell actually sends: a window filling a screen it is
+	// also tiled against is both, and the two must not be exclusive.
+	GYRO_CHECK(
+		StatesOf(State::Maximized | State::TiledTop | State::TiledLeft) ==
+		WindowStates{ .Maximized = true, .TiledLeft = true, .TiledTop = true }
+	);
+
+	// **Nothing is what a shell that says nothing means**, and it is the value a restored window is set
+	// back to rather than a state the protocol has no name for.
+	GYRO_CHECK(StatesOf(State{}) == WindowStates{});
+
+	// **The bits gyro keeps are unreachable from here, and that is the assertion rather than a
+	// coincidence of the numbering.** `activated`, `resizing` and `suspended` are gyro's own answers
+	// about a window — who has the keyboard (149), whose edge the pointer is holding (166), and whether
+	// anybody is looking — and a shell that could write one could light the titlebar of a window a
+	// person is not typing into. Every bit outside the six is dropped, which is what makes a shell built
+	// against a newer protocol lose the surplus rather than the session.
+	GYRO_CHECK(
+		StatesOf(static_cast<State>(0xffffffffU)) == WindowStates{ .Maximized = true,
+	                                                               .Fullscreen = true,
+	                                                               .TiledLeft = true,
+	                                                               .TiledRight = true,
+	                                                               .TiledTop = true,
+	                                                               .TiledBottom = true }
+	);
+
+	GYRO_CHECK(StatesOf(static_cast<State>(64)) == WindowStates{});
+}
+
+GYRO_TEST(Scene, TheWireCapabilitiesAreTheThreeAShellCanBeAskedFor)
+{
+	using Capability = Wayland::Server::GyroSceneV1Capability;
+
+	GYRO_CHECK(CapabilitiesOf(Capability::Maximize) == WindowCapabilities{ .Maximize = true });
+	GYRO_CHECK(CapabilitiesOf(Capability::Minimize) == WindowCapabilities{ .Minimize = true });
+	GYRO_CHECK(CapabilitiesOf(Capability::Fullscreen) == WindowCapabilities{ .Fullscreen = true });
+
+	// **The empty set is a value rather than an absence**, which is the whole of why `xdg_wm_base` can
+	// be advertised at version 5: a client told 5 and sent nothing assumes it has all four controls, so
+	// *none* has to be a thing a shell can say and gyro can send.
+	GYRO_CHECK(CapabilitiesOf(Capability{}) == WindowCapabilities{});
+
+	// **There is no window-menu capability and this is where that is asserted.** `xdg_toplevel` has
+	// four and this has three, because nothing forwards the request a client sends after being offered
+	// the fourth — so offering it would produce exactly the dead control the event exists to prevent.
+	// The day `window_request` learns to carry it, this number moves with it.
+	GYRO_CHECK(
+		CapabilitiesOf(static_cast<Capability>(0xffffffffU)) ==
+		WindowCapabilities{ .Maximize = true, .Minimize = true, .Fullscreen = true }
+	);
+}

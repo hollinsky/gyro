@@ -307,6 +307,25 @@ void ForeignToplevelGlobal::Sync()
 	}
 }
 
+Wayland::Server::ExtForeignToplevelHandleV1
+ForeignToplevelGlobal::HandleFor(const wl_client& client, EntityId window) const noexcept
+{
+	for (const ForeignToplevelList* const list : m_Lists)
+	{
+		if (!list->Object().IsValid() || list->Object().WireClient() != &client)
+		{
+			continue;
+		}
+
+		if (const ForeignToplevelHandle* const handle = list->HandleFor(window); handle != nullptr)
+		{
+			return handle->Object();
+		}
+	}
+
+	return {};
+}
+
 void ForeignToplevelGlobal::Add(ForeignToplevelList& list)
 {
 	m_Lists.push_back(&list);

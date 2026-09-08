@@ -7,13 +7,20 @@
 
 #include "Animation/Author/Catalog.h"
 #include "Core/Handle.h"
+#include "Core/Session.h"
 #include "Geometry/NodeTransform.h"
+#include "Geometry/Space.h"
+#include "Protocol/Shell.h"
 #include "Wayland/Server/GyroSceneV1.h"
+#include "Wayland/Server/Wayland.h"
 
 class ClientContainer;
+class ClientXdgSurface;
 class HostContext;
+class HostOutputs;
 class SceneCommit;
 class SceneManager;
+struct SceneOutput;
 
 // `gyro_scene_v1`: where the windows are, said by the shell.
 //
@@ -69,6 +76,66 @@ inline constexpr std::uint32_t SceneVersion = 1;
 // cap is here because the string is stored for the life of the session rather than for the life of
 // the request that carried it.
 inline constexpr std::size_t MaximumContainerName = 256;
+
+// The wire state set as gyro's record of it. Total, and bits this compositor does not know are
+// dropped rather than refused — a capability or a state is a shell describing itself, so a newer
+// shell saying more than this compositor can carry should lose the surplus rather than the session.
+[[nodiscard]] WindowStates StatesOf(Wayland::Server::GyroSceneV1State states) noexcept;
+
+// The same for the capability set.
+[[nodiscard]] WindowCapabilities CapabilitiesOf(Wayland::Server::GyroSceneV1Capability capabilities) noexcept;
+
+// The part of one output ordinary windows belong inside: the screen, less whatever chrome has
+// reserved along its edges.
+//
+// **The fold is empty today and this is the seam it will land on.** Nothing can reserve anything yet
+// — `gyro_chrome_v1` says a surface is chrome and cannot say *along the top edge*, let alone how much
+// room to keep for it (187, and Docs/Open.md carries both halves) — so this is the output's own
+// rectangle, and every caller is already asking the right question. What it buys before the keepout
+// exists is that the three places that need the answer ask it once: a window is told how much room it
+// has at `configure_bounds`, a menu is kept inside it, and a shell is told it at `work_area`. Those
+// disagreeing is what an application opening underneath a panel actually is.
+//
+// **Not the whole output for a fullscreen window**, which deliberately ignores this and covers the
+// panel — that is what the state means, and it is why the caller decides rather than this.
+[[nodiscard]] Rect<GlobalSpace> WorkArea(const SceneOutput& output) noexcept;
+
+// The client that has claimed placement for this session, or null where nobody has — which is a
+// session with no shell, a shell that has not claimed, and the gap while one restarts.
+//
+// **A scan over the bound scene objects rather than a table**, at the length of the shells on the
+// machine, which is one per logged-in session at most. It runs when a client asks for a window state
+// and once per window per iteration for the capability comparison, not per frame.
+[[nodiscard]] SceneManager* PlacerFor(const HostContext& context, SessionId session) noexcept;
+
+// What this window's session has been told it may offer, which is what its shell declared and is
+// empty where no shell holds placement.
+//
+// **Empty is the answer that matters and it is reached by a shell going away**, not only by one that
+// never spoke: a session whose shell has crashed has nothing that answers a maximise, so the windows
+// are told so and their controls go, rather than staying on screen and doing nothing until it comes
+// back.
+[[nodiscard]] WindowCapabilities CapabilitiesFor(const HostContext& context, const ClientXdgSurface& window);
+
+// Offer a client's window-state request to its session's shell, answering whether anybody took it.
+//
+// False where there is no shell, where no client holds placement, or where the holder has not bound
+// `ext_foreign_toplevel_list_v1` and so has no name for this window — the last of which is a real
+// case rather than a defensive one, since the two protocols are bound separately and a client is
+// entitled to take one without the other. The caller answers the request itself where this is false,
+// which is what keeps a window from waiting forever on a shell that was never going to hear it.
+[[nodiscard]] bool ForwardWindowRequest(
+	HostContext& context,
+	const ClientXdgSurface& window,
+	Wayland::Server::GyroSceneV1Action action,
+	Wayland::Server::WlOutput preferred
+);
+
+// Tell every bound shell what part of each screen its windows belong in, sending nothing where
+// nothing has moved. Called once per `Advance`, beside the foreign list's own walk and for the same
+// reason: the commit that moved an output and the step that notices are the same wakeup of the same
+// thread, so there is nothing to observe and no signal to keep in step.
+void SyncWorkAreas(const HostContext& context, const HostOutputs& outputs);
 
 // The wire transition as the catalog's, or nothing where the client named one gyro does not know.
 //
@@ -192,10 +259,31 @@ public:
 
 	void OnGone() override;
 
+	// **The work areas go out here rather than being left to the walk**, which is the reason
+	// `ForeignToplevelList` runs its own sync from the same place: a client is entitled to bind, round
+	// trip and read the answer, and a round trip's reply is already queued by libwayland while this bind
+	// is being dispatched. A first announcement deferred to the end of the iteration arrives *after* the
+	// reply that was supposed to follow it, so a shell written exactly as the protocol describes would
+	// come up not knowing where any of its screens are.
+	void OnBound() override;
+
 	// The resource is already destroyed when this runs, and `OnGone` follows immediately.
 	void OnDestroy() override {}
 
 	void OnClaimPlacement() override;
+
+	void OnSetCapabilities(Wayland::Server::GyroSceneV1Capability capabilities) override;
+
+	void OnSetWindowSize(
+		Wayland::Server::ExtForeignToplevelHandleV1 toplevel,
+		std::int32_t width,
+		std::int32_t height
+	) override;
+
+	void OnSetWindowStates(
+		Wayland::Server::ExtForeignToplevelHandleV1 toplevel,
+		Wayland::Server::GyroSceneV1State states
+	) override;
 
 	Wayland::Server::GyroContainerV1Handler*
 	OnGetContainer(std::string_view name, wl_fixed_t x, wl_fixed_t y, wl_fixed_t z) override;
@@ -220,6 +308,20 @@ public:
 	// tells each of them to forget it if it goes first.
 	void Remove(ClientContainer& container) noexcept;
 
+	// Whether this object holds its session's placement, which is what makes it the one client a window
+	// state request is offered to.
+	[[nodiscard]] bool IsPlacing() const noexcept { return m_Placing; }
+
+	// What this shell declared it will answer for. Empty until it says, which is what a client's
+	// titlebar is told and is why an unspoken shell produces no window controls rather than dead ones.
+	[[nodiscard]] const WindowCapabilities& Capabilities() const noexcept { return m_Capabilities; }
+
+	// The work area of every output, sent where it has moved since this client was last told and where
+	// the client has a `wl_output` to name. An output it has not bound stays owed rather than being
+	// dropped, which is `SyncOutputEntry`'s rule for an `enter` with nothing to name: a shell that
+	// walks the registry late hears about every screen when it gets there.
+	void SendWorkAreas(const HostOutputs& outputs);
+
 private:
 	// One window the shell has said where to put, since the last commit.
 	struct Placement
@@ -233,10 +335,47 @@ private:
 		Vector3<double> At{};
 	};
 
+	// One window whose size or state the shell has stated, since the last commit. Staged separately
+	// from `Placement` above because a shell may state any of the three without the others — a window
+	// maximising states all three, a tiling shell moving one across a gap states two, and an overview
+	// states only where things are.
+	struct Arrangement
+	{
+		EntityId Window{};
+
+		// Nothing where this batch said nothing about it, which is different from having said the value
+		// it already has: applying an unstated size would hand a window back its natural size every time
+		// the shell moved it.
+		std::optional<PixelSize<SurfaceSpace>> Size;
+		std::optional<WindowStates> States;
+	};
+
+	// The work area one output was last reported as having, so a comparison rather than a signal
+	// decides whether an event is owed — the shape every other per-iteration walk in this module has.
+	struct Reported
+	{
+		OutputId Output{};
+		Rect<GlobalSpace> Area{};
+	};
+
+	// The arrangement staged for a window, created where this batch has not touched it yet.
+	[[nodiscard]] Arrangement& Staged(EntityId window);
+
 	HostContext* m_Context = nullptr;
 
 	// The containers minted on this object. Borrowed, and each removes itself as it dies.
 	std::vector<ClientContainer*> m_Containers;
+
+	// Staged sizes and states, in the order the shell stated them, for `m_Placements`' reason.
+	std::vector<Arrangement> m_Arrangements;
+
+	// What this shell says it answers for, applied immediately rather than at commit: it is a standing
+	// statement about the shell rather than a change to anything a person is watching.
+	WindowCapabilities m_Capabilities{};
+
+	// What this client has been told about each screen. Cleared of nothing when an output goes — the
+	// entry is dropped by the next walk, which is over the outputs that exist.
+	std::vector<Reported> m_WorkAreas;
 
 	// Staged placements, in the order the shell stated them. A vector rather than a set keyed on the
 	// window because the last word wins and stating one twice in a batch is a shell's own business —

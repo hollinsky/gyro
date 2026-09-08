@@ -18,6 +18,7 @@
 #include "Protocol/Chrome.h"
 #include "Protocol/Floor.h"
 #include "Protocol/Popup.h"
+#include "Protocol/Scene.h"
 #include "Protocol/Seat.h"
 #include "Scene/Commit.h"
 #include "Scene/Entity.h"
@@ -213,13 +214,14 @@ void ClientXdgToplevel::ApplyMaterial() noexcept
 	m_Material = m_PendingMaterial;
 }
 
-void ClientXdgToplevel::Configure() const
+void ClientXdgToplevel::Configure()
 {
 	// The states as the protocol carries them: an array of `uint32`, handed over as the bytes behind it.
-	// A fixed array rather than a vector because the set is closed and tiny — two entries, and the rest
-	// of the enumeration is window management a shell owns (51) — and a heap allocation here would be
-	// one per frame of a resize, on the thread a person's drag is being answered by.
-	std::array<Wayland::Server::XdgToplevelState, 2> states{};
+	// A fixed array rather than a vector because the set is closed and small — the two gyro decides and
+	// the six a shell does (51) — and a heap allocation here would be one per frame of a resize, on the
+	// thread a person's drag is being answered by. `suspended` is the ninth and is not sent: nothing
+	// tracks whether a window is being looked at.
+	std::array<Wayland::Server::XdgToplevelState, 8> states{};
 	std::size_t count = 0;
 
 	if (m_Activated)
@@ -237,6 +239,41 @@ void ClientXdgToplevel::Configure() const
 		states[count++] = Wayland::Server::XdgToplevelState::Resizing;
 	}
 
+	// **And the six the shell decides**, which arrive through `gyro_scene_v1.set_window_states` and are
+	// held here as the last set sent. `maximized` and `fullscreen` are what a toolkit reads to swap its
+	// window controls and drop its own frame; the tiled four are what it reads to stop drawing a border
+	// against a neighbour that has one of its own, which is the seam down the middle of two tiled
+	// windows that otherwise looks like a gap nobody meant.
+	if (m_States.Maximized)
+	{
+		states[count++] = Wayland::Server::XdgToplevelState::Maximized;
+	}
+
+	if (m_States.Fullscreen)
+	{
+		states[count++] = Wayland::Server::XdgToplevelState::Fullscreen;
+	}
+
+	if (m_States.TiledLeft)
+	{
+		states[count++] = Wayland::Server::XdgToplevelState::TiledLeft;
+	}
+
+	if (m_States.TiledRight)
+	{
+		states[count++] = Wayland::Server::XdgToplevelState::TiledRight;
+	}
+
+	if (m_States.TiledTop)
+	{
+		states[count++] = Wayland::Server::XdgToplevelState::TiledTop;
+	}
+
+	if (m_States.TiledBottom)
+	{
+		states[count++] = Wayland::Server::XdgToplevelState::TiledBottom;
+	}
+
 	// **Before the configure, which is the protocol's own order** — a client reads the pair together and
 	// the bounds are what it clamps the size in the next event against. Sent on every configure rather
 	// than only where it moved: it is two integers on a batch that already carries five, and the
@@ -251,6 +288,41 @@ void ClientXdgToplevel::Configure() const
 		Object().ConfigureBounds(m_Room.Width, m_Room.Height);
 	}
 
+	// **Before the configure for `configure_bounds`' reason, and unlike the bounds it is sent only when
+	// it is owed.** The bounds are two integers and re-sending them is cheaper than a second *has this
+	// client been told* ledger; this is a variable-length array, and a resize configures once per frame
+	// of the drag — so repeating it would put a wire array on the path a person judges most harshly, to
+	// say a thing that changes when a shell connects and at no other time.
+	//
+	// **The empty set is the ordinary case and is what makes advertising 5 correct**: a client told 5
+	// and sent nothing assumes it has all four controls, so a session with no shell has to be told
+	// *none* out loud. `m_CapabilitiesOwed` starts true for exactly that, since no comparison on the
+	// value can tell *nothing to offer* from *not yet spoken*.
+	if (m_CapabilitiesOwed && Object().Version() >= 5)
+	{
+		std::array<Wayland::Server::XdgToplevelWmCapabilities, 3> capabilities{};
+		std::size_t offered = 0;
+
+		if (m_Capabilities.Maximize)
+		{
+			capabilities[offered++] = Wayland::Server::XdgToplevelWmCapabilities::Maximize;
+		}
+
+		if (m_Capabilities.Minimize)
+		{
+			capabilities[offered++] = Wayland::Server::XdgToplevelWmCapabilities::Minimize;
+		}
+
+		if (m_Capabilities.Fullscreen)
+		{
+			capabilities[offered++] = Wayland::Server::XdgToplevelWmCapabilities::Fullscreen;
+		}
+
+		Object().WmCapabilities(std::as_bytes(std::span{ capabilities.data(), offered }));
+
+		m_CapabilitiesOwed = false;
+	}
+
 	Object().Configure(m_Size.Width, m_Size.Height, std::as_bytes(std::span{ states.data(), count }));
 }
 
@@ -260,26 +332,37 @@ PixelSize<SurfaceSpace> ClientXdgToplevel::Clamp(PixelSize<SurfaceSpace> size) c
 	// has declared a maximum below its own minimum, which the protocol calls an error and `ApplyBounds`
 	// refuses — so this is the arithmetic being total rather than a policy about a case that cannot
 	// arrive.
+	// **Zero is *pick your own size* and is never clamped up to a minimum**, and it is per axis because
+	// the protocol says so — a shell may fix a window's width and leave its height to the application,
+	// which is what a column in a tiling layout is. Raising a zero to the client's own minimum would
+	// answer *be as small as you are allowed* to a question that was *choose*, so a window restored from
+	// maximised would come back at its smallest rather than at its own.
 	PixelSize<SurfaceSpace> clamped = size;
 
-	if (m_Min.Width > 0)
+	if (clamped.Width > 0)
 	{
-		clamped.Width = std::max(clamped.Width, m_Min.Width);
+		if (m_Min.Width > 0)
+		{
+			clamped.Width = std::max(clamped.Width, m_Min.Width);
+		}
+
+		if (m_Max.Width > 0)
+		{
+			clamped.Width = std::min(clamped.Width, m_Max.Width);
+		}
 	}
 
-	if (m_Min.Height > 0)
+	if (clamped.Height > 0)
 	{
-		clamped.Height = std::max(clamped.Height, m_Min.Height);
-	}
+		if (m_Min.Height > 0)
+		{
+			clamped.Height = std::max(clamped.Height, m_Min.Height);
+		}
 
-	if (m_Max.Width > 0)
-	{
-		clamped.Width = std::min(clamped.Width, m_Max.Width);
-	}
-
-	if (m_Max.Height > 0)
-	{
-		clamped.Height = std::min(clamped.Height, m_Max.Height);
+		if (m_Max.Height > 0)
+		{
+			clamped.Height = std::min(clamped.Height, m_Max.Height);
+		}
 	}
 
 	return clamped;
@@ -423,29 +506,56 @@ void ClientXdgToplevel::AnswerUnchanged()
 	}
 }
 
+void ClientXdgToplevel::Ask(Wayland::Server::GyroSceneV1Action action, Wayland::Server::WlOutput preferred, bool answer)
+{
+	if (m_Surface == nullptr)
+	{
+		return;
+	}
+
+	if (ForwardWindowRequest(m_Surface->Host(), *m_Surface, action, preferred))
+	{
+		return;
+	}
+
+	if (answer)
+	{
+		AnswerUnchanged();
+	}
+}
+
 void ClientXdgToplevel::OnSetMaximized()
 {
-	AnswerUnchanged();
+	Ask(Wayland::Server::GyroSceneV1Action::Maximize, {}, true);
 }
 
 void ClientXdgToplevel::OnUnsetMaximized()
 {
-	AnswerUnchanged();
+	Ask(Wayland::Server::GyroSceneV1Action::Unmaximize, {}, true);
 }
 
 void ClientXdgToplevel::OnSetFullscreen(Wayland::Server::WlOutput output)
 {
-	// The output is the client's *preference* for which screen to use, and gyro is not going to use one
-	// — so it is read and dropped rather than recorded. Decision 51 has the choice of screen belonging
-	// to a shell along with the rest of the placement.
-	(void)output;
-
-	AnswerUnchanged();
+	// **The output is the client's *preference* for which screen, and it is passed on rather than
+	// dropped.** Decision 51 gives the choice of screen to the shell along with the rest of the
+	// placement, which is exactly why the shell is the party that should hear the preference: a video
+	// player asked to go fullscreen on the monitor its window is mostly on, and a shell that was never
+	// told would put it on whichever one its own policy prefers.
+	Ask(Wayland::Server::GyroSceneV1Action::Fullscreen, output, true);
 }
 
 void ClientXdgToplevel::OnUnsetFullscreen()
 {
-	AnswerUnchanged();
+	Ask(Wayland::Server::GyroSceneV1Action::Unfullscreen, {}, true);
+}
+
+void ClientXdgToplevel::OnSetMinimized()
+{
+	// **Forwarded and never answered, which is the one asymmetry in this group.** There is no minimised
+	// state on the wire and no configure that could carry one, so a client is told in the interface
+	// description that it cannot observe the result — which means the *only* thing gyro can do wrong
+	// here is nothing at all. A shell hears it and puts the window somewhere nobody is looking.
+	Ask(Wayland::Server::GyroSceneV1Action::Minimize, {}, false);
 }
 
 void ClientXdgPositioner::OnSetSize(std::int32_t width, std::int32_t height)
@@ -962,6 +1072,14 @@ void ClientXdgSurface::Configure()
 		// has never seen this one, and a toolkit sizing its first frame would be working from the
 		// `wl_output` arithmetic this event exists to correct.
 		static_cast<void>(RefreshRoom());
+
+		// **And the capabilities, for exactly the same reason one step further.** A window's first
+		// configure is sent before it is mapped and therefore before `SyncWindows` has ever seen it, so
+		// without this the set on it is empty and the walk sends the real one an iteration later. What a
+		// person would see is a titlebar that opens with no buttons and grows them — which is a worse
+		// picture than either end of it, and is avoidable because the answer does not depend on the
+		// window at all: it is whatever this session's shell has declared.
+		static_cast<void>(m_Toplevel->SetCapabilities(CapabilitiesFor(*m_Context, *this)));
 
 		m_Toplevel->Configure();
 	}
@@ -1527,12 +1645,32 @@ void ClientXdgSurface::BeginResize(Wayland::Server::WlSeat seat, std::uint32_t s
 		return;
 	}
 
+	// **The shell's standing size goes when the pointer takes over**, because they are two authors of
+	// one number and the walk applies whichever it still has. Left in place, a person dragging the
+	// corner of a maximised window would watch it snap back to the shell's last word on every frame —
+	// and clearing it here rather than when the gesture *ends* is what makes the first frame of the drag
+	// the hand's rather than a fight.
+	if (m_Toplevel != nullptr)
+	{
+		m_Toplevel->SetWanted(std::nullopt);
+	}
+
 	Report(request, serial, from->BeginResize(*scene, m_Window, serial, edges));
 }
 
 bool ClientXdgSurface::SetActivated(bool activated) noexcept
 {
 	return m_Toplevel != nullptr && m_Toplevel->SetActivated(activated);
+}
+
+bool ClientXdgSurface::SetStates(WindowStates states) noexcept
+{
+	return m_Toplevel != nullptr && m_Toplevel->SetStates(states);
+}
+
+bool ClientXdgSurface::SetCapabilities(WindowCapabilities capabilities) noexcept
+{
+	return m_Toplevel != nullptr && m_Toplevel->SetCapabilities(capabilities);
 }
 
 bool ClientXdgSurface::SetResizing(bool resizing) noexcept
@@ -1658,8 +1796,15 @@ bool ClientXdgSurface::RefreshRoom()
 		return m_Toplevel->SetRoom({});
 	}
 
-	// **The output's logical extent taken as a surface size, which is exact for as long as a window
-	// hangs on a floor** — a floor is a top-level container at the origin with the identity transform
+	// **The work area rather than the whole screen**, which is what the protocol asks for in as many
+	// words — the bounds "can correspond to the size of a monitor excluding any panels". Nothing
+	// reserves anything yet, so today the two are the same rectangle ([Scene.h](Scene.h)); asking the
+	// right question now is what stops a window opening underneath the shell's own status bar on the
+	// day something does, since this number and the one a shell maximises into would otherwise be
+	// derived in two places and drift apart.
+	//
+	// **The logical extent taken as a surface size, which is exact for as long as a window hangs on a
+	// floor** — a floor is a top-level container at the origin with the identity transform
 	// ([Floor.h](Floor.h)), so the two spaces differ by a translation and a size survives it unchanged.
 	// It is the same assumption [Drag.h](Drag.h) resizes under, and it breaks in the same place: the day
 	// a window sits inside a container that is scaled, this is the output's rectangle pulled through
@@ -1668,9 +1813,10 @@ bool ClientXdgSurface::RefreshRoom()
 	// **Truncated rather than rounded, because this is a ceiling.** Rounding up recommends a window
 	// half a pixel wider than the screen it is on, which is the one direction an upper bound must never
 	// go.
+	const Rect<GlobalSpace> area = WorkArea(*output);
+
 	return m_Toplevel->SetRoom(
-		{ static_cast<std::int32_t>(output->Bounds.Extent.Width),
-	      static_cast<std::int32_t>(output->Bounds.Extent.Height) }
+		{ static_cast<std::int32_t>(area.Extent.Width), static_cast<std::int32_t>(area.Extent.Height) }
 	);
 }
 
@@ -1744,6 +1890,23 @@ void SyncWindows(HostContext& context, const SceneStore& scene, EntityId focused
 		// exactly once — at the first configure, which happens before this walk can see the window at all.
 		owed = window->RefreshRoom() || owed;
 
+		// **What the shell says this window is, and what it says it will answer for.** Both are folded in
+		// here for `activated`'s reason rather than sent from the commit that stated them: a shell moving
+		// forty windows onto a workspace then costs each of them one configure instead of one per request
+		// it sent, and the walk is where every other *fact against what was last told* comparison already
+		// lives.
+		//
+		// **The capability set moves without this window doing anything**, which is the case that would
+		// be missed if it were written at the shell's commit alone: a shell crashing takes the answer to
+		// a maximise with it, so every window in the session is told its controls are gone and a person
+		// stops being offered buttons that lead nowhere until the shell is back.
+		if (ClientXdgToplevel* const toplevel = window->Toplevel(); toplevel != nullptr)
+		{
+			owed = window->SetStates(toplevel->Declared()) || owed;
+		}
+
+		owed = window->SetCapabilities(CapabilitiesFor(context, *window)) || owed;
+
 		// **The menus, which are not in this registry and hang off the windows that are.** Outside the
 		// `owed` fold on purpose: a popup is configured through its own `xdg_surface` and carries a
 		// position rather than a size and a state, so the comparison that decides whether one is owed is
@@ -1762,6 +1925,22 @@ void SyncWindows(HostContext& context, const SceneStore& scene, EntityId focused
 			             static_cast<std::int32_t>(std::lround(wanted.Height)) }
 				   ) ||
 			       owed;
+		}
+		else if (
+			ClientXdgToplevel* const toplevel = window->Toplevel();
+			toplevel != nullptr && toplevel->Wanted().has_value()
+		)
+		{
+			// **The shell's standing size, re-offered rather than applied once.** It is stated again on
+			// every walk so that a window whose client has since raised its own minimum is re-clamped
+			// against the new one — a text editor that grows its minimum after loading a document would
+			// otherwise be left holding a size it has already refused, which a person sees as a maximised
+			// window that does not fill the screen.
+			//
+			// **Behind the drag rather than beside it**, because the pointer is the other author of this
+			// number and only one of them can be answered per configure. `BeginResize` clears this, so the
+			// branch is reachable only for a window nobody is holding.
+			owed = window->SetSize(*toplevel->Wanted()) || owed;
 		}
 
 		if (owed)
