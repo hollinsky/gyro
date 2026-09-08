@@ -1043,11 +1043,19 @@ GYRO_TEST(RenderImport, AClosingWindowLeavesWithThePictureItHadOnTheScreen)
 	const DmabufRead read{ *buffer };
 
 	// The left half of the window was red and the right half blue, and both are where they were
-	// relative to the window rather than to the screen.
-	GYRO_CHECK_EQ(PixelAt(*buffer, 6, 6), 0xFF0000FFU);
-	GYRO_CHECK_EQ(PixelAt(*buffer, 17, 9), 0xFF0000FFU);
-	GYRO_CHECK_EQ(PixelAt(*buffer, 15, 6), 0xFFFF0000U);
-	GYRO_CHECK_EQ(PixelAt(*buffer, 19, 9), 0xFFFF0000U);
+	// relative to the window rather than to the screen. One pixel inside each corner of where the
+	// snapshot landed, because an offset lost on the way into the slot or back out of it moves this
+	// rectangle without changing anything about what is inside it.
+	GYRO_CHECK_EQ(PixelAt(*buffer, 5, 5), 0xFFFF0000U);
+	GYRO_CHECK_EQ(PixelAt(*buffer, 5, 10), 0xFFFF0000U);
+	GYRO_CHECK_EQ(PixelAt(*buffer, 18, 5), 0xFF0000FFU);
+	GYRO_CHECK_EQ(PixelAt(*buffer, 18, 10), 0xFF0000FFU);
+
+	// **And nothing above or below it.** Both colours run the full height of the window, so a
+	// vertical slip would carry the picture off its rectangle without recolouring a single pixel of
+	// it — the four corners alone would not notice.
+	GYRO_CHECK_EQ(PixelAt(*buffer, 6, 3), Black);
+	GYRO_CHECK_EQ(PixelAt(*buffer, 6, 12), Black);
 
 	fixture->Textures().Forget(atlas);
 }
