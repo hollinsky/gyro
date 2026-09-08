@@ -35,6 +35,11 @@ public:
 
 	// Creates the pool and both buffers at this size in device pixels. Refuses an empty extent, which
 	// is the size a shell computes when it bound no output and did not notice.
+	//
+	// **Callable again, and that is what a scale change costs.** The pool is one allocation sized at
+	// open, so a bar told it is now on a 2x screen has no way to honour that except to throw the
+	// mapping away and make another — see `Close`. Nothing is preserved across it: the caller redraws
+	// immediately, because the only reason to have resized is that it is about to.
 	[[nodiscard]] Result<void> Open(Wayland::WlShm shm, std::int32_t width, std::int32_t height);
 
 	// The words to draw the next frame into. Empty where both buffers are still held by the
@@ -53,7 +58,25 @@ public:
 
 	[[nodiscard]] bool IsValid() const noexcept { return m_Words != nullptr; }
 
+	// Whether the canvas already stands at this size, so a configure that changed nothing costs no
+	// reallocation. gyro re-sends a configure whenever the world moves under a bar that is up, which on
+	// a busy desk is often.
+	[[nodiscard]] bool Is(std::int32_t width, std::int32_t height) const noexcept
+	{
+		return IsValid() && m_Width == width && m_Height == height;
+	}
+
 private:
+	// Gives back the pool, the buffers and the mapping, leaving the canvas as though it had never been
+	// opened.
+	//
+	// **The buffers are destroyed even where the compositor still holds one**, which is safe for the
+	// narrow reason that the caller attaches a new buffer in the same breath: a `wl_buffer` destroyed
+	// while attached makes that surface's contents undefined, and a surface about to be committed with
+	// a different buffer has no contents to lose. What would not be safe is destroying the pool and
+	// keeping the buffers, which is why this does both or neither.
+	void Close() noexcept;
+
 	// What a `wl_buffer` says about itself: one event, and it is the one that matters — whether these
 	// words may be written again.
 	class Released final : public Wayland::WlBufferListener

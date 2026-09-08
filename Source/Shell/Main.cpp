@@ -83,7 +83,7 @@ int main(int argument, char** arguments)
 		return EXIT_FAILURE;
 	}
 
-	spdlog::info("gyro-shell: connected, {}x{}", session.Width(), session.Height());
+	spdlog::info("gyro-shell: connected");
 
 	// **What everything this shell starts will be told the display is, and it is not always the one
 	// this process connected on.** The agent puts the applications' socket in `WAYLAND_DISPLAY` and

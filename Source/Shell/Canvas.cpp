@@ -7,10 +7,46 @@
 
 Canvas::~Canvas()
 {
+	Close();
+}
+
+void Canvas::Close() noexcept
+{
+	// The buffers before the pool, which is the order the protocol asks for: a pool's memory stays
+	// alive until every buffer made from it is gone, so destroying it first would leave two objects
+	// holding a mapping this function is about to take away.
+	for (std::size_t index = 0; index < Count; ++index)
+	{
+		if (m_Buffers[index].IsValid())
+		{
+			m_Buffers[index].Destroy();
+		}
+
+		m_Buffers[index] = {};
+
+		// Cleared with the buffer it belonged to. A release for a buffer that no longer exists never
+		// arrives, so a canvas reopened while the compositor held one would otherwise start life with a
+		// permanently busy slot and draw at half the buffering it thinks it has.
+		m_Released[index].Busy = false;
+	}
+
+	if (m_Pool.IsValid())
+	{
+		m_Pool.Destroy();
+	}
+
+	m_Pool = {};
+
 	if (m_Words != nullptr)
 	{
 		::munmap(m_Words, m_Bytes);
 	}
+
+	m_Words = nullptr;
+	m_Bytes = 0;
+	m_Current = Count;
+	m_Width = 0;
+	m_Height = 0;
 }
 
 Result<void> Canvas::Open(Wayland::WlShm shm, std::int32_t width, std::int32_t height)
@@ -19,6 +55,11 @@ Result<void> Canvas::Open(Wayland::WlShm shm, std::int32_t width, std::int32_t h
 	{
 		return Failure(EINVAL, "sizing the shell's canvas", Subject::Of("{}x{}", width, height));
 	}
+
+	// **Before anything is allocated, so a reopen that fails leaves nothing behind.** Every path out of
+	// here below is a failure the caller reports and stops on, and holding the old mapping across one
+	// would be holding a canvas sized for a screen the bar is no longer on.
+	Close();
 
 	const std::size_t stride = static_cast<std::size_t>(width) * 4U;
 	const std::size_t frame = stride * static_cast<std::size_t>(height);

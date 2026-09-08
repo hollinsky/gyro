@@ -2037,16 +2037,34 @@ has the agent hand it in place of a path every program it launches would inherit
 
 `Bar` is the run bar: a surface a person summons with a chord, types into, and dismisses. It covers
 the *whole output*, which is a claim about the material rather than about taste — a chrome surface
-is dressed in glass and gyro draws that behind whatever the surface leaves transparent, so a
-full-output surface is the screen blurring behind one line of text. It is also the only way this
+is dressed in smoke and gyro draws that behind whatever the surface leaves transparent, so a
+full-output surface is the screen dimming behind one line of text. It is also the only way this
 shell can dismiss on a click, a chrome surface having no grab, so a click beside a narrow bar would
-land on the window underneath it instead.
+land on the window underneath it instead. What the person sees on that scrim is a card: a rounded
+rectangle the shell antialiases from a signed distance, a prompt, what they typed, and a caret.
+
+`Metrics` is every number that card is drawn from, stated in **logical pixels** and resolved to
+device pixels at one scale. It is the file that makes `--ui-size` reach the shell at all: a logical
+pixel is the compositor's promise about how big something is at the eye ([164](Decisions.md#164)),
+so a card measured in them is the same size on a 27" monitor and on a laptop panel held at half the
+distance. The bar used to take a fraction of the panel instead, which was [decision
+38](Decisions.md#38)'s fixed grid borrowed from the recovery console — right there, because a
+console has to be legible when nothing else on the machine works, and wrong for UI summoned into a
+running session whose viewing distance the compositor already has.
+
+The two facts that resolution needs are both about *the bar's own surface* rather than about a
+panel: `xdg_toplevel.configure_bounds` for the room, and `wp_fractional_scale_v1` for the density,
+with `wp_viewport.set_destination` carrying what the buffer is worth because
+`wl_surface.set_buffer_scale` is an integer ([171](Decisions.md#171)). That is why `Session` binds
+no `wl_output` at all — gyro puts chrome on the output holding the pointer
+([141](Decisions.md#141)) and the first panel announced was routinely the wrong one.
 
 `Canvas` is the pixels and the `wl_buffer` gyro reads them out of, and it holds two rather than one:
 a launcher redraws on every keystroke, and a single buffer makes each redraw wait for the compositor
 to finish with the last — which on a compositor holding a frame while it composites is a character
 appearing later than it was typed. Two is enough because nothing here draws faster than a person
-types. `Session` is what the shell is connected to and everything it was given on arrival.
+types. It is reopenable, because honouring a new scale means reallocating the one pool it holds.
+`Session` is what the shell is connected to and everything it was given on arrival.
 
 ### Integration
 

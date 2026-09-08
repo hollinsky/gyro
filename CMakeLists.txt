@@ -1349,6 +1349,7 @@ gyro_add_module(Shell
 		Session.cpp
 	TESTS
 		Launch.Test.cpp
+		Metrics.Test.cpp
 )
 
 # The generated client bindings, xkbcommon for the layout, and spdlog for the handful of lines that

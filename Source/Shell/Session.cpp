@@ -11,18 +11,33 @@ namespace
 // The globals a shell cannot do without, in the order they are looked for, so that a machine missing
 // two of them names the first rather than a different one each run.
 constexpr std::string_view RequiredInterfaces[] = {
-	Wayland::WlCompositor::WireName, Wayland::WlShm::WireName,          Wayland::XdgWmBase::WireName,
-	Wayland::WlSeat::WireName,       Wayland::GyroBindingsV1::WireName, Wayland::GyroChromeManagerV1::WireName,
+	Wayland::WlCompositor::WireName,
+	Wayland::WlShm::WireName,
+	Wayland::XdgWmBase::WireName,
+	Wayland::WlSeat::WireName,
+
+	// **Required rather than fallen back from**, which is a judgement about who this client talks to.
+	// gyro serves both to every session client, and the pair is the only way a surface can be drawn at a
+	// non-integer density: without them the bar would have to render at the ceiling and let the
+	// compositor shrink it, which is exactly the softness Shell/Metrics.h exists to avoid. A shell that
+	// carried that path as a fallback would carry a second appearance nobody ever looks at.
+	Wayland::WpViewporter::WireName,
+	Wayland::WpFractionalScaleManagerV1::WireName,
+
+	Wayland::GyroBindingsV1::WireName,
+	Wayland::GyroChromeManagerV1::WireName,
 };
 } // namespace
 
 // Everything the connection dispatches into. One object per interface bound, held for the life of
 // the session because the connection holds their addresses.
 //
-// **Five small listeners rather than one object implementing five interfaces.** Two of these
-// protocols declare an event called `name` — a seat's and an output's — and a class deriving from
-// both would answer them with one function, which would compile and would quietly make the panel's
-// name the seat's. Separate objects make that impossible to write.
+// **Four small listeners rather than one object implementing four interfaces.** The argument that put
+// them apart was a collision: `wl_seat` and `wl_output` both declare an event called `name`, and a
+// class deriving from both would answer the two with one function — which compiles, and quietly makes
+// the panel's name the seat's. The output is gone from this file now, so that particular pair cannot
+// happen again, but the shape is kept: the next protocol to be bound here gets its own object rather
+// than a merge that has to be checked for the same thing.
 struct Session::Events
 {
 	struct Advertised
@@ -41,9 +56,10 @@ struct Session::Events
 		}
 
 		// **Nothing.** A global going away is a monitor unplugged or a session ending, and neither is
-		// something this shell acts on yet: the bar reads a size when it opens and gyro places it
-		// wherever there is an output. What it must not do is tear anything down, because a proxy
-		// stays valid until the client destroys it.
+		// something this shell has to act on: the bar is told its own room and density by the compositor
+		// and is re-configured when either moves, so an output leaving reaches it as a configure rather
+		// than as a registry event. What it must not do is tear anything down, because a proxy stays
+		// valid until the client destroys it.
 		void OnGlobalRemove(std::uint32_t) override {}
 
 		std::vector<Advertised> Globals;
@@ -76,51 +92,6 @@ struct Session::Events
 		Wayland::WlSeatCapability Capabilities{};
 	};
 
-	class OutputEvents final : public Wayland::WlOutputListener
-	{
-	public:
-		void OnGeometry(
-			std::int32_t,
-			std::int32_t,
-			std::int32_t,
-			std::int32_t,
-			Wayland::WlOutputSubpixel,
-			std::string_view,
-			std::string_view,
-			Wayland::WlOutputTransform
-		) override
-		{}
-
-		// The mode flagged current, rather than any mode that arrives: the rest are the modes the
-		// connector could be set to, and taking the last one would size the bar against a resolution
-		// nothing is displaying.
-		void OnMode(Wayland::WlOutputMode flags, std::int32_t width, std::int32_t height, std::int32_t) override
-		{
-			using enum Wayland::WlOutputMode;
-
-			if ((flags & Current) == Current)
-			{
-				Width = width;
-				Height = height;
-			}
-		}
-
-		// **Nothing, and the emptiness is the point.** `wl_output.scale` is an integer and the panel's
-		// rather than this surface's; what the bar draws at is `wl_surface.preferred_buffer_scale` on
-		// the bar's own surface, which is gyro folding the outputs the bar is actually on. Reading it
-		// here would be a second answer to a question already answered better.
-		void OnScale(std::int32_t) override {}
-
-		void OnName(std::string_view) override {}
-
-		void OnDescription(std::string_view) override {}
-
-		void OnDone() override {}
-
-		std::int32_t Width = 0;
-		std::int32_t Height = 0;
-	};
-
 	[[nodiscard]] const Advertised* Find(std::string_view interface) const noexcept
 	{
 		for (const Advertised& global : Registry.Globals)
@@ -138,23 +109,12 @@ struct Session::Events
 	ShmEvents Shm;
 	ShellEvents Shell;
 	SeatEvents Seat;
-	OutputEvents Output;
 };
 
 Session::Session() : m_Events{ std::make_unique<Events>() }
 {}
 
 Session::~Session() = default;
-
-std::int32_t Session::Width() const noexcept
-{
-	return m_Events->Output.Width;
-}
-
-std::int32_t Session::Height() const noexcept
-{
-	return m_Events->Output.Height;
-}
 
 Result<void> Session::Flush()
 {
@@ -246,6 +206,8 @@ Result<void> Session::Open()
 	const Events::Advertised* const shm = m_Events->Find(Wayland::WlShm::WireName);
 	const Events::Advertised* const shell = m_Events->Find(Wayland::XdgWmBase::WireName);
 	const Events::Advertised* const seat = m_Events->Find(Wayland::WlSeat::WireName);
+	const Events::Advertised* const viewporter = m_Events->Find(Wayland::WpViewporter::WireName);
+	const Events::Advertised* const fractional = m_Events->Find(Wayland::WpFractionalScaleManagerV1::WireName);
 	const Events::Advertised* const bindings = m_Events->Find(Wayland::GyroBindingsV1::WireName);
 	const Events::Advertised* const chrome = m_Events->Find(Wayland::GyroChromeManagerV1::WireName);
 
@@ -253,19 +215,14 @@ Result<void> Session::Open()
 	m_Shm = m_Registry.Bind<Wayland::WlShm>(shm->Name, shm->Version, m_Events->Shm);
 	m_Shell = m_Registry.Bind<Wayland::XdgWmBase>(shell->Name, shell->Version, m_Events->Shell);
 	m_Seat = m_Registry.Bind<Wayland::WlSeat>(seat->Name, seat->Version, m_Events->Seat);
+	m_Viewporter = m_Registry.Bind<Wayland::WpViewporter>(viewporter->Name, viewporter->Version);
+	m_Fractional = m_Registry.Bind<Wayland::WpFractionalScaleManagerV1>(fractional->Name, fractional->Version);
 	m_Bindings = m_Registry.Bind<Wayland::GyroBindingsV1>(bindings->Name, bindings->Version);
 	m_Chrome = m_Registry.Bind<Wayland::GyroChromeManagerV1>(chrome->Name, chrome->Version);
 
-	// **An output is not required and its absence is not an error.** gyro serves a session before any
-	// panel is lit, and a shell that refused to start would be one a person could not use to fix that.
-	// What it costs is the size the bar is drawn at, and `Width` answering zero is what the caller
-	// falls back from.
-	if (const Events::Advertised* const output = m_Events->Find(Wayland::WlOutput::WireName); output != nullptr)
-	{
-		m_Output = m_Registry.Bind<Wayland::WlOutput>(output->Name, output->Version, m_Events->Output);
-	}
-
-	// The second trip is what makes the output's mode readable: those events are sent in answer to the
-	// bind above, so they are behind a sync that was asked for before it.
-	return Roundtrip();
+	// **No output is bound, and nothing here waits for one.** gyro serves a session before any panel is
+	// lit, and everything the bar used to read off an output it is now told about its own surface — see
+	// the header. A second round trip existed to make the output's mode readable and has nothing left
+	// to make readable, so the session is open once the binds above are flushed.
+	return Flush();
 }

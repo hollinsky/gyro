@@ -4,8 +4,10 @@
 #include <memory>
 
 #include "Core/Result.h"
+#include "Wayland/FractionalScaleV1.h"
 #include "Wayland/GyroBindingsV1.h"
 #include "Wayland/GyroChromeV1.h"
+#include "Wayland/Viewporter.h"
 #include "Wayland/Wayland.h"
 #include "Wayland/XdgShell.h"
 #include "Wire/Connection.h"
@@ -60,17 +62,17 @@ public:
 
 	[[nodiscard]] Wayland::GyroChromeManagerV1 Chrome() const noexcept { return m_Chrome; }
 
-	// The size of the first output announced, which is what the bar is drawn against.
-	//
-	// **The first rather than the one the bar lands on**, and the difference is real on a mixed desk:
-	// gyro centres chrome on the output holding the pointer (141) and does not tell the shell which that
-	// was. The scale half of this is gone — `wl_surface.preferred_buffer_scale` is the compositor
-	// answering it per surface, and [Bar.h](Bar.h) reads it there. The size half is the same stand-in
-	// with no replacement bound yet: what answers it is `xdg_toplevel.configure`, which is the commit
-	// that gives the bar a cell in logical pixels instead of a face picked off a pixel grid.
-	[[nodiscard]] std::int32_t Width() const noexcept;
+	[[nodiscard]] Wayland::WpViewporter Viewporter() const noexcept { return m_Viewporter; }
 
-	[[nodiscard]] std::int32_t Height() const noexcept;
+	[[nodiscard]] Wayland::WpFractionalScaleManagerV1 FractionalScale() const noexcept { return m_Fractional; }
+
+	// **There is no `Width` here any more, and no `wl_output` behind it.** What used to be here was the
+	// size of the first panel announced, which the bar laid itself out against — and on a mixed desk it
+	// was the wrong panel, because gyro puts chrome on the output holding the pointer (141) and never
+	// told the shell which that was. Both halves of it now come from the compositor's answer *about the
+	// bar's own surface*: `xdg_toplevel.configure_bounds` for the room, `wp_fractional_scale_v1` for the
+	// density. A shell that still bound an output would have a second, worse answer available to
+	// whoever read it next.
 
 private:
 	// The listeners, which are the objects the connection dispatches into and so must outlive every
@@ -87,7 +89,8 @@ private:
 	Wayland::WlShm m_Shm;
 	Wayland::XdgWmBase m_Shell;
 	Wayland::WlSeat m_Seat;
-	Wayland::WlOutput m_Output;
 	Wayland::GyroBindingsV1 m_Bindings;
 	Wayland::GyroChromeManagerV1 m_Chrome;
+	Wayland::WpViewporter m_Viewporter;
+	Wayland::WpFractionalScaleManagerV1 m_Fractional;
 };
