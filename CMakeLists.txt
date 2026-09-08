@@ -1200,6 +1200,7 @@ gyro_add_module(Drm
 		Catalog.Test.cpp
 		Commit.Test.cpp
 		Dumb.Test.cpp
+		Refusal.Test.cpp
 		Scanout.Test.cpp
 		Watchdog.Test.cpp
 )

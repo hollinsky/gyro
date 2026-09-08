@@ -711,30 +711,6 @@ Result<void> DrmOutput::TestLayers(std::span<const PresentLayer> layers)
 	return answer;
 }
 
-bool DrmOutput::RefusedProposal::SameAs(const RefusedProposal& other) const noexcept
-{
-	if (Count != other.Count || Code != other.Code)
-	{
-		return false;
-	}
-
-	for (std::uint32_t index = 0; index < Count; ++index)
-	{
-		const RefusedLayer& left = Layers[index];
-		const RefusedLayer& right = other.Layers[index];
-
-		if (left.Plane != right.Plane || left.Framebuffer != right.Framebuffer || left.SrcX != right.SrcX ||
-		    left.SrcY != right.SrcY || left.SrcW != right.SrcW || left.SrcH != right.SrcH ||
-		    left.CrtcX != right.CrtcX || left.CrtcY != right.CrtcY || left.CrtcW != right.CrtcW ||
-		    left.CrtcH != right.CrtcH)
-		{
-			return false;
-		}
-	}
-
-	return true;
-}
-
 void DrmOutput::KeepRefusal(std::span<const PresentLayer> layers, int code) noexcept
 {
 	// **Read out of `m_Values` rather than recomputed from the layers**, which is the whole point: the

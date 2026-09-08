@@ -14,6 +14,7 @@
 #include "Drm/Commit.h"
 #include "Drm/Device.h"
 #include "Drm/Fence.h"
+#include "Drm/Refusal.h"
 #include "Drm/Scanout.h"
 #include "Drm/Watchdog.h"
 #include "Seam/Allocator.h"
@@ -354,40 +355,8 @@ private:
 	//
 	// **What it is for is that an errno alone cannot be acted on.** A capture of a machine that never
 	// promotes reads `committing a page flip 22` on every frame and stops there: `EINVAL` is the driver
-	// saying *not this*, and which of a dozen properties it meant is the only thing worth knowing. The
-	// format and the modifier are not in here because they are the kernel's — `drmModeGetFB2` answers
-	// them from the framebuffer id at report time, off the frame path, where an ioctl is free.
-	struct RefusedLayer
-	{
-		std::uint32_t Plane = 0;
-		std::uint32_t Framebuffer = 0;
-
-		// 16.16 fixed point, exactly as they went to the kernel: reporting the numbers that were sent
-		// rather than the floats they came from is the point, since a conversion is one of the things
-		// that can be wrong.
-		std::uint64_t SrcX = 0;
-		std::uint64_t SrcY = 0;
-		std::uint64_t SrcW = 0;
-		std::uint64_t SrcH = 0;
-
-		std::int64_t CrtcX = 0;
-		std::int64_t CrtcY = 0;
-		std::uint64_t CrtcW = 0;
-		std::uint64_t CrtcH = 0;
-	};
-
-	// **Compared rather than counted, which is what *once per distinct refusal* means.** A standing
-	// refusal is one line for the session; a refusal that changes when a window resizes is a new line,
-	// and the pair of them together is the diagnosis.
-	struct RefusedProposal
-	{
-		std::array<RefusedLayer, MaxLayers> Layers{};
-		std::uint32_t Count = 0;
-		int Code = 0;
-
-		[[nodiscard]] bool SameAs(const RefusedProposal& other) const noexcept;
-	};
-
+	// saying *not this*, and which of a dozen properties it meant is the only thing worth knowing. What
+	// one holds and how two of them are told apart is Drm/Refusal.h.
 	RefusedProposal m_Refused{};
 	RefusedProposal m_Reported{};
 	bool m_RefusalPending = false;
