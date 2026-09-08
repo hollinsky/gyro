@@ -757,9 +757,10 @@ sentence is the composition root's, exactly as the frame loop's `while` is.
 to be found.** [Blit/Blit.cpp](../Source/Blit/Blit.cpp)'s `Classify` refuses a material, an
 elevation, a nonzero corner radius, and a quad that is not axis-aligned — and one refused item fails
 the whole `Record`, so the frame is *lost* rather than degraded. That makes rotation and materials
-instruments for the Vulkan renderer specifically: under `--backend=dump` they write no frames at all
+instruments for the Vulkan renderer specifically: under `--renderer=cpu` they write no frames at all
 for as long as they are moving, which is an empty directory somebody would otherwise file against the
-backend. `DrawsOnCpu` is a free function beside the interface rather than a verb on it, so the root
+dump backend. *(2026-09-07: that used to be every `--backend=dump` run, since the dump was the CPU
+renderer by construction; it is now only a run that asked for the blitter or fell to it.)* `DrawsOnCpu` is a free function beside the interface rather than a verb on it, so the root
 can say so at startup without a gym having to answer a question about a renderer it never sees.
 
 ### The dispatch loop steps one author, and there are two of them

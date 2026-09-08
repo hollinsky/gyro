@@ -448,12 +448,22 @@ nothing, including on rate combinations nobody has on a desk.
 
 ### Dump
 
-A real presenter whose consumer is a file. `--backend=dump` wires a virtual output to the CPU
-renderer and writes one PAM per presented frame into `./gyro-frames`, or wherever `--dump=DIR` says.
+A real presenter whose consumer is a file. `--backend=dump` wires a virtual output to whichever
+[rendering device](#rendering-devices) is there and writes one PAM per presented frame into
+`./gyro-frames`, or wherever `--dump=DIR` says.
 
-It is the one backend that produces a *picture* on a machine with nothing attached to it — no GPU, no
-seat, no Vulkan ICD, no `/dev/udmabuf` — and it is how the animation work sees what it is doing before
-there is a panel or a protocol. It also **paces**: a virtual output has a period and a phase and
+**What draws is `--renderer`'s answer rather than the backend's** *(2026-09-07)*. Where
+`/dev/udmabuf` and a Vulkan ICD are both present, the targets are real dmabufs the device imports and
+draws into, and the sink reads the same pages back through udmabuf's own mapping — so the pictures
+carry materials, rotated quads and everything else a session draws, which is the half this backend
+used to be unable to show. Where either is missing it falls to the CPU blitter over heap memory,
+which is what still produces a picture on a machine with **nothing** attached to it — no GPU, no seat,
+no ICD, no `/dev/udmabuf` — and the run says in one line which of the two it took. The blitter draws
+no material and no rotated quad, so a run that fell to it and then authored one writes nothing at all
+and is warned before it starts.
+
+It is how the animation work sees what it is doing before there is a panel or a protocol. It also
+**paces**: a virtual output has a period and a phase and
 retires on release, so the frame loop meets a real cadence and real backpressure rather than a
 simulation of them, and two outputs at different rates produce frames in the ratio their rates imply.
 That is what separates it from [headless](#headless), whose renderer charges a cost and draws nothing.
@@ -480,9 +490,12 @@ never picks `dump`: writing files is something a person asks for by name. `--out
 outputs to bring up, which under nested is one host window each; it pads with whatever `--output`
 described, so `--output=1280x720 --outputs=3` is three 720p windows.
 
-Note that the *rendering device* is a separate axis from the backend. Software rendering is a
-physical device gyro may select under any of the three, not a fourth backend — which is what makes
-it testable nested. See [Rendering devices](#rendering-devices).
+Note that the *rendering device* is a separate axis from the backend, and `--renderer=auto|hardware|
+software|cpu` is where a person says so. Software rendering is a physical device gyro may select
+under any of the backends, not a fourth backend — which is what makes it testable nested. `cpu` is
+the odd rung: it is the CPU blitter rather than a device at all, it writes through a mapping, and
+only a virtual output can be asked for a face a processor writes — so it is refused anywhere but
+`--backend=dump` rather than quietly upgraded. See [Rendering devices](#rendering-devices).
 
 ## Boot and the display lifetime
 
@@ -616,6 +629,11 @@ nobody has executed since it was written.
 
 `VkPhysicalDevice` selection, not a backend. gyro may be running on a GPU, on `simpledrm` before the
 real driver has loaded, or on software — and the frame loop is identical in all three.
+
+`--renderer` is the axis on the command line: `auto` takes the best device present, `hardware` and
+`software` name a `DeviceClass` and *refuse to fall back* — somebody who asked for a GPU by name and
+silently got llvmpipe would be measuring the wrong machine — and `cpu` is the CPU blitter beneath
+both, which [the dump backend](#dump) alone can present.
 
 ### Software rendering is the floor tier
 

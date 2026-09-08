@@ -9238,6 +9238,20 @@ copies each frame out and posts it to a writer thread. Nothing on the path needs
 Vulkan ICD or `/dev/udmabuf` — which matters because the machine where somebody most wants a picture
 of what gyro drew is usually the one with no screen attached to it.
 
+**Revised 2026-09-07: the renderer is `--renderer`'s and no longer this backend's.** The pairing
+above fused two axes that Architecture.md had always described as separate — where the frames go, and
+what draws them — and the cost landed on the one thing this backend exists to do. `Blit` fails a
+whole record on an item it cannot express, so a run that authored a material or a rotated quad wrote
+an *empty directory*: the instrument for looking at what gyro composites could not be pointed at half
+of what gyro composites, and the failure looked like a bug in the dump. What replaced it is the
+allocator swap the entry never considered: `UdmabufAllocator` rather than `HeapAllocator`, so the
+targets are real dmabufs a Vulkan device imports and draws into, with `TargetFace::Dmabuf` on the
+presenter's side and udmabuf's own coherent mapping on the sink's — the same pages at both ends, no
+readback, no copy off a device. `--renderer=cpu` keeps the original wiring exactly, and `auto` falls
+to it with a sentence where `/dev/udmabuf` or an ICD is missing, which is the seatless SSH session and
+the CI container this entry was right about. Nothing here changes the pacing argument below, which was
+never about the renderer.
+
 **It paces, and that is the half that is not about pictures.** A virtual output has a period and a
 phase and retires on release, so the frame loop meets real backpressure at a real cadence rather than
 a simulation of one. Two outputs at 60 and 30 produce frames in a 2:1 ratio without anything being

@@ -46,9 +46,10 @@
 // discovered.** `Blit/Blit.cpp` refuses a material, an elevation, a nonzero corner radius, and a quad
 // that is not axis-aligned; one refused item fails the whole `Record`, so the frame is lost rather
 // than degraded. That makes `turn` and `materials` instruments for the Vulkan renderer specifically,
-// and under `--backend=dump` they write nothing at all for as long as they are moving. `DrawsOnCpu`
+// and under `--renderer=cpu` they write nothing at all for as long as they are moving. `DrawsOnCpu`
 // below is what lets the composition root say so at startup instead of leaving somebody to bisect an
-// empty directory.
+// empty directory. *(2026-09-07: that was every `--backend=dump` run until the dump backend stopped
+// being the blitter by construction; the warning now follows the renderer the run resolved to.)*
 
 // Which gym. A closed vocabulary with a name, a sentence, and a claim about the renderer, in the shape
 // World/Material.h and Animation/Author/Catalog.h already use — a new entry is an enumerator, a switch

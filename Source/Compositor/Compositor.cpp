@@ -96,6 +96,7 @@
 #include "Virtual/Dump.h"
 #include "Virtual/Heap.h"
 #include "Virtual/Output.h"
+#include "Virtual/Udmabuf.h"
 
 namespace
 {
@@ -658,175 +659,6 @@ private:
 	HeadlessDevice m_Device;
 };
 
-// The backend whose consumer is a file. A real presenter that allocates, the CPU renderer, and one
-// PAM per presented frame.
-//
-// **It paces exactly as a panel does, and that is most of why it exists.** A virtual output has a
-// period and a phase and hands frames back on release, so the frame loop runs against real
-// backpressure rather than against a simulation of it — which is what makes the pictures worth
-// looking at: they are what a monitor would have shown at that frame boundary.
-//
-// **Nothing on the path needs a GPU.** `HeapAllocator` rather than udmabuf, `Blit` rather than
-// Vulkan, and `TargetFace::Mapped` because a CPU blitter handed a dmabuf is a miswiring
-// Seam/Renderer.h makes `EINVAL`. So `--backend=dump` runs in a container, over SSH, and on the
-// machine with no seat — which are the places somebody most wants a picture and least has a screen.
-class DumpBackend final : public IBackend
-{
-public:
-	DumpBackend(const IClock& clock, std::string directory, std::size_t outputs)
-		: m_Clock{ &clock }, m_Device{ clock }, m_Directory{ std::move(directory) }, m_Outputs{ outputs }
-	{}
-
-	~DumpBackend() override { Close(); }
-
-	[[nodiscard]] IEventSource& Source() noexcept override { return m_Device; }
-
-	[[nodiscard]] Instant NextEvent() const noexcept override { return m_Device.NextEvent(); }
-
-	[[nodiscard]] Result<void>
-	Build(std::size_t index, const OutputConfiguration& wanted, const OutputPlan&, BoundOutput& into) override
-	{
-		auto renderer = std::make_unique<Blit>(*m_Clock);
-		auto dump = std::make_unique<FrameDump>(Destination(index), wanted.Resolution, wanted.Format);
-
-		if (const Result<void> writing = dump->Open(); !writing)
-		{
-			return writing;
-		}
-
-		// The renderer is handed over as the completion gate even though a CPU composite finishes
-		// inside `Record` and every point it returns is immediate. Virtual/Device.h accepts null for
-		// exactly this case; passing the real renderer instead costs one `IsComplete` per delivery and
-		// means the wiring does not have to be revisited if this path ever gains a device that can
-		// export a timeline.
-		VirtualOutput* const presenter =
-			m_Device.Add(wanted, m_Allocator, *dump, renderer.get(), VirtualOutputPolicy{ .Face = TargetFace::Mapped });
-
-		if (presenter == nullptr)
-		{
-			return Failure(ENOSPC, "more outputs than the virtual device holds");
-		}
-
-		if (const Result<void>& allocated = presenter->Status(); !allocated)
-		{
-			return allocated;
-		}
-
-		into.Presenter = presenter;
-		into.Configuration = presenter->Configuration();
-		into.Importer = renderer.get();
-		into.Renderer = std::move(renderer);
-
-		m_Dumps[index] = std::move(dump);
-
-		return {};
-	}
-
-	void Close() noexcept override
-	{
-		for (std::unique_ptr<FrameDump>& dump : m_Dumps)
-		{
-			if (dump)
-			{
-				dump->Close();
-			}
-		}
-	}
-
-	void Report() const override
-	{
-		for (std::size_t index = 0; index < m_Dumps.size(); ++index)
-		{
-			const std::unique_ptr<FrameDump>& dump = m_Dumps[index];
-
-			if (!dump)
-			{
-				continue;
-			}
-
-			spdlog::info("  output {}: {} frame(s) written to {}", index, dump->Written(), dump->Directory());
-
-			// Said as a warning rather than a statistic, because a reader who does not know frames went
-			// missing will read a jump in the sequence numbers as something the compositor did. The
-			// remedy is a slower output — the cadence is what `--output` sets — rather than a deeper
-			// queue, since a queue absorbs a burst and this is a rate.
-			if (dump->Dropped() != 0)
-			{
-				spdlog::warn(
-					"             {} frame(s) dropped: the disk did not keep up, so the dump is a sample of the "
-					"run. Try a lower rate, as --output={}x{}@10",
-					dump->Dropped(),
-					m_Resolutions[index].Width,
-					m_Resolutions[index].Height
-				);
-			}
-
-			if (dump->Skipped() != 0)
-			{
-				spdlog::warn("             {} frame(s) could not be read at all", dump->Skipped());
-			}
-
-			if (dump->Failed() != 0)
-			{
-				spdlog::warn(
-					"             {} frame(s) could not be written: {}",
-					dump->Failed(),
-					dump->FirstFailure() ? dump->FirstFailure()->Context() : std::string_view{ "unknown" }
-				);
-			}
-		}
-	}
-
-	// Remember what each output's extent was, so `Report` can suggest a rate in the terms the person
-	// typed. Set by `Configure` alongside `Build`, because the plan is what knows it.
-	void Remember(std::size_t index, PixelSize<DeviceSpace> resolution) noexcept { m_Resolutions[index] = resolution; }
-
-private:
-	// One directory for one output, and a level per output beyond that — because `frame-00000042.pam`
-	// carries no output identity, so two panels writing into one directory would overwrite each
-	// other's frames at every boundary they share. The parent is created here because Virtual/Pam.h
-	// creates one level and this is the second.
-	[[nodiscard]] std::string Destination(std::size_t index)
-	{
-		if (m_Outputs <= 1)
-		{
-			return m_Directory;
-		}
-
-		(void)::mkdir(m_Directory.c_str(), 0755);
-
-		return std::format("{}/output-{}", m_Directory, index);
-	}
-
-	const IClock* m_Clock = nullptr;
-
-	HeapAllocator m_Allocator{};
-	VirtualDevice m_Device;
-
-	std::string m_Directory;
-	std::size_t m_Outputs = 0;
-
-	std::array<std::unique_ptr<FrameDump>, MaxOutputs> m_Dumps{};
-	std::array<PixelSize<DeviceSpace>, MaxOutputs> m_Resolutions{};
-};
-
-// The daily driver: gyro as a client of another compositor, one host window per output.
-//
-// **It is the first backend whose presenter and renderer are the same device's, and that is decision
-// 120 arriving.** A nested output has no GBM device handed to it and no swapchain allocating on its
-// behalf, so the only thing on the machine that can produce its targets is the Vulkan device that is
-// about to draw into them — and `Nested` may not name `Render`, so the root is what pairs them. Here
-// that pairing is three lines and one `IDmabufAllocator`, which is exactly what moving the interface
-// to the waist bought.
-//
-// **The device is opened once and the renderers are per output**, for `BoundOutput`'s reason: binding
-// targets is not a per-frame call, so a writer belongs to one presenter's target set, while the queue
-// the work serialises on is the device's. Every output names device zero because there is one GPU.
-//
-// **Nothing here forces real time and nothing here should.** Docs/Architecture.md#backends makes
-// nested drop `SCHED_FIFO` and `mlockall` unless explicitly overridden, and `Run` below is where that
-// happens — a real-time thread inside a normal-priority host is an effective way to hard-lock the
-// desktop somebody is developing on.
 // SPEC: how many modifiers per format gyro will offer a client. Drivers list a handful — amdgpu's
 // longest list for a 32-bit format is under twenty — and a client picks one, so this is a ceiling on
 // the advertisement rather than an estimate of anything.
@@ -895,11 +727,414 @@ inline constexpr std::size_t MaxModifierOffer = 64;
 	return static_cast<std::uint64_t>(status.st_rdev);
 }
 
+// Which physical device `--renderer` asked for.
+//
+// `Auto` is `DeviceClass::Any`, which is what every backend took before the axis had a flag: the best
+// device present. `Cpu` never reaches here — it names the blitter, which is not a Vulkan device at
+// all — and answering `Any` for it is the harmless reading rather than a case worth a second enum.
+[[nodiscard]] constexpr DeviceClass ClassOf(RendererKind renderer) noexcept
+{
+	switch (renderer)
+	{
+		case RendererKind::Hardware:
+			return DeviceClass::Hardware;
+		case RendererKind::Software:
+			return DeviceClass::Software;
+		case RendererKind::Auto:
+		case RendererKind::Cpu:
+			break;
+	}
+
+	return DeviceClass::Any;
+}
+
+// The backend whose consumer is a file. A real presenter that allocates, whichever device
+// `--renderer` resolved to, and one PAM per presented frame.
+//
+// **It paces exactly as a panel does, and that is most of why it exists.** A virtual output has a
+// period and a phase and hands frames back on release, so the frame loop runs against real
+// backpressure rather than against a simulation of it — which is what makes the pictures worth
+// looking at: they are what a monitor would have shown at that frame boundary.
+//
+// **What draws is chosen here rather than fixed, and that is decision 121 being narrowed**
+// *(2026-09-07)*. This backend used to *be* `Blit`: heap memory, a mapped face, and no Vulkan
+// anywhere. That made the one instrument for looking at what gyro composites unable to show half of
+// what gyro composites — the blitter fails a whole record on a material or a rotated quad, so a run
+// that authored either wrote an empty directory. The pairing survives as the floor of the axis and
+// nothing else: with `/dev/udmabuf` and an ICD present, targets are real dmabufs a Vulkan device
+// imports and draws into, and the sink reads the same pages back through the mapping udmabuf gives
+// it. Nothing is copied off a device and no readback is involved, which is why this is the presenter
+// where the two ends can be the same memory.
+//
+// **The fallback stays because the machine it is for is the point.** `/dev/udmabuf` is `0600
+// root:kvm` with a `uaccess` ACL a seatless SSH session and a CI container do not get, and a minimal
+// image carries no ICD at all — so the blitter is what still produces a picture there, and a run that
+// took it says so in one line rather than leaving somebody to infer it from an empty directory.
+class DumpBackend final : public IBackend
+{
+public:
+	DumpBackend(const IClock& clock, std::string directory, std::size_t outputs, RendererKind wanted, bool readable)
+		: m_Clock{ &clock }, m_Virtual{ clock }, m_Directory{ std::move(directory) }, m_Outputs{ outputs },
+		  m_Wanted{ wanted }, m_Readable{ readable }
+	{}
+
+	~DumpBackend() override { Close(); }
+
+	// Resolve `--renderer` against what this machine actually has, before an output exists.
+	//
+	// **A named device is a refusal to fall back and `Auto` is not**, which is the whole of the
+	// difference between the two paths through here. Somebody who typed `--renderer=hardware` and
+	// silently got the blitter would be looking at a picture from a machine they did not ask about,
+	// which for the one backend whose output is evidence is the worst answer available. Somebody who
+	// typed nothing wants a picture, so every gate below falls through to the blitter with a sentence
+	// naming the gate that closed.
+	[[nodiscard]] Result<void> Open()
+	{
+		if (m_Wanted == RendererKind::Cpu)
+		{
+			spdlog::info("compositing with the CPU blitter, which draws no materials and no rotated quad");
+
+			return {};
+		}
+
+		// The device and the probe in one step, per Virtual/Udmabuf.h: a node that opens and answers
+		// `ENOTTY` to the only ioctl that matters is exactly what a container has.
+		Result<Fd> udmabuf = OpenAndProbeUdmabuf();
+
+		if (!udmabuf)
+		{
+			return Fall(
+				"this machine cannot allocate a dmabuf for the targets a device would draw into", udmabuf.error()
+			);
+		}
+
+		Result<VulkanDevice> device =
+			VulkanDevice::Open(VulkanDevicePolicy{ .Class = ClassOf(m_Wanted), .Readable = m_Readable });
+
+		if (!device)
+		{
+			return Fall("there is no rendering device on this machine", device.error());
+		}
+
+		m_Vulkan = std::move(*device);
+
+		// **What the target set will actually be**, asked once here rather than discovered as a failed
+		// bind per output: udmabuf produces linear and nothing else, and a device that will not draw
+		// into a linear image cannot present this backend's frames however well it draws. Every output
+		// this root builds is `FormatXrgb8888` linear, so one question covers the run.
+		if (!m_Vulkan.Supports(PixelFormat{ FormatXrgb8888, 0, ModifierLinear }))
+		{
+			const Error refused{ ENOTSUP,
+				                 "this device draws into no linear image",
+				                 Subject{ m_Vulkan.Description().DeviceName() } };
+
+			m_Vulkan = {};
+
+			return Fall("udmabuf produces linear targets and nothing else", refused);
+		}
+
+		m_Udmabuf.emplace(std::move(*udmabuf));
+		m_Textures.emplace(m_Vulkan);
+
+		if (const Result<void>& status = m_Textures->Status(); !status)
+		{
+			// Copied before the table goes, because the error is inside it.
+			const Error why = status.error();
+
+			m_Textures.reset();
+			m_Udmabuf.reset();
+			m_Vulkan = {};
+
+			return Fall("the texture table would not build on this device", why);
+		}
+
+		m_ClientFormats = ClientPairs(m_Vulkan);
+		m_ClientDevice = ClientNodeOf(m_Vulkan);
+
+		if (!m_Vulkan.Description().CopiesFromHost)
+		{
+			// `NestedBackend::Open`'s line for its reason: a person seeing a blank window from a
+			// software toolkit should find the sentence that explains it in the same log.
+			spdlog::warn("this device cannot fill an image from host memory, so software client buffers are refused");
+		}
+
+		spdlog::info(
+			"rendering on {} ({}) into udmabuf targets",
+			m_Vulkan.Description().DeviceName(),
+			m_Vulkan.Description().DriverName()
+		);
+
+		return {};
+	}
+
+	// The device's own line, or the blitter's. Held by the trace's identity block, which is why the
+	// blitter answers something rather than nothing: a capture that names no renderer is one nobody
+	// can compare with another machine's.
+	[[nodiscard]] std::string Renderer() const override
+	{
+		if (!m_Textures)
+		{
+			return "the CPU blitter";
+		}
+
+		const DeviceDescription& description = m_Vulkan.Description();
+
+		return std::format(
+			"{} ({}) Vulkan {}.{}.{}",
+			description.DeviceName(),
+			description.DriverName(),
+			VK_API_VERSION_MAJOR(description.ApiVersion),
+			VK_API_VERSION_MINOR(description.ApiVersion),
+			VK_API_VERSION_PATCH(description.ApiVersion)
+		);
+	}
+
+	[[nodiscard]] std::span<const TextureFormat> ClientFormats() const noexcept override { return m_ClientFormats; }
+
+	[[nodiscard]] std::uint64_t ClientDevice() const noexcept override { return m_ClientDevice; }
+
+	// Whether this run is drawing with the blitter, which is the one thing outside this class that has
+	// to know: Gym/Gym.h's `DrawsOnCpu` is a sentence somebody is owed *before* an empty directory.
+	[[nodiscard]] bool UsesBlitter() const noexcept { return !m_Textures.has_value(); }
+
+	[[nodiscard]] IEventSource& Source() noexcept override { return m_Virtual; }
+
+	[[nodiscard]] Instant NextEvent() const noexcept override { return m_Virtual.NextEvent(); }
+
+	[[nodiscard]] Result<void>
+	Build(std::size_t index, const OutputConfiguration& wanted, const OutputPlan&, BoundOutput& into) override
+	{
+		auto dump = std::make_unique<FrameDump>(Destination(index), wanted.Resolution, wanted.Format);
+
+		if (const Result<void> writing = dump->Open(); !writing)
+		{
+			return writing;
+		}
+
+		if (m_Textures)
+		{
+			auto renderer = std::make_unique<VulkanRenderer>(*m_Clock, m_Vulkan, *m_Textures);
+
+			const Result<VirtualOutput*> attached =
+				Attach(wanted, *dump, renderer.get(), *m_Udmabuf, TargetFace::Dmabuf);
+
+			if (!attached)
+			{
+				return std::unexpected{ attached.error() };
+			}
+
+			into.Presenter = *attached;
+			into.Configuration = (*attached)->Configuration();
+
+			// The device's table rather than this renderer's, which is `NestedBackend::Build`'s reason:
+			// every output on one device points at one table.
+			into.Importer = &*m_Textures;
+			into.Renderer = std::move(renderer);
+		}
+		else
+		{
+			auto renderer = std::make_unique<Blit>(*m_Clock);
+
+			// `TargetFace::Mapped` because a CPU blitter handed a dmabuf is a miswiring Seam/Renderer.h
+			// makes `EINVAL`, and `HeapAllocator` because a mapping is the whole of what this path needs.
+			const Result<VirtualOutput*> attached = Attach(wanted, *dump, renderer.get(), m_Heap, TargetFace::Mapped);
+
+			if (!attached)
+			{
+				return std::unexpected{ attached.error() };
+			}
+
+			into.Presenter = *attached;
+			into.Configuration = (*attached)->Configuration();
+			into.Importer = renderer.get();
+			into.Renderer = std::move(renderer);
+		}
+
+		m_Dumps[index] = std::move(dump);
+
+		return {};
+	}
+
+	void Close() noexcept override
+	{
+		for (std::unique_ptr<FrameDump>& dump : m_Dumps)
+		{
+			if (dump)
+			{
+				dump->Close();
+			}
+		}
+	}
+
+	void Report() const override
+	{
+		for (std::size_t index = 0; index < m_Dumps.size(); ++index)
+		{
+			const std::unique_ptr<FrameDump>& dump = m_Dumps[index];
+
+			if (!dump)
+			{
+				continue;
+			}
+
+			spdlog::info("  output {}: {} frame(s) written to {}", index, dump->Written(), dump->Directory());
+
+			// Said as a warning rather than a statistic, because a reader who does not know frames went
+			// missing will read a jump in the sequence numbers as something the compositor did. The
+			// remedy is a slower output — the cadence is what `--output` sets — rather than a deeper
+			// queue, since a queue absorbs a burst and this is a rate.
+			if (dump->Dropped() != 0)
+			{
+				spdlog::warn(
+					"             {} frame(s) dropped: the disk did not keep up, so the dump is a sample of the "
+					"run. Try a lower rate, as --output={}x{}@10",
+					dump->Dropped(),
+					m_Resolutions[index].Width,
+					m_Resolutions[index].Height
+				);
+			}
+
+			if (dump->Skipped() != 0)
+			{
+				spdlog::warn("             {} frame(s) could not be read at all", dump->Skipped());
+			}
+
+			if (dump->Failed() != 0)
+			{
+				spdlog::warn(
+					"             {} frame(s) could not be written: {}",
+					dump->Failed(),
+					dump->FirstFailure() ? dump->FirstFailure()->Context() : std::string_view{ "unknown" }
+				);
+			}
+		}
+	}
+
+	// Remember what each output's extent was, so `Report` can suggest a rate in the terms the person
+	// typed. Set by `Configure` alongside `Build`, because the plan is what knows it.
+	void Remember(std::size_t index, PixelSize<DeviceSpace> resolution) noexcept { m_Resolutions[index] = resolution; }
+
+private:
+	// A gate closed, turned into either the fallback or the error the person asked for.
+	//
+	// One place rather than four, because the asymmetry is the rule and repeating it is how one of the
+	// four ends up silently falling back on a named device.
+	[[nodiscard]] Result<void> Fall(const char* what, const Error& why)
+	{
+		if (m_Wanted != RendererKind::Auto)
+		{
+			return Failure(why.Code(), what, why.About().IsEmpty() ? Subject{ Name(m_Wanted) } : why.About());
+		}
+
+		spdlog::info("{} ({}), so this run composites with the CPU blitter and draws no materials", what, why);
+
+		return {};
+	}
+
+	// The half of `Build` both renderers share: a virtual output over this face, checked.
+	//
+	// The renderer is handed over as the completion gate for both. A CPU composite finishes inside
+	// `Record` and every point it returns is immediate — Virtual/Device.h accepts null for exactly that
+	// — but a Vulkan one does not, and this is the presenter that has to wait for it before a sink may
+	// read the pages.
+	[[nodiscard]] Result<VirtualOutput*> Attach(
+		const OutputConfiguration& wanted,
+		IFrameSink& sink,
+		const IRenderer* completion,
+		IDmabufAllocator& allocator,
+		TargetFace face
+	)
+	{
+		VirtualOutput* const presenter =
+			m_Virtual.Add(wanted, allocator, sink, completion, VirtualOutputPolicy{ .Face = face });
+
+		if (presenter == nullptr)
+		{
+			return Failure(ENOSPC, "more outputs than the virtual device holds");
+		}
+
+		if (const Result<void>& allocated = presenter->Status(); !allocated)
+		{
+			return std::unexpected{ allocated.error() };
+		}
+
+		return presenter;
+	}
+
+	// One directory for one output, and a level per output beyond that — because `frame-00000042.pam`
+	// carries no output identity, so two panels writing into one directory would overwrite each
+	// other's frames at every boundary they share. The parent is created here because Virtual/Pam.h
+	// creates one level and this is the second.
+	[[nodiscard]] std::string Destination(std::size_t index)
+	{
+		if (m_Outputs <= 1)
+		{
+			return m_Directory;
+		}
+
+		(void)::mkdir(m_Directory.c_str(), 0755);
+
+		return std::format("{}/output-{}", m_Directory, index);
+	}
+
+	const IClock* m_Clock = nullptr;
+
+	// Both providers are held and one is used, which costs a descriptor at most: `HeapAllocator` owns
+	// nothing until it allocates, and the udmabuf device is absent on exactly the runs that take the
+	// heap. Which one a target came from is `m_Textures` — it and the Vulkan device are set together or
+	// not at all, and every branch in this class reads that one field rather than a second flag that
+	// could disagree with it.
+	HeapAllocator m_Heap{};
+	std::optional<UdmabufAllocator> m_Udmabuf;
+
+	VulkanDevice m_Vulkan;
+
+	// After the device and before the outputs, so it is destroyed after every renderer that registered
+	// with it and before the device that owns its handles — `NestedBackend`'s ordering, for its reason.
+	std::optional<VulkanTextures> m_Textures;
+
+	VirtualDevice m_Virtual;
+
+	std::string m_Directory;
+	std::size_t m_Outputs = 0;
+
+	// What was asked for, kept because `Fall` is the only party that can tell a fallback from a
+	// refusal and it runs four times.
+	RendererKind m_Wanted = RendererKind::Auto;
+
+	// Whether `--capture` wants targets it can read back. Only the Vulkan path can honour it; the
+	// blitter's targets are host memory and are readable by construction.
+	bool m_Readable = false;
+
+	std::vector<TextureFormat> m_ClientFormats;
+	std::uint64_t m_ClientDevice = 0;
+
+	std::array<std::unique_ptr<FrameDump>, MaxOutputs> m_Dumps{};
+	std::array<PixelSize<DeviceSpace>, MaxOutputs> m_Resolutions{};
+};
+
+// The daily driver: gyro as a client of another compositor, one host window per output.
+//
+// **It is the first backend whose presenter and renderer are the same device's, and that is decision
+// 120 arriving.** A nested output has no GBM device handed to it and no swapchain allocating on its
+// behalf, so the only thing on the machine that can produce its targets is the Vulkan device that is
+// about to draw into them — and `Nested` may not name `Render`, so the root is what pairs them. Here
+// that pairing is three lines and one `IDmabufAllocator`, which is exactly what moving the interface
+// to the waist bought.
+//
+// **The device is opened once and the renderers are per output**, for `BoundOutput`'s reason: binding
+// targets is not a per-frame call, so a writer belongs to one presenter's target set, while the queue
+// the work serialises on is the device's. Every output names device zero because there is one GPU.
+//
+// **Nothing here forces real time and nothing here should.** Docs/Architecture.md#backends makes
+// nested drop `SCHED_FIFO` and `mlockall` unless explicitly overridden, and `Run` below is where that
+// happens — a real-time thread inside a normal-priority host is an effective way to hard-lock the
+// desktop somebody is developing on.
 class NestedBackend final : public IBackend
 {
 public:
-	NestedBackend(const IClock& clock, bool governor, bool readable) noexcept
-		: m_Clock{ &clock }, m_Host{ clock }, m_Governs{ governor }, m_Readable{ readable }
+	NestedBackend(const IClock& clock, bool governor, bool readable, DeviceClass wanted) noexcept
+		: m_Clock{ &clock }, m_Host{ clock }, m_Governs{ governor }, m_Readable{ readable }, m_Class{ wanted }
 	{}
 
 	// Open the connection and the device, in that order.
@@ -923,7 +1158,8 @@ public:
 
 		// `Readable` is Seam/Capture.h's, and it has to be stated at device creation because target usage
 		// is fixed at allocation — see `VulkanDevicePolicy::Readable`.
-		Result<VulkanDevice> device = VulkanDevice::Open(VulkanDevicePolicy{ .Readable = m_Readable });
+		Result<VulkanDevice> device =
+			VulkanDevice::Open(VulkanDevicePolicy{ .Class = m_Class, .Readable = m_Readable });
 
 		if (!device)
 		{
@@ -1136,6 +1372,11 @@ private:
 	// Whether this backend's device creates targets Render/Readback.h can copy back. Held rather than
 	// asked of the device, because it is stated at device creation and read nowhere else.
 	bool m_Readable = false;
+
+	// Which device `--renderer` asked for, held for `m_Readable`'s reason: it is stated once, at
+	// creation, and the log line after it is what says which one the machine turned out to have.
+	DeviceClass m_Class = DeviceClass::Any;
+
 	GpuGovernor m_Governor;
 
 	// `unique_ptr` because a presenter is neither copyable nor movable and the array has to be built
@@ -1195,8 +1436,8 @@ private:
 class DrmBackend final : public IBackend
 {
 public:
-	DrmBackend(const IClock& clock, bool governor, bool readable) noexcept
-		: m_Clock{ &clock }, m_Governs{ governor }, m_Readable{ readable }
+	DrmBackend(const IClock& clock, bool governor, bool readable, DeviceClass wanted) noexcept
+		: m_Clock{ &clock }, m_Governs{ governor }, m_Readable{ readable }, m_Class{ wanted }
 	{}
 
 	// The card first, for `NestedBackend::Open`'s reason exactly: it is what says whether there is a
@@ -1246,8 +1487,9 @@ public:
 
 		// The card's minor, so that on a machine with two GPUs gyro composites on the one the panel is
 		// actually attached to rather than on whichever part Vulkan ranks highest.
-		Result<VulkanDevice> rendering =
-			VulkanDevice::Open(VulkanDevicePolicy{ .ScanoutMinor = m_Card->Minor(), .Readable = m_Readable });
+		Result<VulkanDevice> rendering = VulkanDevice::Open(
+			VulkanDevicePolicy{ .Class = m_Class, .ScanoutMinor = m_Card->Minor(), .Readable = m_Readable }
+		);
 
 		if (!rendering)
 		{
@@ -1569,6 +1811,11 @@ private:
 	// Whether this backend's device creates targets Render/Readback.h can copy back. Held rather than
 	// asked of the device, because it is stated at device creation and read nowhere else.
 	bool m_Readable = false;
+
+	// Which device `--renderer` asked for, held for `m_Readable`'s reason: it is stated once, at
+	// creation, and the log line after it is what says which one the machine turned out to have.
+	DeviceClass m_Class = DeviceClass::Any;
+
 	GpuGovernor m_Governor;
 
 	std::array<std::unique_ptr<Drm::DrmOutput>, MaxOutputs> m_Panels{};
@@ -3099,8 +3346,19 @@ private:
 		{
 			case BackendKind::Dump:
 			{
-				auto dump =
-					std::make_unique<DumpBackend>(m_Clock, m_Options.DumpDirectory, m_Options.Requested().size());
+				auto dump = std::make_unique<DumpBackend>(
+					m_Clock,
+					m_Options.DumpDirectory,
+					m_Options.Requested().size(),
+					m_Options.Renderer,
+					m_Options.Capture
+				);
+
+				if (const Result<void> opened = dump->Open(); !opened)
+				{
+					return opened;
+				}
+
 				m_Dump = dump.get();
 				m_Backend = std::move(dump);
 
@@ -3116,7 +3374,9 @@ private:
 
 			case BackendKind::Nested:
 			{
-				auto nested = std::make_unique<NestedBackend>(m_Clock, m_Options.Governor, m_Options.Capture);
+				auto nested = std::make_unique<NestedBackend>(
+					m_Clock, m_Options.Governor, m_Options.Capture, ClassOf(m_Options.Renderer)
+				);
 
 				if (const Result<void> opened = nested->Open(); !opened)
 				{
@@ -3130,7 +3390,9 @@ private:
 
 			case BackendKind::Drm:
 			{
-				auto drm = std::make_unique<DrmBackend>(m_Clock, m_Options.Governor, m_Options.Capture);
+				auto drm = std::make_unique<DrmBackend>(
+					m_Clock, m_Options.Governor, m_Options.Capture, ClassOf(m_Options.Renderer)
+				);
 
 				if (const Result<void> opened = drm->Open(m_Options.Device); !opened)
 				{
@@ -3224,7 +3486,12 @@ private:
 			// that stays empty, which is what somebody would otherwise file as a bug against the dump
 			// backend. The test is the backend rather than a question put to `IRenderer`, because the seam
 			// has no verb for it and adding one for a warning would be an interface written for the fakes.
-			if (m_Options.Backend == BackendKind::Dump && !DrawsOnCpu(gym))
+			//
+			// **Which renderer the dump resolved to rather than which backend was asked for** *(2026-09-07)*.
+			// The pairing is `--renderer`'s now, so a machine with udmabuf and an ICD draws every one of
+			// these and has nothing to be warned about; the sentence belongs to the run that actually fell
+			// to the blitter.
+			if (m_Dump != nullptr && m_Dump->UsesBlitter() && !DrawsOnCpu(gym))
 			{
 				spdlog::warn("no CPU composite can draw it, so this run will write no frames at all");
 			}

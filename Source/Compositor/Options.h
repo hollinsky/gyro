@@ -38,7 +38,8 @@ enum class BackendKind : std::uint8_t
 	// A real presenter whose consumer is a file. Virtual/Dump.h writes one PAM per presented frame,
 	// which is what gives gyro a picture of itself before there is a panel or a protocol — and what
 	// paces frames while doing it, since a virtual output has a period and a phase exactly as a panel
-	// does. The presenter is `Virtual`, the renderer is `Blit`, and nothing on the path needs a GPU.
+	// does. The presenter is `Virtual`; what draws into it is `RendererKind` below, down to a CPU
+	// blitter on a machine with no device at all, so nothing on the path *needs* a GPU.
 	Dump = 4,
 };
 
@@ -56,6 +57,51 @@ enum class BackendKind : std::uint8_t
 			return "drm";
 		case BackendKind::Dump:
 			return "dump";
+	}
+
+	return "?";
+}
+
+// Which rendering device draws, on a backend that can reach more than one.
+//
+// **A separate axis from the backend, which Docs/Architecture.md#rendering-devices has always claimed
+// and no backend implemented.** A backend is where frames *go* — a panel, a host window, a file — and
+// what draws them is a `VkPhysicalDevice` selection gyro makes underneath. The two were only ever
+// fused in one place, `--backend=dump`, which paired the virtual presenter with the CPU blitter by
+// construction; that pairing is now the floor of this axis rather than the definition of that
+// backend, and the reason it had to move is that the blitter draws no materials, so the one
+// instrument for looking at what gyro composites could not be pointed at half of what gyro
+// composites.
+enum class RendererKind : std::uint8_t
+{
+	// The best device present, falling back down this list as each one turns out not to be there.
+	Auto = 0,
+
+	// `DeviceClass::Hardware` and `DeviceClass::Software`, which is Render/Device.h's own vocabulary
+	// rather than a second one: a GPU, or Vulkan on llvmpipe. Both draw everything gyro can draw, and
+	// naming either is a refusal to fall back — somebody who asked for a GPU by name and silently got
+	// llvmpipe would be measuring the wrong machine.
+	Hardware = 1,
+	Software = 2,
+
+	// The CPU blitter: Blit rather than Vulkan, no device, no ICD, no `/dev/udmabuf`. **It draws no
+	// materials and no rotated quad**, and it is here because it is the only thing that still produces
+	// a picture on a machine with none of the above — which is where somebody most wants one.
+	Cpu = 3,
+};
+
+[[nodiscard]] constexpr std::string_view Name(RendererKind renderer) noexcept
+{
+	switch (renderer)
+	{
+		case RendererKind::Auto:
+			return "auto";
+		case RendererKind::Hardware:
+			return "hardware";
+		case RendererKind::Software:
+			return "software";
+		case RendererKind::Cpu:
+			return "cpu";
 	}
 
 	return "?";
@@ -118,6 +164,10 @@ inline constexpr std::string_view DefaultCaptureDirectory = "gyro-captures";
 struct Options
 {
 	BackendKind Backend = BackendKind::Auto;
+
+	// Which device draws, which is a separate question from where the frames go. `Auto` is the best
+	// one the backend can reach and is what every run took before the flag existed.
+	RendererKind Renderer = RendererKind::Auto;
 
 	// Where the dump backend writes its frames. Empty under every other backend, and never read from
 	// the environment: this header is the command line and nothing else, which is what lets the one
@@ -738,6 +788,32 @@ inline constexpr double MaximumArcminutes = 10.0;
 			continue;
 		}
 
+		if (Detail::Matches(argument, "--renderer", value))
+		{
+			if (value == "auto")
+			{
+				options.Renderer = RendererKind::Auto;
+			}
+			else if (value == "hardware")
+			{
+				options.Renderer = RendererKind::Hardware;
+			}
+			else if (value == "software")
+			{
+				options.Renderer = RendererKind::Software;
+			}
+			else if (value == "cpu")
+			{
+				options.Renderer = RendererKind::Cpu;
+			}
+			else
+			{
+				return Failure(EINVAL, "--renderer is one of auto, hardware, software, cpu");
+			}
+
+			continue;
+		}
+
 		if (Detail::Matches(argument, "--gym", value))
 		{
 			// Bare `--gym` is the lanes, which is the one that never settles and is therefore what
@@ -1151,6 +1227,23 @@ inline constexpr double MaximumArcminutes = 10.0;
 	if (options.Backend == BackendKind::Dump && options.DumpDirectory.empty())
 	{
 		options.DumpDirectory = DefaultDumpDirectory;
+	}
+
+	// **The blitter is the one rung of the renderer axis that not every backend can present**, because
+	// it writes through a mapping rather than into a device's image: a host window's target comes from
+	// the Vulkan device that will draw it, and a panel's from the card. Only a virtual output can be
+	// asked for a face a processor writes, so this is refused rather than quietly upgraded — somebody
+	// who asked for the blitter is usually asking *because* they are chasing what the blitter does.
+	if (options.Renderer == RendererKind::Cpu && options.Backend != BackendKind::Dump)
+	{
+		return Failure(EINVAL, "--renderer=cpu is the CPU blitter, which only the dump backend can present");
+	}
+
+	// The headless renderer charges a cost and draws nothing, so a device named for it would be one
+	// opened to be unused — the same silent no-op `--dump` under the wrong backend is refused for.
+	if (options.Renderer != RendererKind::Auto && options.Backend == BackendKind::Headless)
+	{
+		return Failure(EINVAL, "--renderer names what draws, and the headless backend draws nothing");
 	}
 
 	// **A gym is an author and so is the client host, and the dispatch loop steps one.** Naming a

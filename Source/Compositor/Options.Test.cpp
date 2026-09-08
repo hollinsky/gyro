@@ -303,6 +303,56 @@ GYRO_TEST(Options, AnEmptyDumpDirectoryIsRefused)
 	GYRO_CHECK(!Parse({ "--backend=dump", "--dump" }).has_value());
 }
 
+// The renderer is a separate axis from the backend, which Docs/Architecture.md#rendering-devices has
+// always said and only `--backend=dump` ever contradicted.
+GYRO_TEST(Options, EveryRendererNameRoundTrips)
+{
+	for (const std::string_view name : { "auto", "hardware", "software" })
+	{
+		const std::string argument = std::format("--renderer={}", name);
+		const Result<Options> options = Parse({ argument });
+
+		GYRO_REQUIRE(options.has_value());
+		GYRO_CHECK_EQ(Name(options->Renderer), name);
+	}
+
+	const Result<Options> blitter = Parse({ "--backend=dump", "--renderer=cpu" });
+
+	GYRO_REQUIRE(blitter.has_value());
+	GYRO_CHECK_EQ(Name(blitter->Renderer), std::string_view{ "cpu" });
+
+	GYRO_CHECK(!Parse({ "--renderer=vulkan" }).has_value());
+	GYRO_CHECK(!Parse({ "--renderer" }).has_value());
+}
+
+// Nothing said is the best device present, which is what every run took before the flag existed.
+GYRO_TEST(Options, TheRendererDefaultsToWhateverIsThere)
+{
+	const Result<Options> options = Parse({});
+
+	GYRO_REQUIRE(options.has_value());
+	GYRO_CHECK(options->Renderer == RendererKind::Auto);
+}
+
+// The blitter writes through a mapping, and only a virtual output can be asked for a face a processor
+// writes — so this is a refusal rather than a quiet upgrade to the device that would have worked.
+GYRO_TEST(Options, TheBlitterIsRefusedUnderABackendThatCannotPresentIt)
+{
+	GYRO_CHECK(!Parse({ "--renderer=cpu" }).has_value());
+	GYRO_CHECK(!Parse({ "--backend=nested", "--renderer=cpu" }).has_value());
+	GYRO_CHECK(!Parse({ "--renderer=cpu", "--backend=drm" }).has_value());
+	GYRO_CHECK(Parse({ "--renderer=cpu", "--backend=dump" }).has_value());
+}
+
+// A device named for the backend that draws nothing would be one opened to be unused, which is the
+// same silent no-op `--dump` under the wrong backend is refused for.
+GYRO_TEST(Options, ARendererUnderTheHeadlessBackendIsRefused)
+{
+	GYRO_CHECK(!Parse({ "--backend=headless", "--renderer=software" }).has_value());
+	GYRO_CHECK(!Parse({ "--renderer=hardware", "--backend=headless" }).has_value());
+	GYRO_CHECK(Parse({ "--backend=headless" }).has_value());
+}
+
 // Every backend the parse accepts has a name, and a name nothing accepts is not one of them.
 GYRO_TEST(Options, EveryBackendNameRoundTrips)
 {
