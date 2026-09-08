@@ -157,13 +157,21 @@ struct MaterialFacts
 	float ContrastFloor = 0.0F;
 };
 
-// SPEC: the placeholder numbers, and they are unmeasured.
+// SPEC: the numbers, seen once on a panel and still owed the screen decision 103 asks for.
 //
 // Decision 103 says in as many words that the tint values, the radii, and `Smoke`'s contrast floor
 // are numbers and want a screen — with GTK, Qt, and an Xwayland application on it at once, which is
 // the same screen decision 105 owes the floor radius to. What is settled by that entry and built
-// here is which materials exist, what each is for, and the mechanism that renders them. These four
-// rows are defensible and they are not decided.
+// here is which materials exist, what each is for, and the mechanism that renders them.
+//
+// **The first look at these on a real panel moved them down a long way, and the floor moved most.**
+// `Smoke` at sigma 32 over a resolved alpha of 0.62 did not read as a material over a photograph —
+// it read as the photograph having been replaced by a grey field, with no hint of what was behind
+// the launcher. Two thirds of that was the floor rather than the blur: 0.62 is most of the way to
+// opaque, so the tint was the picture. What is here now still darkens and still separates, and a
+// person can see what their own screen was showing. The four rows remain defensible rather than
+// decided, and the multi-toolkit screen is still owed — that is what would settle the floor, which
+// is the one number here with a legibility obligation behind it rather than a taste.
 //
 // `Glass` is thin because it sits over content the user arranged. `Smoke` is dark and heavier
 // because it sits over content gyro did not choose, and its floor is what makes that an arithmetic
@@ -182,14 +190,14 @@ struct MaterialFacts
 			return {};
 		case Material::Glass:
 			return { .Gathering = true,
-				     .Sigma = 24.0F,
-				     .Tint = { .Red = 0.18F, .Green = 0.18F, .Blue = 0.19F, .Alpha = 0.28F },
+				     .Sigma = 14.0F,
+				     .Tint = { .Red = 0.18F, .Green = 0.18F, .Blue = 0.19F, .Alpha = 0.24F },
 				     .ContrastFloor = 0.0F };
 		case Material::Smoke:
 			return { .Gathering = true,
-				     .Sigma = 32.0F,
-				     .Tint = { .Red = 0.03F, .Green = 0.03F, .Blue = 0.04F, .Alpha = 0.45F },
-				     .ContrastFloor = 0.62F };
+				     .Sigma = 18.0F,
+				     .Tint = { .Red = 0.03F, .Green = 0.03F, .Blue = 0.04F, .Alpha = 0.30F },
+				     .ContrastFloor = 0.42F };
 	}
 
 	return {};
