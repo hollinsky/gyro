@@ -1481,6 +1481,31 @@ void ClientXdgSurface::Map(ClientSurface& surface)
 
 	if (mapping && m_Popup != nullptr)
 	{
+		// **A menu arrives the way a window does, and this is the line whose absence made one invisible.**
+		// `Map` above creates every `xdg_surface` at `Opacity = 0.0F`, because that is the entrance's
+		// start value rather than a state anybody sees — and the toplevel branch was the only place that
+		// ever wrote the end value. A popup was created at zero and nothing faded it up, so it stayed
+		// there: drawn every frame, at full size, in exactly the right place, multiplied by nothing.
+		//
+		// **What that costs is not a missing animation.** A node at zero keeps its extent, so the menu
+		// went on taking the presses aimed at it — a person clicking where the menu ought to be got
+		// nothing, and clicking beside it dismissed a menu they could not see. The report is about input
+		// and the defect is entirely in what was drawn, which is why `Frame/Evaluator.h`'s `Silent` marks
+		// it: an item that completes every stage and puts no light on the glass.
+		//
+		// **A third transaction for the entrance's own reason**, one paragraph up: the placement above is
+		// the client's and must not animate, and `Transition::MenuAppear` is silent about translation on
+		// purpose — a menu that grew *and* slid would have to slide from somewhere. The anchor is what
+		// says where it grew from, and the catalog puts it at the summon point precisely so a menu comes
+		// out of the control that opened it.
+		SceneCommit entrance{ *scene, CommitAuthor::Compositor, scene->Now(), Transition::MenuAppear };
+
+		static_cast<void>(entrance.Scale(m_Window, { 1.0F, 1.0F, 1.0F }));
+		static_cast<void>(entrance.Fade(m_Window, 1.0F));
+	}
+
+	if (mapping && m_Popup != nullptr)
+	{
 		// **Last, because it is the step that makes the menu the thing input goes to**, and it must not
 		// run before the window it names exists or before the pixels under it do.
 		m_Popup->Enter();
