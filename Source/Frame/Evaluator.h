@@ -733,6 +733,16 @@ private:
 			item.Dress = dress;
 			item.Lift = lift;
 
+			// **A group at zero takes its whole subtree with it**, which is the one that reads as the
+			// application being broken rather than as an animation: every member is walked, textured and
+			// emitted, the group composes them into an offscreen, and the offscreen is then multiplied by
+			// nothing. Marked on the group rather than on the members, because the members are drawing
+			// correctly and it is the flattening that put out the light.
+			if (own <= 0.0F)
+			{
+				Silent("draws nothing: opacity", index);
+			}
+
 			group = Emit(item);
 
 			if (group == NoItem)
@@ -764,7 +774,7 @@ private:
 		// second time, inside the offscreen it was just lifted out of.
 		if (node.HasContent() || dress != Material::None || lift.Draws())
 		{
-			drawn = Draw(node, chain, view, own, dress, lift, runs);
+			drawn = Draw(node, index, chain, view, own, dress, lift, runs);
 
 			if (drawn.Full)
 			{
@@ -862,8 +872,12 @@ private:
 	};
 
 	// Project one drawn node and append its item.
+	//
+	// `index` is carried only so that a node which draws nothing can be named in the mark `Silent` files.
+	// Nothing about the projection reads it.
 	[[nodiscard]] Drawn Draw(
 		const Node& node,
+		std::size_t index,
 		const ComposedTransform& chain,
 		const OutputView& view,
 		float opacity,
@@ -890,6 +904,14 @@ private:
 		item.Dress = dress;
 		item.Lift = lift;
 
+		// **Emitted and invisible, which is the pair of words this whole family exists for.** A node at
+		// zero is walked, projected and textured, and every stage reports success over a rectangle that
+		// puts no light on the glass — while keeping the extent that goes on taking presses.
+		if (opacity <= 0.0F)
+		{
+			Silent("draws nothing: opacity", index);
+		}
+
 		// A node with no content run to index is one that got here on its dressing alone, and
 		// `DrawDressing` is what it draws: a quad, an extent, and a material, with nothing of the
 		// node's own underneath it.
@@ -897,10 +919,23 @@ private:
 		{
 			if (node.Content >= runs.Images.size())
 			{
+				Silent("draws nothing: content", index);
+
 				return {};
 			}
 
 			const ImageContent& content = runs.Images[node.Content];
+
+			// **A node whose picture was never minted, which is the one that reaches the glass looking
+			// like nothing is wrong.** The item is emitted either way — a null texture is the importer's
+			// statement that this content has no pixels yet, not a malformed scene, and dropping the item
+			// would take the node's dressing and shadow down with it. What it must not do is pass
+			// silently: the node is still in the scene, so it still takes a press, and a person gets a
+			// menu they can dismiss by clicking inside it and cannot see.
+			if (content.Texture.IsNull())
+			{
+				Silent("draws nothing: texture", index);
+			}
 
 			item.Content = DrawTexture{ .Texture = content.Texture, .Source = content.Source };
 			item.Color = content.Color;
@@ -915,6 +950,8 @@ private:
 		{
 			if (node.Content >= runs.Solids.size())
 			{
+				Silent("draws nothing: content", index);
+
 				return {};
 			}
 
@@ -1260,6 +1297,40 @@ private:
 		TraceMark("exit draws nothing", TraceThread, TraceTag(reservation));
 	}
 
+	// A node that carried content, finished the walk, and put nothing on the glass.
+	//
+	// **The property `Blanked` states, generalised from a closing window to any node.** `Blank()` covers
+	// exits because that is where it was first paid for, and the reasons above are the rest of the same
+	// class: every stage reports success — the scene is published, the node is walked, its quad projects,
+	// an item is emitted — over content a person cannot see.
+	//
+	// **The reason this is worth a permanent mark rather than a debugging print is that the failure is
+	// silent by construction, and the scene keeps working.** A node with no pixels still has an extent,
+	// so it is still hit-tested and still swallows a press. What that looks like from the outside is a
+	// menu that does not appear, dismisses when clicked beside, and does nothing when clicked where it
+	// ought to be — a report that names input while the defect is entirely in what was drawn.
+	//
+	// **Once per node per output, for `Blanked`'s reason.** The condition holds for as long as the node
+	// is up, so a mark per frame would be sixty a second of one fact, and it would push the rest of the
+	// frame's records out of the ring — which is the capture somebody turned this on to read.
+	void Silent(const char* reason, std::size_t index) noexcept
+	{
+		const std::uint32_t node = static_cast<std::uint32_t>(index);
+
+		if (m_Output >= m_Silenced.size() || m_Silenced[m_Output].Holds(node))
+		{
+			return;
+		}
+
+		m_Silenced[m_Output].Remember(node);
+
+		// Tagged with the node's index in the snapshot, which is the only name this side of the waist
+		// holds: `World/Node.h`'s record carries no identity of its own, deliberately, and the index is
+		// what the dispatch half's serializer numbers by — so it is what joins a mark here to the client
+		// row that committed the surface.
+		TraceMark(reason, TraceThread, TraceTag(node));
+	}
+
 	void Accumulate(Rect<DeviceSpace> bounds) noexcept
 	{
 		Level& level = m_Stack[m_Depth - 1];
@@ -1438,6 +1509,51 @@ private:
 	};
 
 	std::array<Complained, MaxOutputs> m_Complained{};
+
+	// How many nodes one output remembers having complained about. Larger than the exit ring above
+	// because it is over every node that carries content rather than over the windows that are leaving,
+	// and a scene where several are broken at once is exactly the one worth reading.
+	static constexpr std::size_t MaxSilenced = 32;
+
+	// The same ring as `Complained` over a different name space, and **separate rather than shared
+	// because the two disagree about zero.** A reservation of zero is `World/Exit.h`'s absent one, so
+	// `Complained`'s zero-filled slots suppress a mark that can never be wanted; node zero is the root
+	// and is an ordinary node, so the same trick here would silence the one node most likely to take a
+	// whole session's content down with it. Folding them together means giving one of the two a
+	// sentinel it does not need, which is how the zero case gets lost again.
+	struct Silenced
+	{
+		static constexpr std::uint32_t Empty = 0xFFFF'FFFFu;
+
+		Silenced() noexcept { Nodes.fill(Empty); }
+
+		std::array<std::uint32_t, MaxSilenced> Nodes{};
+		std::size_t Next = 0;
+
+		[[nodiscard]] bool Holds(std::uint32_t node) const noexcept
+		{
+			for (const std::uint32_t seen : Nodes)
+			{
+				if (seen == node)
+				{
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		// Oldest overwritten first. A node cycled out complains once more, which is a repeat rather than
+		// a wrong answer, and an index reused for a different node is suppressed once for the same
+		// reason — the trade a ring inside decision 36's guard makes for allocating nothing.
+		void Remember(std::uint32_t node) noexcept
+		{
+			Nodes[Next] = node;
+			Next = (Next + 1) % Nodes.size();
+		}
+	};
+
+	std::array<Silenced, MaxOutputs> m_Silenced{};
 
 	// Which output the walk in progress is for, so that the ring above is the right one. Past the end
 	// until the first evaluation, which makes a mark impossible rather than misfiled.

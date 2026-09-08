@@ -3,7 +3,9 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <memory>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "Animation/Solve/Spring.h"
@@ -2529,4 +2531,171 @@ GYRO_TEST(Evaluator, AWindowClosingOnAnotherOutputIsNotBlankOnThisOne)
 	static_cast<void>(evaluator.Evaluate(On(snapshot, 1)));
 
 	GYRO_CHECK_EQ(evaluator.Blank(), 1U);
+}
+
+namespace
+{
+
+// A ring and its storage, so a test can read what the walk said. The same shape
+// `Core/Trace.Test.cpp` uses, and local for the same reason: a buffer holds a span, and the storage
+// has to outlive it.
+struct MarkRing
+{
+	explicit MarkRing(const IClock& clock) : Records{ std::make_unique<TraceRecord[]>(Capacity) }
+	{
+		Buffer.Arm({ Records.get(), Capacity }, clock);
+		EnrollTracing(&Buffer);
+	}
+
+	~MarkRing() { EnrollTracing(nullptr); }
+
+	MarkRing(const MarkRing&) = delete;
+	MarkRing& operator=(const MarkRing&) = delete;
+
+	// How many records name `reason`, whatever else the walk filed beside them.
+	[[nodiscard]] std::size_t Count(std::string_view reason)
+	{
+		std::array<TraceEvent, Capacity> into{};
+		const std::size_t taken = Buffer.Copy(into);
+
+		std::size_t found = 0;
+
+		for (std::size_t index = 0; index < taken; ++index)
+		{
+			if (into[index].Name != nullptr && std::string_view{ into[index].Name } == reason)
+			{
+				++found;
+			}
+		}
+
+		return found;
+	}
+
+	static constexpr std::size_t Capacity = 64;
+
+	std::unique_ptr<TraceRecord[]> Records;
+	TraceBuffer Buffer;
+};
+
+// An image node's content, with nothing minted for it: `Handle`'s null is generation zero, which is
+// what the importer leaves behind for a surface whose pixels have not arrived.
+[[nodiscard]] ImageContent Unminted()
+{
+	return ImageContent{};
+}
+
+} // namespace
+
+// **The defect this pair exists for is silent by construction**, which is why it is worth a test
+// rather than a debugging session. A node with no pixels keeps its extent, so it is still hit-tested
+// and still swallows a press — what a person reports is a menu that will not appear and will not
+// dismiss where they click, and every stage along the path reported success.
+GYRO_TEST(Evaluator, ANodeWhoseContentIsPastItsRunSaysSoRatherThanVanishing)
+{
+	Wire wire;
+	const std::array nodes{ Image(4, 10.0, 20.0) };
+	const std::array images{ Texel(7) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	MarkRing ring{ clock };
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// The node names entry four of a run holding one, so there is nothing to draw it from.
+	GYRO_CHECK_EQ(list.Items.size(), std::size_t{ 0 });
+
+	GYRO_CHECK_EQ(ring.Count("draws nothing: content"), std::size_t{ 1 });
+}
+
+GYRO_TEST(Evaluator, ANodeWhosePictureWasNeverMintedStillDrawsAndSaysSo)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.0, 20.0) };
+	const std::array images{ Unminted() };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	MarkRing ring{ clock };
+	SceneEvaluator evaluator{ clock };
+
+	const DrawList list = evaluator.Evaluate(Frame(snapshot));
+
+	// **The item is still emitted**, which is the deliberate half: a null texture is the importer
+	// saying this content has no pixels yet rather than the scene being malformed, and dropping the
+	// item would take the node's dressing and its shadow down with it.
+	GYRO_REQUIRE_EQ(list.Items.size(), std::size_t{ 1 });
+
+	const DrawTexture* const texture = AsTexture(list.Items[0]);
+
+	GYRO_REQUIRE(texture != nullptr);
+	GYRO_CHECK(texture->Texture.IsNull());
+
+	GYRO_CHECK_EQ(ring.Count("draws nothing: texture"), std::size_t{ 1 });
+}
+
+// **Once per node, not once per frame.** The condition holds for as long as the node is up, so a mark
+// every frame would be sixty a second of one fact and would push the rest of the capture out of the
+// ring — which is the capture somebody turned this on to read.
+GYRO_TEST(Evaluator, ANodeThatDrawsNothingIsNamedOnceRatherThanEveryFrame)
+{
+	Wire wire;
+	const std::array nodes{ Image(0, 10.0, 20.0) };
+	const std::array images{ Unminted() };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	MarkRing ring{ clock };
+	SceneEvaluator evaluator{ clock };
+
+	for (int frame = 0; frame < 10; ++frame)
+	{
+		static_cast<void>(evaluator.Evaluate(Frame(snapshot)));
+	}
+
+	GYRO_CHECK_EQ(ring.Count("draws nothing: texture"), std::size_t{ 1 });
+}
+
+// **A group at zero is the case that reads as the application being broken.** Every member draws
+// correctly and the flattening puts the light out, so the mark belongs on the group rather than on
+// the members that did their part.
+GYRO_TEST(Evaluator, AGroupFlattenedAtZeroOpacitySaysSo)
+{
+	Wire wire;
+	std::array nodes{ Container(1), Image(0, 10.0, 20.0) };
+
+	nodes[0].Flags = Node::Group;
+	nodes[0].Opacity = 0.0F;
+
+	const std::array images{ Texel(7) };
+	const std::array views{ Placement() };
+
+	wire.PutNodes(std::span<const Node>{ nodes });
+	wire.PutImages(std::span<const ImageContent>{ images });
+	wire.PutViews(std::span<const OutputAdapter>{ views });
+
+	const SnapshotReader snapshot = wire.Read();
+	TickingClock clock;
+	MarkRing ring{ clock };
+	SceneEvaluator evaluator{ clock };
+
+	static_cast<void>(evaluator.Evaluate(Frame(snapshot)));
+
+	GYRO_CHECK_EQ(ring.Count("draws nothing: opacity"), std::size_t{ 1 });
 }
