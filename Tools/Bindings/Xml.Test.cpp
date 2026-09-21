@@ -188,13 +188,17 @@ GYRO_TEST(Xml, WaylandParsesWhole)
 
 	GYRO_CHECK_EQ(corpus.Model->Name, std::string{ "wayland" });
 
+	// The census of the wayland.xml this machine has installed, as of 1.26. Pinned exactly and therefore
+	// broken by every upstream addition, which is what it is for: 1.26 added `wl_pointer.warp` and gave
+	// `wl_shm_pool` an error enumeration, and both are handlers gyro had to write rather than numbers to
+	// bump past.
 	const Counts counts = Count(*corpus.Model);
 	GYRO_CHECK_EQ(counts.Interfaces, std::size_t{ 23 });
-	GYRO_CHECK_EQ(counts.Requests, std::size_t{ 71 });
-	GYRO_CHECK_EQ(counts.Events, std::size_t{ 61 });
-	GYRO_CHECK_EQ(counts.Enumerations, std::size_t{ 26 });
-	GYRO_CHECK_EQ(counts.Entries, std::size_t{ 222 });
-	GYRO_CHECK_EQ(counts.Arguments, std::size_t{ 213 });
+	GYRO_CHECK_EQ(counts.Requests, std::size_t{ 72 });
+	GYRO_CHECK_EQ(counts.Events, std::size_t{ 62 });
+	GYRO_CHECK_EQ(counts.Enumerations, std::size_t{ 28 });
+	GYRO_CHECK_EQ(counts.Entries, std::size_t{ 230 });
+	GYRO_CHECK_EQ(counts.Arguments, std::size_t{ 217 });
 
 	// The licence notice a generated header has to reproduce. Checked for having survived the parse
 	// rather than for its text, which is upstream's to change.

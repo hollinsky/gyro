@@ -193,6 +193,13 @@ private:
 
 		void OnMotion(std::uint32_t time, Wire::Fixed surfaceX, Wire::Fixed surfaceY) override;
 
+		// **A warp is where the pointer now is, which is what `OnMotion` already pushes.** wayland 1.26
+		// added it for the position changes nobody made — the surface moved under the pointer, or the host
+		// released a confinement — and `NestedInputEvent::Position` carries an absolute place rather than a
+		// movement, so the two are the same statement. Ignoring it would leave gyro's own glyph drawn where
+		// the pointer used to be until the next real motion.
+		void OnWarp(Wire::Fixed surfaceX, Wire::Fixed surfaceY) override { OnMotion(0, surfaceX, surfaceY); }
+
 		void OnButton(
 			std::uint32_t serial,
 			std::uint32_t time,

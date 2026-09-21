@@ -265,10 +265,13 @@ Wayland::Server::WlBufferHandler* ClientShmPool::OnCreateBuffer(
 	Wayland::Server::WlShmFormat format
 )
 {
-	// `wl_shm_pool` declares no error enumeration of its own, so the code is `wl_shm`'s — which is what
-	// every client library reads it as, because the two interfaces share one error space.
-	const auto refuse = [this](Wayland::Server::WlShmError code, const char* why) -> Wayland::Server::WlBufferHandler* {
-		Object().PostError(static_cast<std::uint32_t>(code), why);
+	// `wl_shm_pool` gained an error enumeration of its own in wayland 1.26, naming the two faults a
+	// `create_buffer` can have. They are the codes `wl_shm` already carried and the same values, so what
+	// reaches the client is unchanged and the call sites below now say which interface they are refusing
+	// on.
+	const auto refuse =
+		[this](Wayland::Server::WlShmPoolError code, const char* why) -> Wayland::Server::WlBufferHandler* {
+		Object().PostError(code, why);
 
 		// Not null: null is `no_memory` and ends the client with the wrong reason. The buffer is created
 		// and immediately irrelevant, because the error above has already ended the connection.
@@ -285,7 +288,7 @@ Wayland::Server::WlBufferHandler* ClientShmPool::OnCreateBuffer(
 	if (!IsAdvertised(format))
 	{
 		return refuse(
-			Wayland::Server::WlShmError::InvalidFormat,
+			Wayland::Server::WlShmPoolError::InvalidFormat,
 			"wl_shm_pool.create_buffer with a format wl_shm never advertised"
 		);
 	}
@@ -293,7 +296,7 @@ Wayland::Server::WlBufferHandler* ClientShmPool::OnCreateBuffer(
 	if (offset < 0 || width <= 0 || height <= 0 || stride <= 0)
 	{
 		return refuse(
-			Wayland::Server::WlShmError::InvalidStride, "wl_shm_pool.create_buffer with a negative or empty extent"
+			Wayland::Server::WlShmPoolError::InvalidStride, "wl_shm_pool.create_buffer with a negative or empty extent"
 		);
 	}
 
@@ -304,7 +307,7 @@ Wayland::Server::WlBufferHandler* ClientShmPool::OnCreateBuffer(
 	if (pitch < rowBytes)
 	{
 		return refuse(
-			Wayland::Server::WlShmError::InvalidStride,
+			Wayland::Server::WlShmPoolError::InvalidStride,
 			"wl_shm_pool.create_buffer with a stride narrower than its own rows"
 		);
 	}
@@ -318,7 +321,8 @@ Wayland::Server::WlBufferHandler* ClientShmPool::OnCreateBuffer(
 	if (start > m_Mapping->Size() || span > m_Mapping->Size() - start)
 	{
 		return refuse(
-			Wayland::Server::WlShmError::InvalidStride, "wl_shm_pool.create_buffer reaching past the end of its pool"
+			Wayland::Server::WlShmPoolError::InvalidStride,
+			"wl_shm_pool.create_buffer reaching past the end of its pool"
 		);
 	}
 
@@ -338,8 +342,13 @@ void ClientShmPool::OnResize(std::int32_t size)
 	{
 		// A pool only grows, which is the protocol's own rule — and it grows no further than the file
 		// behind it, which is the rule a client asking for the fault would otherwise get around.
+		//
+		// **The code is `wl_shm`'s `invalid_fd` and the interface is the pool's**, which is what
+		// libwayland's own `wl_shm` posts for a failed resize and therefore what a client library reads
+		// there. `wl_shm_pool`'s enumeration names only the two `create_buffer` faults, so a resize failure
+		// has no code of its own to use — cast rather than mistyped as one of the two it is not.
 		Object().PostError(
-			static_cast<std::uint32_t>(Wayland::Server::WlShmError::InvalidFd),
+			static_cast<Wayland::Server::WlShmPoolError>(Wayland::Server::WlShmError::InvalidFd),
 			"wl_shm_pool.resize to a size this pool cannot take"
 		);
 	}
