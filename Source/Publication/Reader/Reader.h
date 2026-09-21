@@ -212,6 +212,20 @@ public:
 		return m_Valid ? Resolve<T>(m_Header.Exits) : std::span<const T>{};
 	}
 
+	// What each output is asked to be, one entry per output in output order. Decision 84's rule as for
+	// `Sessions`, and here it is the safe reading as well as the consistent one: a run whose length is
+	// not the output set's asks for nothing, so a request meant for another set cannot turn a panel off.
+	template<typename T>
+	[[nodiscard]] std::span<const T> Configurations() const noexcept
+	{
+		static_assert(
+			std::is_trivially_copyable_v<T> && std::is_standard_layout_v<T>,
+			"A configuration is reconstituted from bytes at an offset, so it must be one"
+		);
+
+		return m_Valid ? Resolve<T>(m_Header.Configurations) : std::span<const T>{};
+	}
+
 private:
 	// Whether the span's base meets the alignment every element depends on. Checked against the actual
 	// address rather than assumed, so that a reader handed an under-aligned mapping refuses it rather

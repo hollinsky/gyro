@@ -19,6 +19,7 @@
 #include "Scene/Entity.h"
 #include "Scene/Settle.h"
 #include "Scene/Store.h"
+#include "World/Configuration.h"
 #include "World/Content.h"
 #include "World/Exit.h"
 #include "World/Node.h"
@@ -198,6 +199,7 @@ private:
 		m_Wakes.clear();
 		m_Roots.clear();
 		m_Sessions.clear();
+		m_Configurations.clear();
 		m_Exits.clear();
 		m_Open.clear();
 
@@ -518,6 +520,13 @@ private:
 			}
 
 			m_Sessions.push_back(SceneAssignment{ .Shown = output.Session, .Fading = output.Fading, .Fade = fade });
+
+			// Decision 73's request, carried rather than decided: the root asked for it through the store,
+			// and whether it is new is the frame thread's comparison against what it last handed the
+			// presenter — so it crosses on every serialisation, exactly as the assignment beside it does.
+			m_Configurations.push_back(
+				SceneConfiguration{ .Generation = output.Generation, .Powered = output.Powered }
+			);
 		}
 
 		// Decision 69's schedule, one entry per output in output order, and every entry the same — the
@@ -551,6 +560,7 @@ private:
 		m_Publisher.PutRoots<SceneRoot>(m_Roots);
 		m_Publisher.PutSessions<SceneAssignment>(m_Sessions);
 		m_Publisher.PutExits<ExitSnapshot>(m_Exits);
+		m_Publisher.PutConfigurations<SceneConfiguration>(m_Configurations);
 	}
 
 	// One channel's whole story: retire it if it has settled, publish it if it has not, and fold what it
@@ -636,6 +646,9 @@ private:
 	std::vector<SceneRoot> m_Roots;
 	std::vector<SceneAssignment> m_Sessions;
 	std::vector<ExitSnapshot> m_Exits;
+
+	// What each output is asked to be, one per output beside the assignment.
+	std::vector<SceneConfiguration> m_Configurations;
 	std::vector<Wake> m_Wakes;
 
 	// The sweep's two scratch lists: what finished dying this pass, and the subtree stack that decides it.

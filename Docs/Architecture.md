@@ -1369,6 +1369,12 @@ same shape as the [effect quality](#quality-tiers) ladder and closed for the sam
 | Lock | [output reassignment](#locking) | — |
 | Suspend | **not gyro's** — see [Suspend and resume](#suspend-and-resume) | seconds |
 
+*(Built 2026-09-11: display off, and only display off — every output together after `--display-off`
+seconds with no local input, requested through the snapshot and performed on DRM as `ACTIVE` alone on
+the output's commit thread. The ~100 ms in the table was a guess: an i915 Tiger Lake laptop panel
+measured 278 ms off and 250 ms on, in the kernel. See [decision
+204](Decisions.md#204-the-display-off-rung-is-the-first-reconfiguration-and-it-crosses-as-a-request-in-the-snapshot).)*
+
 **Dimming is the backlight, not an overlay.** An alpha overlay cannot go below the panel's black and
 changes color rendition on the way down. So gyro drives `/sys/class/backlight`, which adds a udev
 rule to the table under [Privilege](#privilege) alongside the DRM and input ones. It also means the

@@ -510,6 +510,15 @@ and the interface is what lets the headless sweep place time at arbitrary phase.
   Backlight-off against CRTC-off is a real trade of power for the delay between a keypress and a lit
   panel, and both numbers are hardware-dependent and unmeasured. `// SPEC:` territory, and it wants
   measuring alongside the DRM backend's other hardware questions.
+
+  **Half of it is measured.** *(2026-09-11, by
+  [decision 204](Decisions.md#204-the-display-off-rung-is-the-first-reconfiguration-and-it-crosses-as-a-request-in-the-snapshot).)*
+  The DRM output logs how long each power commit spends in the kernel. On an i915 Tiger Lake driving its
+  own 1920x1080 eDP panel it was 278 ms to turn the CRTC off and 250 ms to turn it back on, and the second
+  figure is most of what a person waits between pressing a key at a dark laptop and seeing the panel —
+  well past Architecture.md's ~100 ms, which was a guess. Backlight-off is the half still unmeasured, and
+  an external DisplayPort monitor, which retrains its link on the way back, is the reading most likely to
+  move the answer.
 - **What acknowledges a suspend, and what happens when nothing does.** Decision 59 has the greeter's
   agent hold logind's delay inhibitor and wait for gyro inside it, which is a few seconds. What gyro
   does if it cannot present the locked state in that window is unspecified, and "suspend anyway with

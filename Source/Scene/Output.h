@@ -131,12 +131,18 @@ struct SceneOutput
 	// taken literally rather than becoming a mode the walk has to know about.
 	SessionId Locked = SessionId::None;
 
-	// Decision 73's per-output reconfiguration generation, echoed from what the composition root last
-	// asked the backend for. It answers *is this output's mode request newer than what I have
-	// achieved*, which is a different question from decision 84's set generation — that one is the
-	// header's and answers *do these runs mean my outputs at all*. Merging the two would have every
-	// mode change renumber the world.
+	// Decision 73's per-output reconfiguration generation. It starts as what the backend achieved when
+	// the output came up, and `SceneStore::SetOutputPower` moves it when the world asks for something
+	// different — which crosses in `World/Configuration.h`'s run and is what the frame thread hands the
+	// presenter. It answers *is this output's request newer than the last one*, which is a different
+	// question from decision 84's set generation — that one is the header's and answers *do these runs
+	// mean my outputs at all*. Merging the two would have every mode change renumber the world.
 	std::uint64_t Generation = 0;
+
+	// Whether the world wants this output's panel lit. False is decision 58's display-off rung, whose
+	// one author is `Scene/Idle.h`. It is the request rather than the state: what the panel is actually
+	// doing is the frame thread's to know, and it learns it from the presenter.
+	bool Powered = true;
 
 	// Where the output sits in the global space the world is laid out in. The origin is what the
 	// placement below subtracts; the extent is the logical size, which is the device grid divided by

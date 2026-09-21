@@ -19,6 +19,7 @@
 #include "Seam/OutputConfiguration.h"
 #include "Seam/PresentationInfo.h"
 #include "Testing/Test.h"
+#include "World/Configuration.h"
 
 // What is worth testing here is the *ordering*, which is the whole of what decision 80 moved into the
 // portable tier and the reason the step takes no readiness set. The arithmetic it composes is asserted
@@ -111,7 +112,13 @@ public:
 		return {};
 	}
 
-	void Reconfigure(const OutputConfiguration& wanted) override { Requested = wanted; }
+	void Reconfigure(const OutputConfiguration& wanted) override
+	{
+		Requested = wanted;
+		++Reconfigures;
+	}
+
+	int Reconfigures = 0;
 
 	// The flip lands. Releases the target the present was holding and re-anchors the clock, which is
 	// what makes this the only input to every deadline.
@@ -306,25 +313,43 @@ public:
 	std::uint64_t FlipSequence = 0;
 };
 
-// A snapshot with nothing in it but a wake schedule, which is the only run the loop reads today.
+// A snapshot with nothing in it but the two runs the loop reads itself rather than handing to the walk:
+// the wake schedule, and what each output is asked to be.
 class SnapshotBuffer
 {
 public:
-	std::span<const std::byte> Build(std::uint64_t sequence, std::span<const Wake> wakes)
+	std::span<const std::byte>
+	Build(std::uint64_t sequence, std::span<const Wake> wakes, std::span<const SceneConfiguration> configurations = {})
 	{
+		// The configurations follow the wakes with no padding between, which holds because nothing in a
+		// configuration is aligned wider than a wake.
+		static_assert(alignof(SceneConfiguration) <= alignof(Wake) && sizeof(Wake) % alignof(SceneConfiguration) == 0);
+
 		constexpr std::size_t offset = ((sizeof(SnapshotHeader) + alignof(Wake) - 1) / alignof(Wake)) * alignof(Wake);
-		const std::size_t size = offset + wakes.size() * sizeof(Wake);
+		const std::size_t configured = offset + wakes.size() * sizeof(Wake);
+		const std::size_t size = configured + configurations.size() * sizeof(SceneConfiguration);
 
 		SnapshotHeader header;
 		header.Sequence = sequence;
 		header.ByteSize = static_cast<std::uint32_t>(size);
 		header.Wakes = { offset, static_cast<std::uint32_t>(wakes.size()), sizeof(Wake), alignof(Wake) };
+		header.Configurations = { static_cast<std::uint32_t>(configured),
+			                      static_cast<std::uint32_t>(configurations.size()),
+			                      sizeof(SceneConfiguration),
+			                      alignof(SceneConfiguration) };
 
 		std::memcpy(m_Data.data(), &header, sizeof(header));
 
 		if (!wakes.empty())
 		{
 			std::memcpy(m_Data.data() + offset, wakes.data(), wakes.size() * sizeof(Wake));
+		}
+
+		if (!configurations.empty())
+		{
+			std::memcpy(
+				m_Data.data() + configured, configurations.data(), configurations.size() * sizeof(SceneConfiguration)
+			);
 		}
 
 		return { m_Data.data(), size };
@@ -373,9 +398,13 @@ struct Harness
 	// Anchor the clock: frame 7 reached the glass at 1000ms, so frame 8 is owed at 1010ms.
 	void Anchor() { Presenter.Flip(At(1000), 7); }
 
-	void Publish(std::uint64_t sequence, std::span<const Wake> wakes)
+	void Publish(
+		std::uint64_t sequence,
+		std::span<const Wake> wakes,
+		std::span<const SceneConfiguration> configurations = {}
+	)
 	{
-		GYRO_CHECK(Ring.Publish(Buffer.Build(sequence, wakes), 0));
+		GYRO_CHECK(Ring.Publish(Buffer.Build(sequence, wakes, configurations), 0));
 	}
 
 	FrameOutput& Output() { return Outputs[0]; }
@@ -1158,6 +1187,123 @@ GYRO_TEST(FrameLoop, AModeSetThatGrewTheOutputDamagesTheWholeNewMode)
 	harness.Presenter.Reconfigured.Emit(achieved);
 
 	GYRO_CHECK_EQ(harness.Output().Damage().Bounds(), (PixelRect<DeviceSpace>{ {}, { 3840, 2160 } }));
+}
+
+// Decision 73's trigger: a generation that moved in the snapshot is asked of the presenter once, and what
+// is asked for is the output as it already is with the world's request laid over it.
+GYRO_TEST(FrameLoop, AGenerationThatMovedInTheSnapshotIsAskedOfThePresenterOnce)
+{
+	Harness harness;
+	constexpr std::array<Wake, 1> settled{ Wake::Never() };
+	constexpr std::array<SceneConfiguration, 1> asIs{ SceneConfiguration{ .Generation = 0, .Powered = true } };
+	constexpr std::array<SceneConfiguration, 1> dark{ SceneConfiguration{ .Generation = 1, .Powered = false } };
+
+	harness.Anchor();
+	harness.Publish(1, settled, asIs);
+	harness.Clock.Set(At(1002));
+	(void)harness.Loop.Step();
+
+	// The generation the output came up with asks for nothing.
+	GYRO_CHECK_EQ(harness.Presenter.Reconfigures, 0);
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
+
+	harness.Presenter.Flip(At(1010), 8);
+	harness.Publish(2, settled, dark);
+	harness.Clock.Set(At(1012));
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Presenter.Reconfigures, 1);
+	GYRO_CHECK_EQ(harness.Presenter.Requested.Generation, std::uint64_t{ 1 });
+	GYRO_CHECK(!harness.Presenter.Requested.Powered);
+	GYRO_CHECK(harness.Presenter.Requested.Resolution == Panel().Resolution);
+	GYRO_CHECK(harness.Presenter.Requested.Period == Panel().Period);
+	GYRO_CHECK(harness.Output().IsReconfiguring());
+
+	// **And the scene that carried the request was not drawn**, though it was one this output had never
+	// drawn: a frame composited into a panel on its way off is a frame nobody sees, and on a real card a
+	// commit the kernel refuses.
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
+
+	// The same snapshot read again and a newer one carrying the same generation ask for nothing more,
+	// because the comparison is against what was asked rather than what has been answered.
+	harness.Clock.Set(At(1022));
+	(void)harness.Loop.Step();
+	harness.Publish(3, settled, dark);
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Presenter.Reconfigures, 1);
+}
+
+// Seam/Presenter.h: an output between the request and its completion is not presenting and the loop
+// tolerates that. Once it is dark it owes nothing and arms nothing, however much the scene wants
+// frames; once it is lit it owes the whole of itself, because nothing it drew before is on the glass.
+GYRO_TEST(FrameLoop, AnOutputTurnedOffDrawsNothingAndArmsNothingUntilItIsTurnedBackOn)
+{
+	Harness harness;
+	constexpr std::array<Wake, 1> everyFrame{ Wake::EveryFrame() };
+	constexpr std::array<SceneConfiguration, 1> dark{ SceneConfiguration{ .Generation = 1, .Powered = false } };
+	constexpr std::array<SceneConfiguration, 1> lit{ SceneConfiguration{ .Generation = 2, .Powered = true } };
+
+	harness.Anchor();
+	harness.Publish(1, everyFrame, dark);
+	harness.Clock.Set(At(1002));
+
+	// Asked and not yet answered. What wakes the loop again is the presenter's completion on the drain,
+	// not a timer armed for a scene it may not draw.
+	GYRO_CHECK(harness.Loop.Step() == Wake::Never());
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 0);
+
+	OutputConfiguration off = Panel();
+	off.Generation = 1;
+	off.Powered = false;
+	harness.Presenter.Reconfigured.Emit(off);
+
+	GYRO_CHECK(!harness.Output().IsReconfiguring());
+
+	harness.Clock.Set(At(1012));
+
+	GYRO_CHECK(harness.Loop.Step() == Wake::Never());
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 0);
+
+	harness.Publish(2, everyFrame, lit);
+	harness.Clock.Set(At(1022));
+
+	GYRO_CHECK(harness.Loop.Step() == Wake::Never());
+	GYRO_CHECK_EQ(harness.Presenter.Reconfigures, 2);
+	GYRO_CHECK(harness.Presenter.Requested.Powered);
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 0);
+
+	OutputConfiguration on = Panel();
+	on.Generation = 2;
+	harness.Presenter.Reconfigured.Emit(on);
+
+	harness.Clock.Set(At(1032));
+	(void)harness.Loop.Step();
+
+	GYRO_CHECK_EQ(harness.Presenter.Presents, 1);
+	GYRO_CHECK_EQ(harness.Renderer.RecordedDamage.Bounds(), (PixelRect<DeviceSpace>{ {}, { 2560, 1440 } }));
+}
+
+// A presenter that reconfigured for a reason of its own — a host that resized a nested window — numbers
+// its own generation, and that completion is not the answer to a request the world is still waiting on.
+GYRO_TEST(FrameLoop, ACompletionBehindTheRequestDoesNotAnswerIt)
+{
+	Harness harness;
+	constexpr std::array<Wake, 1> settled{ Wake::Never() };
+	constexpr std::array<SceneConfiguration, 1> dark{ SceneConfiguration{ .Generation = 3, .Powered = false } };
+
+	harness.Anchor();
+	harness.Publish(1, settled, dark);
+	harness.Clock.Set(At(1002));
+	(void)harness.Loop.Step();
+
+	GYRO_REQUIRE(harness.Output().IsReconfiguring());
+
+	OutputConfiguration resized = Panel();
+	resized.Generation = 2;
+	harness.Presenter.Reconfigured.Emit(resized);
+
+	GYRO_CHECK(harness.Output().IsReconfiguring());
 }
 
 GYRO_TEST(FrameLoop, GpuCostsAreCollectedBeforeAnythingIsAssessed)

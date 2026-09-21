@@ -505,6 +505,7 @@ gyro_add_module(Scene PORTABLE DISPATCH
 		Entity.Test.cpp
 		Focus.Test.cpp
 		Hit.Test.cpp
+		Idle.Test.cpp
 		Output.Test.cpp
 		Pointer.Test.cpp
 		Reach.Test.cpp
@@ -1522,6 +1523,7 @@ target_link_libraries(TraceDump
 
 add_executable(IntegrationTests
 	Source/Integration/BlitPresent.Test.cpp
+	Source/Integration/DisplayOff.Test.cpp
 	Source/Integration/PublicationRoundTrip.Test.cpp
 	Source/Integration/PublicationSoak.Test.cpp
 	Source/Integration/RenderImport.Test.cpp

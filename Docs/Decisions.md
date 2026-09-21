@@ -16438,3 +16438,49 @@ The keepout that makes the work area anything other than the whole screen, which
 ([decision 105](#105-relief-is-one-scalar-the-corner-radius-and-the-shadow-move-together)'s relief is
 not built). And whether a maximised window may be dragged or resized at all, which is a constraint
 decision 51 has the shell declaring and there is still no way to declare.
+
+### 204. The display-off rung is the first reconfiguration, and it crosses as a request in the snapshot
+
+*(Decided 2026-09-11, building the first rung of [decision
+58](#58-idle-is-a-ladder-gyro-executes-and-does-not-choose)'s ladder.)*
+
+**The panels go dark after a configured time with no input, and the input that lights them goes
+nowhere.** Only display off is built: `ACTIVE=0` on every CRTC, every output together, never unless
+`--display-off` asks, and refused under any backend but drm, because a nested window's host already
+manages its own screen.
+
+**The request travels [decision
+73](#73-the-frame-thread-initiates-reconfiguration-and-never-performs-it)'s path, and this is the first
+thing to use it.** `Scene/Idle.h` holds when the seat was last touched and contributes the instant it
+would go dark to dispatch's wake. `SceneStore::SetOutputPower` moves the output's generation, the
+serializer carries a `SceneConfiguration` per output in a new snapshot run, and the frame loop hands the
+presenter a request the first time a generation passes the last one it asked for — then neither serves
+nor arms for that output until `Reconfigured` answers. DRM performs it on the output's commit thread, as
+a blocking commit carrying `ACTIVE` alone with `ALLOW_MODESET`, once no flip is outstanding. That is the
+commit the kernel's own legacy DPMS path builds, and a CRTC left enabled and inactive keeps its mode and
+its planes, so turning it back on shows the last frame until the next one lands.
+
+**Rejected: a power verb on `IPresenter`.** The obvious shape, and `Seam/OutputConfiguration.h` had
+already argued it away: a DPMS change costs what a mode set costs, and a second verb would be a second
+timing story for the same class of work.
+
+**Rejected: a flag the root sets and the frame thread polls.** One atomic and no change to the snapshot.
+It is also a third channel across the waist, with its ordering against the scene arranged rather than
+defined — which is decision 73's reason for putting the generation in the snapshot — and it would have
+been built for power alone, where the run is what a mode change will ride.
+
+**Rejected: the timeout as a timer in the composition root.** Architecture.md's invariant allows one
+armed instant per output and makes that instant the fold. A second arm beside dispatch's wake is what
+that sentence exists to prevent.
+
+**Rejected: delivering the waking key.** Whatever had focus would receive a keystroke aimed at a screen
+nobody could see, which is the first character of a password typed into a terminal. The press and its
+release go to the seat as consumed, so the modifier state a client is told stays true, and a click is
+swallowed the same way. Motion, scroll and touch light the panels and are delivered: the first two have
+nothing to pair, and a touch sequence cannot lose its first contact without losing the rest of it.
+
+**What is open.** The other rungs, and the numbers for all of them, which are [Open.md](Open.md)'s. Idleness
+per seat and per session, inhibitors, and injected input, none of which has a second term to fold yet —
+so a full-screen video goes dark with everything else. And the wake latency per rung: the DRM output now
+logs how long each power commit spent in the kernel, which turns that entry from unmeasured into a
+reading.

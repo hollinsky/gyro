@@ -505,6 +505,32 @@ public:
 		}
 	}
 
+	// Ask for an output's panel to be lit or dark, which is decision 58's display-off rung.
+	//
+	// **The generation moves only where the answer does**, because the generation *is* the request: the
+	// frame thread hands the presenter one reconfiguration per move, and turning a dark panel off again
+	// would be a modeset asked of a card with nothing to change.
+	//
+	// Does nothing for an output that is not here, which `SetOutputSession` above has the reason for.
+	void SetOutputPower(OutputId output, bool powered) noexcept
+	{
+		for (SceneOutput& held : m_Outputs)
+		{
+			if (held.Id != output)
+			{
+				continue;
+			}
+
+			if (held.Powered != powered)
+			{
+				held.Powered = powered;
+				++held.Generation;
+			}
+
+			return;
+		}
+	}
+
 	// The same reassignment, faded rather than cut: the output composites both sessions, live, for the
 	// length of the transition, and the one in front moves against the one behind it.
 	//

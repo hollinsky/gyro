@@ -18,6 +18,7 @@
 #include "Scene/Output.h"
 #include "Scene/Store.h"
 #include "Testing/Test.h"
+#include "World/Configuration.h"
 #include "World/Content.h"
 #include "World/Exit.h"
 #include "World/Node.h"
@@ -320,6 +321,42 @@ GYRO_TEST(SceneSerializer, TheAssignmentRunIsOneSessionPerOutputInOutputOrder)
 
 	// An output nothing has been assigned to is showing gyro's own scene, which crosses as itself.
 	GYRO_CHECK(sessions[1].Shown == SessionId::None);
+}
+
+// Decision 73's request, which crosses beside the assignment and is carried rather than computed: what
+// the store was asked for, with the generation moving for the output whose power changed and for no other.
+GYRO_TEST(SceneSerializer, TheConfigurationRunIsWhatEachOutputWasAskedToBe)
+{
+	SceneStore store{ Clock };
+
+	GYRO_CHECK(store.CreateContainer({}, {}).has_value());
+
+	SceneOutput lit = Primary();
+	lit.Id = OutputId{ 1, 1 };
+	lit.Generation = 1;
+
+	SceneOutput dark = Primary();
+	dark.Id = OutputId{ 2, 1 };
+	dark.Generation = 1;
+	dark.Bounds = { { 1920.0, 0.0 }, { 1920.0, 1080.0 } };
+
+	const SceneOutput both[] = { lit, dark };
+	store.SetOutputs(both);
+	store.SetOutputPower(OutputId{ 2, 1 }, false);
+
+	SceneSerializer serializer;
+	const SnapshotBuffer buffer = serializer.Serialize(store).Build(1);
+	const SnapshotReader reader{ buffer.Bytes() };
+
+	GYRO_REQUIRE(reader.IsValid());
+
+	const std::span<const SceneConfiguration> configurations = reader.Configurations<SceneConfiguration>();
+
+	GYRO_REQUIRE_EQ(configurations.size(), std::size_t{ 2 });
+	GYRO_CHECK_EQ(configurations[0].Generation, std::uint64_t{ 1 });
+	GYRO_CHECK(configurations[0].Powered);
+	GYRO_CHECK_EQ(configurations[1].Generation, std::uint64_t{ 2 });
+	GYRO_CHECK(!configurations[1].Powered);
 }
 
 GYRO_TEST(SceneSerializer, ASecondSerialisationKeepsNothingOfTheFirst)

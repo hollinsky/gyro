@@ -55,6 +55,17 @@ constexpr Duration CompletionPoll = std::chrono::microseconds{ 500 };
 // period is what the backstop is actually scaled to; see `NextEvent`.
 constexpr Duration CommitBackstop = std::chrono::milliseconds{ 50 };
 
+// SPEC: how often a panel changing power is looked at while its commit is in the kernel.
+//
+// **A poll, for the held path's reason: nothing becomes readable when a blocking modeset returns.** A
+// power change asks for no page-flip event, so the commit thread finishing is the only completion there
+// is. The flip backstop cannot stand in for this — it is measured from when the commit was armed, so
+// once a panel has taken longer than two refreshes to light, which is the ordinary case, it names an
+// instant already past and the loop would spin on the `SCHED_FIFO` thread until the ioctl came back. Ten
+// milliseconds against a transition Architecture.md puts near a hundred is a handful of looks per
+// transition, and a person does not see ten milliseconds on a screen that is coming on.
+constexpr Duration PowerPoll = std::chrono::milliseconds{ 10 };
+
 // SRC_X and friends are 16.16 fixed point; CRTC_X and friends are whole pixels.
 [[nodiscard]] constexpr std::uint64_t Fixed(std::int64_t pixels) noexcept
 {
@@ -1049,22 +1060,93 @@ Result<void> DrmOutput::Modeset(bool allowModeset)
 
 void DrmOutput::Reconfigure(const OutputConfiguration& wanted)
 {
-	// **What is not built is a mode set, and this reports that rather than performing one.**
-	// Seam/Presenter.h has this initiated on the frame thread and performed elsewhere, because
-	// `atomic_check` runs synchronously on the caller and a driver may take every modeset lock on the
-	// device inside it. That is a thread and a completion path, and it is the next change.
+	// **Power is performed and a mode is still not, and the answer says which.** Seam/Presenter.h has
+	// this initiated on the frame thread and performed elsewhere, because `atomic_check` runs
+	// synchronously on the caller and a driver may take every modeset lock on the device inside it. The
+	// commit thread is that elsewhere: `Settle` hands it `ACTIVE` once the CRTC is quiet, and `Reap`
+	// answers when the ioctl returns.
 	//
-	// A request that the current configuration already satisfies is answered as achieved, which is the
-	// ordinary case: the frame loop reconfigures when a generation moves, and a generation moves for
-	// reasons that do not always change a mode. Anything else is answered with what this output still
-	// has, which `SatisfiedBy` reads as *not honoured* — no signal is invented and no mode is claimed.
-	m_Request = m_Configuration;
-	m_Request->Generation = wanted.Generation;
+	// Everything else a request carries is answered with what this output still has, which
+	// `SatisfiedBy` reads as *not honoured* — no signal is invented and no mode is claimed. Only the
+	// request is kept here; nothing is issued from inside the frame section.
+	m_Request = wanted;
+}
+
+void DrmOutput::ArmPower(bool powered) noexcept
+{
+	CommitRequest request;
+
+	request.Flags = DRM_MODE_ATOMIC_ALLOW_MODESET;
+	request.ObjectCount = 1;
+	request.Objects[0] = m_Crtc;
+	request.Counts[0] = 1;
+	request.Properties[0] = m_Pipeline->CrtcProps.Active;
+	request.Values[0] = powered ? 1 : 0;
+
+	// A slot that is not free leaves the request standing, and the next drain asks again. `IsQuiet` was
+	// true on the way in, so this is the rule being checked rather than a case that happens.
+	if (!m_Commit.Arm(std::move(request)))
+	{
+		return;
+	}
+
+	TraceMark(powered ? "power on issued" : "power off issued", m_Trace);
+
+	m_Powering = true;
+}
+
+bool DrmOutput::IsQuiet() const noexcept
+{
+	return !m_Flipping && !m_Pending.Waiting && m_Commit.IsIdle();
 }
 
 void DrmOutput::Reap()
 {
 	const std::optional<CommitOutcome> outcome = m_Commit.Reap();
+
+	if (outcome && m_Powering)
+	{
+		// **The answer to a power change, which is the ioctl's return and nothing else.** No flip was asked
+		// for, so there is no event to wait on and no target moved: the images the panel was scanning out
+		// are the ones it scans out when it comes back.
+		m_Powering = false;
+
+		const OutputConfiguration answered = *m_Request;
+		m_Request.reset();
+
+		const double took = std::chrono::duration<double, std::milli>{ outcome->Elapsed }.count();
+
+		if (outcome->Error == 0)
+		{
+			m_Configuration.Powered = answered.Powered;
+
+			// The panel's counter is not continuous across a stretch it spent dark, so the measured period
+			// starts again rather than dividing the whole dark interval by whatever the counter says.
+			m_HavePrevious = false;
+
+			// **Said out loud with how long it took**, because that figure is Docs/Open.md's *wake latency
+			// per rung*: hardware-dependent, unmeasured, and the delay between a keypress and a lit panel.
+			// On the drain, outside the frame section, which is where `ReportRefusal` already speaks.
+			spdlog::info("crtc {} is {}, after {:.1f} ms in the kernel", m_Crtc, answered.Powered ? "on" : "off", took);
+		}
+		else
+		{
+			// Not honoured, and answered as such: the generation is echoed with the power it still has.
+			spdlog::warn(
+				"crtc {} could not be turned {} ({:.1f} ms): {}",
+				m_Crtc,
+				answered.Powered ? "on" : "off",
+				took,
+				std::strerror(outcome->Error)
+			);
+		}
+
+		m_Configuration.Generation = answered.Generation;
+
+		Reconfigured.Emit(m_Configuration);
+
+		return;
+	}
 
 	if (!outcome)
 	{
@@ -1249,27 +1331,55 @@ void DrmOutput::Settle()
 		}
 	}
 
-	if (m_Request.has_value())
+	// **A reconfiguration begins only on a quiet CRTC**, because KMS refuses a second commit on one whose
+	// first has not finished and the commit thread holds one slot. The loop stops serving an output the
+	// moment it asks, so quiet is at most the flip already in the air.
+	if (m_Request.has_value() && !m_Powering && IsQuiet())
 	{
-		const OutputConfiguration answered = *m_Request;
-		m_Request.reset();
+		if (m_Request->Powered != m_Configuration.Powered)
+		{
+			ArmPower(m_Request->Powered);
+		}
+		else
+		{
+			// Nothing this output can change: the power is already what was asked and a mode is not built.
+			// Answered at once with what it has, which is the reading `SatisfiedBy` needs.
+			const OutputConfiguration answered = *m_Request;
+			m_Request.reset();
 
-		m_Configuration.Generation = answered.Generation;
+			m_Configuration.Generation = answered.Generation;
 
-		Reconfigured.Emit(m_Configuration);
+			Reconfigured.Emit(m_Configuration);
+		}
 	}
 }
 
 Instant DrmOutput::NextEvent() const noexcept
 {
-	// The device's file is what wakes this backend for everything else. The two things that are not on
-	// it are a composite gyro is waiting for and a reconfiguration nobody has been told about, and both
-	// are answered by asking to be looked at again.
-	if (m_Pending.Waiting || m_Request.has_value())
+	// The device's file is what wakes this backend for everything else. What is not on it is a composite
+	// gyro is waiting for, a power change the kernel is still inside, and a reconfiguration that can begin
+	// now — and all three are answered by asking to be looked at again.
+	if (m_Pending.Waiting)
 	{
 		const MonotonicClock clock;
 
-		return Advanced(clock.Now(), m_Pending.Waiting ? CompletionPoll : Duration::zero());
+		return Advanced(clock.Now(), CompletionPoll);
+	}
+
+	if (m_Powering)
+	{
+		const MonotonicClock clock;
+
+		return m_Commit.IsComplete() ? clock.Now() : Advanced(clock.Now(), PowerPoll);
+	}
+
+	// **Only once it can begin.** A request waiting for a flip is woken by that flip's event on the
+	// device's file, and answering *now* for it instead would spin the loop for the rest of the refresh.
+	if (m_Request.has_value() && IsQuiet())
+	{
+		const MonotonicClock clock;
+
+		return clock.Now();
 	}
 
 	// **A commit that fails produces no page flip, and silence is the thing that must not happen.** The

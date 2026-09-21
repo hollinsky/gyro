@@ -239,6 +239,15 @@ public:
 		return *this;
 	}
 
+	// Stage what each output is asked to be, one entry per output in output order. A template for
+	// `PutSessions`' reason: the record is `World/Configuration.h`'s, which this module may not name.
+	template<typename T>
+	SnapshotPublisher& PutConfigurations(std::span<const T> configurations)
+	{
+		Stage(m_Configurations, configurations);
+		return *this;
+	}
+
 	// Assemble the staged runs into one contiguous offset-addressed snapshot, in a buffer the caller
 	// owns. The header goes first, then each non-empty run at an offset aligned for its element, then
 	// the wake schedule; the directory records where each landed. The result is self-describing: its
@@ -289,6 +298,9 @@ public:
 		std::uint32_t exitOffset = 0;
 		cursor = Place(m_Exits, cursor, exitOffset);
 
+		std::uint32_t configurationOffset = 0;
+		cursor = Place(m_Configurations, cursor, configurationOffset);
+
 		const std::size_t byteSize = cursor;
 
 		SnapshotHeader header{};
@@ -306,6 +318,7 @@ public:
 		header.Roots = Entry(m_Roots, rootOffset);
 		header.Sessions = Entry(m_Sessions, sessionOffset);
 		header.Exits = Entry(m_Exits, exitOffset);
+		header.Configurations = Entry(m_Configurations, configurationOffset);
 
 		into.Reset(byteSize);
 		const std::span<std::byte> bytes = into.Bytes();
@@ -323,6 +336,7 @@ public:
 		CopyInto(bytes, rootOffset, m_Roots);
 		CopyInto(bytes, sessionOffset, m_Sessions);
 		CopyInto(bytes, exitOffset, m_Exits);
+		CopyInto(bytes, configurationOffset, m_Configurations);
 	}
 
 	// The same assembly into a buffer nobody had yet. The outbox never takes this path — it always has
@@ -405,4 +419,5 @@ private:
 	Staged m_Images;
 	Staged m_Solids;
 	Staged m_Exits;
+	Staged m_Configurations;
 };

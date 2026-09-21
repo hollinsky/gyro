@@ -2517,16 +2517,61 @@ private:
 		// marking it as input would be the row saying a person did something they did not.
 		m_Woke.Input = true;
 
+		const bool waking = Waking(Touch(event.When), event.Pressed, event.Code, m_WakingKey);
+
+		// The chord still sees it, because a modifier that lit the screen is still held down and the
+		// chord's state is a fact about a person's hands. What it may not do is act on it.
 		const Input::ChordVerdict verdict = m_Chord.Feed(event);
 
-		OnChordAction(verdict.Action);
+		OnChordAction(waking ? Input::ChordAction::None : verdict.Action);
 
 		// Only where there is one: `--gym` runs the same loop with no clients behind it, and a scene gyro
-		// authored for itself has nothing to route a keystroke to.
+		// authored for itself has nothing to route a keystroke to. A waking key goes as consumed rather
+		// than not at all, for the chord's reason: the seat folds a consumed key into the modifiers and
+		// tells the client nothing else.
 		if (m_Clients)
 		{
-			m_Clients->OnKey(event, verdict.Consumed);
+			m_Clients->OnKey(event, verdict.Consumed || waking);
 		}
+	}
+
+	// Somebody did something at `when`, which is the one thing that lights panels the idle ladder turned
+	// off. True where it did.
+	[[nodiscard]] bool Touch(Instant when)
+	{
+		if (m_Dispatch == nullptr || !m_Dispatch->Touch(when))
+		{
+			return false;
+		}
+
+		spdlog::info("input turned the panels back on");
+
+		return true;
+	}
+
+	// Whether this event is the press that lit the panels or the release that belongs to it, remembering
+	// the first so that the second can be recognised.
+	//
+	// **The press is swallowed because it was aimed at a picture nobody could see**: a key typed into a
+	// dark screen lands in whatever had focus, and a click lands on a control that was not visible. The
+	// release goes with it so the client is never told a key came up that it never saw go down.
+	[[nodiscard]] static bool Waking(bool lit, bool pressed, std::uint32_t code, std::optional<std::uint32_t>& held)
+	{
+		if (pressed && lit)
+		{
+			held = code;
+
+			return true;
+		}
+
+		if (!pressed && held == code)
+		{
+			held.reset();
+
+			return true;
+		}
+
+		return false;
 	}
 
 	// What a verb does, with no key behind it any more.
@@ -2629,6 +2674,11 @@ private:
 	{
 		m_Woke.Input = true;
 
+		// **A motion lights the panels and is not swallowed**, because it has no release to pair and moves
+		// nothing but the pointer: where the cursor ends up is the one thing a person reaching for a dark
+		// screen is already watching for.
+		static_cast<void>(Touch(event.When));
+
 		if (m_Clients)
 		{
 			m_Clients->OnPointerMotion(event);
@@ -2646,6 +2696,9 @@ private:
 	void OnPointerPosition(const PointerPosition& event)
 	{
 		m_Woke.Input = true;
+
+		// Not swallowed, for a motion's reason: it has nothing to pair and moves only the pointer.
+		static_cast<void>(Touch(event.When));
 
 		const auto found = std::ranges::find(m_Bindings, event.Device, &Binding::Device);
 
@@ -2669,6 +2722,13 @@ private:
 	{
 		m_Woke.Input = true;
 
+		// A click at a dark screen lands on a control nobody could see, so it goes where the waking key
+		// goes, and its release with it.
+		if (Waking(Touch(event.When), event.Pressed, event.Code, m_WakingButton))
+		{
+			return;
+		}
+
 		if (m_Clients)
 		{
 			m_Clients->OnPointerButton(event);
@@ -2678,6 +2738,10 @@ private:
 	void OnPointerScroll(const PointerScroll& event)
 	{
 		m_Woke.Input = true;
+
+		// Not swallowed: a scroll has no release to pair, and one increment of a list nobody could see is
+		// the smallest thing a return from dark can cost.
+		static_cast<void>(Touch(event.When));
 
 		if (m_Clients)
 		{
@@ -2752,6 +2816,11 @@ private:
 	void OnTouch(const TouchEvent& event)
 	{
 		m_Woke.Input = true;
+
+		// **Before the binding, because a finger on the glass is a person whether or not gyro knows which
+		// screen it is.** Not swallowed, which is a gap rather than a choice: a contact is a sequence of
+		// down, motion and up, and dropping the one that woke the panel means dropping the rest of it.
+		static_cast<void>(Touch(event.When));
 
 		const auto found = std::ranges::find(m_Bindings, event.Device, &Binding::Device);
 
@@ -3704,6 +3773,18 @@ private:
 			return opened;
 		}
 
+		// After `Open`, because the ladder writes into outputs the world has only just been handed.
+		// `ResolveOptions` has already refused this under any backend without a panel.
+		if (m_Options.DisplayOff)
+		{
+			m_Dispatch->TurnDisplaysOffAfter(*m_Options.DisplayOff);
+
+			spdlog::info(
+				"the panels turn off after {} s without input",
+				std::chrono::duration_cast<std::chrono::seconds>(*m_Options.DisplayOff).count()
+			);
+		}
+
 		OpenBackground();
 
 		return {};
@@ -4218,6 +4299,12 @@ private:
 	IInput* m_Input = nullptr;
 
 	Input::Chord m_Chord;
+
+	// The key and the button whose press lit the panels, held until their release so that it is swallowed
+	// with them. A client that saw neither is consistent; one that saw only the release has a key coming
+	// up that never went down.
+	std::optional<std::uint32_t> m_WakingKey;
+	std::optional<std::uint32_t> m_WakingButton;
 
 	// The development pipe, where `--chord-pipe` asked for one, and whether it has stopped working.
 	// Held here so that it is closed — and the fifo removed — when the run ends.

@@ -1127,7 +1127,10 @@ either half (86, 90, 91). The node kind and `Material` join it when the scene vo
 `Root` is decision 21's partition beside it: which session each top-level node belongs to, a run
 rather than a field because a session is meaningful at depth one and would otherwise be four bytes
 every node in the scene drags through cache in order not to use — and `None` on one is gyro's own,
-drawn on every output, which is the pointer glyph before it is the splash
+drawn on every output, which is the pointer glyph before it is the splash. `Configuration` is decision
+73's request beside them: what the world asks each output to be, a generation and — today — whether
+the panel is lit, read by the frame loop rather than the walk and handed to the presenter once, when
+the generation moves (204)
 
 ### Text
 
@@ -1157,7 +1160,8 @@ coefficients and is dispatch-side (11, 12, 72)
 *portable, both.*
 
 The data waist. `Snapshot` the offset-addressed layout — coefficient runs by channel, and the scene,
-the per-output wakes, the per-output placement, and the per-kind content runs by name — `Ring` the
+the per-output wakes, the per-output placement, what each output is asked to be, and the per-kind
+content runs by name — `Ring` the
 newest-wins forward channel, `Return` the per-frame report carrying the watermark and, per output,
 the published sequence that reached the glass and when — the *published* one rather than the panel's
 vblank counter, because it is the only number the far side can turn back into surfaces, which is
@@ -1216,6 +1220,12 @@ scene waiting on the clock alone. A replacement is a cross-fade in one commit, t
 fading and retiring in the same scope so that decision 114's sweep *is* the exit, and the replaced
 image is given up when the last node naming it has left the world rather than when it stopped being
 current — a panel is still sampling it for every frame of the fade (152, 179).
+
+`Idle` is decision 58's ladder with one rung built: when the seat was last touched, and the instant the
+panels go dark folded into dispatch's wake beside the background's, so a machine in use arms that one
+instant and a dark machine arms nothing. It asks through `SceneStore::SetOutputPower`, which moves the
+output's generation, and it reports the touch that lit the panels rather than absorbing it, because
+swallowing that event is routing and routing is the composition root's (204).
 
 `Focus` is who the keyboard is on, held here rather than in `Protocol` because the focus ring and
 the motion that goes with it are authored here and a `wl_keyboard.enter` is one consumer of the
@@ -1991,7 +2001,9 @@ to empty* into a spin on the `SCHED_FIFO` thread.
 `Catalog` is the half a machine with no panel can run, and is where the two mistakes this backend is
 most likely to make live: a period taken from the rounded `vrefresh` field rather than from the
 timings, and an `IN_FORMATS` table read one entry out. A mode set after startup is not built and
-`Reconfigure` says so rather than claiming one; and while the planes are driven, *which* overlay a
+`Reconfigure` says so rather than claiming one. Power is built: `ACTIVE` alone, handed to the commit
+thread once the CRTC is quiet and answered when the ioctl returns, which is the commit the kernel's own
+legacy DPMS path makes (204). And while the planes are driven, *which* overlay a
 layer lands on is not chosen — a layer takes the plane at its own index — so the assignment policy
 and what it costs to be wrong are still Open.md's (5, 7, 36, 73, 120, 145, 151, 152, 153)
 

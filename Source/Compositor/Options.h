@@ -345,6 +345,15 @@ struct Options
 	// second time that question came up there was no way to ask it.
 	bool NoPlanes = false;
 
+	// **Turn every panel off after this long with no input**, which is decision 58's display-off rung and
+	// the only one built. Absent is a machine that never goes dark, and absent is the default: the
+	// shipped timeouts are Docs/Open.md's *idle ladder's numbers*, and a default chosen here would be that
+	// question answered by whoever happened to add the flag.
+	//
+	// Refused under any backend but drm, for `--device`'s reason — a nested window has a host that
+	// manages its own screen, and somebody who asked for this there believes something will go dark.
+	std::optional<Duration> DisplayOff{};
+
 	// Snapshot on the first frame that lands a refresh after the one it was aimed at. The miss being
 	// hunted recurs about as often as the ring is long, so waiting for it with a finger on `SIGUSR1`
 	// means catching the right half-minute by hand; this is the loop making the request the moment it
@@ -1096,6 +1105,24 @@ inline constexpr double MaximumArcminutes = 10.0;
 			continue;
 		}
 
+		if (Detail::Matches(argument, "--display-off", value))
+		{
+			std::int64_t seconds = 0;
+
+			// Whole seconds and at least one. Zero would be a panel that goes dark the instant it has been
+			// lit, and a fraction is a precision nobody sitting in front of a screen can tell apart.
+			if (!Detail::ParseInteger(value, seconds) || seconds < 1)
+			{
+				return Failure(
+					EINVAL, "--display-off is how many seconds without input turn the panels off, at least one"
+				);
+			}
+
+			options.DisplayOff = std::chrono::seconds{ seconds };
+
+			continue;
+		}
+
 		if (Detail::Matches(argument, "--priority", value))
 		{
 			std::int64_t priority = 0;
@@ -1269,6 +1296,13 @@ inline constexpr double MaximumArcminutes = 10.0;
 		return Failure(EINVAL, "--control takes every listener from a session agent, so there is no --socket to bind");
 	}
 
+	// **The idle ladder is counted on the dispatch thread, and `--no-socket` has none.** A timeout there is
+	// counted by nothing, which is the flag that does not fail and never does what it said.
+	if (options.DisplayOff && !options.Clients && !options.Gym)
+	{
+		return Failure(EINVAL, "--display-off counts idle time on the dispatch thread, and --no-socket runs none");
+	}
+
 	if (options.Gym)
 	{
 		options.Clients = false;
@@ -1335,6 +1369,16 @@ inline constexpr double MaximumArcminutes = 10.0;
 				);
 			}
 		}
+	}
+
+	// **A panel that turns off is a panel, and only one backend has one.** Here rather than at the parse
+	// for the connector's reason above: `--display-off` with no backend typed is drm at boot and nested
+	// inside a desktop, where the host already manages its own screen and nothing gyro does would go dark.
+	if (resolved.DisplayOff && resolved.Backend != BackendKind::Drm)
+	{
+		return Failure(
+			EINVAL, "--display-off turns panels off, which only the drm backend drives, so it wants --backend=drm"
+		);
 	}
 
 	return resolved;

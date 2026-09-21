@@ -33,6 +33,7 @@
 #include "Seam/Presenter.h"
 #include "Seam/RenderTarget.h"
 #include "Seam/Renderer.h"
+#include "World/Configuration.h"
 // See Docs/Architecture.md#the-frame-loop and decisions 29, 30, 35, 36, 80, 82, 83, and 84.
 
 // One iteration of the frame thread, and the `while` above it belongs to the composition root.
@@ -172,6 +173,11 @@ public:
 		m_Cost = Budget{ budgetPolicy };
 		Adopt(configuration);
 
+		// What the output came up as is the request it has already had answered, so a scene publishing
+		// the same generation asks for nothing.
+		m_Asked = configuration.Generation;
+		m_Reconfiguring = false;
+
 		m_OnPresented.ConnectTo<&FrameOutput::OnPresented>(presenter.Presented, *this);
 		m_OnMissed.ConnectTo<&FrameOutput::OnMissed>(presenter.Missed, *this);
 		m_OnReconfigured.ConnectTo<&FrameOutput::OnReconfigured>(presenter.Reconfigured, *this);
@@ -193,6 +199,10 @@ public:
 	// Whether anything this output committed is still unanswered. The count behind it is what
 	// `IPresenter::CommitDepth` is compared against; this is the question every other caller asks.
 	[[nodiscard]] bool IsFlipPending() const noexcept { return m_InFlight != 0; }
+
+	// Whether this output has asked its presenter for a reconfiguration that has not been answered, which
+	// is an output the loop neither serves nor arms for. See `m_Reconfiguring`.
+	[[nodiscard]] bool IsReconfiguring() const noexcept { return m_Reconfiguring; }
 
 	// How many commits are outstanding, and how many this output is allowed. A presenter that has
 	// vanished allows none, which is the same answer as being full.
@@ -505,6 +515,14 @@ private:
 	// increase.
 	void OnReconfigured(const OutputConfiguration& achieved) noexcept
 	{
+		// **The request is answered by a generation at or past it, and only by that.** A presenter may
+		// reconfigure for reasons of its own — a nested window the host resized numbers its own — and a
+		// completion for one of those must not be read as the world's request having landed.
+		if (achieved.Generation >= m_Asked)
+		{
+			m_Reconfiguring = false;
+		}
+
 		Adopt(achieved);
 		m_Clock.Invalidate();
 		m_Clock.Configure(achieved);
@@ -619,6 +637,17 @@ private:
 	std::uint32_t m_FlightLane = 0;
 
 	OutputConfiguration m_Configuration{};
+
+	// The last generation handed to the presenter, and whether its answer is still outstanding.
+	//
+	// **Decision 73: an output between the request and its completion is not presenting, and the loop
+	// tolerates that.** So it is left out of the schedule and arms nothing, and what brings it back is the
+	// presenter's `Reconfigured` arriving on the drain — a panel changing power under a commit is a
+	// refusal on every backend, and a loop that went on asking would be spending the transition finding
+	// that out once a frame.
+	std::uint64_t m_Asked = 0;
+	bool m_Reconfiguring = false;
+
 	FrameClock m_Clock{};
 	Budget m_Cost{};
 
@@ -865,6 +894,11 @@ public:
 			const FrameSection guard;
 
 			Acquire();
+
+			// **Before anything is ordered**, so an output that has just been asked to change is already out
+			// of this iteration's schedule rather than served one last frame into a panel that is changing.
+			Reconfigure();
+
 			CollectCosts();
 
 			TraceCount("held", static_cast<std::int64_t>(m_Held));
@@ -988,6 +1022,51 @@ private:
 		TraceMark("acquired", TraceThread, TraceFlow(TraceDomain::Scene, m_Held));
 	}
 
+	// Decision 73's trigger: an output whose generation moved in the snapshot is asked for what the world
+	// wants, once.
+	//
+	// **Against the last generation asked rather than the last one achieved**, which is the difference
+	// between one request and one per iteration: the answer arrives on a drain some milliseconds later,
+	// and every iteration between the two reads the same snapshot.
+	//
+	// **What is asked for is what the output already is, with the world's fields laid over it**, because
+	// the record carries only what the world has an opinion about — power, today — and a request built
+	// from anything else would be a mode change nobody asked for. Nothing here allocates: `Reconfigure`
+	// keeps the request and the work happens in the presenter's drain, which is Seam/Presenter.h's
+	// contract and why this may run inside the frame section.
+	void Reconfigure() noexcept
+	{
+		const std::span<const SceneConfiguration> wanted = m_Snapshot.Configurations<SceneConfiguration>();
+
+		// Decision 84: a run that is not this output set's asks for nothing.
+		if (wanted.size() != m_Outputs.size())
+		{
+			return;
+		}
+
+		for (std::size_t index = 0; index < m_Outputs.size(); ++index)
+		{
+			FrameOutput& output = m_Outputs[index];
+			const SceneConfiguration& asked = wanted[index];
+
+			if (!output.IsBound() || asked.Generation <= output.m_Asked)
+			{
+				continue;
+			}
+
+			OutputConfiguration request = output.m_Configuration;
+			request.Generation = asked.Generation;
+			request.Powered = asked.Powered;
+
+			output.m_Asked = asked.Generation;
+			output.m_Reconfiguring = true;
+
+			TraceMark(asked.Powered ? "power on asked" : "power off asked", output.m_Trace, TraceTag(asked.Generation));
+
+			output.m_Presenter->Reconfigure(request);
+		}
+	}
+
 	// Every renderer reports what its finished work actually cost, filed against the generation it was
 	// measured under. A cost from a superseded configuration is dropped by `Budget` rather than tested
 	// for here, which is the whole reason that generation exists.
@@ -1019,7 +1098,9 @@ private:
 
 		for (std::size_t index = 0; index < m_Outputs.size(); ++index)
 		{
-			if (!m_Outputs[index].IsBound() || !m_Outputs[index].m_Configuration.Powered)
+			// Not served while dark, and not served between asking to change and hearing that it has.
+			if (!m_Outputs[index].IsBound() || !m_Outputs[index].m_Configuration.Powered ||
+			    m_Outputs[index].m_Reconfiguring)
 			{
 				continue;
 			}
@@ -2197,7 +2278,10 @@ private:
 		const std::array<Instant, MaxDevices>& deviceFree
 	) const noexcept
 	{
-		if (!output.IsBound() || !output.m_Configuration.Powered)
+		// A dark output and one waiting on its presenter both arm nothing. The first is the point of the
+		// display-off rung; the second is woken by the presenter's completion on the drain, and a timer
+		// armed for a frame it may not draw would spin until that arrived.
+		if (!output.IsBound() || !output.m_Configuration.Powered || output.m_Reconfiguring)
 		{
 			return Wake::Never();
 		}

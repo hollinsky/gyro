@@ -19,6 +19,7 @@
 #include "Scene/Author.h"
 #include "Scene/Background.h"
 #include "Scene/Cursor.h"
+#include "Scene/Idle.h"
 #include "Scene/Output.h"
 #include "Scene/Return.h"
 #include "Scene/Serializer.h"
@@ -246,6 +247,18 @@ public:
 		// pointer only because that is the order they are stacked in; neither reads the other.
 		const Wake background = m_Background.Step(m_Store, m_Textures);
 
+		// **Beside the background and for its reason**: the display-off rung is waiting on the clock and
+		// on nothing else, so a world that has settled would sleep through the instant the panels were
+		// meant to go dark. Before the serialisation, because the request it writes has to be in the scene
+		// that crosses this step.
+		const bool dark = m_Idle.IsDark();
+		const Wake idle = m_Idle.Step(m_Store, now);
+
+		if (m_Idle.IsDark() && !dark)
+		{
+			TraceMark("displays off");
+		}
+
 		m_Cursor.Step(m_Store, m_Textures);
 
 		// **Before the publish and not after**, because the number has to be the sequence this step's
@@ -318,10 +331,11 @@ public:
 		// to write; `Republish` says when a channel it already wrote comes to rest, which is when this
 		// scene can be re-serialised smaller. Both must be armed or one of the two halves of
 		// Docs/Architecture.md#doing-nothing-must-cost-nothing goes unserved.
-		// Three folds now. The background's is the odd one: an image gyro was handed but is not drawing
-		// yet is waiting on the clock and on nothing else, so a world that has settled would sleep
-		// through the instant it was meant to fade up. See `Scene/Background.h`.
-		const Wake wake = Sooner(Sooner(authored, background), m_Serializer.Republish());
+		// Four folds now. The background's and the idle ladder's are the odd ones: each is waiting on the
+		// clock and on nothing else, so a world that has settled would sleep through the instant a
+		// wallpaper was meant to fade up or the panels were meant to go dark. See `Scene/Background.h`
+		// and `Scene/Idle.h`.
+		const Wake wake = Sooner(Sooner(Sooner(authored, background), idle), m_Serializer.Republish());
 		const Wake next = published ? wake : Sooner(wake, Wake::At(Advanced(now, PublishRetryInterval)));
 
 		// Remembered rather than recomputed, because `Woke` above has no other way to ask whether the
@@ -429,6 +443,29 @@ public:
 
 	// Take it away, fading to black. A session whose shell has gone.
 	void ClearBackground() { m_Background.Clear(m_Store); }
+
+	// Turn every output off after `timeout` with no input, which is `Scene/Idle.h`'s one rung. The
+	// root's to call, because whether there is a panel to turn off is a fact about the backend.
+	void TurnDisplaysOffAfter(Duration timeout) { m_Idle.DisplayOffAfter(timeout, m_Store.Now()); }
+
+	// Somebody did something at `when`. True where it lit panels the ladder had turned off, which is the
+	// root's cue to swallow the event — `Scene/Idle.h` has why that is routing and not the ladder's.
+	//
+	// **A verb the root calls rather than a signal this loop observes**, unlike the pointer's motion
+	// beside it, because the answer is needed before the event is routed and a signal has no answer.
+	bool Touch(Instant when)
+	{
+		const bool lit = m_Idle.Touch(m_Store, when);
+
+		if (lit)
+		{
+			TraceMark("displays on");
+		}
+
+		return lit;
+	}
+
+	[[nodiscard]] const IdleLadder& Idle() const noexcept { return m_Idle; }
 
 	[[nodiscard]] const SceneBackground& Background() const noexcept { return m_Background; }
 
@@ -571,6 +608,11 @@ private:
 	SceneBackground m_Background{};
 
 	SceneCursor m_Cursor{};
+
+	// The idle ladder, stepped beside the background for its reason and touched by the root from every
+	// input event. Held here rather than by the root because what it writes is the world and what it
+	// answers is a contribution to this loop's wake.
+	IdleLadder m_Idle{};
 
 	// The devices' link to where the pointer is. Held rather than fired and forgotten, because a device
 	// set that goes away while this loop is alive has to be able to drop the observer.

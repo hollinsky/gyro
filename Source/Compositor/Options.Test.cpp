@@ -483,6 +483,47 @@ GYRO_TEST(Options, PlanesArePromotedUntilRefusedAndTheRefusalTakesNoValue)
 	GYRO_CHECK(!Parse({ "--no-planes=2" }).has_value());
 }
 
+// Absent by default, because the shipped timeouts are Docs/Open.md's to settle and not this flag's.
+GYRO_TEST(Options, ThePanelsStayOnUnlessToldHowLongToWait)
+{
+	const Result<Options> ordinary = Parse({});
+	const Result<Options> told = Parse({ "--display-off=600" });
+
+	GYRO_REQUIRE(ordinary.has_value() && told.has_value());
+	GYRO_CHECK(!ordinary->DisplayOff.has_value());
+	GYRO_REQUIRE(told->DisplayOff.has_value());
+	GYRO_CHECK(*told->DisplayOff == std::chrono::seconds{ 600 });
+
+	// A panel that goes dark the instant it is lit, and a flag with nothing to count, are both refused
+	// rather than read as something.
+	GYRO_CHECK(!Parse({ "--display-off=0" }).has_value());
+	GYRO_CHECK(!Parse({ "--display-off" }).has_value());
+	GYRO_CHECK(!Parse({ "--display-off=ten" }).has_value());
+}
+
+// Resolved rather than parsed, for the connector's reason: with nothing typed, the same command line is
+// drm at boot and nested inside a desktop, and only the second has no panel of its own to turn off.
+// The ladder is counted on the dispatch thread, so a run without one would take the flag and never go dark.
+GYRO_TEST(Options, ARunWithNothingToCountIdleTimeOnRefusesTheTimeout)
+{
+	GYRO_CHECK(!Parse({ "--display-off=600", "--no-socket" }).has_value());
+	GYRO_CHECK(Parse({ "--display-off=600", "--no-socket", "--gym" }).has_value());
+}
+
+GYRO_TEST(Options, ThePanelsTurnOffOnlyWhereThereArePanels)
+{
+	const Result<Options> told = Parse({ "--display-off=600" });
+
+	GYRO_REQUIRE(told.has_value());
+	GYRO_CHECK(ResolveOptions(*told, false).has_value());
+	GYRO_CHECK(!ResolveOptions(*told, true).has_value());
+
+	const Result<Options> headless = Parse({ "--display-off=600", "--backend=headless" });
+
+	GYRO_REQUIRE(headless.has_value());
+	GYRO_CHECK(!ResolveOptions(*headless, false).has_value());
+}
+
 GYRO_TEST(Options, TheMissTriggerIsOffUntilAskedForAndTakesNoValue)
 {
 	const Result<Options> silent = Parse({});

@@ -55,13 +55,15 @@
 // which costs the overlap between drawing a frame and handing it over and is said out loud in the log
 // once, because every pacing figure the session then reports has gyro's own polling in it.
 //
-// **A mode set is not built here yet, and the header says so rather than pretending.** `Reconfigure`
-// is defined by Seam/Presenter.h as initiated on the frame thread and *performed elsewhere*, because
-// the kernel runs the driver's `atomic_check` synchronously on the caller and amdgpu takes every
-// modeset lock on the device inside it. That is a thread and a completion path. What this output does
-// today is adopt at `Open` — one blocking commit before the frame thread exists — and answer a later
-// request by reporting the configuration it still has, which `OutputConfiguration::SatisfiedBy` reads
-// as *not honoured*. Nothing lies about having changed a mode it did not change.
+// **Power is reconfigured here and a mode is not yet, and the answer says which.** `Reconfigure` is
+// defined by Seam/Presenter.h as initiated on the frame thread and *performed elsewhere*, because the
+// kernel runs the driver's `atomic_check` synchronously on the caller and amdgpu takes every modeset
+// lock on the device inside it. The commit thread below is that elsewhere, and a power change is the
+// first thing to use it for anything but a flip: `ACTIVE` alone, once the CRTC is quiet, answered when
+// the ioctl returns. A mode is still adopted at `Open` — one blocking commit before the frame thread
+// exists — and any other field of a later request is answered with what this output still has, which
+// `OutputConfiguration::SatisfiedBy` reads as *not honoured*. Nothing lies about having changed a mode
+// it did not change.
 
 namespace Drm
 {
@@ -302,6 +304,20 @@ private:
 	// The commit that carries a mode. libdrm's, blocking, and off the frame thread by contract.
 	[[nodiscard]] Result<void> Modeset(bool allowModeset);
 
+	// Hand the commit thread the one property a power change is: the CRTC's `ACTIVE`, with
+	// `ALLOW_MODESET` because the kernel counts turning a CRTC on or off as one. No page-flip event is
+	// asked for — there is no frame in it — so the answer is the ioctl's return, and `Reap` takes it.
+	//
+	// The same commit the kernel's own legacy DPMS path builds in `drm_atomic_connector_commit_dpms`:
+	// `ACTIVE` alone, with the mode and the planes left as they are. A CRTC that is enabled and inactive
+	// keeps both, so turning it back on shows the last frame until the next one lands.
+	void ArmPower(bool powered) noexcept;
+
+	// Nothing outstanding on this CRTC: no flip owed, no commit held for a composite, and the commit
+	// thread idle. The only state a reconfiguration may begin in, because KMS refuses a second commit on
+	// a CRTC whose first has not finished.
+	[[nodiscard]] bool IsQuiet() const noexcept;
+
 	DrmDevice* m_Device = nullptr;
 	const Pipeline* m_Pipeline = nullptr;
 	IDmabufAllocator* m_Allocator = nullptr;
@@ -397,8 +413,12 @@ private:
 	std::uint64_t m_FlippingFrame = 0;
 
 	// A reconfiguration the drain has not answered yet. Held as the request rather than as a flag,
-	// because what is echoed back is its generation.
+	// because what is echoed back is its generation and what is acted on is its power.
 	std::optional<OutputConfiguration> m_Request;
+
+	// Whether the commit thread is holding the request above rather than a flip. Set by `ArmPower` and
+	// cleared by the `Reap` that answers it.
+	bool m_Powering = false;
 
 	// The thread that issues this output's commits, and the slot the frame thread hands one through.
 	//
