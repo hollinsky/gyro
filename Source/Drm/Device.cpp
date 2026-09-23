@@ -21,6 +21,7 @@
 #include <utility>
 
 #include "Drm/Output.h"
+#include "Drm/Vblank.h"
 
 namespace Drm
 {
@@ -563,6 +564,24 @@ Result<std::unique_ptr<DrmDevice>> DrmDevice::OpenNode(const std::string& path, 
 		::drmFreeVersion(version);
 	}
 
+	// **`EOPNOTSUPP` is the kernel's own no**, from a card that never initialised vblank — `simpledrm`
+	// and the other firmware framebuffers, whose completion is sent when the commit is done. Any other
+	// failure is a CRTC that exists and is only switched off, which says nothing about the card. The
+	// question is the device's rather than the CRTC's, so asking about the first pipeline answers it;
+	// a card with none drives nothing and its answer is never read.
+	bool vblank = true;
+
+	if (!built->m_Pipelines.empty())
+	{
+		std::uint64_t sequence = 0;
+		std::uint64_t nanoseconds = 0;
+
+		vblank = ::drmCrtcGetSequence(device.Get(), built->m_Pipelines.front().Crtc, &sequence, &nanoseconds) == 0 ||
+		         errno != EOPNOTSUPP;
+	}
+
+	built->m_HardwareVblank = vblank && !HasTimerVblank(built->m_Driver);
+
 	built->m_Device = std::move(device);
 
 	return built;
@@ -727,7 +746,7 @@ void DrmDevice::Complete(std::uint32_t crtc, std::uint32_t sequence, std::uint32
 		const Instant presented =
 			Monotonic::FromMicroseconds(static_cast<std::int64_t>(seconds) * 1'000'000 + microseconds);
 
-		subscriber.Output->OnPresented(presented, sequence, m_Monotonic);
+		subscriber.Output->OnPresented(presented, sequence, m_Monotonic, m_HardwareVblank);
 
 		return;
 	}

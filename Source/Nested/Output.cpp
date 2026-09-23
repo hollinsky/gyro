@@ -98,6 +98,10 @@ void NestedOutput::Feedback::OnPresented(
 		// caveat this backend actually has.
 		.HardwareClock = Has(flags, Wayland::WpPresentationFeedbackKind::HwClock) && m_Output->m_Host->IsMonotonic(),
 
+		// The host's word alone, since it is a statement about what signalled the flip rather than about
+		// a clock gyro has to read.
+		.HardwareCompletion = Has(flags, Wayland::WpPresentationFeedbackKind::HwCompletion),
+
 		// The host telling gyro its dmabuf reached a plane. Information about the *host's* behaviour,
 		// never about gyro's own plane assignment.
 		.ZeroCopy = Has(flags, Wayland::WpPresentationFeedbackKind::ZeroCopy),

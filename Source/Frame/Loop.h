@@ -425,6 +425,7 @@ private:
 				            .Period = info.Period,
 				            .Vsync = info.Vsync,
 				            .HardwareClock = info.HardwareClock,
+				            .HardwareCompletion = info.HardwareCompletion,
 				            .ZeroCopy = info.ZeroCopy };
 		}
 

@@ -62,17 +62,23 @@ struct PresentationInfo
 	// virtual output's clock is flow control and is never precise while the panel beside it is.
 	bool HardwareClock = false;
 
+	// The display itself signalled that it began scanning this frame out, rather than software deciding
+	// when it probably had — a vblank interrupt on KMS, the host's `hw_completion` nested. **Separate
+	// from `HardwareClock` because the two fail independently**: every KMS driver reports monotonic
+	// timestamps, and a driver with no interrupt behind its vblank reports them from a timer. This is
+	// the flag a client's `wp_presentation_feedback` is told as `hw_completion`, and a backend that
+	// cannot tell the two cases apart leaves it false.
+	bool HardwareCompletion = false;
+
 	// The buffer was scanned out directly rather than composited by whatever is downstream. Nested it
 	// is the host telling gyro its dmabuf reached a plane; on KMS it is true by construction. It is
 	// information about the *host's* behaviour and never about gyro's own plane assignment.
 	bool ZeroCopy = false;
 
-	std::uint8_t Reserved = 0;
-
 	friend constexpr bool operator==(PresentationInfo, PresentationInfo) noexcept = default;
 };
 
-// Prints as presented 12500000ns seq 4210 period 8333333ns vsync hw-clock. Durations print in the
+// Prints as presented 12500000ns seq 4210 period 8333333ns vsync hw-clock hw-completion. Durations print in the
 // timebase's own units, which is what Core/Time.h's formatter does and what keeps two of them
 // comparable by eye.
 template<>
@@ -97,6 +103,11 @@ struct std::formatter<PresentationInfo>
 			out = std::format_to(out, " hw-clock");
 		}
 
+		if (info.HardwareCompletion)
+		{
+			out = std::format_to(out, " hw-completion");
+		}
+
 		if (info.ZeroCopy)
 		{
 			out = std::format_to(out, " zero-copy");
@@ -114,4 +125,7 @@ static_assert(std::formattable<PresentationInfo, char>, "A report prints the fra
 // A default one is the *absence* of an observation rather than an observation of zero, and the clock
 // distinguishes them by never being handed this. Asserted so the meaning of the default is written
 // down where a backend author reading the type will find it.
-static_assert(PresentationInfo{}.Period == Duration::zero() && !PresentationInfo{}.HardwareClock);
+static_assert(
+	PresentationInfo{}.Period == Duration::zero() && !PresentationInfo{}.HardwareClock &&
+	!PresentationInfo{}.HardwareCompletion
+);

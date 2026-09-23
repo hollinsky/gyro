@@ -1408,7 +1408,7 @@ Instant DrmOutput::NextEvent() const noexcept
 	return Instant{ Duration::max() };
 }
 
-void DrmOutput::OnPresented(Instant at, std::uint32_t sequence, bool hardwareClock)
+void DrmOutput::OnPresented(Instant at, std::uint32_t sequence, bool hardwareClock, bool hardwareCompletion)
 {
 	if (!m_Flipping)
 	{
@@ -1460,6 +1460,7 @@ void DrmOutput::OnPresented(Instant at, std::uint32_t sequence, bool hardwareClo
 	info.Sequence = sequence;
 	info.Vsync = true;
 	info.HardwareClock = hardwareClock;
+	info.HardwareCompletion = hardwareCompletion;
 
 	// True by construction on this backend: what was committed is what the display engine is scanning,
 	// with nothing between them.

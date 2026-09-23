@@ -92,6 +92,11 @@ struct HeadlessOutputPolicy
 	// would produce a schedule with no error bar.
 	bool HardwareClock = true;
 
+	// Whether the display signalled the flip rather than a timer guessing at it. True for a simulated
+	// panel for `HardwareClock`'s reason, and separable from it so a test can stand in for a KMS driver
+	// whose vblank is a timer while its timestamps are monotonic.
+	bool HardwareCompletion = true;
+
 	// Whether the presented buffer reached a plane rather than being composited by something
 	// downstream. False here: a headless output composites into its own memory and there is no
 	// downstream to be honest about.
@@ -312,6 +317,7 @@ private:
 		      .Sequence = m_FlipSequence,
 		      .Vsync = true,
 		      .HardwareClock = m_Policy.HardwareClock,
+		      .HardwareCompletion = m_Policy.HardwareCompletion,
 		      .ZeroCopy = m_Policy.ZeroCopy }
 		);
 	}

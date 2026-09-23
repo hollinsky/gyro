@@ -382,3 +382,31 @@ it has been open for a decade, and every attempt so far has foundered on there b
 vocabulary for a constraint. gyro does not need the general solution. It needs the two-party case:
 *this DRM device will scan it out, this Vulkan device will render into it, give me the best layout
 they share.*
+
+## A vblank does not say whether the display sent it
+
+### A timer vblank looks exactly like a real one
+
+`wp_presentation_feedback` asks a compositor whether a presentation's completion was *signalled by
+the display* or *guessed by software* — `hw_completion` — and a video player or a nested compositor
+decides how far to trust the timestamp from the answer. The kernel lets gyro answer half of it.
+
+A card that never initialised vblank says so: `drm_crtc_get_sequence_ioctl` returns `EOPNOTSUPP` when
+`drm_dev_has_vblank` is false (`drm_vblank.c:2026`, `:601`). That is `simpledrm` and the other
+firmware framebuffers, whose flip event is sent when the commit is done.
+
+But `drm_vblank_helper.c` lets a driver with no vblank interrupt run an `hrtimer` at the mode's
+refresh and call `drm_crtc_handle_vblank` from it, and from userspace that is indistinguishable from
+a panel: the counter counts, the events arrive on the refresh, and the timestamps are monotonic —
+as they are on every driver, since `DRM_CAP_TIMESTAMP_MONOTONIC` is answered with a constant
+(`drm_ioctl.c:243`). The helper's users are virtio-gpu, qxl, bochs, cirrus-qemu, hyperv_drm, vkms,
+vmwgfx's virtual display and amdgpu's virtual display (`amdgpu_vkms.c`).
+
+**What gyro does instead.** Asks for the sequence to catch the first kind, and denies the flag by
+driver name for the second — `Drm/Vblank.h`, a list taken from every caller of the timer helpers in
+the tree above. It misses amdgpu's virtual display, which shares the real driver's name, and rots as
+soon as another driver adopts the helper.
+
+**What would let gyro delete it.** One bit per CRTC saying the vblank is emulated — an immutable
+CRTC property, or a flag in `drm_crtc_get_sequence` — set where `drm_crtc_vblank_start_timer` is.
+The kernel already knows; it is a matter of saying so.

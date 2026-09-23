@@ -49,6 +49,7 @@ struct SurfacePresentation
 
 	bool Vsync = false;
 	bool HardwareClock = false;
+	bool HardwareCompletion = false;
 	bool ZeroCopy = false;
 };
 

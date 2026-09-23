@@ -328,6 +328,7 @@ void ClientHost::OnReached(EntityId entity, std::size_t output, const OutputPres
 		                           .Vblank = shown.Vblank,
 		                           .Vsync = shown.Vsync,
 		                           .HardwareClock = shown.HardwareClock,
+		                           .HardwareCompletion = shown.HardwareCompletion,
 		                           .ZeroCopy = shown.ZeroCopy };
 
 	// **The index is a subscript into the advertised set, which is the world's order**, so a reach bit,

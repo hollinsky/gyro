@@ -80,6 +80,7 @@ struct OutputPresentation
 	Duration Period{};
 	bool Vsync = false;
 	bool HardwareClock = false;
+	bool HardwareCompletion = false;
 	bool ZeroCopy = false;
 
 	[[nodiscard]] bool HasPresented() const noexcept { return Sequence != 0; }
@@ -296,6 +297,7 @@ private:
 			                       .Period = frame.Period,
 			                       .Vsync = frame.Vsync,
 			                       .HardwareClock = frame.HardwareClock,
+			                       .HardwareCompletion = frame.HardwareCompletion,
 			                       .ZeroCopy = frame.ZeroCopy };
 
 		Presented.Emit(index, frame.Sequence, frame.At);

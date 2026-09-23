@@ -240,6 +240,12 @@ public:
 	// clock told that is precise would build a schedule with no error bar. See decision 57's revision.
 	[[nodiscard]] bool HasMonotonicTimestamps() const noexcept { return m_Monotonic; }
 
+	// Whether a page-flip completion is the display signalling it rather than the kernel deciding it
+	// had. This is `PresentationInfo::HardwareCompletion`, and it is false on two kinds of card: one
+	// that registered no vblank at all, which the kernel says, and one whose vblank is a timer, which
+	// it does not and Drm/Vblank.h guesses by name.
+	[[nodiscard]] bool HasHardwareVblank() const noexcept { return m_HardwareVblank; }
+
 	// The pipelines this device can drive, one per connected connector, already assigned a CRTC and a
 	// primary plane. Empty is a card with nothing plugged into it, which is not a failure — a machine
 	// with two GPUs has one of these for each.
@@ -302,6 +308,7 @@ private:
 	std::int64_t m_Minor = -1;
 	PlaneCensus m_Planes{};
 	bool m_Monotonic = false;
+	bool m_HardwareVblank = false;
 
 	// Constructed with the device's descriptor, and destroyed with it — after every output, which the
 	// composition root sequences and which is what makes the table's destructor a plain release rather

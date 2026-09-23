@@ -45,9 +45,11 @@ GYRO_TEST(PresentationInfo, FormatsForALog)
 	PresentationInfo full = bare;
 	full.Vsync = true;
 	full.HardwareClock = true;
+	full.HardwareCompletion = true;
 	full.ZeroCopy = true;
 
 	GYRO_CHECK_EQ(
-		std::format("{}", full), std::string{ "presented 12500000ns seq 0 period 8333333ns vsync hw-clock zero-copy" }
+		std::format("{}", full),
+		std::string{ "presented 12500000ns seq 0 period 8333333ns vsync hw-clock hw-completion zero-copy" }
 	);
 }

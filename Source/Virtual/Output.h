@@ -285,6 +285,8 @@ public:
 		      // virtual output's clock is flow control, so a `FrameClock` built on it must
 		      // not report a precise prediction beside a panel that has one.
 		      .HardwareClock = false,
+		      // False for the same reason: nothing with a view of a display signalled this.
+		      .HardwareCompletion = false,
 		      // Nothing downstream put this on a plane; a consumer read it out of memory.
 		      .ZeroCopy = false }
 		);

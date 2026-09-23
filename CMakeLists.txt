@@ -1203,6 +1203,7 @@ gyro_add_module(Drm
 		Dumb.Test.cpp
 		Refusal.Test.cpp
 		Scanout.Test.cpp
+		Vblank.Test.cpp
 		Watchdog.Test.cpp
 )
 

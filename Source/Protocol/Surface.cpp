@@ -458,16 +458,19 @@ void ClientSurface::PresentFeedback(const SurfacePresentation& shown) noexcept
 		flags |= static_cast<std::uint32_t>(Wayland::Server::WpPresentationFeedbackKind::HwClock);
 	}
 
+	// **Its own flag rather than read off `hw_clock`**, because the two come apart on exactly the
+	// drivers a person is likeliest to run gyro on while developing it: a virtual GPU's timestamps are
+	// monotonic and its vblank is a kernel timer. `Seam/PresentationInfo.h` carries the answer
+	// separately so that this is a copy and not an inference.
+	if (shown.HardwareCompletion)
+	{
+		flags |= static_cast<std::uint32_t>(Wayland::Server::WpPresentationFeedbackKind::HwCompletion);
+	}
+
 	if (shown.ZeroCopy)
 	{
 		flags |= static_cast<std::uint32_t>(Wayland::Server::WpPresentationFeedbackKind::ZeroCopy);
 	}
-
-	// **`hw_completion` is deliberately not among them.** It says the display hardware signalled the
-	// start of the presentation as opposed to a timer having guessed, and nothing gyro reads answers
-	// that question separately from `hw_clock` — `Seam/PresentationInfo.h` has three flags because those
-	// are the three a backend can honestly fill in. Claiming a fourth from the strength of a third is
-	// the fabrication that whole type exists to prevent.
 
 	// Emptied first and sent out of a local, for `Present`'s reason exactly.
 	std::vector<ClientPresentationFeedback*> due;

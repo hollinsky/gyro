@@ -139,11 +139,12 @@ struct PresentedFrame
 	// assertions mean anything.
 	bool Vsync = false;
 	bool HardwareClock = false;
+	bool HardwareCompletion = false;
 	bool ZeroCopy = false;
 
 	// Spelled, for the reason the record above is: decision 49 holds open a shared mapping, and
 	// uninitialised bytes crossing one are what that rules out.
-	std::uint8_t Reserved[5] = {};
+	std::uint8_t Reserved[4] = {};
 
 	friend constexpr bool operator==(PresentedFrame, PresentedFrame) noexcept = default;
 };

@@ -154,7 +154,7 @@ public:
 
 	// A page flip completed. Called by the device's drain, on the frame thread, and the only producer
 	// of `Presented`.
-	void OnPresented(Instant at, std::uint32_t sequence, bool hardwareClock);
+	void OnPresented(Instant at, std::uint32_t sequence, bool hardwareClock, bool hardwareCompletion);
 
 	// Drm/Scanout.h's question, answered on the dispatch thread about writes the frame thread made.
 	//
